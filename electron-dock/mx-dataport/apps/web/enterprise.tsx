@@ -105,6 +105,33 @@ const roleNames: Record<string, string> = {
   billing: "财务",
   viewer: "只读成员",
 };
+type EmployeeCredentials = {
+  account: string; email?: string; displayName?: string; status?: string;
+  password: string; expiresAt?: string | null; mustChangePassword?: boolean;
+};
+function EmployeeLoginInfo({ info }: { info: EmployeeCredentials }) {
+  const [copyNotice, setCopyNotice] = useState("");
+  async function copy(value: string) {
+    try { await navigator.clipboard.writeText(value); setCopyNotice("已复制"); }
+    catch { setCopyNotice("复制失败，请选中内容手动复制。"); }
+  }
+  return <div className="dp-form dp-employee-login-info">
+    <div className="credential-success">
+      <div className="credential-field"><span>员工名称</span><strong>{info.displayName || "未设置姓名"}</strong></div>
+      <div className="credential-field"><span>邮箱</span><strong>{info.email || "未设置邮箱"}</strong></div>
+      <div className="credential-field"><span>登录账号</span><code>{info.account}</code></div>
+      <div className="credential-field"><span>状态</span><strong>{info.status === "suspended" ? "已停用" : "正常"}</strong></div>
+    </div>
+    <label>当前数港密码<Input readOnly value={info.password} autoComplete="off" /></label>
+    {info.mustChangePassword && <p className="harbor-hint">首次登录须修改密码。此初始密码有效至 {dateTime(info.expiresAt || undefined)}；过期后需由超管重置。</p>}
+    {info.status === "suspended" && <p className="harbor-hint">账号已停用，查看或重置密码不会启用账号。</p>}
+    <div className="dialog-actions">
+      <Button variant="outline" onClick={() => void copy(info.password)}><Copy size={16} />复制密码</Button>
+      <Button onClick={() => void copy(`登录地址：${location.origin}\n员工名称：${info.displayName || ""}\n邮箱：${info.email || ""}\n登录账号：${info.account}\n密码：${info.password}`)}><Copy size={16} />复制登录信息</Button>
+    </div>
+    {copyNotice && <p role="status">{copyNotice}</p>}
+  </div>;
+}
 export function EnterpriseMembers(props: Props) {
   const [page, setPage] = useState(1),
     [memberSearch, setMemberSearch] = useState("");
@@ -120,7 +147,9 @@ export function EnterpriseMembers(props: Props) {
     [roleId, setRoleId] = useState("analyst"),
     [commandId, setCommandId] = useState(crypto.randomUUID()),
     [invite, setInvite] = useState<any>(null),
-    [password, setPassword] = useState<string | null>(null),
+    [password, setPassword] = useState<EmployeeCredentials | null>(null),
+    [createdMember, setCreatedMember] = useState<any>(null),
+    [createdCredentials, setCreatedCredentials] = useState<EmployeeCredentials | null>(null),
     [roleEditor, setRoleEditor] = useState(false),
     [editingMember, setEditingMember] = useState<any>(null),
     [memberUpdateUnconfirmed, setMemberUpdateUnconfirmed] = useState(false),
@@ -237,6 +266,9 @@ export function EnterpriseMembers(props: Props) {
               <Button
                 variant="outline"
                 onClick={() => {
+                  setCreatedMember(null);
+                  setCreatedCredentials(null);
+                  write.setError("");
                   setOperation("invite");
                   setCommandId(crypto.randomUUID());
                   setOpen(true);
@@ -246,6 +278,9 @@ export function EnterpriseMembers(props: Props) {
               </Button>
               <Button
                 onClick={() => {
+                  setCreatedMember(null);
+                  setCreatedCredentials(null);
+                  write.setError("");
                   setOperation("create");
                   setCommandId(crypto.randomUUID());
                   setOpen(true);
@@ -260,7 +295,7 @@ export function EnterpriseMembers(props: Props) {
         <Input
           className="member-search"
           aria-label="搜索企业成员"
-          placeholder="搜索员工名称或登录账号"
+          placeholder="搜索员工名称、邮箱或登录账号"
           value={memberSearch}
           onChange={(e) => {
             setMemberSearch(e.target.value);
@@ -374,25 +409,39 @@ export function EnterpriseMembers(props: Props) {
       <Dialog
         open={open}
         onOpenChange={(v) => {
-          if (!write.busy) setOpen(v);
+          if (!write.busy) { setOpen(v); if (!v) { setCreatedMember(null); setCreatedCredentials(null); write.setError(""); } }
         }}
       >
         <DialogContent className="dp-dialog dp-member-dialog">
           <DialogHeader>
             <DialogTitle>
-              {operation === "create" ? "新建员工子账号" : "关联已有 MX 账号"}
+              {createdMember ? "子账号创建成功" : operation === "create" ? "新建员工子账号" : "关联已有 MX 账号"}
             </DialogTitle>
             <DialogDescription>
-              {operation === "create"
+              {createdMember ? "账号已保存，无需再次提交。请复制登录信息交给指定员工。" : operation === "create"
                 ? "填写员工信息，为其创建独立登录账号。"
                 : "填写员工已有的 MX 账号，邀请其加入企业。"}
             </DialogDescription>
           </DialogHeader>
-          <form
+          {createdMember ? <div className="dp-form">
+            {createdCredentials ? <EmployeeLoginInfo info={createdCredentials} /> : <>
+              <div className="credential-success">
+                <div className="credential-field"><span>员工名称</span><strong>{createdMember.displayName}</strong></div>
+                <div className="credential-field"><span>邮箱</span><strong>{createdMember.email}</strong></div>
+                <div className="credential-field"><span>登录账号</span><code>{createdMember.account}</code></div>
+              </div>
+              <p className="harbor-hint">{owner ? "正在读取登录信息；读取失败时可重试，无需重新创建账号。" : "账号已创建。完整登录信息仅企业超管可查看，请联系超管从员工详情交付。"}</p>
+              {owner && <Button disabled={write.busy} onClick={() => void write.run(`members/${createdMember.memberId}/initial-password`, {}).then(setCreatedCredentials).catch(() => {})}>{write.busy ? "正在读取…" : "读取登录信息"}</Button>}
+            </>}
+            {write.error && <p role="alert">{write.error}</p>}
+            <Button variant="outline" disabled={write.busy} onClick={() => { setOpen(false); setCreatedMember(null); setCreatedCredentials(null); write.setError(""); }}>完成</Button>
+          </div> : <form
             className="ticket-form"
             onSubmit={async (e) => {
               e.preventDefault();
+              if (write.busy) return;
               const values = Object.fromEntries(new FormData(e.currentTarget));
+              if (operation === "create" && values.password !== values.confirmPassword) { write.setError("两次输入的密码不一致。"); return; }
               try {
                 const result = await write.run("members", {
                   ...values,
@@ -400,9 +449,17 @@ export function EnterpriseMembers(props: Props) {
                   roleId,
                   commandId,
                 });
-                setOpen(false);
-                setInvite(operation === "invite" ? result : null);
                 view.reload();
+                if (operation === "create") {
+                  setCreatedMember(result);
+                  if (owner) {
+                    const info = await write.run(`members/${result.memberId}/initial-password`, {});
+                    setCreatedCredentials(info);
+                  }
+                } else {
+                  setOpen(false);
+                  setInvite(result);
+                }
               } catch {}
             }}
           >
@@ -414,8 +471,9 @@ export function EnterpriseMembers(props: Props) {
                 <input
                   name="displayName"
                   required
-                  maxLength={80}
-                  placeholder="填写员工姓名"
+                  disabled={write.busy}
+                  maxLength={40}
+                  placeholder="填写员工姓名，不超过 40 字"
                   onChange={() => setCommandId(crypto.randomUUID())}
                 />
               </label>
@@ -427,7 +485,9 @@ export function EnterpriseMembers(props: Props) {
               <input
                 name="account"
                 required
-                maxLength={128}
+                disabled={write.busy}
+                maxLength={operation === "create" ? 64 : 128}
+                pattern={operation === "create" ? "[a-zA-Z][a-zA-Z0-9_.\\-]{2,63}" : undefined}
                 autoComplete="off"
                 placeholder={
                   operation === "create"
@@ -437,12 +497,24 @@ export function EnterpriseMembers(props: Props) {
                 onChange={() => setCommandId(crypto.randomUUID())}
               />
             </label>
+            {operation === "create" && <>
+              <label><span className="field-label-text">员工邮箱 <span className="required-mark">*</span></span>
+                <input name="email" type="email" required disabled={write.busy} maxLength={254} placeholder="填写员工邮箱" onChange={() => setCommandId(crypto.randomUUID())} />
+              </label>
+              <label><span className="field-label-text">初始密码 <span className="required-mark">*</span></span>
+                <input name="password" type="password" required disabled={write.busy} minLength={12} maxLength={128} autoComplete="new-password" placeholder="设置 12–128 位密码" onChange={() => setCommandId(crypto.randomUUID())} />
+              </label>
+              <label><span className="field-label-text">确认密码 <span className="required-mark">*</span></span>
+                <input name="confirmPassword" type="password" required disabled={write.busy} minLength={12} maxLength={128} autoComplete="new-password" placeholder="再次输入密码" onChange={() => setCommandId(crypto.randomUUID())} />
+              </label>
+            </>}
             <label>
               <span className="field-label-text">
                 角色 <span className="required-mark">*</span>
               </span>
               <select
                 required
+                disabled={write.busy}
                 value={roleId}
                 onChange={(e) => {
                   setRoleId(e.target.value);
@@ -460,7 +532,7 @@ export function EnterpriseMembers(props: Props) {
             </label>
             <small>
               {operation === "create"
-                ? "初始密码自动生成，48 小时有效；首次登录须修改密码。仅企业超管可在详情中查看和复制。"
+                ? "设置的初始密码 48 小时有效，首次登录须修改；企业超管可查看、复制员工当前数港登录信息。"
                 : "邀请链接 24 小时有效，员工登录统一 MX 账号并确认后加入企业。"}
             </small>
             {write.error && <p role="alert">{write.error}</p>}
@@ -471,7 +543,7 @@ export function EnterpriseMembers(props: Props) {
                   ? "生成邀请链接"
                   : "创建子账号"}
             </Button>
-          </form>
+          </form>}
         </DialogContent>
       </Dialog>
       <Dialog
@@ -511,18 +583,12 @@ export function EnterpriseMembers(props: Props) {
       >
         <DialogContent className="dp-dialog">
           <DialogHeader>
-            <DialogTitle>员工初始密码</DialogTitle>
+            <DialogTitle>员工登录信息</DialogTitle>
             <DialogDescription>
-              仅适用于新建员工账号。员工修改密码后，此初始密码立即失效；查看操作将记入审计日志。
+              仅企业超管可查看本企业员工的当前数港密码；查看操作记入审计日志。
             </DialogDescription>
           </DialogHeader>
-          <Input readOnly value={password || ""} />
-          <Button
-            onClick={() => void navigator.clipboard.writeText(password || "")}
-          >
-            <Copy size={16} />
-            复制密码
-          </Button>
+          {password && <EmployeeLoginInfo info={password} />}
         </DialogContent>
       </Dialog>
       <Dialog
@@ -643,6 +709,10 @@ export function EnterpriseMembers(props: Props) {
                     <code>{editingMember.account || "已有 MX 账号"}</code>
                   </div>
                   <div className="credential-field">
+                    <span>员工邮箱</span>
+                    <strong>{editingMember.email || "未设置邮箱"}</strong>
+                  </div>
+                  <div className="credential-field">
                     <span>角色</span>
                     <strong>{memberRoleName(editingMember)}</strong>
                   </div>
@@ -678,22 +748,21 @@ export function EnterpriseMembers(props: Props) {
                           .run(`members/${editingMember.id}/initial-password`, {})
                           .then((v) => {
                             setEditingMember(null);
-                            setPassword(v.password);
+                            setPassword(v);
                           })
                           .catch(() => {})
                       }
                     >
                       <Copy size={16} />
-                      查看初始密码
+                      查看登录信息
                     </Button>
                   )}
-                  {owner &&
-                    editingMember.managed &&
-                    editingMember.status === "active" && (
+                  {owner && editingMember.managed && (
                       <Button
                         variant="outline"
                         disabled={write.busy}
                         onClick={() => {
+                          write.setError("");
                           setResetMember(editingMember);
                           setResetCommand(crypto.randomUUID());
                           setEditingMember(null);
@@ -837,39 +906,32 @@ export function EnterpriseMembers(props: Props) {
             <DialogTitle>重置托管子账号密码？</DialogTitle>
             <DialogDescription>
               {resetMember?.displayName}{" "}
-              {resetMember?.authMode === "local" ? "的数港旧密码和登录会话将失效。" : "将转为数港独立登录，原 MX 密码保持不变，该企业不再接受其 MX 登录。"}重置后可从成员详情查看 48 小时内有效的新初始密码，并交给员工修改。
+              {resetMember?.authMode === "local" ? "的数港旧密码和登录会话将失效。" : "将转为数港独立登录，原 MX 密码保持不变，该企业不再接受其 MX 登录。"}请设置并确认新密码，首次登录仍须修改；停用账号不会自动启用。
             </DialogDescription>
           </DialogHeader>
-          {write.error && <p role="alert">{write.error}</p>}
-          <div className="dialog-actions">
-            <Button
-              autoFocus
-              variant="outline"
-              disabled={write.busy}
-              onClick={() => setResetMember(null)}
-            >
-              取消
-            </Button>
-            <Button
-              disabled={write.busy}
-              onClick={() =>
-                void write
-                  .run(`members/${resetMember.id}/reset-password`, {
-                    commandId: resetCommand,
-                  })
-                  .then(() => {
-                    setResetMember(null);
-                    view.reload();
-                    setNotice(
-                      "密码已重置，请从成员详情查看新初始密码并交给员工。",
-                    );
-                  })
-                  .catch(() => {})
-              }
-            >
-              {write.busy ? "正在重置…" : "确认重置"}
-            </Button>
-          </div>
+          <form className="ticket-form" onSubmit={async e => {
+            e.preventDefault();
+            if (write.busy) return;
+            const values = Object.fromEntries(new FormData(e.currentTarget));
+            if (values.password !== values.confirmPassword) { write.setError("两次输入的新密码不一致。"); return; }
+            try {
+              await write.run(`members/${resetMember.id}/reset-password`, { ...values, commandId: resetCommand });
+              const target = resetMember;
+              setResetMember(null);
+              view.reload();
+              setNotice("密码已重置，旧密码和会话已失效；账号启停状态保持原样。");
+              const info = await write.run(`members/${target.id}/initial-password`, {});
+              setPassword(info);
+            } catch {}
+          }}>
+            <label>新密码<input name="password" type="password" required disabled={write.busy} minLength={12} maxLength={128} autoComplete="new-password" placeholder="设置 12–128 位新密码" onChange={() => setResetCommand(crypto.randomUUID())} /></label>
+            <label>确认新密码<input name="confirmPassword" type="password" required disabled={write.busy} minLength={12} maxLength={128} autoComplete="new-password" placeholder="再次输入新密码" onChange={() => setResetCommand(crypto.randomUUID())} /></label>
+            {write.error && <p role="alert">{write.error}</p>}
+            <div className="dialog-actions">
+              <Button type="button" variant="outline" disabled={write.busy} onClick={() => setResetMember(null)}>取消</Button>
+              <Button disabled={write.busy}>{write.busy ? "正在重置…" : "确认重置"}</Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
       {owner && roleEditor && (
@@ -899,7 +961,7 @@ function RoleEditor(props: Props & { onClose: () => void }) {
         <DialogHeader>
           <DialogTitle>角色与权限</DialogTitle>
           <DialogDescription>
-            固定角色不可修改，可复制为自定义角色。修改立即生效；角色定义和初始密码查看始终仅限企业超管。
+            固定角色不可修改，可复制为自定义角色。修改立即生效；角色定义和员工密码查看始终仅限企业超管。
           </DialogDescription>
         </DialogHeader>
         {(view.error || write.error) && (
@@ -1338,6 +1400,7 @@ export function Audit(props: Props) {
     "member.joined": "确认加入企业",
     "member.updated": "修改员工",
     "member.initial-password.viewed": "查看初始密码",
+    "member.credentials.viewed": "查看员工登录信息",
     "member.password.reset": "重置托管子账号密码",
     "member.login": "子账号登录",
     "member.password.changed": "修改子账号密码",

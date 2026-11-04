@@ -11,6 +11,7 @@ const random = () => randomBytes(32).toString('base64url');
 const fail = (status, code, message) => { throw new AppError(status, code, message); };
 const accountName = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
 const accountValid = value => /^[a-z][a-z0-9_.-]{2,63}$/.test(value);
+const emailValid = value => typeof value === 'string' && value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const passwordValid = value => typeof value === 'string' && value.length >= 12 && value.length <= 128;
 let hashing = 0;
 async function hashPassword(password, salt = randomBytes(16).toString('hex')) {
@@ -43,7 +44,7 @@ export class DataportLocalAccounts {
   }
   open(row) {
     try {
-      const { iv, tag, value } = row.initial_cipher;
+      const { iv, tag, value } = row.password_cipher;
       const cipher = createDecipheriv('aes-256-gcm', this.key(), Buffer.from(iv, 'hex'));
       cipher.setAAD(Buffer.from(`${row.tenant_id}:${row.member_id}`));
       cipher.setAuthTag(Buffer.from(tag, 'hex'));
@@ -73,9 +74,15 @@ export class DataportLocalAccounts {
   }
   async create(principal, tenantId, body) {
     const account = accountName(body.account), displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
-    if (!accountValid(account) || !displayName || displayName.length > 80)
-      fail(400, 'invalid_local_account', '账号需为 3–64 位字母、数字、点、下划线或短横线，以字母开头；请填写员工名称。');
-    const fingerprint = sha(JSON.stringify({operation:'create',account,displayName,roleId:body.roleId}));
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = body.password;
+    if (!accountValid(account) || !displayName || displayName.length > 40)
+      fail(400, 'invalid_local_account', '账号需为 3–64 位字母、数字、点、下划线或短横线，以字母开头；请填写不超过 40 字的员工名称。');
+    if (!emailValid(email))
+      fail(400, 'invalid_employee_email', '请填写有效的员工邮箱。');
+    if (!passwordValid(password) || body.confirmPassword !== password)
+      fail(400, 'invalid_password', '密码需为 12–128 位，且两次输入一致。');
+    const fingerprint = createHmac('sha256', this.key()).update(JSON.stringify({operation:'create',account,displayName,email,roleId:body.roleId,password})).digest('hex');
     try {
       return await withPgTransaction(this.pool, async db => {
         await this.lock(db, tenantId, body.commandId);
@@ -85,43 +92,54 @@ export class DataportLocalAccounts {
           fail(403, 'role_exceeds_authority', '不能分配此角色。');
         const previous = await this.previous(db, principal, tenantId, body.commandId, 'create-local', fingerprint);
         if (previous) return previous.document;
-        const memberId = randomUUID(), password = randomBytes(18).toString('base64url');
+        const memberId = randomUUID();
         const hash = await hashPassword(password), sealed = this.seal(password, memberId, tenantId);
         await db.query('INSERT INTO iam.members(id,display_name) VALUES($1,$2)', [memberId, displayName]);
         await db.query(`INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role,granted_by) VALUES($1,$2,$3,'viewer',$4)`, [randomUUID(), tenantId, memberId, principal.memberId]);
         await db.query('INSERT INTO dataport.member_roles(tenant_id,member_id,role_id) VALUES($1,$2,$3)', [tenantId, memberId, role.id]);
-        await db.query(`INSERT INTO dataport.managed_accounts(tenant_id,member_id,user_id,account,managed,auth_mode) VALUES($1,$2,$3,$4,true,'local')`, [tenantId, memberId, `dataport:${memberId}`, account]);
-        await db.query(`INSERT INTO dataport.local_credentials(member_id,tenant_id,account,password_hash,initial_cipher,initial_expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '48 hours')`, [memberId, tenantId, account, hash, sealed]);
-        const result = { memberId, account, authMode: 'local' };
+        await db.query(`INSERT INTO dataport.managed_accounts(tenant_id,member_id,user_id,account,managed,auth_mode,email) VALUES($1,$2,$3,$4,true,'local',$5)`, [tenantId, memberId, `dataport:${memberId}`, account, email]);
+        await db.query(`INSERT INTO dataport.local_credentials(member_id,tenant_id,account,password_hash,initial_cipher,initial_expires_at,password_cipher) VALUES($1,$2,$3,$4,$5,now()+interval '48 hours',$5)`, [memberId, tenantId, account, hash, sealed]);
+        const result = { memberId, account, email, displayName, roleId: role.id, status: 'active', authMode: 'local' };
         await this.complete(db, principal, tenantId, body.commandId, 'create-local', fingerprint, result);
         await this.dataport.event(tenantId, principal.memberId, 'member.created', memberId, 201, { roleId: role.id, authMode: 'local' }, db);
         return result;
       });
     } catch (error) {
-      if (error.code === '23505') fail(409, 'local_account_exists', '此数港子账号名已使用，请更换账号名。');
+      if (error.code === '23505') {
+        if (error.constraint === 'dataport_employee_email_unique') fail(409, 'employee_email_exists', '此邮箱已用于数港子账号，请更换邮箱。');
+        fail(409, 'local_account_exists', '此数港子账号名已使用，请更换账号名。');
+      }
       throw error;
     }
   }
-  async reset(principal, tenantId, memberId, commandId) {
+  async reset(principal, tenantId, memberId, body) {
+    const { commandId } = body;
+    // Retain command-only resets for already deployed clients. New forms set and confirm a password.
+    const supplied = body.password !== undefined || body.confirmPassword !== undefined;
+    if (supplied && (!passwordValid(body.password) || body.confirmPassword !== body.password))
+      fail(400, 'invalid_password', '新密码需为 12–128 位，且两次输入一致。');
     try {
       return await withPgTransaction(this.pool, async db => {
         await this.lock(db, tenantId, commandId);
         await this.fresh(principal, tenantId, true, db);
         const row = (await db.query(`SELECT ma.* FROM dataport.managed_accounts ma
           JOIN iam.tenant_memberships tm USING(tenant_id,member_id) JOIN iam.members m ON m.id=ma.member_id
-          WHERE ma.tenant_id=$1 AND ma.member_id=$2 AND ma.managed AND tm.role<>'owner' AND tm.status='active' AND m.status='active' FOR UPDATE OF ma`, [tenantId, memberId])).rows[0];
-        if (!row || memberId === principal.memberId) fail(403, 'managed_account_required', '仅可重置本企业有效托管子账号；已有 MX 账号请使用统一找回。');
-        const fingerprint = sha(JSON.stringify([tenantId, principal.memberId, memberId, 'reset-local']));
+          WHERE ma.tenant_id=$1 AND ma.member_id=$2 AND ma.managed AND tm.role<>'owner' AND tm.status IN ('active','suspended') AND m.status='active' FOR UPDATE OF ma`, [tenantId, memberId])).rows[0];
+        if (!row || memberId === principal.memberId) fail(403, 'managed_account_required', '仅可重置本企业托管子账号；已有 MX 账号请使用统一找回。');
+        const scope = JSON.stringify([tenantId, principal.memberId, memberId, 'reset-local']);
+        const fingerprint = supplied ? createHmac('sha256', this.key()).update(JSON.stringify([scope, body.password])).digest('hex') : sha(scope);
         const previous = await this.previous(db, principal, tenantId, commandId, 'reset-local', fingerprint);
         if (previous) return previous.document;
         const account = accountName(row.account);
         if (!accountValid(account)) fail(409, 'local_account_name_invalid', '旧账号名不符合数港子账号规则，请联系管理员处理迁移。');
-        const existing = (await db.query('SELECT tenant_id FROM dataport.local_credentials WHERE member_id=$1', [memberId])).rows[0];
+        const existing = (await db.query('SELECT tenant_id,password_hash FROM dataport.local_credentials WHERE member_id=$1', [memberId])).rows[0];
         if (existing && existing.tenant_id !== tenantId) fail(409, 'local_account_scope_conflict', '该身份已属于另一企业的独立子账号，请联系管理员处理。');
-        const password = randomBytes(18).toString('base64url'), hash = await hashPassword(password), sealed = this.seal(password, memberId, tenantId);
-        await db.query(`INSERT INTO dataport.local_credentials(member_id,tenant_id,account,password_hash,initial_cipher,initial_expires_at)
-          VALUES($1,$2,$3,$4,$5,now()+interval '48 hours') ON CONFLICT(member_id) DO UPDATE SET password_hash=excluded.password_hash,
-          initial_cipher=excluded.initial_cipher,initial_expires_at=excluded.initial_expires_at,revision=dataport.local_credentials.revision+1,updated_at=now()`, [memberId, tenantId, account, hash, sealed]);
+        if (supplied && existing && await verifyPassword(body.password, existing.password_hash))
+          fail(400, 'password_unchanged', '新密码不能与当前密码相同。');
+        const password = supplied ? body.password : randomBytes(18).toString('base64url'), hash = await hashPassword(password), sealed = this.seal(password, memberId, tenantId);
+        await db.query(`INSERT INTO dataport.local_credentials(member_id,tenant_id,account,password_hash,initial_cipher,initial_expires_at,password_cipher)
+          VALUES($1,$2,$3,$4,$5,now()+interval '48 hours',$5) ON CONFLICT(member_id) DO UPDATE SET password_hash=excluded.password_hash,
+          initial_cipher=excluded.initial_cipher,initial_expires_at=excluded.initial_expires_at,password_cipher=excluded.password_cipher,revision=dataport.local_credentials.revision+1,updated_at=now()`, [memberId, tenantId, account, hash, sealed]);
         await db.query(`UPDATE dataport.managed_accounts SET auth_mode='local' WHERE tenant_id=$1 AND member_id=$2`, [tenantId, memberId]);
         await db.query('DELETE FROM dataport.local_sessions WHERE member_id=$1', [memberId]);
         const result = { passwordReset: true, authMode: 'local', account };
@@ -135,13 +153,21 @@ export class DataportLocalAccounts {
     }
   }
   async initial(principal, tenantId, memberId) {
-    await this.fresh(principal, tenantId, true);
-    const row = (await this.pool.query(`SELECT c.* FROM dataport.local_credentials c JOIN iam.tenant_memberships tm USING(tenant_id,member_id)
-      WHERE c.tenant_id=$1 AND c.member_id=$2 AND tm.status='active' AND tm.role<>'owner' AND c.initial_expires_at>now() AND c.initial_cipher IS NOT NULL`, [tenantId, memberId])).rows[0];
-    if (!row) fail(404, 'initial_password_unavailable', '没有可查看的初始密码；旧托管账号请先重置为数港独立账号。');
-    const password = this.open(row);
-    await this.dataport.event(tenantId, principal.memberId, 'member.initial-password.viewed', memberId);
-    return { password, expiresAt: row.initial_expires_at };
+    return withPgTransaction(this.pool, async db => {
+      await this.lock(db, tenantId);
+      await this.fresh(principal, tenantId, true, db);
+      const row = (await db.query(`SELECT c.*,ma.email,coalesce(mp.display_name,m.display_name) AS display_name,tm.status
+        FROM dataport.local_credentials c JOIN iam.tenant_memberships tm USING(tenant_id,member_id)
+        JOIN dataport.managed_accounts ma USING(tenant_id,member_id) JOIN iam.members m ON m.id=c.member_id
+        LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=c.tenant_id AND mp.member_id=c.member_id
+        WHERE c.tenant_id=$1 AND c.member_id=$2 AND tm.role<>'owner' AND ma.managed AND ma.auth_mode='local'
+        AND tm.status IN ('active','suspended') AND c.password_cipher IS NOT NULL`, [tenantId, memberId])).rows[0];
+      if (!row) fail(404, 'initial_password_unavailable', '没有可查看的数港密码；旧密码无法恢复，请由企业超管重置。');
+      const password = this.open(row);
+      await this.dataport.event(tenantId, principal.memberId, 'member.credentials.viewed', memberId, 200, {}, db);
+      return { account: row.account, email: row.email, displayName: row.display_name, status: row.status,
+        password, expiresAt: row.initial_cipher ? row.initial_expires_at : null, mustChangePassword: !!row.initial_cipher };
+    });
   }
   async throttle(key, max) {
     const row = (await this.pool.query(`INSERT INTO dataport.login_limits(bucket,attempts,expires_at) VALUES($1,1,now()+interval '15 minutes')
@@ -150,14 +176,17 @@ export class DataportLocalAccounts {
     if (row.attempts > max) fail(429, 'local_login_limited', '尝试次数过多，请 15 分钟后重试或联系企业超管。');
   }
   async login(body) {
-    if (!body || typeof body!=='object' || Array.isArray(body) || Object.keys(body).some(k => !['account','password'].includes(k)) || !accountValid(accountName(body.account)) || typeof body.password !== 'string' || !body.password || body.password.length > 128)
+    if (!body || typeof body!=='object' || Array.isArray(body) || Object.keys(body).some(k => !['account','password'].includes(k)) || !(accountValid(accountName(body.account)) || emailValid(accountName(body.account))) || typeof body.password !== 'string' || !body.password || body.password.length > 128)
       fail(400, 'invalid_local_login', '请填写数港子账号和密码。');
     const account = accountName(body.account);
     // Shared, persistent budgets also bound unknown-name churn across replicas.
     await this.throttle('login-global', 600);
     await this.pool.query('DELETE FROM dataport.login_limits WHERE bucket IN (SELECT bucket FROM dataport.login_limits WHERE expires_at<=now() LIMIT 1000)');
     await this.throttle(`login:${account}`, 10);
-    const row = (await this.pool.query('SELECT * FROM dataport.local_credentials WHERE account=$1', [account])).rows[0];
+    const row = (await this.pool.query(`SELECT c.* FROM dataport.local_credentials c JOIN dataport.managed_accounts ma USING(tenant_id,member_id)
+      WHERE c.account=$1 OR ma.email=$1`, [account])).rows[0];
+    // Email and account name share the same per-employee budget.
+    if (row && account !== row.account) await this.throttle(`login:${row.account}`, 10);
     if (!await verifyPassword(body.password, row?.password_hash)) fail(401, 'local_login_failed', '账号或密码不正确，或账号不可用。');
     return withPgTransaction(this.pool, async db => {
       await this.lock(db, row.tenant_id);
@@ -219,7 +248,7 @@ export class DataportLocalAccounts {
           fail(400, 'invalid_display_name', '请填写不超过 80 字的名称。');
         await db.query(`INSERT INTO dataport.member_profiles(tenant_id,member_id,display_name) VALUES($1,$2,$3) ON CONFLICT(tenant_id,member_id) DO UPDATE SET display_name=excluded.display_name`, [tenantId, fresh.memberId, body.displayName.trim()]);
       } else {
-        await db.query(`UPDATE dataport.local_credentials SET revision=revision+1,updated_at=now()${hash ? ',password_hash=$2,initial_cipher=NULL,initial_expires_at=NULL' : ''} WHERE member_id=$1`, hash ? [principal.memberId, hash] : [principal.memberId]);
+        await db.query(`UPDATE dataport.local_credentials SET revision=revision+1,updated_at=now()${hash ? ',password_hash=$2,password_cipher=$3,initial_cipher=NULL,initial_expires_at=NULL' : ''} WHERE member_id=$1`, hash ? [principal.memberId, hash, this.seal(body.password, principal.memberId, tenantId)] : [principal.memberId]);
         await db.query('DELETE FROM dataport.local_sessions WHERE member_id=$1', [principal.memberId]);
       }
       await this.dataport.event(tenantId, principal.memberId, `member.${body.action === 'password' ? 'password.changed' : body.action === 'profile' ? 'profile.updated' : 'sessions.revoked'}`, principal.memberId, 200, {}, db);

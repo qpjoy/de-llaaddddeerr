@@ -1680,3 +1680,10 @@
     width: 100%;
   }
 }
+
+/* Employee login details also contain long contact addresses. */
+.dp-employee-login-info .credential-field,
+.dp-member-details .credential-field {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
