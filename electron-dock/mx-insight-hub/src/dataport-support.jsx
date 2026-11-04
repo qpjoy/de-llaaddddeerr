@@ -5,6 +5,8 @@ import {
   DropdownField,
   ErrorState,
   Field,
+  LoadingState,
+  Modal,
   PageHeading,
   useRemoteData,
 } from "./components.jsx";
@@ -180,85 +182,88 @@ function TicketWorkspace({ token, ticket, onUnauthorized, onSaved, onClose }) {
     }
   }
   return (
-    <section className="qp-panel mih-panel">
-      <PageHeading title="处理工单" description={ticket.id}>
-        <button
-          className="qp-button qp-button--outline"
-          disabled={busy}
-          onClick={onClose}
-        >
-          关闭处理面板
-        </button>
-      </PageHeading>
-      {state.error ? <ErrorState error={state.error} /> : null}
+    <Modal
+      title="处理工单"
+      description={ticket.id}
+      size="large"
+      busy={busy}
+      onClose={onClose}
+    >
+      {state.loading && !state.data ? <LoadingState label="正在读取工单与回复" /> : null}
+      {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
       {error ? <ErrorState error={error} /> : null}
       {notice ? <p role="status">{notice}</p> : null}
-      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-        {state.data?.content}
-      </p>
-      <p>联系方式：{state.data?.contact || "未填写"}</p>
-      {state.data?.replies.map((r) => (
-        <article key={r.id}>
-          <strong>
-            {statuses[r.status]} · {when(r.created_at)}
-          </strong>
+      {state.data ? (
+        <>
           <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-            {r.reply || "状态已更新"}
+            {state.data?.content}
           </p>
-        </article>
-      ))}
-      <form onSubmit={save}>
-        <DropdownField
-          label="处理状态"
-          value={status}
-          onChange={setStatus}
-          disabled={busy || !!pending}
-          options={Object.entries(statuses).map(([value, label]) => ({
-            value,
-            label,
-          }))}
-        />
-        <Field label="客服回复" hint="回复仅向有权查看该工单的成员展示。">
-          <textarea
-            className="qp-input"
-            rows={5}
-            maxLength={5000}
-            value={reply}
-            disabled={busy || !!pending}
-            onChange={(e) => setReply(e.target.value)}
-          />
-        </Field>
-        <div className="mih-page-actions">
-          <button
-            className="qp-button qp-button--primary"
-            disabled={
-              busy ||
-              state.loading ||
-              !state.data ||
-              (!pending && !reply.trim() && status === state.data.status)
-            }
-          >
-            {busy ? "保存中…" : pending ? "重试原操作" : "保存处理并通知"}
-          </button>
-          <button
-            type="button"
-            className="qp-button qp-button--outline"
-            disabled={busy}
-            onClick={() => {
-              state.refresh();
-              onSaved();
-              setPending(null);
-            }}
-          >
-            刷新确认结果
-          </button>
-        </div>
-        {pending && !busy ? (
-          <p>
-            上次结果尚未确认。重试会使用原操作编号；修改内容前请先刷新确认。
-          </p>
-        ) : null}
-      </form>
-    </section>
+          <p>联系方式：{state.data?.contact || "未填写"}</p>
+          {state.data?.replies.map((r) => (
+            <article key={r.id}>
+              <strong>
+                {statuses[r.status]} · {when(r.created_at)}
+              </strong>
+              <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                {r.reply || "状态已更新"}
+              </p>
+            </article>
+          ))}
+          <form onSubmit={save}>
+            <DropdownField
+              label="处理状态"
+              value={status}
+              onChange={setStatus}
+              disabled={busy || !!pending}
+              options={Object.entries(statuses).map(([value, label]) => ({
+                value,
+                label,
+              }))}
+            />
+            <Field label="客服回复" hint="回复仅向有权查看该工单的成员展示。">
+              <textarea
+                className="qp-input"
+                rows={5}
+                maxLength={5000}
+                value={reply}
+                disabled={busy || !!pending}
+                onChange={(e) => setReply(e.target.value)}
+              />
+            </Field>
+            <div className="mih-page-actions">
+              <button
+                className="qp-button qp-button--primary"
+                disabled={
+                  busy ||
+                  state.loading ||
+                  !!state.error ||
+                  !state.data ||
+                  (!pending && !reply.trim() && status === state.data.status)
+                }
+              >
+                {busy ? "保存中…" : pending ? "重试原操作" : "保存处理并通知"}
+              </button>
+              <button
+                type="button"
+                className="qp-button qp-button--outline"
+                disabled={busy}
+                onClick={() => {
+                  state.refresh();
+                  onSaved();
+                  setPending(null);
+                }}
+              >
+                刷新确认结果
+              </button>
+            </div>
+            {pending && !busy ? (
+              <p>
+                上次结果尚未确认。重试会使用原操作编号；修改内容前请先刷新确认。
+              </p>
+            ) : null}
+          </form>
+        </>
+      ) : null}
+    </Modal>
   );
 }
