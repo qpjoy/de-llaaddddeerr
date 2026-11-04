@@ -229,7 +229,7 @@ test('confirmed supplier rejection and unknown transport stay durable and never 
   }
 })
 
-test('standard v2 unknown and running bindings block the raw alias before it can dispatch', async () => {
+test('standard v2 running bindings block the raw alias before it can dispatch; an ended unknown does not', async () => {
   for (const state of ['unknown', 'running']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-v2-guard', body: {
@@ -238,7 +238,12 @@ test('standard v2 unknown and running bindings block the raw alias before it can
     } })
     if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
     const result = await f.run({ caseName: 'control', execute: true })
-    assert.equal(result.errorCode, state === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
+    if (state === 'unknown') {
+      assert.equal(result.errorCode, undefined)
+      assert.equal(result.adapterCalls, 1)
+      continue
+    }
+    assert.equal(result.errorCode, 'request_in_progress')
     assert.equal(result.adapterCalls, 0)
     assert.equal(f.sent.length, 0)
     assert.equal(f.usage.requests.size, 0)
@@ -352,7 +357,7 @@ test('unknown and unconfirmed first-half outcomes stop the second half and never
   assert.equal(f.sent.length, 2)
 })
 
-test('halves require the exact saved query-param refusal and retain standard v2 unknown protection', async () => {
+test('halves require the exact saved query-param refusal and retain standard v2 in-flight protection', async () => {
   for (const mutate of [f => { f.knownCandidates[2].status = 'unknown' }, f => { f.knownCalls[2].id = randomUUID() },
     f => { f.knownCandidates[2].acquisition_request.path = '/api/v1/data/search' }]) {
     const f = await fixture(); mutate(f)
@@ -362,14 +367,13 @@ test('halves require the exact saved query-param refusal and retain standard v2 
     assert.equal(f.creations(), 0)
   }
   const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
-  const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-half-unknown', body: {
+  await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-half-running', body: {
     platform: 'twitter', query: HALF_CASES.chinese_half.query, pageSize: 20, type: 'stable',
     timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
   } })
-  await protocol.finish(lease.input, { state: 'unknown', usageRequestId: randomUUID() })
   const result = await f.run({ caseName: 'halves', execute: true })
   assert.equal(result.adapterCalls, 0)
-  assert.equal(result.errorCode, 'request_outcome_unknown')
+  assert.equal(result.errorCode, 'request_in_progress')
   assert.equal(result.reports.length, 1)
 })
 
@@ -508,8 +512,8 @@ test('full explicit-AND dispatch requires a saved English sole owned success, no
   }
 })
 
-test('explicit-AND adaptation retains the native query guard and cannot bypass its running or unknown v2 request', async () => {
-  for (const state of ['running', 'unknown']) {
+test('explicit-AND adaptation retains the native query guard and cannot bypass its running v2 request', async () => {
+  for (const state of ['running']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'original-english-v2-identity', body: {
       platform: 'twitter', query: HALF_CASES.english_half.query, pageSize: 20, type: 'stable',
@@ -655,7 +659,7 @@ test('English groups require the exact owned explicit-AND key, body and sole sav
   }
 })
 
-test('English groups retain original and half proof checks plus running and unknown v2 protections', async () => {
+test('English groups retain original and half proof checks plus running v2 protections', async () => {
   for (const mutate of [f => { f.knownCandidates[2].status = 'unknown' }, f => { f.halfCalls[0].id = randomUUID() },
     f => { f.knownHalves[1].acquisition_request.body.query = 'different' }]) {
     const f = await fixture(); mutate(f)
@@ -664,7 +668,7 @@ test('English groups retain original and half proof checks plus running and unkn
     assert.equal(f.creations(), 0)
     assert.equal(f.sent.length, 0)
   }
-  for (const state of ['running', 'unknown']) {
+  for (const state of ['running']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
     await seedGroupTopic(f)
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'same-group-v2-identity', body: {
@@ -945,8 +949,8 @@ test('event-order requires the exact original event refusal, including its owner
   }
 })
 
-test('event-order cannot bypass running or unknown v2 bindings of either original native query', async () => {
-  for (const selected of ['events_order', 'candidate_order']) for (const state of ['running', 'unknown']) {
+test('event-order cannot bypass running v2 bindings of either original native query', async () => {
+  for (const selected of ['events_order', 'candidate_order']) for (const state of ['running']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'original-order-native-identity', body: {
       platform: 'twitter', query: ORDER_CASES[selected].query, pageSize: 20, type: 'stable',
@@ -1240,14 +1244,14 @@ test('event-term diagnostics require the owned order-refusal receipt and cannot 
   }
 })
 
-test('event-term diagnostics retain current grant, policy and running or unknown v2 protection for their exact selected query', async () => {
+test('event-term diagnostics retain current grant, policy and running v2 protection for their exact selected query', async () => {
   for (const options of [{ grant: false }, { enabled: false }]) {
     const f = await fixture(options), report = await f.run({ caseName: 'event-terms', execute: true })
     assert.ok(report.errorCode)
     assert.equal(report.adapterCalls, 0)
     assert.equal(f.sent.length, 0)
   }
-  for (const state of ['running', 'unknown']) for (const name of ['events_pair_a', 'events_pair_b', 'event_statement']) {
+  for (const state of ['running']) for (const name of ['events_pair_a', 'events_pair_b', 'event_statement']) {
     const f = await fixture({ outcome: part => part === 'events_pair_a' ? 'rejected' : 'success' })
     const protocol = new SearchProtocolStore(f.usage)
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-term-identity', body: {
@@ -1391,8 +1395,8 @@ test('host proxy requires exact original update refusal, owner, key and sole own
   }
 })
 
-test('changing proxy cannot bypass running or unknown v2 identity for update or the full query', async () => {
-  for (const state of ['running', 'unknown']) for (const name of ['update_proxy', 'candidate_proxy']) {
+test('changing proxy cannot bypass a running v2 identity for update or the full query', async () => {
+  for (const state of ['running']) for (const name of ['update_proxy', 'candidate_proxy']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'preexisting-proxy-comparison-identity', body: {
       platform: 'twitter', query: PROXY_CASES[name].query, pageSize: 20, type: 'stable',

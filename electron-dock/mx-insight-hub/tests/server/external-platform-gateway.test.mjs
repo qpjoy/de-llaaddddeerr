@@ -1429,7 +1429,7 @@ test('a billed code=0 response that cannot be normalized is archived and never r
   assert.equal(analytics.totals.usableUpstreamCalls, 0)
 })
 
-test('an ambiguous dispatch quarantines its exact fingerprint without spending another call', async () => {
+test('an ambiguous dispatch keeps its own key unknown while a new key may dispatch again', async () => {
   let calls = 0
   const adapter = new JustOneAdapter({
     token: 'secret-token',
@@ -1454,7 +1454,7 @@ test('an ambiguous dispatch quarantines its exact fingerprint without spending a
   await assert.rejects(
     () => state.gateway.search(state.context, {
       body,
-      idempotencyKey: 'ambiguous-call-02',
+      idempotencyKey: 'ambiguous-call-01',
       path: '/api/v1/data/ecommerce/products/search',
     }),
     (error) => error?.status === 409
@@ -1462,8 +1462,17 @@ test('an ambiguous dispatch quarantines its exact fingerprint without spending a
       && typeof error.details?.requestId === 'string',
   )
   assert.equal(calls, 1)
+  await assert.rejects(
+    () => state.gateway.search(state.context, {
+      body,
+      idempotencyKey: 'ambiguous-call-02',
+      path: '/api/v1/data/ecommerce/products/search',
+    }),
+    (error) => error?.code === 'external_platform_outcome_unknown',
+  )
+  assert.equal(calls, 2)
   const archives = [...state.platformStore.responseArchives.values()]
-  assert.equal(archives.length, 1)
+  assert.equal(archives.length, 2)
   assert.deepEqual(archives[0].rawPayload.response.transportFailure.codes, ['UND_ERR_CONNECT_TIMEOUT'])
   assert.equal([...state.platformStore.calls.values()][0].billed, null)
 })

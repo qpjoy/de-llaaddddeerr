@@ -1564,8 +1564,6 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS="${MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS:-}" \
     --from-literal=MX_INSIGHT_JUSTONE_FRESH_TTL_MS="${MX_INSIGHT_JUSTONE_FRESH_TTL_MS:-60000}" \
     --from-literal=MX_INSIGHT_JUSTONE_STALE_TTL_MS="${MX_INSIGHT_JUSTONE_STALE_TTL_MS:-604800000}" \
-    --from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS="${MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS:-900000}" \
-    --from-literal=MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS="${MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS:-300000}" \
     --from-literal=MX_INSIGHT_JUSTONE_MAX_CONCURRENCY="${MX_INSIGHT_JUSTONE_MAX_CONCURRENCY:-32}" \
     --from-literal=MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY="${MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY:-8}" \
     --from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-50}" \
@@ -1591,8 +1589,6 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS="${MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS:-86400000}" \
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS="${MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS:-20}" \
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY="${MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY:-2}" \
-    --from-literal=MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS="${MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS:-900000}" \
-    --from-literal=MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS="${MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS:-300000}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONCURRENCY:-16}" \
     --from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS:-30000}" \
     --from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING:-256}" \
@@ -1989,7 +1985,9 @@ k8s_admin_stop_diagnostics() {
 
 # A successful scale request only changes the desired state. Wait for the
 # Deployment controller to observe it as well as for the old writer Pods to
-# disappear. Keep one 120s budget for both phases; do not extend Pod grace or
+# stop. Succeeded Pods cannot restart, but their API objects may remain after
+# exit; other phases (including Failed on a lost node) still block migration.
+# Keep one 120s budget for both phases; do not extend Pod grace or
 # force deletion when the controller has not processed the scale request.
 k8s_wait_for_admin_stop() {
   local expected_uid="$1" deadline=$((SECONDS + 120))
@@ -2034,6 +2032,7 @@ k8s_wait_for_admin_stop() {
         [ "$remaining" -ge "$request_timeout" ] || request_timeout="$remaining"
         if pods="$(kubectl -n mx-insight-hub get pods \
           -l app.kubernetes.io/name=mx-insight-hub-admin --request-timeout="${request_timeout}s" \
+          --field-selector=status.phase!=Succeeded \
           -o name 2>/dev/null)"; then
           if [ -z "$pods" ] && [ "$SECONDS" -lt "$deadline" ]; then
             # Check the intent again after the Pod read, so a concurrent scale

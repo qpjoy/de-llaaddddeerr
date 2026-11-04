@@ -3,13 +3,16 @@ const { spawnSync } = require('node:child_process');
 const {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } = require('node:fs');
 const { tmpdir } = require('node:os');
-const { join, resolve } = require('node:path');
+const { dirname, join, resolve } = require('node:path');
 const { after, test } = require('node:test');
 
 const packageRoot = resolve(__dirname, '..');
@@ -162,6 +165,132 @@ test('the managed command dispatcher runs before the legacy interactive installe
 
 // Exercise real transaction/filesystem behavior with fake Linux network tools.
 // These tests never modify the host network or invoke a real systemctl/wg.
+const existingPeer = [
+  '# BEGIN_QP_WG_PEER existing',
+  '[Peer]',
+  'PublicKey = existing-public-key',
+  'PresharedKey = existing-preshared-key',
+  'AllowedIPs = 100.127.100.4/32',
+  '# END_QP_WG_PEER existing',
+  '',
+].join('\n');
+
+function createClientFixture() {
+  const dir = mkdtempSync(join(testRoot, 'create-'));
+  mkdirSync(join(dir, 'wireguard'));
+  mkdirSync(join(dir, 'state/clients'), { recursive: true });
+  writeFileSync(join(dir, 'wireguard/qpwgs-us01.conf'), `PrivateKey = server-private-key\n\n${existingPeer}`);
+  writeFileSync(join(dir, 'state/clients/existing.conf'), 'existing-profile-must-not-change\n');
+  writeFileSync(join(dir, 'runtime'), existingPeer);
+  writeFileSync(join(dir, 'calls'), '');
+  return dir;
+}
+
+const createClientHarness = String.raw`
+  set -euo pipefail
+  QP_WG_SERVER_HOME="$1/state"
+  QP_WG_SERVER_CONFIG="$1/wireguard/qpwgs-us01.conf"
+  QP_WG_SERVER_CLIENTS="$1/state/clients"
+  QP_WG_SERVER_DEV=qpwgs-us01
+  QP_WG_INSTANCE=us01
+  TEST_DIR="$1"; CASE="$2"; TEST_NODE="$3"
+  qp_wg_require_root () { :; }
+  qp_wg_load_server_env () {
+    QP_WG_SUBNET=100.127.100.0/24; QP_WG_HOST=example.com
+    QP_WG_PORT=20000; QP_WG_DNS=1.1.1.1
+  }
+  systemctl () { echo systemctl >> "$TEST_DIR/calls"; return 1; }
+  wg-quick () { echo wg-quick >> "$TEST_DIR/calls"; return 1; }
+  ip () { echo ip >> "$TEST_DIR/calls"; return 1; }
+  wg () {
+    echo "$1" >> "$TEST_DIR/calls"
+    case "$1" in
+      genkey) echo client-private-key ;;
+      genpsk) echo client-preshared-key ;;
+      pubkey)
+        local private
+        read -r private
+        case "$private" in
+          client-private-key) echo client-public-key ;;
+          server-private-key) echo server-public-key ;;
+          *) return 1 ;;
+        esac ;;
+      show) [[ "$2" == qpwgs-us01 && "$CASE" != inactive ]] ;;
+      set)
+        [[ "$#" == 8 && "$2" == qpwgs-us01 && "$3" == peer && "$4" == client-public-key
+          && "$5" == preshared-key && "$7" == allowed-ips && "$8" == 100.127.100.5/32 ]] || return 1
+        # Simulate a confined wg binary: only the server config directory is
+        # allowed, and the PSK must have owner-only read/write permissions.
+        "$TEST_NODE" -e 'const fs = require("node:fs"), path = require("node:path");
+          const [key, config] = process.argv.slice(1);
+          if (path.dirname(key) !== path.dirname(config) || (fs.statSync(key).mode & 0o777) !== 0o600)
+            process.exit(1);' "$6" "$QP_WG_SERVER_CONFIG" || {
+          echo 'fopen: Permission denied' >&2; return 1;
+        }
+        [[ "$(cat "$6")" == client-preshared-key ]] || return 1
+        echo "$6" > "$TEST_DIR/psk-path"
+        if [[ "$CASE" == runtime-failure ]]; then
+          echo 'fopen: Permission denied' >&2; return 1
+        fi
+        printf 'client-public-key|100.127.100.5/32\n' >> "$TEST_DIR/runtime" ;;
+      *) return 1 ;;
+    esac
+  }
+  qp_wg_create_client us0105 --ip 100.127.100.5 --output "$TEST_DIR/export.conf"
+`;
+
+for (const scenario of ['success', 'runtime-failure', 'inactive']) {
+  test(`create client preserves other peers and safely handles the live PSK: ${scenario}`, () => {
+    const dir = createClientFixture();
+    const result = runLibrary(createClientHarness, [dir, scenario, process.execPath]);
+    const success = scenario !== 'runtime-failure';
+    assert.equal(result.status === 0, success, result.stderr + result.stdout);
+
+    const configPath = join(dir, 'wireguard/qpwgs-us01.conf');
+    const config = readFileSync(configPath, 'utf8');
+    const profilePath = join(dir, 'state/clients/us0105.conf');
+    const profile = readFileSync(profilePath, 'utf8');
+    assert.ok(config.startsWith(`PrivateKey = server-private-key\n\n${existingPeer}`));
+    assert.match(config, /PublicKey = client-public-key\nPresharedKey = client-preshared-key\nAllowedIPs = 100\.127\.100\.5\/32/);
+    assert.match(profile, /^PrivateKey = client-private-key$/m);
+    assert.match(profile, /^PresharedKey = client-preshared-key$/m);
+    assert.match(profile, /^PublicKey = server-public-key$/m);
+    assert.match(profile, /^Address = 100\.127\.100\.5\/24$/m);
+    assert.equal(statSync(configPath).mode & 0o777, 0o600);
+    assert.equal(statSync(profilePath).mode & 0o777, 0o600);
+    assert.equal(readFileSync(join(dir, 'state/clients/existing.conf'), 'utf8'), 'existing-profile-must-not-change\n');
+    assert.equal(readFileSync(join(dir, 'runtime'), 'utf8'), existingPeer + (scenario === 'success' ? 'client-public-key|100.127.100.5/32\n' : ''));
+    assert.deepEqual(readdirSync(join(dir, 'wireguard')), ['qpwgs-us01.conf']);
+    const calls = readFileSync(join(dir, 'calls'), 'utf8');
+    assert.doesNotMatch(calls, /systemctl|wg-quick|^ip$/m);
+    assert.equal(calls.split('\n').filter(call => call === 'set').length, scenario === 'inactive' ? 0 : 1);
+    if (scenario !== 'inactive') {
+      const pskPath = readFileSync(join(dir, 'psk-path'), 'utf8').trim();
+      assert.equal(dirname(pskPath), dirname(configPath));
+      assert.equal(existsSync(pskPath), false, 'temporary PSK must be cleaned after wg set');
+    }
+    assert.equal(existsSync(join(dir, 'export.conf')), success);
+    if (success) {
+      assert.equal(readFileSync(join(dir, 'export.conf'), 'utf8'), profile);
+      assert.equal(statSync(join(dir, 'export.conf')).mode & 0o777, 0o600);
+      assert.match(result.stdout, /^Created us0105 at 100\.127\.100\.5\.$/m);
+    } else {
+      assert.match(result.stderr, /fopen: Permission denied/);
+      assert.match(result.stderr, /Live peer update failed for us0105 on qpwgs-us01/);
+      assert.ok(result.stderr.includes(profilePath), 'failure must identify the saved recovery profile');
+      assert.doesNotMatch(result.stdout, /^Created |^Profile: /m);
+
+      const retry = runLibrary(createClientHarness, [dir, 'success', process.execPath]);
+      assert.notEqual(retry.status, 0);
+      assert.match(retry.stderr, /Client 'us0105' already exists/);
+      assert.equal(readFileSync(profilePath, 'utf8'), profile, 'retry must retain the original private key and PSK');
+      assert.equal(readFileSync(configPath, 'utf8'), config);
+      assert.equal(readFileSync(join(dir, 'calls'), 'utf8'), calls, 'retry must not generate keys or mutate the live interface');
+      assert.equal(existsSync(join(dir, 'export.conf')), false);
+    }
+  });
+}
+
 const rotationHarness = String.raw`
   set -euo pipefail
   QP_WG_SERVER_HOME="$1"

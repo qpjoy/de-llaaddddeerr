@@ -141,10 +141,13 @@ export function prepareNightAllCompatibilityTraversal({
 
   // Old clients may send the retained params alias alongside the canonical cursor.
   if (wrappedTop && wrappedParams && wrappedTop !== wrappedParams) invalidCursor()
-  if (topCursor && !wrappedTop) {
+  // The historical comments contract explicitly accepts provider cursors and
+  // provider continuation params from older callers. Once a page is returned,
+  // capNightAllCompatibilityTraversal replaces them with the Hub cursor.
+  if (topCursor && !wrappedTop && operation !== 'post-comments') {
     invalidCursor('Historical provider cursors cannot prove the 15-page boundary; restart from page 1')
   }
-  if (!wrappedParams && hasContinuationParams(body.params)) {
+  if (!wrappedParams && hasContinuationParams(body.params) && operation !== 'post-comments') {
     invalidCursor('Historical provider continuation params cannot prove the 15-page boundary; restart from page 1')
   }
 

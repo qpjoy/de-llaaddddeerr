@@ -1,6 +1,7 @@
 import { AppError } from '../core/errors.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { analyzeRequestDiagnostic } from '../operations/request-diagnostic-analysis.mjs'
+import { FAILURE_EVIDENCE_WINDOW_MS } from '../external-platforms/availability-errors.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const LIMIT = 20
@@ -16,7 +17,33 @@ export function diagnosticIdentifier(value) {
   return value.trim()
 }
 
-function advice(request, providers, connectors, gateway) {
+// Plain-language names for Hub's normalized upstream classifications.
+const UPSTREAM_REASON_TEXT = {
+  upstream_balance_exhausted: '供应商账户余额不足', upstream_token_limit_exceeded: '供应商套餐额度用完',
+  upstream_daily_quota_exceeded: '供应商当日额度用完', upstream_rate_limited: '供应商限流',
+  upstream_auth_or_balance_unavailable: '供应商鉴权或余额不可用', upstream_endpoint_unavailable: '供应商接口不可用',
+  upstream_collection_failed: '供应商采集失败', upstream_deadline_exceeded: '供应商响应超时', upstream_transport_error: '连接供应商失败',
+  upstream_http_error: '供应商 HTTP 错误', upstream_request_rejected: '供应商拒绝请求',
+}
+const PROVIDER_TEXT = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', qixin: '启信宝' }
+
+function refusalAdvice(refusal) {
+  const provider = PROVIDER_TEXT[refusal.provider] || refusal.provider || '供应商'
+  const trigger = refusal.trigger
+  if (!trigger) return `Hub 熔断保护拒绝了本请求，未调用 ${provider}。拒绝前 ${refusal.windowMinutes} 分钟内账本没有该供应商的失败调用，保护可能由更早的失败或内部冷却触发；请在“限制与恢复”核对当前状态。`
+  const codes = [trigger.httpStatus != null ? `HTTP ${trigger.httpStatus}` : null,
+    trigger.businessCode != null ? `业务码 ${trigger.businessCode}` : null, trigger.errorCode].filter(Boolean).join(' / ')
+  const billed = trigger.billed === false ? '未计费' : trigger.billed === true ? '已计费' : '计费未知'
+  const where = trigger.marketplace ? `${trigger.marketplace} ` : ''
+  if (refusal.cause === 'hub_response_parsing') {
+    return `Hub 解析保护拒绝了本请求，未调用 ${provider}。拒绝前最近一次 ${where}调用已收到供应商响应，但 Hub 无法解析（${codes}，${billed}）。这是 Hub 侧问题：需修复解析并发布后，保护才会停止重复打开。`
+  }
+  const reason = UPSTREAM_REASON_TEXT[trigger.errorCode] ? `${UPSTREAM_REASON_TEXT[trigger.errorCode]}，` : ''
+  return `Hub 熔断保护拒绝了本请求，未调用 ${provider}。拒绝前该供应商最近一次失败：${reason}${codes}（${where}${billed}）。这是上游问题，Hub 只是暂停派发；保护约 1 分钟后到期，供应商仍失败会再次打开。`
+}
+
+function advice(request, providers, connectors, gateway, refusal = null) {
+  if (refusal) return refusalAdvice(refusal)
   const qixin = providers.find(p => p.provider_key === 'qixin' && p.outcome === 'rejected')
   if (qixin?.business_code === 105) return '启信宝拒绝接口授权。核对当次 AppKey 所属应用的接口开通与授权有效期；不能据此判断未开通、过期或应用不匹配。'
   if (qixin?.business_code === 104) return '启信宝返回白名单拒绝。核对该应用访问供应商时的实际出口 IP。'
@@ -85,6 +112,24 @@ export async function lookupRequestDiagnostics(pool, input) {
         FROM external_platform.gateway_requests WHERE usage_request_id = $1
           AND source_mode <> 'idempotent_replay'
         ORDER BY created_at DESC, id DESC LIMIT 1`, [id])
+      // A circuit refusal dispatches nothing; the supplier's latest failure
+      // just before it is the recorded explanation, read from the call ledger.
+      const circuitRefused = gateway?.source_mode === 'circuit_rejected' && !gateway.provider_call_id
+      const trigger = circuitRefused ? (await client.query(`/* request-diagnostics:refusal */
+        SELECT id, outcome, http_status, business_code, error_code, billed, marketplace, started_at, completed_at
+          FROM external_platform.provider_calls
+         WHERE provider_key = $1 AND outcome IN ('rejected', 'unknown', 'succeeded_unusable')
+           AND started_at <= $2 AND started_at > $2::timestamptz - make_interval(secs => $3::double precision)
+         ORDER BY started_at DESC LIMIT 1`, [gateway.provider_key, gateway.created_at, FAILURE_EVIDENCE_WINDOW_MS / 1000])).rows[0] : null
+      const refusal = circuitRefused ? {
+        kind: 'circuit', provider: text(gateway.provider_key), refusedAt: gateway.created_at, upstreamDispatched: false,
+        windowMinutes: FAILURE_EVIDENCE_WINDOW_MS / 60_000,
+        evidence: trigger ? 'latest_supplier_failure_before_refusal' : 'no_supplier_failure_in_window',
+        cause: !trigger ? null : trigger.outcome === 'succeeded_unusable' ? 'hub_response_parsing' : 'upstream',
+        trigger: trigger ? { callId: trigger.id, outcome: text(trigger.outcome), httpStatus: trigger.http_status,
+          businessCode: trigger.business_code, errorCode: text(trigger.error_code), billed: trigger.billed,
+          marketplace: text(trigger.marketplace), failedAt: trigger.completed_at ?? trigger.started_at } : null,
+      } : null
       const providers = (await client.query(`/* request-diagnostics:providers */
         SELECT p.id, p.provider_key, p.operation, p.endpoint_key, p.outcome,
           p.http_status, p.business_code, p.error_code, p.upstream_request_id,
@@ -148,7 +193,8 @@ export async function lookupRequestDiagnostics(pool, input) {
           quotedMinor: charges[0].quoted_minor, chargedMinor: charges[0].charged_minor,
           currency: text(charges[0].currency), settledAt: charges[0].settled_at,
         } : null,
-        guidance: advice(request, providers, connectors, gateway),
+        refusal,
+        guidance: advice(request, providers, connectors, gateway, refusal),
       }
       run.analysis = analyzeRequestDiagnostic(run)
       runs.push(run)

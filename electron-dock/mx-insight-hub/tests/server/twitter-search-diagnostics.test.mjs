@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { inspectTwitterArchive, diagnoseTwitterSearch, twitterInputShapes } from '../../server/ops/diagnose-twitter-search.mjs'
@@ -40,6 +42,43 @@ test('verified empty Twitter timeline is distinguished from missing or unusable 
   assert.equal(invalid.reason, 'invalid_timeline_shape')
   assert.equal(inspectTwitterArchive(archive(timeline()), snapshot, { httpStatus: 400 }).state, 'not_success_http')
   noSecrets(invalid)
+})
+
+test('verified Twitter 429 archives expose complete message-template claims without plan names, links or raw text', () => {
+  for (const [message, classification] of [
+    ['You have exceeded the rate limit per second for your plan, PRIVATE-PLAN, by the API provider', 'rate_limit_per_second_claim'],
+    ['You have exceeded the rate limit per minute for your plan, PRIVATE-PLAN, by the API provider.', 'rate_limit_per_minute_claim'],
+    ['You have exceeded the rate limit per hour for your plan, PRIVATE-PLAN, by the API provider', 'rate_limit_per_hour_claim'],
+    ['You have exceeded the MONTHLY quota for Requests on your current plan, PRIVATE-PLAN. Upgrade your plan at https://rapidapi.com/private/api/private-api', 'monthly_quota_claim'],
+    ['You have exceeded the DAILY quota for Requests on your current plan, PRIVATE-PLAN', 'daily_quota_claim'],
+    ['Too many requests', 'too_many_requests_unspecified_claim'],
+    ['You are not subscribed to this API.', 'not_subscribed_claim'],
+    ['This endpoint is disabled for your subscription', 'subscription_endpoint_disabled_claim'],
+  ]) {
+    for (const [payload, field] of [[{ message }, 'message'], [{ error: message }, 'error'], [{ error: { message } }, 'error.message']]) {
+      const receipt = archive({ ...payload, secret: 'private-token' }), before = Buffer.from(receipt.body_bytes)
+      const report = inspectTwitterArchive(receipt, snapshot, { httpStatus: 429 })
+      assert.equal(report.state, 'not_success_http'); assert.equal(report.hashVerified, true)
+      assert.deepEqual(report.savedMessageObservation.fields[field], { type: 'string', length: message.length, classification })
+      assert.equal(report.savedMessageObservation.scope, 'saved_response_message_only_not_verified_account_state')
+      assert.ok(receipt.body_bytes.equals(before))
+      assert.doesNotMatch(JSON.stringify(report), /PRIVATE-PLAN|private-token|https:\/\/|You have exceeded|You are not subscribed/u)
+    }
+  }
+})
+
+test('Twitter 429 classification remains unknown for incomplete, negated, oversized or unverified messages', () => {
+  const knownMessage = 'You have exceeded the rate limit per second for your plan, PRIVATE-PLAN, by the API provider'
+  for (const message of ['Not true: ' + knownMessage, knownMessage + ' private-token', 'monthly quota',
+    'No rate limit exceeded', 'Rate limit per second: private-token', 'private-token'.repeat(100), 429, {}, null]) {
+    const report = inspectTwitterArchive(archive({ message, data: { message: knownMessage } }), snapshot, { httpStatus: 429 })
+    assert.equal(report.savedMessageObservation.fields.message.classification, 'unknown')
+    assert.equal(report.savedMessageObservation.fields['error.message'].classification, 'unknown')
+    assert.doesNotMatch(JSON.stringify(report), /private-token|PRIVATE-PLAN/u)
+  }
+  const receipt = archive({ message: knownMessage })
+  assert.equal(inspectTwitterArchive({ ...receipt, body_bytes: Buffer.from('changed') }, snapshot, { httpStatus: 429 }).savedMessageObservation, undefined)
+  assert.equal(inspectTwitterArchive(receipt, snapshot, { httpStatus: 400 }).savedMessageObservation, undefined)
 })
 
 test('saved effective options distinguish new Latest/overrides from historical implicit Top without printing filters', () => {
@@ -142,7 +181,7 @@ test('archive integrity, saved inputs and structural limits fail closed before o
   noSecrets(twitterInputShapes({ body: { query: 'private-query', cursor: 'private-cursor', sort: 'private-value', params: { token: 'private-secret' } } }))
 })
 
-function databaseFixture({ fail = false, provider = 'rapidapi' } = {}) {
+function databaseFixture({ fail = false, provider = 'rapidapi', rejected = false } = {}) {
   const statements = [], release = []
   const request = { id: REQUEST, platform: 'twitter', status: 'committed', response_status: 200,
     reserved_at: capturedAt, completed_at: capturedAt, acquisition_request: snapshot,
@@ -152,6 +191,10 @@ function databaseFixture({ fail = false, provider = 'rapidapi' } = {}) {
     endpoint_version: 'twitter-aio.hub.v1', contract_version: 'mx-insight-hub.social-data.v1',
     outcome: 'succeeded', http_status: 200, business_code: null, billed: null, item_count: 0,
     started_at: capturedAt, completed_at: capturedAt }
+  if (rejected) {
+    Object.assign(request, { response_status: 429, delivered_item_count: null, declared_returned_count: null })
+    Object.assign(call, { outcome: 'rejected', http_status: 429 })
+  }
   return { statements, release, request,
     pool: { async connect() { return { release() { release.push(true) }, async query(sql, values) {
       statements.push({ sql, values })
@@ -161,14 +204,15 @@ function databaseFixture({ fail = false, provider = 'rapidapi' } = {}) {
         if (fail) throw new Error('private-database-connection-string')
         return { rows: [call] }
       }
-      if (sql.includes('FROM control.external_platform_restricted_raw_responses')) return { rows: [archive(timeline())] }
+      if (sql.includes('FROM control.external_platform_restricted_raw_responses')) return { rows: [archive(rejected
+        ? { message: 'You have exceeded the rate limit per second for your plan, PRIVATE-PLAN, by the API provider' } : timeline())] }
       assert.fail('Unexpected diagnostic SQL')
     } } } } }
 }
 
 test('request diagnostic joins only its stored provider calls under a read-only transaction', async () => {
   const h = databaseFixture(), report = await diagnoseTwitterSearch(h.pool, REQUEST)
-  assert.equal(report.diagnosticRevision, 'twitter-search-diagnostic.v3')
+  assert.equal(report.diagnosticRevision, 'twitter-search-diagnostic.v4')
   assert.equal(report.projectionImplementation, 'installed_hub_contract')
   assert.equal(report.parserSha256, null)
   assert.match(h.statements[0].sql, /READ ONLY$/)
@@ -189,6 +233,21 @@ test('request diagnostic joins only its stored provider calls under a read-only 
   const absent = databaseFixture()
   absent.request.delivery_source_mode = undefined
   assert.equal((await diagnoseTwitterSearch(absent.pool, REQUEST)).delivery.sourceMode, 'other_or_missing')
+})
+
+test('the read-only search diagnostic classifies only its proven RapidAPI 429 call without changing the saved failure', async () => {
+  const f = databaseFixture({ rejected: true }), before = structuredClone(f.request)
+  const report = await diagnoseTwitterSearch(f.pool, REQUEST)
+  assert.equal(report.responseStatus, 429)
+  assert.equal(report.evidence.length, 1)
+  assert.equal(report.evidence[0].callId, CALL)
+  assert.equal(report.evidence[0].httpStatus, 429)
+  assert.equal(report.evidence[0].billed, null)
+  assert.equal(report.evidence[0].projection.savedMessageObservation.fields.message.classification, 'rate_limit_per_second_claim')
+  assert.deepEqual(f.request, before)
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE-PLAN|You have exceeded/u)
+  const unsupported = await diagnoseTwitterSearch(databaseFixture({ rejected: true, provider: 'tikhub' }).pool, REQUEST)
+  assert.equal(unsupported.evidence[0].projection.savedMessageObservation, undefined)
 })
 
 test('unsupported routes are not projected as Twitter AIO and read errors roll back without writes', async () => {
@@ -214,6 +273,36 @@ test('operator stdin command runs the unmodified script without requiring filesy
     assert.equal(result.stdout, '')
     assert.deepEqual(JSON.parse(result.stderr), { error: args.length > 1 ? 'invalid_arguments' : args[0] === REQUEST ? 'database_url_required' : 'invalid_request_id' })
   }
+})
+
+test('stdin 429 observation works with the installed older contract without calling its parser', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'twitter-diagnostic-stdin-'))
+  t.after(() => rmSync(cwd, { recursive: true, force: true }))
+  mkdirSync(join(cwd, 'node_modules/pg'), { recursive: true })
+  mkdirSync(join(cwd, 'server/contracts'), { recursive: true })
+  writeFileSync(join(cwd, 'node_modules/pg/package.json'), JSON.stringify({ type: 'module', main: 'index.js' }))
+  writeFileSync(join(cwd, 'server/contracts/hub-social.mjs'), `export const HUB_SOCIAL_VERSION = 'mx-insight-hub.social-data.v1';
+    export function normalizeTwitterResponse() { throw new Error('must_not_parse_429') }`)
+  const receipt = archive({ message: 'Too many requests', secret: 'private-token' })
+  writeFileSync(join(cwd, 'node_modules/pg/index.js'), `export default { Pool: class {
+    async end() {} async connect() { return { release() {}, async query(sql) {
+      if (sql.includes('FROM public.usage_requests')) return { rows: [{ id: '${REQUEST}', platform: 'twitter', response_status: 429 }] };
+      if (sql.includes('FROM external_platform.provider_calls')) return { rows: [{ id: '${CALL}', provider_key: 'rapidapi',
+        operation: 'social.content.search', endpoint_key: 'twitter-aio.search', endpoint_version: 'twitter-aio.hub.v1',
+        contract_version: 'mx-insight-hub.social-data.v1', http_status: 429, outcome: 'rejected' }] };
+      if (sql.includes('FROM control.external_platform_restricted_raw_responses')) return { rows: [{
+        body_bytes: Buffer.from('${receipt.body_bytes.toString('base64')}', 'base64'), body_size: ${receipt.body_size},
+        body_sha256: '${receipt.body_sha256}' }] };
+      return { rows: [] };
+    } } }
+  } }`)
+  const result = spawnSync(process.execPath, ['--input-type=module', '-', REQUEST], { cwd,
+    env: { ...process.env, DATABASE_URL: 'postgres://unused-local-test' }, encoding: 'utf8', timeout: 10000,
+    input: readFileSync(new URL('../../server/ops/diagnose-twitter-search.mjs', import.meta.url), 'utf8') })
+  assert.equal(result.status, 0, result.stderr)
+  const report = JSON.parse(result.stdout)
+  assert.equal(report.evidence[0].projection.savedMessageObservation.fields.message.classification, 'too_many_requests_unspecified_claim')
+  noSecrets(report)
 })
 
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
@@ -255,4 +344,21 @@ test('isolated PostgreSQL executes the diagnostic JSON and restricted archive re
   const saved = await db.query('SELECT response_body FROM usage_requests WHERE id = $1', [REQUEST])
   assert.deepEqual(saved.rows[0].response_body, delivered)
   noSecrets(report)
+
+  const rejected = { error: { code: 'social_upstream_rejected', details: { upstreamStatus: 429, retryable: false } } }
+  const rejectedReceipt = archive({ message: 'You have exceeded the rate limit per second for your plan, PRIVATE-PLAN, by the API provider' })
+  await db.query('UPDATE usage_requests SET response_status = 429, response_body = $2 WHERE id = $1', [REQUEST, JSON.stringify(rejected)])
+  await db.query("UPDATE external_platform.provider_calls SET http_status = 429, outcome = 'rejected' WHERE id = $1", [CALL])
+  await db.query(`UPDATE control.external_platform_restricted_raw_responses SET body_sha256 = $2,
+    body_size = $3, body_bytes = $4 WHERE provider_call_id = $1`, [CALL, rejectedReceipt.body_sha256, rejectedReceipt.body_size, rejectedReceipt.body_bytes])
+  const failureReport = await diagnoseTwitterSearch(pool, REQUEST)
+  assert.equal(failureReport.responseStatus, 429)
+  assert.equal(failureReport.evidence[0].projection.hashVerified, true)
+  assert.equal(failureReport.evidence[0].projection.savedMessageObservation.fields.message.classification, 'rate_limit_per_second_claim')
+  assert.deepEqual((await db.query('SELECT response_body FROM usage_requests WHERE id = $1', [REQUEST])).rows[0].response_body, rejected)
+  const afterReceipt = (await db.query('SELECT body_bytes, body_sha256 FROM control.external_platform_restricted_raw_responses WHERE provider_call_id = $1', [CALL])).rows[0]
+  assert.equal(afterReceipt.body_sha256, rejectedReceipt.body_sha256)
+  assert.ok(Buffer.from(afterReceipt.body_bytes).equals(rejectedReceipt.body_bytes))
+  assert.ok(statements.every(sql => /^(BEGIN|SET LOCAL|SELECT|COMMIT)/.test(sql)))
+  assert.doesNotMatch(JSON.stringify(failureReport), /PRIVATE-PLAN|You have exceeded/u)
 })

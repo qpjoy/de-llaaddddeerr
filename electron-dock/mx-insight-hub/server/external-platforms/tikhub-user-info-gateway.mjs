@@ -1,7 +1,8 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
-import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit, isLcySupplierPriority, effectiveBusinessPageLimit } from '../core/internal-traffic-policy.mjs'
+import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
+import { circuitOpenError, openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
@@ -168,10 +169,14 @@ export class TikHubUserInfoGateway {
   }
 
   #enter(context) {
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      return isLcySupplierPriority(context)
+        ? enterPriority(this, context.consumer.id, currentAdmissionLimits(this).maxConcurrency) : 'exempt'
+    }
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
-    if (this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
+    if (ordinaryCapacityBlocked(this, currentAdmissionLimits(this).maxConcurrency)
+      || this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
       return false
     }
     this.active += 1
@@ -181,6 +186,7 @@ export class TikHubUserInfoGateway {
 
   #leave(consumerId, admission = true) {
     if (admission === 'exempt') return
+    leavePriority(this, admission)
     this.active = Math.max(0, this.active - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
@@ -208,7 +214,7 @@ export class TikHubUserInfoGateway {
       throw new AppError(503, 'plan_assignment_unavailable', 'An active published plan assignment is required')
     }
     const maxPageSize = consumerPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize
-    if (pageSize > Math.min(maxPageSize, entitlement?.maxPageSize ?? maxPageSize)) {
+    if (pageSize > effectiveBusinessPageLimit(current, maxPageSize, entitlement?.maxPageSize ?? maxPageSize)) {
       throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the current policy after waiting')
     }
     return { ...context, ...current }
@@ -217,7 +223,14 @@ export class TikHubUserInfoGateway {
   async #enterOrQueue(context, { lease, expiresAt, expectedProviderCalls, signal, canWait, revalidate }) {
     await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      if (!isLcySupplierPriority(context)) return 'exempt'
+      // It used to bypass this gate, so it waits even where others fall back.
+      return waitForPriorityCapacity(this, { enter: () => this.#enter(context),
+        leave: admission => this.#leave(context.consumer.id, admission), expiresAt, signal,
+        revalidate: canWait ? revalidate : null, details: { platform: XIAOHONGSHU_PLATFORM },
+        dispatchReserveMs: expectedProviderCalls * (this.config.timeoutMs || 30000) + 5000 })
+    }
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false
     const policy = admissionQueuePolicy(this)
@@ -356,9 +369,7 @@ export class TikHubUserInfoGateway {
         : null
       const policy = {
         ...consumerPolicy,
-        maxPageSize: entitlement
-          ? Math.min(consumerPolicy.maxPageSize, entitlement.maxPageSize)
-          : consumerPolicy.maxPageSize,
+        maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize, entitlement?.maxPageSize ?? consumerPolicy.maxPageSize),
       }
       const contractVersion = isCrawl
         ? XIAOHONGSHU_CRAWL_CONTRACT_VERSION
@@ -549,7 +560,9 @@ export class TikHubUserInfoGateway {
         })
         ownsReservation = false
         if (operationControlError) throw operationControlError
-        if (circuitOpen) throw circuitOpenError(state, this.config, 'External Xiaohongshu user data is unavailable')
+        if (circuitOpen) throw (await openCircuitError({ store: this.platformStore, state, now: this.admissionClock?.() ?? Date.now(),
+          config: this.config, message: 'External Xiaohongshu user data is unavailable' }))
+          || circuitOpenError(state, this.config, 'External Xiaohongshu user data is unavailable')
         throw new AppError(503, code, 'External Xiaohongshu user data is unavailable')
       }
 
@@ -603,9 +616,9 @@ export class TikHubUserInfoGateway {
               waitedForCapacity = true
               context = await this.#revalidateWaitingIdentity(context, gatewayOperation, pageSize)
               const latest = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
-              if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) {
-                throw circuitOpenError(latest, this.config, 'External Xiaohongshu user data is unavailable')
-              }
+              const blocked = await openCircuitError({ store: this.platformStore, state: latest, now: this.admissionClock(),
+                config: this.config, message: 'External Xiaohongshu user data is unavailable' })
+              if (blocked) throw blocked
               resolvedCredential = await this.#credential()
               if (!resolvedCredential.ready) {
                 throw new AppError(503, 'external_platform_not_configured', 'Upstream configuration changed while waiting')
@@ -692,7 +705,10 @@ export class TikHubUserInfoGateway {
               limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
               tokens: expectedProviderCalls,
               windowMs: 60_000,
-            })
+            }, { signal, providerState: () => this.platformStore.providerState(TIKHUB_PROVIDER_KEY),
+              deadline: new Date(reservation.request.leaseExpiresAt).getTime()
+                - expectedProviderCalls * (this.config.timeoutMs || 30000) - 5000,
+              maxWaitMs: currentAdmissionLimits(this).maxWaitMs })
         if (!admission.allowed) {
           if (snapshot) {
             const fallback = fallbackResponse(snapshot, activeRequestId)

@@ -20,13 +20,16 @@ export const TIKHUB_CONTENT_SEARCH_RECIPES = Object.freeze(Object.fromEntries([
     { sort_type: 'newest', publish_time: 'all', duration: 'all' }, ['keyword', 'pcursor', 'sort_type', 'publish_time', 'duration']],
   ['zhihu', 'zhihu_web_fetch_article_search_v3', 'GET', '/api/v1/zhihu/web/fetch_article_search_v3', 'offset',
     { offset: '0', show_all_topics: 0, search_source: 'Normal', search_hash_id: '', sort: 'created_time' }, ['keyword', 'offset', 'limit', 'show_all_topics', 'search_source', 'search_hash_id', 'sort']],
+  // Raw compatibility since 2026-10-31 for Reddit, YouTube and TikTok: Night-All
+  // answers their raw aliases with a non-JSON 404, so both raw aliases now run
+  // here like Bilibili/Douyin. Public params stay standard-search only.
   ['reddit', 'reddit_app_fetch_dynamic_search', 'GET', '/api/v1/reddit/app/fetch_dynamic_search', 'cursor',
     { search_type: 'post', sort: 'NEW', time_range: 'all', safe_search: 'unset', allow_nsfw: '0', after: '', need_format: false },
-    ['query', 'search_type', 'sort', 'time_range', 'safe_search', 'allow_nsfw', 'after', 'need_format'], false, false],
+    ['query', 'search_type', 'sort', 'time_range', 'safe_search', 'allow_nsfw', 'after', 'need_format'], true, false],
   ['youtube', 'youtube_web_v2_get_general_search_v2', 'GET', '/api/v1/youtube/web_v2/get_general_search_v2', 'cursor',
-    { sort_by: 'upload_date', continuation_token: '' }, ['keyword', 'continuation_token', 'upload_date', 'type', 'duration', 'features', 'sort_by'], false, false],
+    { sort_by: 'upload_date', continuation_token: '' }, ['keyword', 'continuation_token', 'upload_date', 'type', 'duration', 'features', 'sort_by'], true, false],
   ['tiktok', 'tiktok_web_fetch_general_search', 'GET', '/api/v1/tiktok/web/fetch_general_search', 'compound',
-    { offset: 0, search_id: '' }, ['keyword', 'offset', 'search_id'], false, false],
+    { offset: 0, search_id: '' }, ['keyword', 'offset', 'search_id'], true, false],
   ['weibo', 'weibo_web_v2_fetch_realtime_search', 'GET', '/api/v1/weibo/web_v2/fetch_realtime_search', 'page',
     {}, ['query', 'page'], false, false],
   ['xiaohongshu', 'xiaohongshu_app_v2_search_notes', 'GET', '/api/v1/xiaohongshu/app_v2/search_notes', 'compound',
@@ -151,7 +154,12 @@ function bilibiliRow(value, capturedAt) {
   const stat = object(value.stat) ? value.stat : {}
   const id = identity(value.id, value.aid, value.bvid)
   const kind = value.type === 'article' ? 'article' : 'video'
-  const url = first(value.arcurl, value.url) || (kind !== 'video' ? '' : identity(value.bvid) ? `https://www.bilibili.com/video/${value.bvid}` : /^\d+$/.test(id || '') ? `https://www.bilibili.com/video/av${id}` : '')
+  // Bilibili search responses can expose the public item under share_url.
+  // Keep the explicit share address attached to the item before falling back
+  // to the older URL aliases.
+  const url = first(value.share_url, value.shareUrl, value.share_link, value.shareLink,
+    value.url, value.arcurl, value.original_url)
+    || (kind !== 'video' ? '' : identity(value.bvid) ? `https://www.bilibili.com/video/${value.bvid}` : /^\d+$/.test(id || '') ? `https://www.bilibili.com/video/av${id}` : '')
   return baseRow('bilibili', id, capturedAt, { kind, title: value.title, text: first(value.description, value.desc, value.text, value.title),
     url, authorId: value.mid ?? value.author_id ?? value.owner?.mid, authorName: first(value.author, value.owner?.name), avatar: first(value.upic, value.uface, value.owner?.face),
     publishedAt: value.pubdate ?? value.published_at, likes: count(value.like_count, value.like, stat.like), comments: count(value.comment_count, value.review, stat.reply),
@@ -185,17 +193,43 @@ function emptyCardJson(value) {
   if (!cardString(value) || value.length > 65536) return false
   try { return cardShape(JSON.parse(value), {}) } catch { return false }
 }
-const relatedWordImage = value => cardShape(value, {
-  url_list: urls => Array.isArray(urls) && urls.length <= 100 && urls.every(cardString),
-}, ['url_list'])
-const relatedWordRecord = value => cardShape(value, {
-  group_id: cardString, words_position: cardNumber, words_content: cardString, words_source: cardString,
-  words_image: relatedWordImage, force_update_rank: cardBoolean, product_id: cardString,
-}, ['words_content'])
-const relatedWord = value => cardShape(value, {
-  related_word: word => cardString(word) && Boolean(word.trim()), word_record: relatedWordRecord,
-  related_img: cardString, rand_num: cardNumber, extra_info: extra => cardShape(extra, { words_type: cardString }),
-}, ['related_word', 'word_record'])
+// A related-search word is a suggestion, never a post. New suggestion
+// attributes are tolerated so one word cannot fail a paid page, but a post
+// container or post identity anywhere inside the word, including in encoded
+// JSON text, still prevents excluding the card.
+const POST_KEYS = new Set(['aweme_id', 'awemeId', 'aweme_info', 'aweme', 'aweme_detail', 'aweme_list',
+  'video', 'statistics', 'author', 'images', 'music', 'item', 'items'])
+const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,40}$/u
+// Returns the first offending path, or null when the value is a safe suggestion attribute.
+function suggestionIssue(value, path, depth = 0) {
+  if (value === null || cardBoolean(value) || cardNumber(value)) return null
+  if (cardString(value)) {
+    if (value.length > 65536) return `${path}:too_long`
+    if (!/^\s*[[{]/u.test(value)) return null
+    try { return suggestionIssue(JSON.parse(value), `${path}(json)`, depth + 1) } catch { return null }
+  }
+  if (depth >= 4) return `${path}:too_deep`
+  if (Array.isArray(value)) {
+    if (value.length > 100) return `${path}:too_many`
+    for (const item of value) { const issue = suggestionIssue(item, `${path}[]`, depth + 1); if (issue) return issue }
+    return null
+  }
+  if (!plainCardObject(value)) return `${path}:unsupported`
+  for (const [key, field] of Object.entries(value)) {
+    const name = SAFE_KEY.test(key) ? key : '?'
+    if (POST_KEYS.has(key)) return `${path}.${name}:post_field`
+    const issue = suggestionIssue(field, `${path}.${name}`, depth + 1)
+    if (issue) return issue
+  }
+  return null
+}
+function relatedWordIssue(value) {
+  if (!plainCardObject(value)) return 'word:not_object'
+  if (!cardString(value.related_word)) return 'word.related_word:missing'
+  if (!plainCardObject(value.word_record) || !cardString(value.word_record.words_content)) return 'word.word_record.words_content:missing'
+  return suggestionIssue(value, 'word')
+}
+const relatedWord = value => relatedWordIssue(value) === null
 const relatedWordData = value => cardShape(value, {
   card_tags: cardNull, hotspot_tab_config: cardNull, common_tab_config: cardNull,
   rs_extra_info: extra => cardShape(extra, {
@@ -227,9 +261,10 @@ export function isDouyinRelatedWordsCard(entry) {
 }
 export function douyinRelatedWordsCardCoverage(entry) {
   const words = entry?.related_word_list, bounded = Array.isArray(words) && words.length <= 100
-  const invalidIndexes = bounded ? words.flatMap((word, index) => relatedWord(word) ? [] : [index]) : []
+  const issues = bounded ? words.flatMap((word, index) => { const path = relatedWordIssue(word); return path ? [{ index, path }] : [] }) : []
   return { metadataAccepted: relatedWordsCardMetadata(entry), relatedWordCount: Array.isArray(words) ? words.length : null,
-    inspectedCount: bounded ? words.length : 0, invalidIndexes, truncated: Array.isArray(words) && !bounded }
+    inspectedCount: bounded ? words.length : 0, invalidIndexes: issues.map(issue => issue.index),
+    invalidPaths: issues.slice(0, 10), truncated: Array.isArray(words) && !bounded }
 }
 function shareParam(value, name) {
   const match = string(value).match(new RegExp(`(?:^|[?&])${name}=([^&]+)`))
@@ -353,6 +388,10 @@ function youtubeText(value) {
   if (!object(value)) return ''
   return first(value.simpleText, array(value.runs).map(run => string(run?.text)).join(''))
 }
+// An exact count with a views unit ("12,345 views", "12,345次观看") is a precise
+// observation. Abbreviated display counts ("1.2M", "12万") are not and stay unset.
+const EXACT_VIEWS = /^(\d{1,3}(?:,\d{3})+|\d+)\s*(?:views?|次观看|次觀看|次播放)$/iu
+const exactViewText = text => /^no views$/iu.test(text.trim()) ? '0' : EXACT_VIEWS.exec(text.trim())?.[1]?.replaceAll(',', '') ?? null
 function youtubeRow(value, capturedAt, videoContainer = false) {
   const id = identity(value.video_id, value.videoId, videoContainer || value.type === 'video' ? value.id : null)
   const author = object(value.channel) ? value.channel : object(value.author) ? value.author : {}
@@ -360,15 +399,15 @@ function youtubeRow(value, capturedAt, videoContainer = false) {
   const title = youtubeText(value.title)
   // Human-readable abbreviated counts and relative publication dates are not
   // precise observations. Only supplied exact counters/timestamps are retained.
-  const viewText = youtubeText(value.viewCountText)
-  const exactViews = /^(\d{1,3}(?:,\d{3})*|\d+) views?$/.exec(viewText)?.[1]?.replaceAll(',', '')
+  // Formatted search results supply view_count as such text and author as a plain string.
+  const exactViews = exactViewText(youtubeText(value.viewCountText)) ?? exactViewText(string(value.view_count))
   return baseRow('youtube', id, capturedAt, { kind: 'video', title,
     text: first(value.text, value.full_text, youtubeText(value.description), youtubeText(value.descriptionSnippet),
       array(value.detailedMetadataSnippets).map(item => youtubeText(item?.snippetText)).filter(Boolean).join('\n'), title),
     url: urls(value.url, value.video_url)[0] || `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
     publishedAt: suppliedTimestamp(value.published_at ?? value.publishedAt ?? value.published_time ?? value.created_at),
     authorId: author.channel_id ?? author.channelId ?? author.id ?? value.channel_id ?? value.author_id ?? owner.navigationEndpoint?.browseEndpoint?.browseId,
-    authorName: first(author.name, author.title, author.display_name, value.channel_name, value.channelTitle, value.author_name, owner.text),
+    authorName: first(author.name, author.title, author.display_name, value.channel_name, value.channelTitle, value.author_name, string(value.author), owner.text),
     avatar: first(author.avatar_url, value.author_avatar_url),
     likes: exactCount(value.like_count), comments: exactCount(value.comment_count), shares: exactCount(value.share_count),
     bookmarks: exactCount(value.collect_count, value.bookmark_count), views: exactCount(value.view_count, value.viewCount, exactViews),
@@ -404,10 +443,44 @@ function standardCursorPage({ scopes, tokenNames, flagNames, inputToken, nextNam
   const hasMore = next ? true : states[0] ?? (nullIsEnd && explicitNull ? false : null)
   return { hasMore, nextParams: next ? { [nextName]: next } : null, nextPage: null, paginationMode: 'cursor', sourceCount }
 }
+// Reddit search mixes widgets (surveys, notices, ...) into its result edges.
+// An unknown node is excluded only when nothing inside it looks like a post; a
+// hidden post still fails the page instead of being dropped silently.
+const REDDIT_POST_KEYS = new Set(['post', 'posts', 'postTitle', 'permalink', 'selftext', 'subredditPost', 'profilePost'])
+function redditWidgetTelemetry(typename, path) {
+  if (typename === 'SearchSpellCorrectionApplied') {
+    return path.length === 1 && path[0] === 'telemetry'
+      || path.length === 3 && path[0] === 'behaviors' && ['corrected', 'original'].includes(path[1]) && path[2] === 'telemetry'
+  }
+  if (typename !== 'SearchBanner') return false
+  return path.length === 2 && path[0] === 'telemetry' && path[1] === 'trackingContext'
+    || path.length === 4 && path[0] === 'behaviors' && ['cta', 'dismiss'].includes(path[1])
+      && path[2] === 'telemetry' && path[3] === 'trackingContext'
+}
+function redditHidesPost(value, depth = 0, widgetType = value?.__typename ?? null, path = []) {
+  if (depth > 6) return true
+  // Spelling widgets also carry deep search metadata outside trackingContext.
+  // Skip only their three telemetry subtrees without modifying the receipt;
+  // banners retain the narrower trackingContext exception.
+  if (redditWidgetTelemetry(widgetType, path)) return false
+  if (Array.isArray(value)) return value.length > 200 || value.some((item, index) => redditHidesPost(item, depth + 1, widgetType, [...path, index]))
+  if (!object(value)) return typeof value === 'string' && /^t3_/u.test(value)
+  if (typeof value.__typename === 'string' && /Post$/u.test(value.__typename)) return true
+  return Object.entries(value).some(([key, item]) => REDDIT_POST_KEYS.has(key) || redditHidesPost(item, depth + 1, widgetType, [...path, key]))
+}
+// Reddit answers an empty search with its own notice node. Only a notice that
+// says there are no results is an empty page; any other notice is a Reddit-side
+// error and the page fails as such (never as Hub parsing, never as empty).
+const REDDIT_NO_RESULTS = /\b(?:no results|no posts|nothing found|couldn['’]t find|could not find|didn['’]t find|did not find)\b|没有找到|无结果|找不到|沒有找到/iu
+export function redditSearchMessageClass(node) {
+  const presentation = object(node?.presentation) ? node.presentation : {}
+  const text = [presentation.message, presentation.explanation].filter(value => typeof value === 'string').join('\n')
+  return REDDIT_NO_RESULTS.test(text) ? 'no_results' : 'error'
+}
 function redditProjection(data, request, capturedAt) {
   const main = (data.search?.dynamic || data.search?.Dynamic)?.components?.main
-  const rows = [], scopes = [], nonposts = []
-  let inspectedCount = 0
+  const rows = [], scopes = [], nonposts = [], warnings = []
+  let inspectedCount = 0, searchError = false
   const add = value => {
     if (!object(value)) throw new Error('invalid_content_search_entry')
     if (value.isCommercialCommunication === true || value.promoted === true || value.removedByCategory || value.removed_by_category) { nonposts.push(value); return }
@@ -422,10 +495,25 @@ function redditProjection(data, request, capturedAt) {
       if (Object.hasOwn(node, 'post')) { add(node.post); recognized = true }
       if (Object.hasOwn(node, 'children')) { boundedEntries(node.children).forEach(child => visit(child, depth + 1)); recognized = true }
       if (!recognized && ['community', 'comment', 'author'].some(name => object(node[name]))) { nonposts.push(node); recognized = true }
-      if (!recognized) throw new Error('invalid_content_search_entry')
+      if (!recognized && node.__typename === 'SearchErrorMessage') {
+        if (redditSearchMessageClass(node) === 'error') searchError = true
+        else warnings.push({ code: 'reddit_no_results', message: 'Reddit reported no results for this search page.' })
+        nonposts.push(node); recognized = true
+      }
+      if (!recognized) {
+        if (redditHidesPost(node)) throw new Error('invalid_content_search_entry')
+        if (node.__typename === 'SearchSpellCorrectionApplied') warnings.push({ code: 'reddit_spell_correction',
+          message: 'Reddit applied a spelling correction; these results may reflect a corrected search query.' })
+        nonposts.push(node)
+      }
     }
     for (const edge of boundedEntries(main.edges)) visit(edge?.node)
-    scopes.push(main.pageInfo, main)
+    if (searchError && !rows.length) throw new Error('upstream_search_error_message')
+    if (searchError) warnings.push({ code: 'reddit_search_notice', message: 'Reddit returned an error notice alongside these results.' })
+    // Relay pageInfo: endCursor is the last edge's cursor and stays set on the
+    // final page, so an explicit hasNextPage=false alone ends pagination.
+    const pageInfo = object(main.pageInfo) && flag(main.pageInfo.hasNextPage) === false ? { hasNextPage: false } : main.pageInfo
+    scopes.push(pageInfo, main)
   } else {
     const listing = data.kind === 'Listing' ? data.data : data
     if (!object(listing) && !Array.isArray(listing)) throw new Error('invalid_content_search_shape')
@@ -440,9 +528,10 @@ function redditProjection(data, request, capturedAt) {
   }
   const sourceCount = rows.length + nonposts.length
   if (sourceCount > 10000) throw new Error('content_search_page_too_large')
-  return { rows, nonPostCount: nonposts.length, providerPage: standardCursorPage({ scopes,
+  const providerPage = standardCursorPage({ scopes,
     tokenNames: ['endCursor', 'after', 'next_cursor'], flagNames: ['hasNextPage', 'has_more', 'hasMore'],
-    inputToken: request.upstreamQuery.after, nextName: 'after', sourceCount, nullIsEnd: true }) }
+    inputToken: request.upstreamQuery.after, nextName: 'after', sourceCount, nullIsEnd: true })
+  return { rows, nonPostCount: nonposts.length, providerPage: warnings.length ? { ...providerPage, warnings } : providerPage }
 }
 function youtubeProjection(data, request, capturedAt) {
   const rows = [], continuations = []
@@ -517,6 +606,23 @@ function selectedArray(data, paths) {
   if (Array.isArray(data) && data.length <= 10000) return data
   throw new Error('invalid_content_search_shape')
 }
+function isBilibiliOmittedEmptyPage(data, request) {
+  const page = data.data, input = request.upstreamQuery
+  // Verified successful zero-result replies omit result; missing data alone is not exhaustion.
+  if (data.code !== 0 || !object(page) || Object.hasOwn(data, 'result') || Object.hasOwn(page, 'result')
+    || page.numResults !== 0 || page.numPages !== 0
+    || !Number.isSafeInteger(page.page) || page.page < 1 || page.page !== Number(input.page)
+    || !Number.isSafeInteger(page.pagesize) || page.pagesize < 1 || page.pagesize !== Number(input.page_size)) return false
+  if (['data', 'items', 'results', 'list', 'videos', 'next_page', 'nextPage', 'next_cursor', 'cursor']
+    .some(key => Object.hasOwn(page, key))) return false
+  for (const [key, expected] of [['num_results', 0], ['num_pages', 0], ['page_size', page.pagesize]]) {
+    if (Object.hasOwn(page, key) && page[key] !== expected) return false
+  }
+  for (const key of ['has_more', 'hasMore']) {
+    if (Object.hasOwn(page, key) && page[key] !== false && page[key] !== 0) return false
+  }
+  return true
+}
 function pagination(data, request, sourceCount) {
   const platform = request.platform, input = request.upstreamQuery
   let hasMore = flag(data.has_more ?? data.hasMore), nextParams = null, nextPage = null
@@ -561,15 +667,17 @@ function pagination(data, request, sourceCount) {
 export function projectTikHubContentSearch(result, request) {
   let data = result.publicBody?.data
   if (!object(data) && !Array.isArray(data)) throw new Error('invalid_content_search_shape')
+  if (request.platform === 'bilibili' && data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
+  const omittedEmptyPage = request.platform === 'bilibili' && isBilibiliOmittedEmptyPage(data, request)
   // Known extra Bilibili / Zhihu payload envelope; never walk content objects.
-  if (object(data.data) && (request.platform === 'bilibili' && data.data.result != null || request.platform === 'zhihu' && Array.isArray(data.data.data))) data = data.data
+  if (object(data.data) && (request.platform === 'bilibili' && (data.data.result != null || omittedEmptyPage) || request.platform === 'zhihu' && Array.isArray(data.data.data))) data = data.data
   if (data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
   const capturedAt = timestamp(result.publicBody?.meta?.capturedAt)
   if (!capturedAt) throw new Error('invalid_content_search_capture_time')
   if (request.platform === 'twitter') return projectTikHubTwitterSearch(result, request)
   if (['tiktok', 'xiaohongshu', 'weibo'].includes(request.platform)) return projectRemainingContentSearch(result, data, request, capturedAt)
   if (request.platform === 'reddit' || request.platform === 'youtube') return standardOnlyProjection(result, data, request, capturedAt)
-  let entries = selectedArray(data, { bilibili: [['result'], ['data', 'result'], ['data']], douyin: [['business_data'], ['aweme_list'], ['data'], ['items']],
+  let entries = omittedEmptyPage ? [] : selectedArray(data, { bilibili: [['result'], ['data', 'result'], ['data']], douyin: [['business_data'], ['aweme_list'], ['data'], ['items']],
     kuaishou: [['mixFeeds'], ['feeds'], ['result', 'items'], ['items'], ['data']], zhihu: [['data'], ['items']] }[request.platform])
   let nonPostCount = 0
   if (request.platform === 'bilibili') entries = entries.flatMap(entry => {

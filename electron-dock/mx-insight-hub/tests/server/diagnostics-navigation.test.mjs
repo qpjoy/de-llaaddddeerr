@@ -34,7 +34,7 @@ test('old diagnostic links resolve before rendering and retain IDs, queries and 
 })
 
 test('diagnostic links encode identifiers and preserve the selected read-only view on reload', () => {
-  for (const view of ['requests', 'limits']) {
+  for (const view of ['requests', 'limits', 'platforms']) {
     const href = diagnosticHref('req/a?b&c:d', view)
     const { result, replaced } = location(href)
     assert.equal(result.path, '/diagnostics')
@@ -44,6 +44,8 @@ test('diagnostic links encode identifiers and preserve the selected read-only vi
   }
   assert.equal(diagnosticHref(), '#/diagnostics?view=requests')
   assert.equal(diagnosticHref('req', 'unrecognized'), '#/diagnostics?view=requests&requestId=req')
+  assert.equal(diagnosticHref('hub-id', 'platforms', 'reddit'), '#/diagnostics?view=platforms&requestId=hub-id&platform=reddit')
+  assert.equal(diagnosticTabRequestId('platforms', 'hub-id', null, 'admin'), 'hub-id')
 })
 
 test('business browsing routes are unchanged and diagnostics retain the existing Admin Token boundary', async () => {

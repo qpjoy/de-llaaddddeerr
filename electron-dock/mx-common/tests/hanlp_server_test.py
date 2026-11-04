@@ -73,6 +73,8 @@ class FakeWorker:
         self.dead = False
         self.closed = False
         self.calls = []
+        # What the real worker would have reported with its last reply.
+        self.resident_bytes = None
 
     def wait_ready(self):
         if self.ready_gate is not None:
@@ -114,7 +116,7 @@ def make_pool(workers, tokenizer=split_tokens, start=True):
 
 
 class PoolSizingTest(unittest.TestCase):
-    def test_the_current_16_cpu_8gi_pod_gets_five_workers_of_three_threads(self):
+    def test_an_uncapped_16_cpu_8gi_pod_gets_five_workers_of_three_threads(self):
         plan = server.plan_pool(16, 8 * GIB)
         self.assertEqual((plan.workers, plan.threads, plan.reserved), (5, 3, 1))
 
@@ -143,6 +145,38 @@ class PoolSizingTest(unittest.TestCase):
         self.assertEqual(server.plan_pool(16, 8 * GIB, cap=1)[:3], (1, 16, 0))
         self.assertEqual(server.plan_pool(16, 8 * GIB, cap=2)[:3], (2, 8, 1))
         self.assertEqual(server.plan_pool(16, 8 * GIB, cap=64).workers, 5)
+
+    def test_a_five_worker_cap_keeps_extra_memory_as_headroom(self):
+        self.assertEqual(server.plan_pool(16, 32 * GIB).workers, 16)
+        self.assertEqual(server.plan_pool(16, 32 * GIB, cap=5)[:3], (5, 3, 1))
+
+    def test_workers_are_recycled_above_a_share_of_their_memory_slice(self):
+        share = (32 * GIB - server.FRONT_MEMORY_BYTES) // 5
+        self.assertEqual(
+            server.plan_pool(16, 32 * GIB, cap=5).recycle_bytes,
+            int(share * server.RECYCLE_MEMORY_FRACTION),
+        )
+        # A tight limit never recycles a worker that is inside its budget.
+        self.assertEqual(server.plan_pool(16, 8 * GIB).recycle_bytes, server.WORKER_MEMORY_BYTES)
+        # Without a memory limit there is no slice to protect.
+        self.assertIsNone(server.plan_pool(16, None).recycle_bytes)
+        self.assertIsNone(server.plan_pool(None, None).recycle_bytes)
+
+    def test_passes_keep_order_and_stay_within_the_character_budget(self):
+        texts = ["a" * 12_000, "b" * 9_000, "c c", "d" * 20_000, "e"]
+        passes = list(server._passes(texts))
+        self.assertEqual([[len(text) for text in part] for part in passes], [[12_000], [9_000, 3], [20_000], [1]])
+        self.assertEqual([text for part in passes for text in part], texts)
+        # Short texts still share a pass, and nothing is ever an empty pass.
+        self.assertEqual(list(server._passes(["x"] * 300)), [["x"] * 300])
+        self.assertEqual(list(server._passes([])), [])
+
+    def test_a_single_text_answered_flat_stays_one_entry(self):
+        self.assertEqual(server._tokenize(lambda texts: texts[0].split(), ["a b"]), [["a", "b"]])
+        self.assertEqual(
+            server._tokenize(lambda texts: [text.split() for text in texts], ["a b", "c" * 20_000]),
+            [["a", "b"], ["c" * 20_000]],
+        )
 
     def test_the_legacy_setting_is_optional(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -213,20 +247,37 @@ class CgroupLimitTest(unittest.TestCase):
 
 
 class AdmissionTest(unittest.TestCase):
-    def test_the_pool_is_ready_only_once_every_worker_has_warmed_up(self):
+    def test_initial_models_load_one_at_a_time_and_all_warm_before_ready(self):
         gates = [threading.Event() for _ in range(3)]
+        started = [threading.Event() for _ in range(3)]
+
+        def spawn(index):
+            started[index].set()
+            return FakeWorker(index, ready_gate=gates[index])
+
         pool = server.InferencePool(
             server.plan_pool(3, memory_for(3)),
-            lambda index: FakeWorker(index, ready_gate=gates[index]),
+            spawn,
         )
         starter = threading.Thread(target=pool.start)
+        self.addCleanup(starter.join, 5)
+        for gate in gates:
+            self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
         starter.start()
+        self.assertTrue(started[0].wait(1))
+        self.assertFalse(started[1].wait(0.05))
+        self.assertFalse(pool.ready)
         gates[0].set()
-        gates[2].set()
-        time.sleep(0.05)
+        self.assertTrue(started[1].wait(1))
+        self.assertFalse(started[2].wait(0.05))
         self.assertFalse(pool.ready)
         gates[1].set()
+        self.assertTrue(started[2].wait(1))
+        self.assertFalse(pool.ready)
+        gates[2].set()
         starter.join(5)
+        self.assertFalse(starter.is_alive())
         self.assertTrue(pool.ready)
         self.assertEqual(pool.describe()["liveWorkers"], 3)
 
@@ -243,6 +294,52 @@ class AdmissionTest(unittest.TestCase):
         self.assertFalse(pool.ready)
         self.assertEqual(pool.error, "RuntimeError: model warm-up failed")
         self.assertTrue(all(worker.closed for worker in spawned))
+        self.assertEqual([worker.index for worker in spawned], [0, 1])
+
+    def test_close_during_initial_loading_stops_it_without_spawning_more(self):
+        gate = threading.Event()
+        started = threading.Event()
+        spawned = []
+
+        class LoadingWorker(FakeWorker):
+            def close(self):
+                super().close()
+                gate.set()  # terminating a real child also wakes wait_ready
+
+        def spawn(index):
+            spawned.append(LoadingWorker(index, ready_gate=gate))
+            started.set()
+            return spawned[-1]
+
+        pool = server.InferencePool(server.plan_pool(3, memory_for(3)), spawn)
+        starter = threading.Thread(target=pool.start)
+        self.addCleanup(starter.join, 5)
+        self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
+        starter.start()
+        self.assertTrue(started.wait(1))
+        pool.close()
+        starter.join(5)
+        self.assertFalse(starter.is_alive())
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(spawned[0].closed)
+        self.assertFalse(pool.ready)
+
+    def test_extra_memory_keeps_five_slots_and_the_interactive_reserve(self):
+        pool = server.InferencePool(server.plan_pool(16, 32 * GIB, cap=5), FakeWorker)
+        self.addCleanup(pool.close)
+        pool.start()
+        writers = [pool.acquire(BULK, 0.05) for _ in range(4)]
+        self.assertTrue(all(isinstance(ticket, server._Ticket) for ticket in writers))
+        self.assertIsNone(pool.acquire(BULK, 0.05))
+        query = pool.acquire(INTERACTIVE, 0.05)
+        self.assertIsInstance(query, server._Ticket)
+        tickets = [*writers, query]
+        self.assertEqual(len({ticket.worker.index for ticket in tickets}), 5)
+        self.assertEqual(pool.describe()["threadsPerWorker"], 3)
+        self.assertEqual(pool.describe()["reservedForInteractive"], 1)
+        for ticket in tickets:
+            pool.release(ticket)
 
     def test_interactive_is_admitted_before_bulk_that_queued_first(self):
         pool, _ = make_pool(1)
@@ -362,12 +459,12 @@ class AdmissionTest(unittest.TestCase):
         pool.release(ticket)
 
     def test_a_replacement_that_cannot_load_fails_the_pool(self):
-        attempts = []
+        spawned = []
 
         def spawn(index):
-            attempts.append(index)
-            error = "RuntimeError: model warm-up failed" if len(attempts) > 2 else None
-            return FakeWorker(index, ready_error=error)
+            error = "RuntimeError: model warm-up failed" if len(spawned) >= 2 else None
+            spawned.append(FakeWorker(index, ready_error=error))
+            return spawned[-1]
 
         pool = server.InferencePool(server.plan_pool(2, memory_for(2)), spawn)
         pool.start()
@@ -378,16 +475,200 @@ class AdmissionTest(unittest.TestCase):
             self.assertTrue(wait_until(lambda: pool.error is not None))
         self.assertFalse(pool.ready)
         self.assertEqual(pool.error, "RuntimeError: model warm-up failed")
+        self.assertTrue(spawned[-1].closed)
         # Waiters give up at once rather than sitting out their timeout.
         started = time.monotonic()
         self.assertIsNone(pool.acquire(BULK, 5))
         self.assertLess(time.monotonic() - started, 1)
+
+    def test_replacements_load_serially_while_a_surviving_worker_serves(self):
+        gates = [threading.Event(), threading.Event()]
+        started = [threading.Event(), threading.Event()]
+        spawned = []
+
+        def spawn(index):
+            replacement = len(spawned) - 3
+            gate = gates[replacement] if replacement >= 0 else None
+            worker = FakeWorker(index, ready_gate=gate)
+            spawned.append(worker)
+            if replacement >= 0:
+                started[replacement].set()
+            return worker
+
+        pool = server.InferencePool(server.plan_pool(3, memory_for(3)), spawn)
+        for gate in gates:
+            self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
+        pool.start()
+        tickets = [pool.acquire(INTERACTIVE, 0.05) for _ in range(2)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            for ticket in tickets:
+                ticket.worker.dead = True
+                pool.release(ticket)
+        self.assertTrue(started[0].wait(1))
+        self.assertFalse(started[1].wait(0.05))
+        self.assertTrue(pool.ready)
+        survivor = pool.acquire(INTERACTIVE, 0.1)
+        self.assertIsInstance(survivor, server._Ticket)
+        self.assertEqual(survivor.worker.run(["still serving"]), [["still", "serving"]])
+        pool.release(survivor)
+        self.assertFalse(gates[0].is_set())
+        gates[0].set()
+        self.assertTrue(started[1].wait(1))
+        self.assertTrue(wait_until(lambda: pool.describe()["liveWorkers"] == 2))
+        gates[1].set()
+        self.assertTrue(wait_until(lambda: pool.describe()["replacedWorkers"] == 2))
+        self.assertEqual(pool.describe()["liveWorkers"], 3)
+
+    def test_close_prevents_a_queued_replacement_from_spawning(self):
+        gate = threading.Event()
+        loading = threading.Event()
+        spawned = []
+
+        class LoadingWorker(FakeWorker):
+            def close(self):
+                super().close()
+                gate.set()
+
+        def spawn(index):
+            if len(spawned) >= 3:
+                worker = LoadingWorker(index, ready_gate=gate)
+                loading.set()
+            else:
+                worker = FakeWorker(index)
+            spawned.append(worker)
+            return worker
+
+        pool = server.InferencePool(server.plan_pool(3, memory_for(3)), spawn)
+        pool.start()
+        # Invoke the same replacement entry point in joinable threads so close
+        # can be checked after both the active and queued loader have returned.
+        old = [pool.acquire(INTERACTIVE, 0.05).worker for _ in range(2)]
+        threads = [threading.Thread(target=pool._replace, args=(worker,)) for worker in old]
+        for thread in threads:
+            self.addCleanup(thread.join, 5)
+        self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
+        for thread in threads:
+            thread.start()
+        self.assertTrue(loading.wait(1))
+        pool.close()
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(spawned), 4)
+        self.assertTrue(all(worker.closed for worker in spawned))
 
     def test_closing_stops_every_worker(self):
         pool, spawned = make_pool(3)
         pool.close()
         self.assertTrue(all(worker.closed for worker in spawned))
         self.assertIsNone(pool.acquire(INTERACTIVE, 1))
+
+
+class RecycleTest(unittest.TestCase):
+    def make(self, workers, replacement_gate=None):
+        spawned = []
+
+        def spawn(index):
+            gate = replacement_gate if len(spawned) >= workers else None
+            spawned.append(FakeWorker(index, ready_gate=gate))
+            return spawned[-1]
+
+        pool = server.InferencePool(server.plan_pool(workers, memory_for(workers)), spawn)
+        self.addCleanup(pool.close)
+        pool.start()
+        return pool, spawned
+
+    def test_a_worker_over_its_threshold_is_replaced_once_idle(self):
+        pool, spawned = self.make(2)
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = pool.plan.recycle_bytes + 1
+        self.assertEqual(
+            pool.describe()["residentBytes"][str(ticket.worker.index)], pool.plan.recycle_bytes + 1
+        )
+        # Still holding its ticket: the request it serves is never cut short.
+        self.assertFalse(ticket.worker.closed)
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            pool.release(ticket)
+            self.assertTrue(wait_until(lambda: pool.describe()["recycledWorkers"] == 1))
+        description = pool.describe()
+        self.assertEqual((description["replacedWorkers"], description["liveWorkers"]), (0, 2))
+        self.assertTrue(ticket.worker.closed)
+        self.assertEqual([worker.index for worker in spawned], [0, 1, ticket.worker.index])
+        self.assertIn("recycling it", log.getvalue())
+        self.assertTrue(pool.ready)
+
+    def test_a_worker_at_its_threshold_keeps_serving(self):
+        pool, spawned = self.make(2)
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = pool.plan.recycle_bytes
+        pool.release(ticket)
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+        self.assertFalse(ticket.worker.closed)
+        self.assertEqual(len(spawned), 2)
+
+    def test_only_one_worker_is_recycled_at_a_time(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        pool, spawned = self.make(3, replacement_gate=gate)
+        first, second = pool.acquire(INTERACTIVE, 1), pool.acquire(INTERACTIVE, 1)
+        for ticket in (first, second):
+            ticket.worker.resident_bytes = pool.plan.recycle_bytes + 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            pool.release(first)
+            self.assertTrue(wait_until(lambda: len(spawned) == 4))
+            # The first replacement is still loading: the second stays in service.
+            pool.release(second)
+            self.assertFalse(second.worker.closed)
+            self.assertEqual(pool.describe()["liveWorkers"], 2)
+            gate.set()
+            self.assertTrue(wait_until(
+                lambda: pool.describe()["recycledWorkers"] == 1 and pool.describe()["liveWorkers"] == 3
+            ))
+            # Its next release, with nothing else loading, recycles it.
+            tickets = [pool.acquire(INTERACTIVE, 1) for _ in range(3)]
+            for ticket in tickets:
+                pool.release(ticket)
+            self.assertTrue(wait_until(lambda: pool.describe()["recycledWorkers"] == 2))
+        self.assertTrue(second.worker.closed)
+        self.assertTrue(wait_until(lambda: pool.describe()["liveWorkers"] == 3))
+
+    def test_a_crash_replacement_also_defers_recycling(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        pool, spawned = self.make(3, replacement_gate=gate)
+        crashed, grown = pool.acquire(INTERACTIVE, 1), pool.acquire(INTERACTIVE, 1)
+        crashed.worker.dead = True
+        grown.worker.resident_bytes = pool.plan.recycle_bytes + 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            pool.release(crashed)
+            self.assertTrue(wait_until(lambda: len(spawned) == 4))
+            pool.release(grown)
+            self.assertFalse(grown.worker.closed)
+            gate.set()
+            self.assertTrue(wait_until(lambda: pool.describe()["replacedWorkers"] == 1))
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+
+    def test_the_last_live_worker_is_never_recycled(self):
+        pool, spawned = self.make(1)
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = pool.plan.recycle_bytes * 4
+        pool.release(ticket)
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+        self.assertFalse(ticket.worker.closed)
+        self.assertEqual(len(spawned), 1)
+
+    def test_without_a_memory_limit_nothing_is_recycled(self):
+        pool = server.InferencePool(server.plan_pool(2, None), FakeWorker)
+        self.addCleanup(pool.close)
+        pool.start()
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = 64 * GIB
+        pool.release(ticket)
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+        self.assertIsNone(pool.describe()["recycleAboveBytes"])
 
 
 class ClientGoneTest(unittest.TestCase):
@@ -621,6 +902,22 @@ class WorkerBodyTest(unittest.TestCase):
         patcher = mock.patch.dict(sys.modules)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Successive resident-memory readings; the last one repeats.
+        self.resident = []
+        self.trims = []
+
+        def resident():
+            if len(self.resident) > 1:
+                return self.resident.pop(0)
+            return self.resident[0] if self.resident else None
+
+        for name, value in (
+            ("_resident_bytes", resident),
+            ("_malloc_trim", lambda: self.trims.append),
+        ):
+            patch = mock.patch.object(server, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def install(self, tokenizer, on_load=None):
         model_ref = object()
@@ -654,10 +951,47 @@ class WorkerBodyTest(unittest.TestCase):
             return [("吴恩达", "与", "人工智能")]
 
         self.install(tokenizer)
+        self.resident = [700 * server.MIB]
         sent, _ = self.run_worker(inbox=[["吴恩达与人工智能。"]])
         self.assertEqual(calls, [[server.WARMUP_TEXT], ["吴恩达与人工智能。"]])
         # Tuples become lists, so only builtins cross back to the front.
-        self.assertEqual(sent, [("ready", os.getpid()), ("ok", [["吴恩达", "与", "人工智能"]])])
+        self.assertEqual(
+            sent,
+            [("ready", os.getpid()), ("ok", [["吴恩达", "与", "人工智能"]], 700 * server.MIB)],
+        )
+        # Inside its planning budget a worker pays for no trim.
+        self.assertEqual(self.trims, [])
+
+    def test_long_batches_run_as_bounded_passes_and_reply_in_order(self):
+        calls = []
+
+        def tokenizer(texts):
+            calls.append([len(text) for text in texts])
+            return [[text[:1], str(len(text))] for text in texts]
+
+        self.install(tokenizer)
+        texts = ["a" * 12_000, "b" * 9_000, "c c", "d" * 20_000, "e"]
+        sent, _ = self.run_worker(inbox=[texts])
+        self.assertEqual(calls[1:], [[12_000], [9_000, 3], [20_000], [1]])
+        self.assertEqual(
+            sent[1],
+            ("ok", [["a", "12000"], ["b", "9000"], ["c", "3"], ["d", "20000"], ["e", "1"]], None),
+        )
+
+    def test_a_grown_worker_trims_and_reports_memory_after_trimming(self):
+        self.install(split_tokens)
+        above = server.TRIM_ABOVE_BYTES + 1
+        self.resident = [100 * server.MIB, above, 900 * server.MIB]
+        sent, _ = self.run_worker(inbox=[["one"], ["two"]])
+        self.assertEqual(sent[1:], [("ok", [["one"]], 100 * server.MIB), ("ok", [["two"]], 900 * server.MIB)])
+        self.assertEqual(self.trims, [0])
+
+    def test_without_malloc_trim_memory_is_still_reported(self):
+        self.install(split_tokens)
+        self.resident = [server.TRIM_ABOVE_BYTES + 1]
+        with mock.patch.object(server, "_malloc_trim", lambda: None):
+            sent, _ = self.run_worker(inbox=[["one"]])
+        self.assertEqual(sent[1], ("ok", [["one"]], server.TRIM_ABOVE_BYTES + 1))
 
     def test_an_empty_warm_up_fails_closed(self):
         self.install(lambda _texts: [[]])
@@ -684,8 +1018,13 @@ class WorkerBodyTest(unittest.TestCase):
             return [text.split() for text in texts]
 
         self.install(tokenizer)
+        self.resident = [800 * server.MIB]
         sent, log = self.run_worker(inbox=[[secret], ["still serving"]])
-        self.assertEqual(sent[1:], [("error", None), ("ok", [["still", "serving"]])])
+        # A failed pass reports memory too: it may be why the pass failed.
+        self.assertEqual(
+            sent[1:],
+            [("error", None, 800 * server.MIB), ("ok", [["still", "serving"]], 800 * server.MIB)],
+        )
         self.assertIn("RuntimeError", log)
         self.assertNotIn(secret, log)
 
@@ -726,6 +1065,8 @@ class Tokenizer:
                 out.append(["slept"])
             elif text == "env":
                 out.append([os.environ.get(name, "") for name in THREADS] + [str(os.getpid())])
+            elif text == "arena":
+                out.append([os.environ.get("MALLOC_ARENA_MAX", "")])
             elif text == "crash":
                 os._exit(3)
             elif text.startswith("raise:"):
@@ -778,7 +1119,7 @@ class EndToEndTest(unittest.TestCase):
             name: value
             for name, value in os.environ.items()
             if not name.startswith("PYTHON")
-            and name not in ("MAX_CONCURRENT_INFERENCES", *server.THREAD_ENV_NAMES)
+            and name not in ("MAX_CONCURRENT_INFERENCES", "MALLOC_ARENA_MAX", *server.THREAD_ENV_NAMES)
         }
         env.update(
             PORT=str(self.port),
@@ -860,6 +1201,11 @@ class EndToEndTest(unittest.TestCase):
             (pool["workers"], pool["liveWorkers"], pool["threadsPerWorker"], pool["reservedForInteractive"]),
             (3, 3, 2, 1),
         )
+        self.assertEqual(
+            (pool["recycledWorkers"], pool["recycleAboveBytes"], pool["maxPassCharacters"]),
+            (0, server.WORKER_MEMORY_BYTES, server.MAX_PASS_CHARACTERS),
+        )
+        self.assertEqual(sorted(pool["residentBytes"]), ["0", "1", "2"])
         status, tokens, headers = self.http("POST", "/tokenize", {"text": "吴恩达 与 人工智能", "coarse": True})
         self.assertEqual((status, tokens), (200, [["吴恩达", "与", "人工智能"]]))
         self.assertEqual(headers["content-type"], "application/json; charset=utf-8")
@@ -868,6 +1214,9 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.http("GET", "/nope")[:2], (404, {"error": "not found"}))
         status, body, _ = self.http("POST", "/tokenize", raw=b"x" * 2048)
         self.assertEqual((status, body), (413, {"error": "request body exceeds 1024 bytes"}))
+
+    def test_workers_start_with_fewer_malloc_arenas(self):
+        self.assertEqual(self.batch(["arena"])[:2], (200, {"batch": [["2"]]}))
 
     def test_each_worker_is_its_own_process_with_an_even_thread_share(self):
         calls = [self.in_background(self.batch, ["sleep:0.4", "env"], True) for _ in range(3)]

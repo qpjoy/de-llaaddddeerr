@@ -1,16 +1,19 @@
-import { refreshAdmissionLimits } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { openCircuitError } from './availability-errors.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
-import { FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY, projectFacebookSearch, facebookJustOneArchives } from '../contracts/facebook-search.mjs'
+import { NightAllAUpstreamError } from '../adapters/night-all-a-facebook.mjs'
+import { FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY, FACEBOOK_SELFHOSTED_PROVIDER, projectFacebookSearch, facebookJustOneArchives } from '../contracts/facebook-search.mjs'
 import { projectDataSearch } from '../contracts/hub-data-search.mjs'
 import { rawSearchRecords } from '../contracts/raw-search.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
+import { waitForFacebookSelfhostedAdmission } from './facebook-selfhosted-admission.mjs'
 
 const MAX_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024
-const PAGE_BYTES = { rapidapi: 4 * 1024 * 1024, justone: 8 * 1024 * 1024 }
+const PAGE_BYTES = { rapidapi: 4 * 1024 * 1024, justone: 8 * 1024 * 1024, [FACEBOOK_SELFHOSTED_PROVIDER]: 8 * 1024 * 1024 }
 const hash = rows => createHash('sha256').update(JSON.stringify(rows)).digest('hex')
 const unavailable = () => new AppError(409, 'search_page_unavailable', 'The saved Facebook page cannot be continued; restart explicitly')
 const uncertain = () => {
@@ -24,13 +27,13 @@ const knownAdmission = error => error instanceof AppError && error.status !== 40
     'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'facebook_search_paused',
     'facebook_search_capacity_unavailable', 'search_restart_required'].includes(error.code))
 
-function rapidArchives(result, step, callId) {
+function rapidArchives(result, step, callId, prefix = 'rapidapi/facebook/social.facebook.search') {
   if (result.archiveObjects?.length) return result.archiveObjects
   const archive = result.responseArchive
   if (!archive?.payloadSha256) return []
   return [{ kind: 'response', marketplace: 'facebook', endpointVersion: step.endpointVersion,
     capturedDate: new Date(archive.capturedAt).toISOString().slice(0, 10),
-    archivePath: `rapidapi/facebook/social.facebook.search/${callId}`, envelopePointer: '$', sourceKey: callId,
+    archivePath: `${prefix}/${callId}`, envelopePointer: '$', sourceKey: callId,
     payloadSha256: archive.payloadSha256, rawPayload: archive.rawPayload }]
 }
 
@@ -43,7 +46,6 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
   const started = performance.now(), identity = { tenantId: context.tenant.id, consumerId: context.consumer.id,
     apiKeyId: context.apiKey.id, path: '/api/v1/data/search', query: request.query, pageSize: request.pageSize,
     type: request.resultType, scopeHash: request.scopeHash, startDate: request.startDate, endDate: request.endDate, stores }
-  if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
   const history = await store.facebookDeliveredIdsFor({ ...identity, previousDeliveryId: request.fill?.previousDeliveryId })
   const seen = new Set(history.ids), rows = [], sources = [], tokens = new Set()
   let provider = request.provider, pinned = Boolean(request.provider), providerCursor = request.providerCursor ?? null
@@ -99,7 +101,6 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
     const claim = await store.acquireFacebookFillDeliveryLease(parentLease)
     if (claim !== true && claim?.kind !== 'acquired') throw new AppError(409, 'request_in_progress', 'An equal Facebook delivery is in progress')
     ownsLease = true
-    if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
     if (request.buffer) {
       const archived = await store.facebookPageFor({ ...identity, callId: request.buffer.callId, sourceProvider: provider })
       if (!archived || archived.bodySize > PAGE_BYTES[provider]) throw unavailable()
@@ -116,13 +117,13 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
       if (upstreamPages >= MAX_PAGES) { stopReason = 'upstream_page_limit'; break }
       if (sources.length && !providerCursor) break
       let currentCall = null, evidence = null, costReservation = null, childLease = null, entered = false
-      let admission = null, observationFailed = false, sourceProvider = null
+      let admission = null, observationFailed = false, sourceProvider = null, selfhostedAdmission = null
       try {
         if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
         context = await revalidateIdentity()
         const policy = await policyStore.facebook()
         if (policy.mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
-        provider ||= policy.mode === 'justone' ? 'justone' : 'rapidapi'
+        provider ||= policy.mode === 'justone' ? 'justone' : policy.mode === 'selfhosted' ? FACEBOOK_SELFHOSTED_PROVIDER : 'rapidapi'
         sourceProvider = provider
         const target = gateways[provider]
         if (!target) throw new AppError(503, 'external_platform_not_configured', 'Facebook supplier is unavailable')
@@ -133,18 +134,17 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         const authorizeStep = async () => {
           context = await revalidateIdentity()
           if ((await policyStore.facebook()).mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
-          if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
           const shared = await target.platformStore.providerState(provider)
           const state = isHubRateLimitExempt(context) ? internalCircuitState(gateway.usageStore, context, shared) : shared
           const contract = await target.platformStore.contractCircuitState?.(provider, 'facebook')
-          if ([state, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > clock())) {
-            throw new AppError(503, 'external_platform_circuit_open', 'Facebook supplier is temporarily unavailable')
-          }
+          const blocked = await openCircuitError({ store: target.platformStore, state, contract, now: clock(), config: target.config,
+            message: 'Facebook supplier is temporarily unavailable', marketplace: 'facebook' })
+          if (blocked) throw blocked
           const credential = await resolveCredential(provider)
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Facebook supplier is unavailable')
           const control = await target.operationControlStore.authorizeDispatch(provider, operation, {
             consumerId: context.consumer.id, config: target.config, credentialConfigured: true, credentialRevision: credential.revision })
-          const cost = providerCostControl(control?.billing ? { billing: control.billing } : target.config, base.endpointKey, provider === 'rapidapi')
+          const cost = providerCostControl(control?.billing ? { billing: control.billing } : target.config, base.endpointKey, provider !== 'justone')
           return { credential, control, cost }
         }
         let authorization = await authorizeStep()
@@ -163,10 +163,12 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         }
         let { credential, control, cost } = authorization
         costReservation = cost.costMinor === 0 ? null : await target.platformStore.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-        const rate = isHubRateLimitExempt(context) ? { allowed: true } : await target.platformStore.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(target)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
+        const rate = await acquireSupplierRate(context, target.platformStore, { limit: (await refreshAdmissionLimits(target)).maxRequestsPerMinute ?? 90,
+          windowMs: 60000, signal, providerState: () => target.platformStore.providerState(provider),
+          deadline: deadlineAt - (target.config.timeoutMs || 30000) - 5000, maxWaitMs: currentAdmissionLimits(target).maxWaitMs })
         if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Facebook supplier rate limit is exhausted')
         if (provider === 'rapidapi') {
-          admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => isHubRateLimitExempt(context), requestId: delivery.usageRequestId,
+          admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => bypassesSupplierLimits(context), requestId: delivery.usageRequestId,
             deadlineAt, timeoutMs: target.config.timeoutMs || 30000, signal, logger: gateway.logger,
             revalidate: async () => {
               const latest = await authorizeStep()
@@ -183,6 +185,13 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
             throw new AppError(503, pinned ? 'search_restart_required' : 'facebook_search_capacity_unavailable',
               'Facebook search capacity is temporarily unavailable')
           }
+        }
+        if (provider === FACEBOOK_SELFHOSTED_PROVIDER) {
+          selfhostedAdmission = await waitForFacebookSelfhostedAdmission({ policyStore, requestId: delivery.usageRequestId,
+            deadlineAt, budgetMs: target.config.timeoutMs, signal, logger: gateway.logger, revalidate: async () => {
+              const latest = await authorizeStep()
+              credential = latest.credential; control = latest.control
+            } })
         }
         if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
         if (clock() + (target.config.timeoutMs || 30000) + 5000 >= deadlineAt) { stopReason = 'deadline'; break }
@@ -201,14 +210,17 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         try {
           result = provider === 'rapidapi'
             ? await target.adapter.execute(step, { credential: credential.credential })
-            : await target.adapter.forwardNative(FACEBOOK_JUSTONE_KEY, { params: step.upstreamQuery }, { credential: credential.credential })
+            : provider === FACEBOOK_SELFHOSTED_PROVIDER ? await target.adapter.execute(step, { signal })
+              : await target.adapter.forwardNative(FACEBOOK_JUSTONE_KEY, { params: step.upstreamQuery }, { credential: credential.credential })
           if (provider === 'justone') {
             const projected = projectFacebookSearch(result.publicBody.data, step, provider, result.publicBody.meta.capturedAt, { allowOverflow: true })
             result = { ...result, restrictedResponseArchive: result.restrictedResponseArchive,
               archiveObjects: facebookJustOneArchives(result.archiveObjects, base.endpointVersion), ...projected }
           }
         } catch (error) {
-          if (!(error instanceof RapidApiUpstreamError || error instanceof JustOneUpstreamError)) {
+          // An unknown self-hosted run may still be collecting; keep its slot.
+          if (selfhostedAdmission && !(error instanceof NightAllAUpstreamError && error.evidence.outcome !== 'unknown')) selfhostedAdmission.retain = true
+          if (!(error instanceof RapidApiUpstreamError || error instanceof JustOneUpstreamError || error instanceof NightAllAUpstreamError)) {
             if (!result) throw error
             error = new JustOneUpstreamError('JustOneSucceededUnusableError', 'Facebook response could not be normalized', {
               outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 0, errorCode: 'invalid_facebook_response',
@@ -219,10 +231,11 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         const source = result && !failure ? result : failure
         const persisted = persistedCallEvidence(source)
         const archiveObjects = provider === 'rapidapi' ? rapidArchives(source, base, currentCall.id)
-          : facebookJustOneArchives(source.archiveObjects, base.endpointVersion)
+          : provider === FACEBOOK_SELFHOSTED_PROVIDER ? rapidArchives(source, base, currentCall.id, `${provider}/facebook/${operation}`)
+            : facebookJustOneArchives(source.archiveObjects, base.endpointVersion)
         const probe = provider === 'rapidapi' && admission?.probe === true
         evidence = { callId: currentCall.id, delivery: stepDelivery, outcome: failure ? failure.evidence.outcome : 'succeeded',
-          billed: failure ? failure.evidence.billed ?? null : provider === 'rapidapi' ? null : true,
+          billed: failure ? failure.evidence.billed ?? null : provider === 'rapidapi' ? null : provider !== FACEBOOK_SELFHOSTED_PROVIDER,
           httpStatus: persisted.responseArchive?.httpStatus ?? failure?.evidence.httpStatus ?? 200,
           businessCode: persisted.responseArchive?.businessCode ?? failure?.evidence.businessCode ?? (provider === 'justone' ? 0 : null),
           costMinor: probe ? null : cost.costMinor, costKind: probe ? 'unknown' : cost.costKind, currency: probe ? null : cost.currency,
@@ -284,7 +297,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
           }
           if (sources.length) { stopReason = error.code; break }
         }
-        if (!sources.length && error.details?.stage === 'facebook_quota_admission') {
+        if (!sources.length && ['facebook_quota_admission', 'facebook_selfhosted_admission'].includes(error.details?.stage)) {
           await target.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
             status: error.status || 503, errorCode: error.code })
         }
@@ -298,6 +311,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         if (childLease) await target.platformStore.releaseDispatchLease(childLease).catch(() => {})
         if (entered) leaveCapacity(sourceProvider, entered)
         if (admission && !observationFailed) await policyStore.observeRapid(admission).catch(() => {})
+        if (selfhostedAdmission && !selfhostedAdmission.retain) await policyStore.releaseSelfhosted(selfhostedAdmission).catch(() => {})
       }
     }
     if (!sources.length) throw new AppError(503, 'facebook_search_capacity_unavailable', 'No Facebook page could be acquired within the bounded search')

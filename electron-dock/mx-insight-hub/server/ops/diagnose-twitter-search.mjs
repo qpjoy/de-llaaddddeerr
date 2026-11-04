@@ -8,7 +8,7 @@ const contracts = process.argv[1] === '-'
   ? pathToFileURL(`${process.cwd()}/server/contracts/`) : new URL('../contracts/', import.meta.url)
 const { normalizeHubSocialRequest, normalizeTwitterResponse, projectTwitterSearchPage, HUB_SOCIAL_VERSION } = await import(new URL('hub-social.mjs', contracts))
 const DIAGNOSTIC_IMPLEMENTATION = { projectionImplementation: 'installed_hub_contract', parserSha256: null } // TWITTER_DIAGNOSTIC_IMPLEMENTATION
-export const TWITTER_DIAGNOSTIC_REVISION = 'twitter-search-diagnostic.v3'
+export const TWITTER_DIAGNOSTIC_REVISION = 'twitter-search-diagnostic.v4'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MAX_BYTES = 4 * 1024 * 1024
@@ -23,6 +23,26 @@ const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : nul
 const known = (value, choices) => choices.includes(value) ? value : 'other_or_missing'
 const listCount = value => Array.isArray(value) ? value.length : null
 const resultType = value => known(value, ['Tweet', 'LegacyTweet', 'TweetWithVisibilityResults', 'TweetUnavailable', 'TweetTombstone'])
+
+function savedMessageObservation(payload) {
+  const classify = value => {
+    if (typeof value !== 'string' || value.length > 512) return 'unknown'
+    if (['Too Many Requests', 'Too many requests'].includes(value)) return 'too_many_requests_unspecified_claim'
+    if (value === 'You are not subscribed to this API.') return 'not_subscribed_claim'
+    if (value === 'This endpoint is disabled for your subscription') return 'subscription_endpoint_disabled_claim'
+    // Match complete known envelopes, never isolated keywords or arbitrary
+    // error text. Plan/object names and optional links are never emitted.
+    const rate = /^You have exceeded the rate limit per (second|minute|hour) for your plan, [A-Za-z0-9 _-]{1,80}, by the API provider\.?$/u.exec(value)
+    if (rate) return `rate_limit_per_${rate[1]}_claim`
+    const quota = /^You have exceeded the (DAILY|MONTHLY) quota for [A-Za-z0-9 _-]{1,80} on your current plan, [A-Za-z0-9 _-]{1,80}(?:\. Upgrade your plan at https:\/\/rapidapi\.com\/[A-Za-z0-9/_-]{1,200})?\.?$/u.exec(value)
+    if (quota) return quota[1] === 'DAILY' ? 'daily_quota_claim' : 'monthly_quota_claim'
+    return 'unknown'
+  }
+  return { scope: 'saved_response_message_only_not_verified_account_state',
+    fields: Object.fromEntries([['message', payload?.message], ['error', payload?.error],
+      ['error.message', object(payload?.error) ? payload.error.message : undefined]]
+      .map(([field, value]) => [field, { ...shape(value), classification: classify(value) }])) }
+}
 
 export function twitterInputShapes(snapshot) {
   const body = snapshot?.body
@@ -128,7 +148,8 @@ export function inspectTwitterArchive(archive, snapshot, { httpStatus = 200, cal
   try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '')) }
   catch { return { state: 'archive_not_json', ...integrity } }
   const structure = timelineShape(payload)
-  if (httpStatus !== 200) return { state: 'not_success_http', ...integrity, structure }
+  if (httpStatus !== 200) return { state: 'not_success_http', ...integrity, structure,
+    ...(httpStatus === 429 ? { savedMessageObservation: savedMessageObservation(payload) } : {}) }
   const body = snapshot?.body
   if (!ROUTES.has(snapshot?.path) || !['twitter', 'x'].includes(body?.platform?.trim?.().toLowerCase())
     || body.cursor || body.params?.cursor || (body.page ?? 1) !== 1) {

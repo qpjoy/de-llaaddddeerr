@@ -524,7 +524,7 @@ test('both search contracts deliver independently verified edited full text as o
   }
 })
 
-test('Weibo contract failures preserve a bounded cause and still suppress a second paid dispatch', async () => {
+test('Weibo contract failures preserve a bounded cause and allow a new request without endpoint quarantine', async () => {
   for (const [options, code] of [
     [{ malformed: true }, 'invalid_weibo_search_shape'],
     ...[undefined, null, [], { has_next_page: 'false' }, { unexpected: true }].map(pagination =>
@@ -543,8 +543,8 @@ test('Weibo contract failures preserve a bounded cause and still suppress a seco
     })
     assert.equal([...h.platformStore.calls.values()][0].errorCode, code)
     await assert.rejects(h.invokeData({ platform: 'weibo', query: '另一关键词', pageSize: 20 }, 'another-query-idempotency'),
-      { status: 409, code: 'external_platform_response_unusable' })
-    assert.equal(h.calls.length, 1)
+      { status: 502, code: 'external_platform_response_unusable' })
+    assert.equal(h.calls.length, 2)
     assert.equal(h.historical.length, 0)
   }
 })
@@ -1075,8 +1075,8 @@ test('Twitter standard third request waits for a consumer slot without buying ca
   assert.equal(h.gateway.concurrencyQueue.entries.length, 0)
 })
 
-test('Twitter queued admission rechecks current access, operation, circuit and unknown-delivery protection', async t => {
-  for (const scenario of ['key', 'grant', 'credential', 'operation', 'circuit', 'parent_unknown', 'dispatch_unknown']) await t.test(scenario, async () => {
+test('Twitter queued admission rechecks current access, operation, circuit and dispatch-lease protection', async t => {
+  for (const scenario of ['key', 'grant', 'credential', 'operation', 'circuit', 'dispatch_unknown']) await t.test(scenario, async () => {
     const h = await harness({ platform: 'twitter' })
     h.gateway.active = h.config.maxConcurrency
     h.config.concurrencyQueue = { maxWaitMs: 1000, maxPending: 4 }
@@ -1087,7 +1087,6 @@ test('Twitter queued admission rechecks current access, operation, circuit and u
     if (scenario === 'credential') h.gateway.adapter.resolveCredential = async () => null
     if (scenario === 'operation') h.controls.authorizeDispatch = async () => { throw new AppError(503, 'external_platform_operation_paused', 'paused') }
     if (scenario === 'circuit') h.platformStore.providerState = async () => ({ circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
-    if (scenario === 'parent_unknown') h.platformStore.twitterFillUnknownFor = async () => true
     if (scenario === 'dispatch_unknown') h.platformStore.acquireDispatchLease = async () => ({ kind: 'blocked', reason: 'unknown' })
     h.gateway.active = 0
     h.gateway.concurrencyQueue.drain()
@@ -1095,7 +1094,7 @@ test('Twitter queued admission rechecks current access, operation, circuit and u
     assert.ok(error instanceof AppError)
     assert.equal(error.code, ({ key: 'capability_not_granted', grant: 'capability_not_granted', credential: 'external_platform_not_configured',
       operation: 'external_platform_operation_paused', circuit: 'external_platform_circuit_open',
-      parent_unknown: 'request_outcome_unknown', dispatch_unknown: 'request_outcome_unknown' })[scenario])
+      dispatch_unknown: 'request_outcome_unknown' })[scenario])
     assert.equal(h.platformStore.calls.size, 0)
     assert.equal(h.calls.length, 0)
     assert.equal(h.gateway.active, 0)
@@ -1216,12 +1215,14 @@ test('Twitter known rate admission may deliver a short page while a later unknow
     assert.equal(h.platformStore.ingestJobs.length, 1)
     assert.deepEqual([...h.platformStore.calls.values()].map(row => row.outcome), ['succeeded', 'unknown'])
     await assert.rejects(h.invokeData({ ...body, type }, 'twitter-fill-unknown-first'), { code: 'request_outcome_unknown' })
-    await assert.rejects(h.invokeData({ ...body, type }, 'twitter-fill-unknown-new-key'), { code: 'request_outcome_unknown' })
     assert.equal(h.calls.length, 2)
+    // A new key is not held by the ended unknown; it acquires again and meets the same synthetic failure.
+    await assert.rejects(h.invokeData({ ...body, type }, 'twitter-fill-unknown-new-key'), { code: 'social_upstream_outcome_unknown' })
+    assert.equal(h.calls.length, 4)
   }
 })
 
-test('Twitter fill final-commit uncertainty keeps the parent unknown even when every supplier step succeeded', async () => {
+test('Twitter fill final-commit uncertainty keeps the parent unknown under its own key even when every supplier step succeeded', async () => {
   const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost], null) })
   h.platformStore.commitTwitterFillDelivery = async () => { throw new Error('synthetic parent persistence uncertainty') }
   const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
@@ -1231,11 +1232,15 @@ test('Twitter fill final-commit uncertainty keeps the parent unknown even when e
   assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded')
   assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
   assert.equal(h.platformStore.ingestJobs.length, 1)
-  await assert.rejects(h.invokeData(body, 'twitter-fill-final-unknown-other'), { code: 'request_outcome_unknown' })
+  await assert.rejects(h.invokeData(body, 'twitter-fill-final-unknown'), { code: 'request_outcome_unknown' })
   assert.equal(h.calls.length, 1)
+  // A new key acquires again; the synthetic commit failure makes it unknown too.
+  await assert.rejects(h.invokeData(body, 'twitter-fill-final-unknown-other'), { code: 'request_outcome_unknown' })
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.ingestJobs.length, 2)
 })
 
-test('Twitter cached-only final-commit uncertainty blocks a new idempotency key without another acquisition', async () => {
+test('Twitter cached-only final-commit uncertainty never acquires again for a new idempotency key on buffered content', async () => {
   const posts = Array.from({ length: 21 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1) }))
   const h = await harness({ platform: 'twitter', twitterData: twitterTimeline(posts, null) })
   const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
@@ -2225,6 +2230,80 @@ test('raw and data-search forward cancellation through Hub routing before generi
   assert.equal(h.calls.length, 0)
 })
 
+test('Instagram shared and contract circuits explain the active blocker without dispatch or state changes', async t => {
+  for (const provider of ['justone', 'tikhub']) for (const route of ['invoke', 'invokeData']) {
+    for (const contractActive of [false, true]) await t.test(`${provider}/${route}/${contractActive ? 'contract' : 'shared'}`, async () => {
+      const h = await harness({ platform: 'instagram', instagramProvider: provider })
+      h.config.circuitFailureThreshold = 3
+      const sharedUntil = new Date(Date.now() + (contractActive ? -60000 : 60000)).toISOString()
+      const contractUntil = new Date(Date.now() + (contractActive ? 30000 : -30000)).toISOString()
+      Object.assign(h.platformStore.state, { consecutiveFailures: 3, circuitOpenUntil: sharedUntil,
+        lastErrorCode: 'upstream_balance_exhausted' })
+      h.platformStore.contractCircuits.set('instagram', { scope: 'instagram', consecutiveFailures: 3,
+        circuitOpenUntil: contractUntil, lastErrorCode: 'private_contract_failure' })
+      // The call ledger's latest failure explains the refusal with upstream codes.
+      const failedAt = new Date(Date.now() - 20000).toISOString()
+      h.platformStore.calls.set('balance-failure', { id: 'balance-failure', outcome: 'rejected', httpStatus: 200, businessCode: 601,
+        errorCode: 'upstream_balance_exhausted', billed: false, marketplace: 'instagram', startedAt: failedAt, completedAt: failedAt })
+      h.platformStore.calls.set('parse-failure', { id: 'parse-failure', outcome: 'succeeded_unusable', httpStatus: 200, businessCode: 0,
+        errorCode: 'invalid_upstream_contract', billed: true, marketplace: 'instagram',
+        startedAt: new Date(Date.now() - 40000).toISOString(), completedAt: new Date(Date.now() - 40000).toISOString() })
+      const beforeShared = structuredClone(h.platformStore.state)
+      const beforeContract = structuredClone(h.platformStore.contractCircuits.get('instagram'))
+      await assert.rejects(h[route]({ platform: 'instagram', query: 'circuit fixture', pageSize: 20 }, 'instagram-circuit'), error => {
+        assert.equal(error.status, 503)
+        assert.equal(error.code, 'external_platform_circuit_open')
+        assert.equal(error.message, 'Instagram 搜索暂时受保护，请保留请求 ID 核查原因。')
+        assert.equal(error.details.upstreamDispatched, false)
+        assert.equal(error.details.scope, contractActive ? 'platform_contract' : 'shared_upstream')
+        assert.equal(error.details.reason, contractActive ? 'response_contract_unusable' : 'upstream_balance_exhausted')
+        assert.equal(error.details.cause, contractActive ? 'hub_response_parsing' : 'upstream')
+        assert.deepEqual(error.details.upstream, contractActive
+          ? { errorCode: 'invalid_upstream_contract', httpStatus: 200, businessCode: 0, outcome: 'succeeded_unusable', billed: true,
+            failedAt: h.platformStore.calls.get('parse-failure').completedAt }
+          : { errorCode: 'upstream_balance_exhausted', httpStatus: 200, businessCode: 601, outcome: 'rejected', billed: false, failedAt })
+        assert.equal(error.details.circuitOpenUntil, contractActive ? contractUntil : sharedUntil)
+        assert.ok(error.details.retryAfterMs > 0 && error.details.retryAfterMs <= (contractActive ? 30000 : 60000))
+        assert.equal(error.details.failureThreshold, 3)
+        assert.equal(error.details.retryable, false)
+        assert.ok(h.store.requests.has(error.details.requestId))
+        assert.doesNotMatch(JSON.stringify(error.details), /justone|tikhub|private_contract_failure|fixture-secret/u)
+        return true
+      })
+      assert.equal(h.calls.length, 0)
+      assert.equal(h.historical.length, 0)
+      assert.equal(h.platformStore.calls.size, 2, 'only the two seeded historical failures; no new call')
+      assert.equal(h.platformStore.requests.at(-1).sourceMode, 'circuit_rejected')
+      assert.deepEqual(h.platformStore.state, beforeShared)
+      assert.deepEqual(h.platformStore.contractCircuits.get('instagram'), beforeContract)
+    })
+  }
+})
+
+test('Instagram circuit diagnostics do not replace an immutable saved upstream rejection', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await harness({ platform: 'instagram', instagramProvider: 'justone', justOneCode: 400 })
+    const body = { platform: 'instagram', query: 'saved rejection', pageSize: 20 }
+    await assert.rejects(h[route](body, 'instagram-saved-rejection'))
+    const [call] = [...h.platformStore.calls.values()]
+    const usage = h.store.requests.get(call.usageRequestId)
+    const before = structuredClone(usage)
+    Object.assign(h.platformStore.state, { consecutiveFailures: 3,
+      circuitOpenUntil: new Date(Date.now() + 60000).toISOString(), lastErrorCode: 'upstream_rate_limited' })
+    await assert.rejects(h[route](body, 'instagram-saved-rejection'), error => {
+      assert.equal(error.status, before.responseStatus)
+      assert.equal(error.code, before.responseBody.error.code)
+      assert.equal(error.message, before.responseBody.error.message)
+      assert.deepEqual(error.details, before.responseBody.error.details)
+      return true
+    })
+    assert.deepEqual(h.store.requests.get(call.usageRequestId), before)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.calls.size, 1)
+    assert.equal(h.historical.length, 0)
+  }
+})
+
 test('JustOne Instagram standard/raw routing preserves grants, customer meters and one immutable receipt', async () => {
   for (const route of ['invoke', 'invokeData']) {
     const h = await harness({ platform: 'instagram', instagramProvider: 'justone' })
@@ -2564,7 +2643,7 @@ test('Instagram strategy unknown replay is resolved before reading changed or un
   }
 })
 
-test('Instagram strategy cannot bypass an equal unknown or paid unusable dispatch via a primary-provider circuit', async () => {
+test('Instagram strategy retains the primary circuit and permits configured fallback without response quarantine', async () => {
   for (const route of ['invoke', 'invokeData']) {
     for (const justone of [{ searchFails: true }, { instagramData: { unexpected: [] } }]) {
       const h = await instagramStrategyHarness({ justone,
@@ -2574,18 +2653,17 @@ test('Instagram strategy cannot bypass an equal unknown or paid unusable dispatc
       const providerState = await h.platformStore.providerState()
       const contractState = await h.platformStore.contractCircuitState('justone', 'instagram')
       assert.ok(providerState?.circuitOpenUntil || contractState?.circuitOpenUntil)
-      await assert.rejects(h[route](instagramBody, 'strategy-circuit-different-key'), {
-        code: justone.searchFails ? 'request_outcome_unknown' : 'external_platform_response_unusable',
-      })
+      // The primary stays circuit-open; a new request can use the already
+      // configured fallback without a separate ended-response quarantine.
+      const differentKey = h[route](instagramBody, 'strategy-circuit-different-key')
+      assert.equal((await differentKey).status, 200)
       assert.equal(h.providers.justone.calls.length, 1)
-      assert.equal(h.providers.tikhub.calls.length, 0)
+      assert.equal(h.providers.tikhub.calls.length, 1)
       assert.equal([...h.store.requests.values()][0].status, justone.searchFails ? 'unknown' : 'committed')
-      // Unknown protection is query-specific. Contract quarantine also blocks
-      // different queries until the existing endpoint guard permits dispatch.
       const other = h[route]({ ...instagramBody, query: 'different strategy fixture' }, 'strategy-circuit-other-query')
-      if (justone.searchFails) assert.equal((await other).status, 200)
-      else await assert.rejects(other, { code: 'external_platform_response_unusable' })
-      assert.equal(h.providers.tikhub.calls.length, justone.searchFails ? 1 : 0)
+      assert.equal((await other).status, 200)
+      assert.equal(h.providers.justone.calls.length, 1)
+      assert.equal(h.providers.tikhub.calls.length, 2)
       assert.equal(h.platformStore.leases.size, 0)
     }
   }

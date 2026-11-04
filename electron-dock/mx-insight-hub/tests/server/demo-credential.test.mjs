@@ -97,6 +97,42 @@ async function memberFor(store, tenantId, role = 'owner') {
  return member
 }
 
+test('demo credentials do not depend on usage statistics or quota overview queries', async () => {
+ const {service,store,tenant,key,consumer} = await fixture()
+ const member = await memberFor(store, tenant.id)
+ const usageFailure = Object.assign(new Error('could not resize shared memory segment: No space left on device'), {code:'53100'})
+ let usageReads = 0, quotaReads = 0
+ store.usage = async () => { usageReads++; throw usageFailure }
+ store.quotaSnapshot = async () => { quotaReads++; throw new Error('quota overview unavailable') }
+ service.externalPlatformCapabilities = async ({consumerId}) => {
+  assert.equal(consumerId, consumer.id)
+  return {operations:{'social.posts.search':{ready:false,effectiveState:'paused',privateProvider:'must-not-leak'}}}
+ }
+ service.externalPostCapabilities = async () => ({operations:{'social.posts.resolve':{ready:true,effectiveState:'active'}}})
+ for (const scope of [null, {memberId:member.id,tenantIds:[tenant.id]}]) {
+  const demo = await service.createDemoCredential({keyId:key.id},scope)
+  assert.equal(demo.keyId,key.id)
+  assert.equal((await service.authenticate(demo.secret)).apiKey.id,key.id)
+  assert.deepEqual(demo.access.operations, {
+   'social.posts.search':{ready:false,effectiveState:'paused'},
+   'social.posts.resolve':{ready:true,effectiveState:'active'},
+  })
+ }
+ assert.equal(usageReads,0)
+ assert.equal(quotaReads,0)
+ assert.equal(store.apiKeys.size,1)
+ // The reporting endpoint still reports its failure instead of inventing zero usage.
+ await assert.rejects(service.getApiKeyOverview(key.id), error => error === usageFailure)
+ assert.equal(usageReads,1)
+})
+
+test('demo credentials still fail when authoritative grant reads fail', async () => {
+ const {service,store,key} = await fixture()
+ const failure = new Error('grant read unavailable')
+ store.listCapabilityGrants = async () => { throw failure }
+ await assert.rejects(service.createDemoCredential({keyId:key.id}), error => error === failure)
+})
+
 test('tenant default selects only its own key and revocation invalidates an issued ticket', async () => {
  const {service,store,tenant,key} = await fixture()
  const otherTenant = await service.createTenant({name:'Other'})

@@ -5,9 +5,12 @@ export const STRATEGY_SEARCH_MODES = Object.freeze(['fixed', 'priority', 'paused
 const PROVIDERS_BY_PLATFORM = Object.freeze({
   instagram: Object.freeze(['justone', 'tikhub']),
   twitter: Object.freeze(['rapidapi', 'tikhub']),
+  facebook: Object.freeze(['justone']),
 })
 
-const editable = (interfaceId, platform) => interfaceId === 'search' && Object.hasOwn(PROVIDERS_BY_PLATFORM, platform)
+const editable = (interfaceId, platform) => platform === 'facebook'
+  ? ['crawl', 'user-info'].includes(interfaceId)
+  : interfaceId === 'search' && Object.hasOwn(PROVIDERS_BY_PLATFORM, platform)
 const validRoute = row => row && editable(row.interface_key, row.platform)
   && STRATEGY_SEARCH_MODES.includes(row.mode) && PROVIDERS_BY_PLATFORM[row.platform].includes(row.primary_provider)
   && (row.mode === 'priority'
@@ -32,6 +35,10 @@ export class StrategySearchRoutingStore {
       interface_key: 'search', platform: 'twitter', mode: 'priority', primary_provider: 'rapidapi',
       fallback_provider: 'tikhub', revision: 1, reason: 'initial_route', updated_at: null,
     }]])
+    for (const interfaceId of ['crawl', 'user-info']) this.policies.set(`${interfaceId}/facebook`, {
+      interface_key: interfaceId, platform: 'facebook', mode: 'fixed', primary_provider: 'justone',
+      fallback_provider: null, revision: 1, reason: 'initial_route', updated_at: null,
+    })
     this.events = []
   }
 
@@ -96,4 +103,15 @@ export class StrategySearchRoutingStore {
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
     finally { client.release() }
   }
+}
+
+// Check the top-level business operation, never a nested profile-resolution step.
+// Invoke only before fresh procurement: replay and purchased carry stay readable.
+export async function assertFacebookAccountEnabled(store, interfaceId, platform) {
+  if (platform !== 'facebook' || !['crawl', 'user-info'].includes(interfaceId)) return
+  const route = await store?.get(interfaceId, platform)
+  if (!route) throw unavailable()
+  if (route.mode === 'paused') throw new AppError(503, 'facebook_account_paused',
+    `Facebook ${interfaceId === 'crawl' ? 'account content' : 'account profile'} acquisition is paused`,
+    { platform, interface: interfaceId, upstreamDispatched: false })
 }

@@ -46,7 +46,7 @@ export class BaiduIpRiskAdapter {
     const ready = policy?.enabled === true && (hubRateLimitExempt || !policy.cooldown_until || new Date(policy.cooldown_until) <= new Date())
     return {platform:'ip_risk',ready,operations:{'ip.risk.query.v2':{ready,effectiveState:ready?'active':'paused'}}}
   }
-  async claim(requestId,endpoint,{ hubRateLimitExempt = false } = {}) {
+  async claim(requestId,endpoint,{ hubRateLimitExempt = false, dailyQuotaExempt = hubRateLimitExempt } = {}) {
     return withPgTransaction(this.pool,async client=>{
       const policy = (await client.query("SELECT *,now() AS current_time,(now() AT TIME ZONE 'Asia/Shanghai')::date AS today FROM hub_commerce.ip_channel WHERE id='baidu-v2' FOR UPDATE")).rows[0]
       if (!policy?.enabled) throw new AppError(503,'ip_channel_paused','IP v2 渠道暂停')
@@ -55,7 +55,7 @@ export class BaiduIpRiskAdapter {
       const tokens = Math.min(10, Number(policy.tokens) + Math.max(0,now-new Date(policy.refill_at).getTime())/60000)
       if(!hubRateLimitExempt && tokens < 1) throw new AppError(429,'ip_channel_busy','IP v2 上游令牌不足，每分钟恢复 1 次请求')
       const used = String(policy.day) === String(policy.today) ? policy.calls : 0
-      if (!hubRateLimitExempt && used >= policy.daily_limit) throw new AppError(429,'ip_channel_daily_limit','IP v2 上游日配额已用尽')
+      if (!dailyQuotaExempt && used >= policy.daily_limit) throw new AppError(429,'ip_channel_daily_limit','IP v2 上游日配额已用尽')
       const slot = hubRateLimitExempt ? now : Math.max(now,new Date(policy.next_at || now).getTime())
       if (slot-now > 10000) throw new AppError(429,'ip_channel_busy','IP v2 渠道繁忙，请稍后查询')
       const id = randomUUID()
@@ -64,12 +64,12 @@ export class BaiduIpRiskAdapter {
       return {id,wait:slot-now}
     })
   }
-  async query(ip,{requestId,hubRateLimitExempt=false}={}) {
+  async query(ip,{requestId,hubRateLimitExempt=false,dailyQuotaExempt=hubRateLimitExempt}={}) {
     const started=Date.now(), evidence=[], values={}
     const result={outcome:'unknown',errorCode:'ip_query_outcome_unknown',httpStatus:null,businessCode:null}
     try {
       for (const endpoint of ['base','overall']) {
-        const slot=await this.claim(requestId,endpoint,{hubRateLimitExempt})
+        const slot=await this.claim(requestId,endpoint,{hubRateLimitExempt,dailyQuotaExempt})
         if(slot.wait>0)await this.sleep(slot.wait)
         let bytes=null,status=null,outcome='unknown'
         try {

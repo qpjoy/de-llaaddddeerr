@@ -1,17 +1,21 @@
-import { refreshAdmissionLimits } from './admission-runtime.mjs'
-import { upstreamCapacityError } from './availability-errors.mjs'
+import { assertFacebookAccountEnabled } from './strategy-search-routing.mjs'
+import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
+import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
+import { twitterAccountFailureMessage, twitterLookupFoundNoAccount } from '../contracts/twitter-account-failure.mjs'
 import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '../contracts/hub-social-compat.mjs'
+import { TWITTER_REPLIES_ENDPOINT_KEY } from '../contracts/hub-social.mjs'
 import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
 import { SocialSearchStateStore } from './social-search-store.mjs'
 import { YOUTUBE_COMMENTS_TRAVERSAL } from '../contracts/youtube-comments.mjs'
+import { POST_COMMENTS_TRAVERSAL } from '../contracts/post-comments.mjs'
 
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -24,7 +28,7 @@ const uncertain = () => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
-    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline'].includes(error.code))
+    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline', 'facebook_account_paused', 'strategy_search_route_unavailable'].includes(error.code))
 const descriptor = request => ({ provider: request.provider, operation: request.operationKey || request.procurementOperation || request.operation,
   endpointKey: request.endpointKey, endpointVersion: request.endpointVersion, contractVersion: request.endpointContractVersion })
 const sourceRows = (projected, operation) => operation === 'user-info' ? projected.profiles : projected.acquiredItems
@@ -63,7 +67,7 @@ function persistedEvidence(source) {
   } : null) }
 }
 
-function projectPage(payload, step, operation, capturedAt, traversal = null) {
+export function projectPage(payload, step, operation, capturedAt, traversal = null) {
   const custom = traversal?.projectPage(payload, step, { capturedAt })
   const projected = custom?.projected ?? projectHubSocialCompatResponse(payload, step, { capturedAt })
   if (!isPostgresSafeJsonValue(projected) || !Array.isArray(projected.acquiredItems) || !Array.isArray(projected.profiles)
@@ -82,16 +86,17 @@ function projectPage(payload, step, operation, capturedAt, traversal = null) {
 export async function runSocialAccountWorkflow({ gateway, context, request, delivery, deadlineAt, signal,
   resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse,
   workflowKind = 'social-account' }, { clock = Date.now } = {}) {
-  if (!['social-account', 'youtube-comments'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
-  const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL : null
+  if (!['social-account', 'youtube-comments', 'post-comments'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
+  const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL
+    : workflowKind === 'post-comments' ? POST_COMMENTS_TRAVERSAL : null
+  const manualProviderPagination = workflowKind === 'post-comments' && request.manualProviderPagination === true
   const store = gateway.platformStore, provider = gateway.providerKey
   const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform, workflowKind })
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
     path: traversal ? request.path : `/api/v1/data/social/${request.operation}`, scopeHash: request.scopeHash }
-  if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal account request has an unknown outcome')
   const history = await stateStore.historyFor({ ...identity, previousDeliveryId: request.previousDeliveryId,
     jobCount: request.jobs.length, totalLimit: request.totalLimit })
-  const state = history.state || { jobs: request.jobs.map(job => ({ query: job.id, providerCursor: null,
+  const state = history.state || { jobs: request.jobs.map(job => ({ query: job.id, providerCursor: structuredClone(request.initialParams ?? null),
     providerPage: 1, upstreamPages: 0, started: false, done: false, buffer: null, resolvedIdentity: null, profiles: [], dispatchedTokens: [] })) }
   if (state.jobs.some((job, index) => job.query !== request.jobs[index].id)) throw unavailable()
   const rowsByJob = request.jobs.map(() => []), seen = history.seenIds, sources = [], warnings = [], started = performance.now()
@@ -99,6 +104,10 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     ownerRequestId: delivery.usageRequestId, expiresAt: new Date(deadlineAt).toISOString() }
   let calls = 0, bytes = 0, capturedAt = null, ownsParent = false, entered = false
   let currentCall = null, currentEvidence = null, costReservation = null, childLease = null, settledFailure = false, retainLease = false, stopped = false
+  // A Twitter ID lookup that found no account while the same digits wait to be
+  // looked up as a username. It is this request's answer unless that second
+  // lookup is actually dispatched.
+  let idLookupFailure = null
   const enoughTime = () => Number.isFinite(deadlineAt) && clock() + (gateway.config.timeoutMs || 30000) + 5000 < deadlineAt
   const warn = (code, message) => { if (!warnings.some(row => row.code === code)) warnings.push({ code, message }) }
   const stop = reason => { stopped = true; warn('social_page_fill_stopped', `Account acquisition paused before another dispatch (${reason}); continue with nextCursor when present.`) }
@@ -108,6 +117,18 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
       try { if (['unknown', 'committed'].includes((await gateway.usageStore.getRequest(delivery.usageRequestId, delivery.consumerId))?.status)) return } catch { /* Preserve the existing hold and lease. */ }
       retainLease = true
     }
+  }
+  // The username lookup was not dispatched, so save the ID lookup's refusal
+  // once, as finishFailure would have; a same-key retry replays it.
+  const answerIdLookup = async () => {
+    const { status, body, latencyMs, capturedAt } = idLookupFailure
+    idLookupFailure = null
+    try {
+      await gateway.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: status, responseBody: body,
+        unitsActual: 0, upstreamLatencyMs: latencyMs, deliverySourceMode: 'live', capturedAt })
+    } catch { await markUnknown(); throw uncertain() }
+    settledFailure = true
+    throw new AppError(status, body.error.code, body.error.message, body.error.details)
   }
   const buildStep = (index, job, buffer = null) => traversal ? traversal.buildStep(request, job, buffer) : buildHubSocialCompatDispatch(request.jobs[index], {
     page: buffer?.providerPage ?? job.providerPage, nextParams: buffer ? buffer.providerCursor : job.providerCursor,
@@ -145,8 +166,11 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     else {
       job.buffer = null
       const next = projected.providerPage
+      // An empty page that repeats its own continuation is how Twitter ends a
+      // timeline: nothing is left, and a restart would only buy the same rows.
+      const ended = next.stopReason === 'repeated_cursor' && !rows.length
       if (next.stopReason === 'continuation_unproven' && traversal) warn('pagination_completeness_unknown', 'The upstream response did not prove comment continuation; acquired rows were retained.')
-      else if (next.stopReason) warn('upstream_pagination_stopped', 'The upstream continuation did not advance; acquired rows were retained. Restart explicitly to traverse again.')
+      else if (next.stopReason && !ended) warn('upstream_pagination_stopped', 'The upstream continuation did not advance; acquired rows were retained. Restart explicitly to traverse again.')
       job.done = request.operation === 'user-info' || next.hasMore === false || !next.nextParams || job.upstreamPages >= 15
       job.providerCursor = structuredClone(next.nextParams ?? null)
       job.providerPage = next.nextPage || job.providerPage + 1
@@ -156,18 +180,23 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         job.providerCursor = null
         warn('repeated_cursor', 'The upstream repeated an earlier continuation; acquired rows were retained. Restart explicitly to traverse again.')
       }
-      if (job.upstreamPages >= 15 && next.hasMore && next.nextParams) warn('upstream_page_limit_reached', 'The account traversal reached its upstream page limit; restart explicitly.')
+      if (job.upstreamPages >= 15 && next.nextParams && (next.hasMore || manualProviderPagination && next.hasMore == null)) {
+        warn('upstream_page_limit_reached', 'The account traversal reached its upstream page limit; restart explicitly.')
+      }
       if (next.hasMore == null) {
         warn('pagination_completeness_unknown', 'The upstream response did not prove continuation; no additional page was purchased automatically.')
         job.manualContinuation = true
       }
     }
+    // TikHub Twitter comments expose a cursor without an authoritative more
+    // flag. One request consumes one saved or newly acquired page; callers
+    // explicitly choose any next purchase, even if this page is short/empty.
+    if (manualProviderPagination) job.manualContinuation = true
     return added
   }
   try {
     if (!await stateStore.acquireDeliveryLease(parentLease)) throw new AppError(409, 'request_in_progress', 'An equal account delivery is in progress')
     ownsParent = true
-    if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal account request has an unknown outcome')
     for (const [index, job] of state.jobs.entries()) {
       if (traversal) job.duplicateCount = 0
       job.manualContinuation = false
@@ -198,18 +227,34 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         try {
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
+          await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
           const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, request.platform)])
           if (provider === 'tikhub' || isHubRateLimitExempt(context)) states[0] = internalCircuitState(gateway.usageStore, context, states[0])
-          if (states.some(row => row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > clock())) throw new AppError(503, 'external_platform_circuit_open', 'Account acquisition is temporarily unavailable')
+          const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
+            message: 'Account acquisition is temporarily unavailable', marketplace: request.platform })
+          if (blocked) throw blocked
           const credential = await resolveCredential()
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Account acquisition is unavailable')
           const control = await gateway.operationControlStore.authorizeDispatch(provider, expected.operation,
             { consumerId: context.consumer.id, config: gateway.config, credentialConfigured: true, credentialRevision: credential.revision })
+          // Replies have an optional price of their own. Without it, do not
+          // buy the profile lookup that only serves the replies timeline.
+          if (!traversal && step.socialCompat.stage === 'resolve' && step.platform === 'twitter' && step.socialCompat.job?.activityType === 'replies') {
+            const crawl = await gateway.operationControlStore.authorizeDispatch(provider, 'social.content.crawl',
+              { consumerId: context.consumer.id, config: gateway.config, credentialConfigured: true, credentialRevision: credential.revision })
+            providerCostControl(crawl?.billing ? { billing: crawl.billing } : gateway.config, TWITTER_REPLIES_ENDPOINT_KEY)
+          }
           const pendingLease = { ...parentLease, operation: expected.operation, endpointKey: expected.endpointKey, contractVersion: expected.contractVersion }
           const lease = await store.acquireDispatchLease(pendingLease)
-          if (lease !== true && lease?.kind !== 'acquired') throw new AppError(409, lease?.reason === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', 'The acquisition is pending; inspect the original request')
+          if (lease !== true && lease?.kind !== 'acquired') {
+            if (lease?.reason === 'succeeded_unusable') throw new AppError(409, 'external_platform_response_unusable',
+              'A recent response could not be normalized; do not retry automatically',
+              { upstreamDispatched: false, blockedUntil: lease.blockedUntil || null })
+            throw new AppError(409, lease?.reason === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress',
+              'The acquisition is pending; inspect the original request')
+          }
           childLease = pendingLease
-          if (entered === 'exempt' && !isHubRateLimitExempt(context)) {
+          if (entered === 'exempt' && !bypassesSupplierLimits(context)) {
             leaveCapacity(entered); entered = false
           }
           if (!entered) {
@@ -217,17 +262,22 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           }
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, expected.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-          const rate = isHubRateLimitExempt(context) || (provider === 'tikhub' && isInternalTraffic(gateway.usageStore, context)) ? { allowed: true }
-            : await store.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
+          const rate = await acquireSupplierRate(context, store, { limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,
+            windowMs: 60000, bypass: provider === 'tikhub' && isInternalTraffic(gateway.usageStore, context), signal,
+            providerState: () => store.providerState(provider), deadline: deadlineAt - (gateway.config.timeoutMs || 30000) - 5000,
+            maxWaitMs: currentAdmissionLimits(gateway).maxWaitMs })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Account acquisition rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'social_search_deadline', 'Account acquisition deadline reached before dispatch')
+          await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
           currentEvidence = null
           currentCall = await store.beginProviderCall({ ...delivery, operation: expected.operation,
             contractVersion: expected.contractVersion, endpointKey: expected.endpointKey, endpointVersion: expected.endpointVersion,
             marketplace: request.platform, callOrdinal: calls, callRole: calls ? 'enrichment' : 'primary',
             dispatchFingerprint: delivery.fingerprint, costControl: cost.costMinor === 0 ? null : cost,
             costReservationId: costReservation.id, operationControl: control })
+          // The username lookup now owns the outcome.
+          idLookupFailure = null
           calls++; job.started = true; tokens.add(token); job.dispatchedTokens.push(token)
           if (traversal ? traversal.countsAsPage(step) : step.socialCompat.stage !== 'resolve') job.upstreamPages++
           const callStart = performance.now()
@@ -242,27 +292,53 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             const payload = receipt?.bodyBytes ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(receipt.bodyBytes).replace(/^\uFEFF/u, '')) : null
             try { ({ projected, records } = projectPage(publicPayload(payload, credential.credential), step, request.operation, receipt?.capturedAt, traversal)) }
             catch {
-              const evidence = { outcome: 'succeeded_unusable', billed, httpStatus: 200, businessCode, errorCode: 'invalid_social_contract', affectsCircuit: true }
+              const evidence = { outcome: 'succeeded_unusable', billed, httpStatus: 200, businessCode, errorCode: 'invalid_social_contract', affectsCircuit: false }
               if (provider === 'rapidapi') throw new RapidApiUpstreamError(evidence, result)
               throw new TikHubUpstreamError('Account response could not be normalized', evidence, result)
             }
           } catch (error) {
             if (!(error instanceof TikHubUpstreamError || error instanceof RapidApiUpstreamError || error instanceof JustOneUpstreamError)) throw error
             const evidence = error.evidence
-            const accountNotFound = error instanceof RapidApiUpstreamError && provider === 'rapidapi'
+            const accountFailure = error instanceof RapidApiUpstreamError && provider === 'rapidapi'
               && step.endpointKey === 'twitter-aio.user-info' && step.operation === 'user-info'
-              && evidence.outcome === 'rejected' && evidence.errorCode === 'social_account_not_found'
-            const status = accountNotFound ? 404 : evidence.httpStatus === 429 ? 429 : 502
+              && evidence.outcome === 'rejected' && ['social_account_not_found', 'social_account_unavailable'].includes(evidence.errorCode)
+            const accountNotFound = accountFailure && evidence.errorCode === 'social_account_not_found'
+            const status = accountFailure ? accountNotFound ? 404 : 422 : evidence.httpStatus === 429 ? 429 : 502
             const failureDetails = { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
-              ...(accountNotFound ? { platform: 'twitter', stage: 'account_lookup' } : {}), outcome: evidence.outcome, retryable: false }
+              ...(accountFailure ? { platform: 'twitter', stage: 'account_lookup',
+                ...(accountNotFound ? {} : { reason: evidence.accountReason || 'unavailable' }) } : {}), outcome: evidence.outcome, retryable: false }
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id) }
-            const code = accountNotFound ? 'social_account_not_found' : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
-            const message = accountNotFound ? 'The upstream provider reported that the Twitter account was not found'
-              : 'Account acquisition failed; inspect its saved outcome'
-            await store.finishFailure({ ...currentEvidence, failureResponseStatus: status,
-              failureResponseBody: { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId } })
+            if (workflowKind === 'social-account' && request.platform === 'weibo' && request.operation === 'crawl'
+              && step.socialCompat.stage === 'data' && step.socialCompat.job.activityType === 'posts' && rowsByJob[index].length > 0
+              && evidence.outcome === 'succeeded_unusable' && evidence.errorCode === 'invalid_social_contract'
+              && evidence.httpStatus === 200 && evidence.businessCode === 200 && currentEvidence.restrictedResponseArchive?.jsonParsed === true) {
+              // Settle the failed purchase separately. Only earlier verified
+              // pages back this delivery, and this job cannot buy the bad page again.
+              await store.finishProviderStep(currentEvidence)
+              currentCall = null
+              job.done = true
+              job.providerCursor = null
+              warn('weibo_posts_page_unusable', 'A later Weibo posts page could not be read. Earlier posts were retained; this account traversal stopped.')
+              stopped = true
+              break
+            }
+            const code = accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
+            const message = accountFailure ? twitterAccountFailureMessage(evidence) : 'Account acquisition failed; inspect its saved outcome'
+            const failureBody = { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId }
+            // Callers send bare digits for both IDs and handles. When the ID
+            // lookup definitely finds no account, settle that call and try the
+            // same digits once as a username; nothing else buys a second lookup.
+            if (accountFailure && step.userId && !job.resolvedIdentity && twitterLookupFoundNoAccount(evidence)) {
+              await store.finishProviderStep({ ...currentEvidence, affectsCircuit: false })
+              currentCall = null
+              idLookupFailure = { status, body: failureBody, latencyMs: currentEvidence.latencyMs,
+                capturedAt: currentEvidence.responseArchive?.capturedAt ?? new Date().toISOString() }
+              job.resolvedIdentity = { kind: 'username', value: step.userId, username: step.userId, lookupComplete: true, profileReady: false }
+              continue
+            }
+            await store.finishFailure({ ...currentEvidence, failureResponseStatus: status, failureResponseBody: failureBody })
             currentCall = null; settledFailure = true
             throw new AppError(status, code, message, failureDetails)
           }
@@ -289,6 +365,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             if (currentCall) await store.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(currentEvidence || {}) }).catch(() => {})
             await markUnknown(); throw uncertain()
           }
+          // Whatever kept the username lookup from being dispatched, the ID
+          // lookup's definite refusal is still the answer.
+          if (idLookupFailure) await answerIdLookup()
           if (knownAdmission(error) && sources.length) { stop(error.code); break }
           throw error
         } finally {
@@ -298,6 +377,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           childLease = null
         }
       }
+      if (idLookupFailure) await answerIdLookup()
       if (stopped) break
     }
     if (!sources.length) throw new AppError(503, 'social_data_unavailable', 'No account page could be acquired within this request')

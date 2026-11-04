@@ -208,7 +208,7 @@ for (const postgres of [false,true]) for (const provider of ['rapidapi','justone
   })
 }
 for(const postgres of [false,true]) {
-  test(`${postgres?'PostgreSQL':'memory'} Facebook parent lease protects exact ownership and unknown carry`,{skip:postgres&&!modulePath},async t=>{
+  test(`${postgres?'PostgreSQL':'memory'} Facebook parent lease protects exact ownership`,{skip:postgres&&!modulePath},async t=>{
     const f=await fixture(t,postgres)
     const lease={consumerId:f.input.consumerId,operation:'social.facebook.search',fingerprint,ownerRequestId:f.target.id,expiresAt:ago(-60000)}
     assert.equal((await f.store.acquireFacebookFillDeliveryLease(lease)).kind,'acquired')
@@ -216,9 +216,7 @@ for(const postgres of [false,true]) {
     assert.equal((await f.store.acquireDispatchLease({...lease,ownedDeliveryLease:true})).kind,'acquired')
     assert.equal((await f.store.acquireDispatchLease({...lease,ownedDeliveryLease:true,ownerRequestId:randomUUID()})).kind,'busy')
     assert.equal((await f.store.acquireDispatchLease({...lease,ownedDeliveryLease:true,expiresAt:ago(-90000)})).kind,'busy')
-    await f.setUsage(f.target.id,{status:'unknown',reservedAt:ago(1000)})
-    assert.equal(await f.store.facebookFillUnknownFor(f.saved.delivery),true)
-    assert.equal(await f.store.facebookFillUnknownFor({...f.saved.delivery,apiKeyId:randomUUID()}),false)
+    assert.equal(typeof f.store.facebookFillUnknownFor,'undefined','an ended unknown no longer holds an equal Facebook delivery')
   })
 }
 for (const postgres of [false,true]) {

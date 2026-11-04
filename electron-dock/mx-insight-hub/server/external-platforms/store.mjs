@@ -1,4 +1,5 @@
-import { quarantineRecoverySql } from '../core/admission-recovery.mjs'
+import { memoryBudgetExempt, budgetExemptionProjection } from './budget-exemption.mjs'
+import { RESPONSE_QUARANTINE_MS, quarantineRecoverySql } from '../core/admission-recovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AppError } from '../core/errors.mjs'
@@ -11,6 +12,7 @@ import { canonicalPlatform } from '../hub-service.mjs'
 import * as facebookSearchStore from './facebook-search-store.mjs'
 import * as twitterRetryStore from './twitter-manual-retry.mjs'
 import { twitterDeliveryLeases } from './twitter-delivery-leases.mjs'
+import { FAILURE_EVIDENCE_WINDOW_MS, failureEvidence } from './availability-errors.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
@@ -660,16 +662,16 @@ export class MemoryExternalPlatformStore {
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
-    uncertainCooldownMs = 15 * 60_000,
-    responseQuarantineCooldownMs = Math.min(uncertainCooldownMs, 5 * 60_000),
+    responseQuarantineCooldownMs = RESPONSE_QUARANTINE_MS,
+    providerCircuit = 'shared',
   } = {}) {
     this.usageStore = usageStore
     this.providerKey = providerKey
+    this.providerCircuit = circuitMode(providerCircuit)
     this.authorizationPlatform = authorizationPlatform
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
     this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
-    this.uncertainCooldownMs = uncertainCooldownMs
     this.responseQuarantineCooldownMs = responseQuarantineCooldownMs
     this.calls = new Map()
     this.costReservations = new Map()
@@ -716,7 +718,6 @@ export class MemoryExternalPlatformStore {
 
   async facebookPageFor(input) { return facebookSearchStore.facebookPageFor(this, input) }
   async facebookDeliveredIdsFor(input) { return facebookSearchStore.facebookDeliveredIdsFor(this, input) }
-  async facebookFillUnknownFor(input) { return facebookSearchStore.facebookFillUnknownFor(this, input) }
   async acquireFacebookFillDeliveryLease(input) { return facebookSearchStore.acquireFacebookFillDeliveryLease(this, input) }
   async commitFacebookFillDelivery(input) { return facebookSearchStore.commitFacebookFillDelivery(this, input) }
 
@@ -729,16 +730,6 @@ export class MemoryExternalPlatformStore {
     const rootId = input.previousDeliveryId ?? (input.sourceCallId ? this.calls.get(input.sourceCallId)?.usageRequestId : null)
     if (input.sourceCallId && !rootId) throw twitterHistoryError()
     return twitterDeliveredIds(async id => this.usageStore.requests.get(id), input, rootId)
-  }
-
-  async twitterFillUnknownFor(delivery) {
-    const excluded = delivery.twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterRetryInput(delivery))).ancestorRequestIds : []
-    return [...this.usageStore.requests.values()].some(row => row.platform === 'twitter' && row.status === 'unknown'
-      && row.tenantId === delivery.tenantId && row.consumerId === delivery.consumerId && row.apiKeyId === delivery.apiKeyId
-      && row.fingerprint === delivery.fingerprint && row.acquisitionRequest?.path === TWITTER_PAGE_PATH
-      && !excluded.includes(row.id)
-      && Date.now()-new Date(row.reservedAt ?? row.createdAt ?? Date.now()).getTime() <= TWITTER_PAGE_MAX_AGE_MS)
   }
 
   async validateTwitterManualRetry(input) { return twitterRetryStore.validateTwitterManualRetry(this, input) }
@@ -843,8 +834,7 @@ export class MemoryExternalPlatformStore {
   }) {
     if (twitterManualRetry && (operation !== 'social.content.search' || twitterManualRetry.usageRequestId !== ownerRequestId
       || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
-    const excluded = twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterManualRetry)).ancestorRequestIds : []
+    if (twitterManualRetry) await this.validateTwitterManualRetry(twitterManualRetry)
     const now = Date.now()
     const blocker = [...this.calls.values()]
       .filter((call) => (
@@ -858,13 +848,6 @@ export class MemoryExternalPlatformStore {
           || (
             (
               (
-                call.consumerId === consumerId
-                && call.dispatchFingerprint === fingerprint
-                && call.outcome === 'unknown'
-                && call.usageRequestId !== retryOfRequestId
-                && !excluded.includes(call.usageRequestId)
-              )
-              || (
                 call.endpointKey === endpointKey
                 && call.contractVersion === contractVersion
                 && call.outcome === 'succeeded_unusable'
@@ -877,8 +860,8 @@ export class MemoryExternalPlatformStore {
                 && call.errorCode === 'upstream_note_unavailable'
               )
             )
-            && new Date(call.completedAt).getTime() + (call.outcome === 'succeeded_unusable'
-              && call.errorCode !== 'upstream_note_unavailable' ? this.responseQuarantineCooldownMs : this.uncertainCooldownMs) > now
+            && this.responseQuarantineCooldownMs > 0
+            && new Date(call.completedAt).getTime() + this.responseQuarantineCooldownMs > now
           )
         )
       ))
@@ -891,8 +874,7 @@ export class MemoryExternalPlatformStore {
           : blocker.outcome,
         blockedUntil: blocker.outcome === 'pending'
           ? null
-          : iso(new Date(blocker.completedAt).getTime() + (blocker.outcome === 'succeeded_unusable'
-            && blocker.errorCode !== 'upstream_note_unavailable' ? this.responseQuarantineCooldownMs : this.uncertainCooldownMs)),
+          : iso(new Date(blocker.completedAt).getTime() + this.responseQuarantineCooldownMs),
       }
     }
     const key = snapshotKey({ consumerId, operation, fingerprint })
@@ -927,7 +909,7 @@ export class MemoryExternalPlatformStore {
   }
 
   async providerState(providerKey = this.providerKey) {
-    if (providerKey !== this.providerKey) return null
+    if (providerKey !== this.providerKey || this.providerCircuit === 'marketplace') return null
     return clone(this.state)
   }
 
@@ -938,6 +920,16 @@ export class MemoryExternalPlatformStore {
   // marketplace. Counting those provider-wide suspended live dispatch for every
   // other marketplace too, which then degraded healthy traffic to stale
   // snapshots. Upstream faults still use the provider-wide breaker.
+  async latestFailureEvidence({ marketplace = null, unusableOnly = false, before = null } = {}) {
+    const end = before == null ? Date.now() : new Date(before).getTime()
+    const outcomes = unusableOnly ? ['succeeded_unusable'] : ['rejected', 'unknown', 'succeeded_unusable']
+    const call = [...this.calls.values()].filter(row => outcomes.includes(row.outcome)
+      && (marketplace == null || row.marketplace === marketplace)
+      && new Date(row.startedAt).getTime() <= end && new Date(row.startedAt).getTime() > end - FAILURE_EVIDENCE_WINDOW_MS)
+      .sort((left, right) => new Date(right.startedAt) - new Date(left.startedAt))[0]
+    return failureEvidence(call)
+  }
+
   async contractCircuitState(providerKey = this.providerKey, scope = null) {
     if (providerKey !== this.providerKey || !scope) return null
     const bucket = this.contractCircuits.get(scope)
@@ -989,7 +981,7 @@ export class MemoryExternalPlatformStore {
     }
   }
 
-  #costState(costControl, { customerBilled = false, usageRequestId = null } = {}) {
+  #costState(costControl, { budgetExempt = false, usageRequestId = null } = {}) {
     const month = utcMonthBounds()
     const monthlyCalls = [...this.calls.values()].filter((call) => {
       const startedAt = new Date(call.startedAt).getTime()
@@ -1004,18 +996,18 @@ export class MemoryExternalPlatformStore {
         && startedAt >= month.start
         && startedAt < month.end
     })
-    // A positive enforced per-request hold makes aggregate financial caps
+    // A positive enforced hold or the original Key's explicit exemption makes aggregate caps
     // observe-only for this request. Scope the integrity check to this request
     // as well, so unrelated historical bookkeeping cannot turn paid traffic
     // into an apparent provider outage. The current request's own cost evidence
     // remains mandatory and is still persisted for every real dispatch.
-    const calls = customerBilled
+    const calls = budgetExempt
       ? monthlyCalls.filter((call) => call.usageRequestId === usageRequestId)
       : monthlyCalls
     const knownCalls = calls.filter((call) => (
       Number.isSafeInteger(call.costMinor) && call.costMinor >= 0
     ))
-    const incompleteControlledCost = calls.some((call) => customerBilled
+    const incompleteControlledCost = calls.some((call) => budgetExempt
       ? !Number.isSafeInteger(call.costMinor)
         || call.costMinor <= 0
         || !['estimated', 'provider_reported'].includes(call.costKind)
@@ -1034,7 +1026,7 @@ export class MemoryExternalPlatformStore {
       return reservation.providerKey === this.providerKey
         && (reservation.currency === costControl.currency || reservation.usageRequestId === usageRequestId
           || !/^[A-Z]{3}$/u.test(reservation.currency || ''))
-        && (!customerBilled || reservation.usageRequestId === usageRequestId)
+        && (!budgetExempt || reservation.usageRequestId === usageRequestId)
         && reservation.status === 'active'
         && usage?.status === 'reserved'
         && (leaseExpiresAt == null || (Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now()))
@@ -1050,7 +1042,7 @@ export class MemoryExternalPlatformStore {
       || reservation.reservedCostMinor <= 0
       || !Number.isSafeInteger(reservation.reservedSubsidyMinor)
       || reservation.reservedSubsidyMinor < 0
-      || (customerBilled && (
+      || (budgetExempt && (
         !Number.isSafeInteger(reservation.monthlyBudgetMinor)
         || reservation.monthlyBudgetMinor < 0
         || !Number.isSafeInteger(reservation.monthlySubsidyBudgetMinor)
@@ -1158,7 +1150,7 @@ export class MemoryExternalPlatformStore {
     let knownCostMinor = null
     let reservedCostMinor = null
     try {
-      const state = this.#costState(costControl, { customerBilled: false })
+      const state = this.#costState(costControl, { budgetExempt: false })
       knownCostMinor = state.knownCostMinor
       reservedCostMinor = state.reservedCostMinor
     } catch {
@@ -1221,9 +1213,9 @@ export class MemoryExternalPlatformStore {
     if (!Number.isSafeInteger(costMinor)) {
       throw new TypeError('workflow cost exceeds the safe-integer range')
     }
-    const customerBilled = this.#isCustomerBilledRequest(input.usageRequestId)
+    const budgetExempt = this.#isCustomerBilledRequest(input.usageRequestId) || memoryBudgetExempt(this.usageStore, usage)
     const state = this.#costState(policy, {
-      customerBilled,
+      budgetExempt,
       usageRequestId: input.usageRequestId,
     })
     if (state.activeReservations.some(
@@ -1235,7 +1227,7 @@ export class MemoryExternalPlatformStore {
         'Usage request already has an active provider cost reservation',
       )
     }
-    if (!customerBilled
+    if (!budgetExempt
       && state.knownCostMinor + state.reservedCostMinor + costMinor > policy.monthlyBudgetMinor) {
       throw new AppError(
         429,
@@ -1247,7 +1239,7 @@ export class MemoryExternalPlatformStore {
     const coverageMinor = state.coveredMinor(input.usageRequestId)
     const subsidyMinor = Math.max(0, baseCostMinor + costMinor - coverageMinor)
       - Math.max(0, baseCostMinor - coverageMinor)
-    if (!customerBilled
+    if (!budgetExempt
       && state.subsidyCostMinor + state.reservedSubsidyMinor + subsidyMinor
       > policy.monthlySubsidyBudgetMinor) {
       throw new AppError(
@@ -1341,9 +1333,9 @@ export class MemoryExternalPlatformStore {
       operation: input.operation,
     })
     if (costControl) {
-      const customerBilled = this.#isCustomerBilledRequest(input.usageRequestId)
+      const budgetExempt = this.#isCustomerBilledRequest(input.usageRequestId) || memoryBudgetExempt(this.usageStore, usage)
       const state = this.#costState(costControl, {
-        customerBilled,
+        budgetExempt,
         usageRequestId: input.usageRequestId,
       })
       const existingUsageCostMinor = state.costsByUsage.get(input.usageRequestId) || 0
@@ -1386,7 +1378,7 @@ export class MemoryExternalPlatformStore {
           )
         }
       } else {
-        if (!customerBilled
+        if (!budgetExempt
           && state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
           > costControl.monthlyBudgetMinor) {
           throw new AppError(
@@ -1399,7 +1391,7 @@ export class MemoryExternalPlatformStore {
           0,
           existingUsageCostMinor + costControl.costMinor - customerCoverageMinor,
         ) - Math.max(0, existingUsageCostMinor - customerCoverageMinor)
-        if (!customerBilled
+        if (!budgetExempt
           && state.subsidyCostMinor + state.reservedSubsidyMinor + incrementalSubsidyMinor
           > costControl.monthlySubsidyBudgetMinor) {
           throw new AppError(
@@ -1732,6 +1724,11 @@ export class MemoryExternalPlatformStore {
   }
 
   #recordSuccess(call) {
+    if (this.providerCircuit === 'marketplace') {
+      const scoped = this.contractCircuits.get(call.marketplace)
+      if (scoped && new Date(scoped.lastFailureAt) <= new Date(call.startedAt)) this.contractCircuits.delete(call.marketplace)
+      return
+    }
     this.state.lastSuccessAt = call.completedAt
     // A search settles after its enrichment children. Its earlier success
     // cannot prove recovery from a failure observed since that call started.
@@ -1745,7 +1742,8 @@ export class MemoryExternalPlatformStore {
     // response we could not read, so it opens only that marketplace's breaker.
     // Everything else -- authentication, capacity, balance, transport -- really
     // is a provider-wide condition and keeps the provider-wide breaker.
-    if (circuitCategory === 'contract' && scope) {
+    if (this.providerCircuit === 'marketplace' && !scope) return
+    if ((circuitCategory === 'contract' || this.providerCircuit === 'marketplace') && scope) {
       const current = this.contractCircuits.get(scope)
       const failures = (current?.consecutiveFailures ?? 0) + 1
       this.contractCircuits.set(scope, {
@@ -1863,7 +1861,8 @@ export class MemoryExternalPlatformStore {
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
     if (exactArchive) this.restrictedResponseArchives.set(callId, exactArchive)
     if (affectsCircuit) {
-      this.#recordFailure(errorCode, { circuitCategory, scope: delivery?.marketplace ?? null })
+      this.#recordFailure(errorCode, { circuitCategory,
+        scope: delivery?.marketplace ?? (this.providerCircuit === 'marketplace' ? call.marketplace : null) ?? null })
     }
     if (snapshot) {
       this.requests.push(requestEvent({
@@ -2119,6 +2118,7 @@ export async function providerCostExposure(client, {
   usageRequestId,
   currency,
   reservationId = null,
+  identity = null,
 }) {
   const exposure = await client.query(
     `WITH month_bounds AS MATERIALIZED (
@@ -2339,7 +2339,7 @@ export async function providerCostExposure(client, {
             ) AS reservation_monthly_budget_minor,
             (
               SELECT monthly_subsidy_budget_minor FROM active_reservations WHERE id = $4
-            ) AS reservation_monthly_subsidy_budget_minor`,
+            ) AS reservation_monthly_subsidy_budget_minor${budgetExemptionProjection(identity)}`,
     [providerKey, currency, usageRequestId, reservationId],
   )
   return exposure.rows[0] || {}
@@ -2353,6 +2353,7 @@ async function postgresProviderCostState(client, {
   currency,
   reservationId = null,
   serialize = true,
+  identity = null,
 }) {
   if (serialize) {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
@@ -2360,14 +2361,14 @@ async function postgresProviderCostState(client, {
     ])
   }
   const row = await providerCostExposure(client, {
-    providerKey, usageRequestId, currency, reservationId,
+    providerKey, usageRequestId, currency, reservationId, identity,
   })
-  const customerBilled = row.customer_billed === true
-  const knownCostMinor = customerBilled ? 0 : Number(row.known_cost_minor)
-  const unknownCostCallsRaw = customerBilled
+  const budgetExempt = row.customer_billed === true || row.budget_exempt === true
+  const knownCostMinor = budgetExempt ? 0 : Number(row.known_cost_minor)
+  const unknownCostCallsRaw = budgetExempt
     ? row.current_unknown_cost_calls
     : row.unknown_cost_calls
-  const mixedReservationCountRaw = customerBilled
+  const mixedReservationCountRaw = budgetExempt
     ? row.current_mixed_reservation_count
     : row.mixed_reservation_count
   const unknownCostCalls = unknownCostCallsRaw == null ? Number.NaN : Number(unknownCostCallsRaw)
@@ -2386,9 +2387,9 @@ async function postgresProviderCostState(client, {
       'External data cost evidence is incomplete; paid dispatch is disabled',
     )
   }
-  const subsidyCostMinor = customerBilled ? 0 : Number(row.subsidy_cost_minor)
-  const reservedCostMinor = customerBilled ? 0 : Number(row.reserved_cost_minor)
-  const reservedSubsidyMinor = customerBilled ? 0 : Number(row.reserved_subsidy_minor)
+  const subsidyCostMinor = budgetExempt ? 0 : Number(row.subsidy_cost_minor)
+  const reservedCostMinor = budgetExempt ? 0 : Number(row.reserved_cost_minor)
+  const reservedSubsidyMinor = budgetExempt ? 0 : Number(row.reserved_subsidy_minor)
   const usageCostMinor = Number(row.usage_cost_minor)
   const customerCoverageMinor = row.customer_coverage_minor == null
     ? 0
@@ -2431,7 +2432,7 @@ async function postgresProviderCostState(client, {
     reservedSubsidyMinor,
     usageCostMinor,
     customerCoverageMinor,
-    customerBilled,
+    budgetExempt,
     reservation,
   }
 }
@@ -2461,17 +2462,17 @@ export class PostgresExternalPlatformStore {
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
-    uncertainCooldownMs = 15 * 60_000,
-    responseQuarantineCooldownMs = Math.min(uncertainCooldownMs, 5 * 60_000),
+    responseQuarantineCooldownMs = RESPONSE_QUARANTINE_MS,
+    providerCircuit = 'shared',
   }) {
     this.pool = pool
     this.providerKey = providerKey
+    this.providerCircuit = circuitMode(providerCircuit)
     this.authorizationPlatform = authorizationPlatform
     this.queueName = queueName
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
     this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
-    this.uncertainCooldownMs = uncertainCooldownMs
     this.responseQuarantineCooldownMs = responseQuarantineCooldownMs
   }
 
@@ -2509,7 +2510,6 @@ export class PostgresExternalPlatformStore {
 
   async facebookPageFor(input) { return facebookSearchStore.facebookPageFor(this, input) }
   async facebookDeliveredIdsFor(input) { return facebookSearchStore.facebookDeliveredIdsFor(this, input) }
-  async facebookFillUnknownFor(input) { return facebookSearchStore.facebookFillUnknownFor(this, input) }
   async acquireFacebookFillDeliveryLease(input) { return facebookSearchStore.acquireFacebookFillDeliveryLease(this, input) }
   async commitFacebookFillDelivery(input) { return facebookSearchStore.commitFacebookFillDelivery(this, input) }
 
@@ -2541,23 +2541,6 @@ export class PostgresExternalPlatformStore {
       return row ? { id:row.id,tenantId:row.tenant_id,consumerId:row.consumer_id,apiKeyId:row.api_key_id,
         platform:row.platform,status:row.status,responseStatus:row.response_status,acquisitionRequest:row.acquisition_request,responseBody:row.response_body } : null
     }, input, rootId ?? null)
-  }
-
-  async twitterFillUnknownFor(delivery) {
-    if (!['tenantId','consumerId','apiKeyId'].every(key=>twitterPageIdentity(delivery[key]))
-      || !SHA256_PATTERN.test(delivery.fingerprint || '')) throw twitterHistoryError()
-    // The quota index bounds this read by tenant, consumer, platform and time.
-    // Buffer-only unknown deliveries have no owned provider call to join.
-    const excluded = delivery.twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterRetryInput(delivery))).ancestorRequestIds : []
-    const {rows}=await this.pool.query(`SELECT 1 FROM usage_requests request
-      WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3
-        AND request.platform='twitter' AND request.fingerprint=$4 AND request.status='unknown'
-        AND request.acquisition_request->>'path'='/api/v1/data/search'
-        AND NOT (request.id = ANY($5::uuid[]))
-        AND request.reserved_at >= now()-interval '24 hours' LIMIT 1`,
-    [delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint,excluded])
-    return rows.length>0
   }
 
   async validateTwitterManualRetry(input) { return twitterRetryStore.validateTwitterManualRetry(this, input) }
@@ -2697,8 +2680,9 @@ export class PostgresExternalPlatformStore {
   }) {
     if (twitterManualRetry && (operation !== 'social.content.search' || twitterManualRetry.usageRequestId !== ownerRequestId
       || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
-    const excluded = twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterManualRetry)).ancestorRequestIds : []
+    if (twitterManualRetry) await this.validateTwitterManualRetry(twitterManualRetry)
+    // An equal call still in flight holds dispatch. Response quarantine is
+    // disabled by runtime configuration; retain explicit historical fixtures.
     const { rows } = await this.pool.query(
       `INSERT INTO external_platform.dispatch_leases
          (consumer_id, operation, request_fingerprint, owner_request_id, expires_at)
@@ -2706,7 +2690,7 @@ export class PostgresExternalPlatformStore {
         WHERE NOT EXISTS (
           SELECT 1
             FROM external_platform.provider_calls call
-           WHERE call.provider_key = $10
+           WHERE call.provider_key = $8
              AND call.operation = $2
              AND (
                (
@@ -2720,18 +2704,8 @@ export class PostgresExternalPlatformStore {
                OR (
                  (
                    (
-                     call.consumer_id = $1
-                     AND (
-                       call.dispatch_fingerprint = $3
-                       OR (call.dispatch_fingerprint IS NULL AND call.request_fingerprint = $3)
-                     )
-                     AND call.outcome = 'unknown'
-                     AND ($8::uuid IS NULL OR call.usage_request_id <> $8)
-                     AND NOT (call.usage_request_id = ANY($13::uuid[]))
-                   )
-                   OR (
-                     call.endpoint_key = $7
-                     AND call.contract_version = $9
+                     call.endpoint_key = $6
+                     AND call.contract_version = $7
                      AND call.outcome = 'succeeded_unusable'
                      AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
                      ${quarantineRecoverySql('call')}
@@ -2746,9 +2720,8 @@ export class PostgresExternalPlatformStore {
                      AND call.error_code = 'upstream_note_unavailable'
                    )
                  )
-                 AND call.completed_at > now() - make_interval(secs => CASE
-                   WHEN call.outcome='succeeded_unusable' AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
-                     THEN $11::double precision ELSE $6::double precision END)
+                 AND $9::double precision > 0
+                 AND call.completed_at > now() - make_interval(secs => $9::double precision)
                )
              )
         )
@@ -2757,7 +2730,7 @@ export class PostgresExternalPlatformStore {
          expires_at = EXCLUDED.expires_at,
          created_at = now()
        WHERE external_platform.dispatch_leases.expires_at <= now()
-         OR ($12::boolean AND external_platform.dispatch_leases.owner_request_id=EXCLUDED.owner_request_id
+         OR ($10::boolean AND external_platform.dispatch_leases.owner_request_id=EXCLUDED.owner_request_id
            AND external_platform.dispatch_leases.expires_at=EXCLUDED.expires_at)
          OR EXISTS (
            SELECT 1 FROM usage_requests previous
@@ -2778,14 +2751,11 @@ export class PostgresExternalPlatformStore {
        RETURNING owner_request_id, expires_at`,
       [
         consumerId, operation, fingerprint, ownerRequestId, expiresAt,
-        Math.ceil(this.uncertainCooldownMs / 1_000),
         endpointKey,
-        retryOfRequestId,
         contractVersion,
         this.providerKey,
         Math.ceil(this.responseQuarantineCooldownMs / 1_000),
         ownedDeliveryLease && ownedSearchDelivery(this.providerKey, operation),
-        excluded,
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }
@@ -2794,12 +2764,10 @@ export class PostgresExternalPlatformStore {
       `SELECT outcome, error_code, completed_at,
               CASE
                 WHEN outcome = 'pending' THEN NULL
-                ELSE completed_at + make_interval(secs => CASE
-                  WHEN outcome='succeeded_unusable' AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
-                    THEN $9::double precision ELSE $4::double precision END)
+                ELSE completed_at + make_interval(secs => $6::double precision)
               END AS blocked_until
          FROM external_platform.provider_calls call
-        WHERE provider_key = $8
+        WHERE provider_key = $5
           AND operation = $2
           AND (
             (
@@ -2813,17 +2781,7 @@ export class PostgresExternalPlatformStore {
             OR (
               (
                 (
-                  consumer_id = $1
-                  AND (
-                    dispatch_fingerprint = $3
-                    OR (dispatch_fingerprint IS NULL AND request_fingerprint = $3)
-                  )
-                  AND outcome = 'unknown'
-                  AND ($6::uuid IS NULL OR usage_request_id <> $6)
-                  AND NOT (usage_request_id = ANY($10::uuid[]))
-                )
-                OR (
-                  endpoint_key = $5
+                  endpoint_key = $4
                   AND contract_version = $7
                   AND outcome = 'succeeded_unusable'
                   AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
@@ -2839,20 +2797,17 @@ export class PostgresExternalPlatformStore {
                   AND error_code = 'upstream_note_unavailable'
                 )
               )
-              AND completed_at > now() - make_interval(secs => CASE
-                WHEN outcome='succeeded_unusable' AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
-                  THEN $9::double precision ELSE $4::double precision END)
+              AND $6::double precision > 0
+              AND completed_at > now() - make_interval(secs => $6::double precision)
             )
           )
         ORDER BY started_at DESC
         LIMIT 1`,
       [
-        consumerId, operation, fingerprint,
-        Math.ceil(this.uncertainCooldownMs / 1_000), endpointKey, retryOfRequestId,
-        contractVersion,
+        consumerId, operation, fingerprint, endpointKey,
         this.providerKey,
         Math.ceil(this.responseQuarantineCooldownMs / 1_000),
-        excluded,
+        contractVersion,
       ],
     )
     if (blocker.rows[0]) {
@@ -2908,6 +2863,21 @@ export class PostgresExternalPlatformStore {
   // unparseable response cannot suspend live dispatch for the rest of the
   // provider. Kept in its own table so provider_state keeps meaning exactly
   // what it meant before -- the provider-wide breaker.
+  // Bounded by the provider/start-time index; used only on refusal paths.
+  async latestFailureEvidence({ marketplace = null, unusableOnly = false, before = null } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT id, outcome, http_status, business_code, error_code, billed, marketplace, started_at, completed_at
+         FROM external_platform.provider_calls
+        WHERE provider_key = $1 AND outcome = ANY($2::text[]) AND ($3::text IS NULL OR marketplace = $3)
+          AND started_at <= coalesce($4::timestamptz, now())
+          AND started_at > coalesce($4::timestamptz, now()) - make_interval(secs => $5::double precision)
+        ORDER BY started_at DESC LIMIT 1`,
+      [this.providerKey, unusableOnly ? ['succeeded_unusable'] : ['rejected', 'unknown', 'succeeded_unusable'],
+        marketplace, before, FAILURE_EVIDENCE_WINDOW_MS / 1000],
+    )
+    return failureEvidence(rows[0])
+  }
+
   async contractCircuitState(providerKey = this.providerKey, scope = null) {
     if (providerKey !== this.providerKey || !scope) return null
     const { rows } = await this.pool.query(
@@ -2958,7 +2928,7 @@ export class PostgresExternalPlatformStore {
   }
 
   async providerState(providerKey = this.providerKey) {
-    if (providerKey !== this.providerKey) return null
+    if (providerKey !== this.providerKey || this.providerCircuit === 'marketplace') return null
     const { rows } = await this.pool.query(
       `SELECT provider_key, consecutive_failures, circuit_open_until, last_call_at,
               last_success_at, last_failure_at, last_error_code
@@ -3208,11 +3178,12 @@ export class PostgresExternalPlatformStore {
           )
         }
         const state = await postgresProviderCostState(client, {
+          identity: input,
           providerKey: this.providerKey,
           usageRequestId: input.usageRequestId,
           currency: policy.currency,
         })
-        if (!state.customerBilled
+        if (!state.budgetExempt
           && state.knownCostMinor + state.reservedCostMinor + reservedCostMinor
           > policy.monthlyBudgetMinor) {
           throw new AppError(
@@ -3225,7 +3196,7 @@ export class PostgresExternalPlatformStore {
           0,
           state.usageCostMinor + reservedCostMinor - state.customerCoverageMinor,
         ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
-        if (!state.customerBilled
+        if (!state.budgetExempt
           && state.subsidyCostMinor + state.reservedSubsidyMinor + reservedSubsidyMinor
           > policy.monthlySubsidyBudgetMinor) {
           throw new AppError(
@@ -3528,6 +3499,7 @@ export class PostgresExternalPlatformStore {
             )
           }
           const state = await postgresProviderCostState(client, {
+            identity: input,
             providerKey: this.providerKey,
             usageRequestId: input.usageRequestId,
             currency: costControl.currency,
@@ -3567,7 +3539,7 @@ export class PostgresExternalPlatformStore {
               )
             }
           } else {
-            if (!state.customerBilled
+            if (!state.budgetExempt
               && state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
               > costControl.monthlyBudgetMinor) {
               throw new AppError(
@@ -3580,7 +3552,7 @@ export class PostgresExternalPlatformStore {
               0,
               state.usageCostMinor + costControl.costMinor - state.customerCoverageMinor,
             ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
-            if (!state.customerBilled
+            if (!state.budgetExempt
               && state.subsidyCostMinor + state.reservedSubsidyMinor
               + incrementalSubsidyMinor > costControl.monthlySubsidyBudgetMinor) {
               throw new AppError(
@@ -4238,6 +4210,7 @@ export class PostgresExternalPlatformStore {
         await this.#advanceFailureState(client, errorCode, {
           circuitCategory,
           scope: delivery?.marketplace ?? null,
+          callId,
         })
       }
       await this.#insertIngestJob(client, ingestJob)
@@ -4334,6 +4307,18 @@ export class PostgresExternalPlatformStore {
   }
 
   async #recordProviderSuccess(client, callId) {
+    if (this.providerCircuit === 'marketplace') {
+      // Recovery is per marketplace too: a call that started after the last
+      // failure clears only its own marketplace's breaker.
+      await client.query(
+        `DELETE FROM external_platform.provider_contract_circuits AS circuit
+          USING external_platform.provider_calls AS call
+          WHERE circuit.provider_key = $1 AND call.id = $2 AND circuit.scope = call.marketplace
+            AND circuit.last_failure_at <= call.started_at`,
+        [this.providerKey, callId],
+      )
+      return
+    }
     // Settlement can lag acquisition (notably while search enriches its rows).
     // Only a call started after the latest failure is evidence of recovery.
     // A healthy provider would only move last_success_at here; writing it on
@@ -4357,10 +4342,14 @@ export class PostgresExternalPlatformStore {
     )
   }
 
-  async #advanceFailureState(client, errorCode, { circuitCategory = null, scope = null } = {}) {
+  async #advanceFailureState(client, errorCode, { circuitCategory = null, scope = null, callId = null } = {}) {
     // Contract failures belong to one marketplace; everything else is a
     // provider-wide condition. Same split as the memory store.
-    if (circuitCategory === 'contract' && scope) {
+    if (this.providerCircuit === 'marketplace' && !scope && callId) {
+      scope = (await client.query('SELECT marketplace FROM external_platform.provider_calls WHERE id = $1', [callId])).rows[0]?.marketplace ?? null
+    }
+    if (this.providerCircuit === 'marketplace' && !scope) return
+    if ((circuitCategory === 'contract' || this.providerCircuit === 'marketplace') && scope) {
       await this.#recordContractFailure(client, scope, errorCode)
       return
     }
@@ -4433,6 +4422,7 @@ export class PostgresExternalPlatformStore {
         await this.#advanceFailureState(client, errorCode, {
           circuitCategory,
           scope: delivery?.marketplace ?? null,
+          callId,
         })
       }
       if (snapshot) {
@@ -5018,6 +5008,15 @@ function analyticsFromRows(requests, calls, state) {
     endpoints: [],
     state: clone(state),
   }
+}
+
+// `shared` keeps one breaker per supplier. `marketplace` is for a channel that
+// shares a supplier account with unrelated products (RapidAPI sells Twitter and
+// Taobao listings on one key): its failures and recoveries stay on its own
+// per-marketplace breaker and never read or move the supplier-wide one.
+function circuitMode(value) {
+  if (value !== 'shared' && value !== 'marketplace') throw new TypeError('providerCircuit must be shared or marketplace')
+  return value
 }
 
 export function createExternalPlatformStore({ pool, usageStore, ...options }) {

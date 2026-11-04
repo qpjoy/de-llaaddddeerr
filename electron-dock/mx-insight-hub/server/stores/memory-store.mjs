@@ -1,4 +1,4 @@
-import { createInternalTrafficPolicy, isInternalTraffic } from '../core/internal-traffic-policy.mjs'
+import { createInternalTrafficPolicy, isInternalTraffic, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { normalizeRequestFailureDiagnostic, normalizeRequestFailureId } from '../core/request-failure-diagnostic.mjs'
 import { strategySearchUsageDay } from '../data/strategy-search-usage.mjs'
@@ -783,6 +783,7 @@ export class MemoryStore {
       ...safe,
       hubRateLimitExempt: safe.hubRateLimitExempt ?? null,
       hubRateLimitRevision: safe.hubRateLimitRevision ?? 0,
+      hubSupplierAdmission: safe.hubSupplierAdmission === 'priority' ? 'priority' : 'bypass',
       platforms: (record.scopeMode === 'legacy_dynamic'
         ? this.#dynamicPlatformEntitlements(record)
         : this.apiKeyPlatformEntitlements.get(record.id) || []).map((entry) => entry.platform),
@@ -1022,6 +1023,7 @@ export class MemoryStore {
       account: account ? {
         ...clone(account),
         balanceMinor: account.availableMinor + account.heldMinor,
+        outstandingMinor: Math.max(0, -(account.availableMinor + account.heldMinor)),
       } : null,
       ledger: clone(ledger),
     }
@@ -1400,7 +1402,9 @@ export class MemoryStore {
     if (profile.mode === 'enforced' && quoted > 0) {
       const account = this.creditAccounts.get(record.tenantId)
       if (!account || account.status !== 'active' || account.currency !== currency
-        || account.availableMinor < quoted) {
+        || (account.availableMinor < quoted && !isLcySupplierPriority({
+          apiKey: this.apiKeys.get(record.apiKeyId), tenant: { id: record.tenantId }, consumer: { id: record.consumerId },
+        }))) {
         throw new AppError(402, 'insufficient_credit', 'Tenant credit is insufficient for this request', {
           currency,
           requiredMinor: quoted,
@@ -1737,9 +1741,10 @@ export class MemoryStore {
     tenantId, consumerId, apiKeyId, platform, capability,
     windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
   }) {
-    const internal = isInternalTraffic(this, { apiKey: this.apiKeys.get(apiKeyId),
-      tenant: { id: tenantId }, consumer: { id: consumerId } })
-    if (!internal) assertMemoryKeyAccessLimits(this, apiKeyId, authorizationScopes)
+    const owner = { apiKey: this.apiKeys.get(apiKeyId), tenant: { id: tenantId }, consumer: { id: consumerId } }
+    const internal = isInternalTraffic(this, owner)
+    const paced = isLcySupplierPriority(owner)
+    if (!internal || paced) assertMemoryKeyAccessLimits(this, apiKeyId, authorizationScopes, { rateOnly: internal })
     const records = [...this.requests.values()]
     for (const scope of internal ? [] : authorizationScopes) {
       const entitlement = scopeEntitlements.get(authorizationScopeKey(scope))
@@ -1788,10 +1793,10 @@ export class MemoryStore {
         'An active plan assignment is required before usage can be reserved',
       )
     }
-    if (internal) return
+    if (internal && !paced) return
     const planMaxRequests = plan?.limits?.maxRequests
     const planWindowSeconds = plan?.limits?.windowSeconds
-    if (Number.isInteger(planMaxRequests) && planMaxRequests > 0
+    if (!internal && Number.isInteger(planMaxRequests) && planMaxRequests > 0
       && Number.isInteger(planWindowSeconds) && planWindowSeconds > 0) {
       const slidingStart = new Date(Math.max(
         Date.now() - planWindowSeconds * 1_000,
@@ -1812,7 +1817,7 @@ export class MemoryStore {
       }
     }
     const monthlyRequests = plan?.limits?.monthlyRequests
-    if (Number.isInteger(monthlyRequests) && monthlyRequests > 0) {
+    if (!internal && Number.isInteger(monthlyRequests) && monthlyRequests > 0) {
       const now = new Date()
       const calendarMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
       const assignedAt = new Date(assignment.assignedAt)

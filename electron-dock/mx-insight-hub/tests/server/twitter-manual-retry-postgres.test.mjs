@@ -196,7 +196,7 @@ test('PG cyclic stored retry lineage is refused and a buffer-only target needs a
   await assert.rejects(validateTwitterManualRetry(f.store, { ...bufferInput, bufferCallId: sourceCall.id }), denied)
 })
 
-test('PG dispatch excludes only verified unknown ancestors and retains unrelated, pending and unusable blockers', options, async t => {
+test('PG dispatch ignores ended unknown calls and retains pending and unusable blockers', options, async t => {
   const f = await fixture(t), store = await platformStore(f)
   const original = await f.addRequest(), successor = await f.addRequest('reserved')
   const originalCall = await f.addCall(original)
@@ -205,13 +205,11 @@ test('PG dispatch excludes only verified unknown ancestors and retains unrelated
   const lease = { consumerId: f.identity.consumerId, operation: delivery.operation, fingerprint,
     endpointKey: 'twitter-aio.search', contractVersion: 'mx-insight-hub.social-data.v1', ownerRequestId: successor.id,
     expiresAt: new Date(Date.now() + 60000), twitterManualRetry: f.input(original, successor) }
-  assert.equal(await store.twitterFillUnknownFor({ ...delivery, twitterManualRetry: null }), true)
-  assert.equal(await store.twitterFillUnknownFor(delivery), false)
   assert.equal((await store.acquireDispatchLease(lease)).kind, 'acquired')
   await store.releaseDispatchLease(lease)
   const unrelated = await f.addRequest(), unrelatedCall = await f.addCall(unrelated)
-  assert.equal(await store.twitterFillUnknownFor(delivery), true)
-  assert.equal((await store.acquireDispatchLease(lease)).reason, 'unknown')
+  assert.equal((await store.acquireDispatchLease(lease)).kind, 'acquired', 'an unrelated ended unknown does not hold dispatch')
+  await store.releaseDispatchLease(lease)
   await f.db.query("UPDATE usage_requests SET status='released' WHERE id=$1", [unrelated.id])
   await f.db.query("UPDATE external_platform.provider_calls SET outcome='rejected' WHERE id=$1", [unrelatedCall.id])
   for (const outcome of ['pending', 'succeeded_unusable']) {

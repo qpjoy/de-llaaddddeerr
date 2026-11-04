@@ -23,7 +23,7 @@ test('strategy catalog separates supported operation sets and exposes the implem
   assert.equal(platformById(catalog, 'search', 'linkedin'), undefined)
   assert.equal(platformById(catalog, 'user-info', 'reddit').migrationStatus, 'hub_native')
   const editable = catalog.interfaces.flatMap(group => group.platforms.filter(row => row.editable).map(row => `${group.id}:${row.platform}`))
-  assert.deepEqual(editable.sort(), ['search:facebook', 'search:instagram', 'search:twitter'])
+  assert.deepEqual(editable.sort(), ['crawl:facebook', 'search:facebook', 'search:instagram', 'search:twitter', 'user-info:facebook'])
   for (const row of catalog.interfaces.flatMap(group => group.platforms)) {
     assert(row.label && row.routeSummary)
     if (!row.editable) assert(row.readOnlyReason)
@@ -40,7 +40,8 @@ test('policy rows preserve provider-specific saved shape without mutating it or 
   const facebook = platformById(catalog, 'search', 'facebook')
   assert.deepEqual(instagram.providers, ['justone', 'tikhub'])
   assert.deepEqual(instagram.allowedModes, ['fixed', 'priority', 'paused'])
-  assert.deepEqual(facebook.allowedModes, ['auto', 'rapidapi', 'justone', 'paused'])
+  assert.deepEqual(facebook.allowedModes, ['auto', 'rapidapi', 'justone', 'selfhosted', 'paused'])
+  assert.deepEqual(facebook.providers, ['rapidapi', 'justone', 'night-all-a'])
   assert.deepEqual(instagram.policy, instagramPolicy)
   assert.deepEqual(facebook.policy, facebookPolicy)
   facebook.policy.monthly_limit = 1

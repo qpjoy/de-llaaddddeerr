@@ -1,12 +1,12 @@
-import { refreshAdmissionLimits } from './admission-runtime.mjs'
-import { upstreamCapacityError } from './availability-errors.mjs'
+import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
+import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, contentSearchDataItem, TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
 import { rawSearchRecords, RAW_SEARCH_DATASET } from '../contracts/raw-search.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { ContentSearchStateStore } from './content-search-store.mjs'
 import { assertTwitterSearchAvailable } from '../data/twitter-search-availability.mjs'
 
@@ -50,7 +50,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
   const store = gateway.platformStore, stateStore = new ContentSearchStateStore(store, request)
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
     path: request.standard ? '/api/v1/data/search' : '/api/v1/night-all/search/raw', scopeHash: request.scopeHash }
-  if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal search has an unknown outcome')
   if (request.restartRequired) throw new AppError(409, 'search_restart_required', 'This platform now searches directly in Hub; restart from page 1 with a new Idempotency-Key. Historical cursors cannot be converted.')
   if (request.unsupportedNativeCursor) throw new AppError(400, 'content_search_pagination_unsupported', 'Native continuation parameters cannot replace the signed Hub cursor; restart explicitly')
   if (request.platform === 'xiaohongshu' && typeof finalizeResponse !== 'function') throw new AppError(503, 'content_search_unavailable', 'Xiaohongshu search enrichment is unavailable')
@@ -165,7 +164,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     if (request.standard && request.platform === 'twitter') await assertTwitterSearchAvailable({
       usageStore: gateway.usageStore, context, query: request.queries[0], excludeRequestIds: [delivery.usageRequestId],
     })
-    if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal search has an unknown outcome')
     for (const [index, job] of state.jobs.entries()) {
       // Only an already saved incomplete page can be continued explicitly.
       // Incomplete metadata discovered while consuming a buffer must stop this
@@ -200,7 +198,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           await assertSearchDispatchAllowed?.()
           const states = await Promise.all([store.providerState('tikhub'), store.contractCircuitState?.('tikhub', request.platform)])
           states[0] = internalCircuitState(gateway.usageStore, context, states[0])
-          if (states.some(row => row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > clock())) throw new AppError(503, 'external_platform_circuit_open', 'The content-search supplier circuit is open')
+          const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
+            message: 'The content-search supplier circuit is open', marketplace: request.platform })
+          if (blocked) throw blocked
           const credential = await resolveCredential()
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Content search is unavailable')
           const control = await gateway.operationControlStore.authorizeDispatch('tikhub', nativeRequest.operation,
@@ -210,7 +210,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
             lease?.reason === 'unknown' ? 'request_outcome_unknown' : lease?.reason === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'request_in_progress',
             'The procurement result is pending or unavailable; verify the original request')
           ownsChild = true
-          if (entered === 'exempt' && !isHubRateLimitExempt(context)) {
+          if (entered === 'exempt' && !bypassesSupplierLimits(context)) {
             leaveCapacity(entered); entered = false
           }
           if (!entered) {
@@ -218,8 +218,10 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           }
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, nativeRequest.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-          const rate = isInternalTraffic(gateway.usageStore, context) ? { allowed: true }
-            : await store.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
+          const rate = await acquireSupplierRate(context, store, { limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,
+            windowMs: 60000, bypass: isInternalTraffic(gateway.usageStore, context), signal,
+            providerState: () => store.providerState('tikhub'), deadline: deadlineAt - (gateway.config.timeoutMs || 30000) - 5000,
+            maxWaitMs: currentAdmissionLimits(gateway).maxWaitMs })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Content-search rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'content_search_deadline', 'Content-search deadline reached before dispatch')
@@ -240,9 +242,13 @@ export async function runContentSearch({ gateway, context, request, delivery, de
               contentSearchProjection: request.standard && ['kuaishou', 'twitter'].includes(request.platform) })
             phase = 'project_response'
             try { ({ projected, records } = projectContentPage(result, nativeRequest)) }
-            catch { throw new TikHubUpstreamError('Content-search response could not be normalized', {
+            catch (projectionError) { throw new TikHubUpstreamError('Content-search response could not be normalized', {
               outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
-              errorCode: 'invalid_content_search_contract', affectsCircuit: true,
+              // A platform's own error notice is told apart from Hub parsing.
+              // Either way the endpoint quarantine covers it; neither is a
+              // supplier outage for other TikHub platforms.
+              errorCode: projectionError?.message === 'upstream_search_error_message'
+                ? 'upstream_search_error_message' : 'invalid_content_search_contract', affectsCircuit: false,
             }, result) }
           } catch (error) {
             if (!(error instanceof TikHubUpstreamError)) throw error

@@ -11,6 +11,7 @@ import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-rese
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
 import { hubSocialPaths, hubSocialGuide, hubSocialAccountPlatforms } from './contracts/hub-social-docs.mjs'
 import { youtubeCommentsPaths, youtubeCommentsGuide } from './contracts/youtube-comments-docs.mjs'
+import { postCommentsPaths, postCommentsAliasPaths, postCommentsGuide, postCommentsPlatforms } from './contracts/post-comments-docs.mjs'
 import { productForDocs } from '../shared/product-workbenches.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
@@ -932,7 +933,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
       : 'searchNightAllCompatibility',
     summary: historicalAlias
       ? 'Call a legacy search operation through its historical route alias'
-      : 'Call one of the three Night-All legacy search operations',
+      : 'Call a Night-All legacy search, post-detail, or post-comments operation',
     'x-mx-required-capabilities-by-platform-operation': {
       xiaohongshu: {
         raw: 'social.posts.search',
@@ -959,7 +960,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
     parameters: [
       {
         name: 'operation', in: 'path', required: true,
-        schema: { type: 'string', enum: ['raw', 'crawl', 'user-info'] },
+        schema: { type: 'string', enum: ['raw', 'crawl', 'user-info', 'post-detail', 'post-comments'] },
       },
       nightAllCompatibilityIdempotencyParameter,
     ],
@@ -1290,6 +1291,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       ],
     },
   },
+  'x-hub-resource-admission': { scope: 'api_process', appliesToAllKeys: true, includesLcyFinancialExemption: true,
+    algorithm: 'token_bucket', burst: 'one_second_capacity', concurrentLifetime: 'until_handler_finishes_including_settlement',
+    error: 'resource_admission_limited', status: 429, retryHeader: 'Retry-After',
+    note: 'Default, product and API limits apply together, independently of supplier limits. Reuse the original body and Idempotency-Key; a refusal of this HTTP attempt says nothing about an earlier attempt.' },
   servers: [{ url: '/api/v1', description: 'Same-origin public API' }],
   tags: [
     { name: 'Discovery', description: 'Discover the caller\'s granted platform capabilities.' },
@@ -1315,6 +1320,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...nativeForwardingPaths,
     ...hubSocialPaths,
     ...youtubeCommentsPaths,
+    ...postCommentsPaths,
+    ...postCommentsAliasPaths,
     ...webSearchPaths,
     ...wechatSelfHostedPaths,
     '/data/services/pricing': { get: { tags:['Hub 服务定价'], summary:'当前 Key 的 Hub 官方定价与账户执行价',
@@ -1600,7 +1607,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         summary: 'Search marketplace products through the governed external data gateway',
         'x-mx-required-platform': 'ecommerce',
         'x-mx-required-capabilities': ['ecommerce.products.search'],
-        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires both the ecommerce data-domain grant and ecommerce.products.search business-operation grant in the key immutable scope; no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, deliveryMode, page, cursor, sort and price; pageSize and provider-routing fields are not part of this contract. deliveryMode defaults to cache_first: cache_only never dispatches external acquisition and returns 404 when no exact snapshot exists; refresh bypasses a fresh snapshot, requires a caller-supplied Idempotency-Key and may still deliver an exact stored fallback when acquisition fails. X-MX-Insight-Retry-Of names a matching prior same-consumer unknown ecommerce request and is accepted only for refresh with a different new Idempotency-Key; Hub verifies operation and normalized fingerprint, and never bypasses reserved state, succeeded-unusable quarantine, lookup failure, route/version mismatch, quota, circuit or concurrency. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Existing cursors remain bound to their original compatible adapter when the internal default changes; completed requests replay their saved body. Unavailable internal route configuration blocks new acquisition with 503 ecommerce_route_unavailable. Hub never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price. Ecommerce service credit/quota failures keep the existing HTTP status and error.code, and add error.details.service=ecommerce plus reasonCode=ecommerce_service_credit_exhausted, ecommerce_service_quota_exhausted or ecommerce_service_daily_quota_exhausted. Display error.message and reasonCode to the user and retain requestId; these service limits require an administrator. Active protection adds circuitOpenUntil, retryAfterMs, circuitDurationMs and failureThreshold, with retryable=false. The protection deadline does not promise credit/quota recovery or permit automatic retries. Old committed errors replay unchanged.',
+        description: 'Uses the ordinary Live Hub Public API key issued through API Keys and requires both the ecommerce data-domain grant and ecommerce.products.search business-operation grant in the key immutable scope; no ecommerce-specific or provider key is accepted. Legacy Test keys are compatibility metadata rather than an isolated sandbox and are rejected before usage reservation, cache work or provider dispatch. The strict body accepts only marketplace, query, deliveryMode, page, cursor, sort and price; pageSize and provider-routing fields are not part of this contract. deliveryMode defaults to cache_first: cache_only never dispatches external acquisition and returns 404 when no exact snapshot exists; refresh bypasses a fresh snapshot, requires a caller-supplied Idempotency-Key and may still deliver an exact stored fallback when acquisition fails. X-MX-Insight-Retry-Of names a matching prior same-consumer unknown ecommerce request and is accepted only for refresh with a different new Idempotency-Key; Hub verifies operation and normalized fingerprint, and never bypasses reserved state, succeeded-unusable quarantine, lookup failure, route/version mismatch, quota, circuit or concurrency. page and cursor are mutually exclusive. Prefer the opaque nextCursor returned by Hub, keep marketplace/query/sort/price unchanged, and use a new Idempotency-Key for every next page. Each marketplace is served by an internally configured compatible supplier. When an administrator configures a backup, a supplier that cannot run, or that definitively refuses without charging (for example exhausted credit or an invalid credential), is replaced once within the same request; a charged, unusable or unknown result is never retried on another supplier. Request, response, cursor and replay contracts are identical whichever supplier runs: an existing cursor continues on the currently configured supplier and completed requests replay their saved body. Unavailable internal route configuration blocks new acquisition with 503 ecommerce_route_unavailable. Hub never labels a stored result as live. A provider success that cannot be normalized is committed as a stable 502; replaying the same Idempotency-Key returns that error without another provider call. A 200 response with an empty items array is a valid delivery, not an interface failure. No external platform identity, credential, endpoint, provider rate/balance/free quota, procurement amount, customer invoice or raw response is exposed; sourceMode is delivery evidence, not a customer price. Ecommerce service credit/quota failures keep the existing HTTP status and error.code, and add error.details.service=ecommerce plus reasonCode=ecommerce_service_credit_exhausted, ecommerce_service_quota_exhausted or ecommerce_service_daily_quota_exhausted. Display error.message and reasonCode to the user and retain requestId; these service limits require an administrator. Active protection adds circuitOpenUntil, retryAfterMs, circuitDurationMs and failureThreshold, with retryable=false. The protection deadline does not promise credit/quota recovery or permit automatic retries. Old committed errors replay unchanged.',
         'x-mx-error-codes': {
           400: [
             'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
@@ -1642,6 +1649,22 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                 firstPage: {
                   summary: 'First page',
                   value: { marketplace: 'jd', query: 'AI recorder' },
+                },
+                taobaoBySales: {
+                  summary: 'Taobao by sales (Tmall items are included)',
+                  value: { marketplace: 'taobao', query: '始祖鸟', sort: 'sales_desc', deliveryMode: 'live_only' },
+                },
+                tmallOnly: {
+                  summary: 'Tmall stores only',
+                  value: { marketplace: 'tmall', query: '始祖鸟', sort: 'sales_desc', deliveryMode: 'live_only' },
+                },
+                taobaoPriceRange: {
+                  summary: 'Taobao with an inclusive price range',
+                  value: { marketplace: 'taobao', query: '羽绒服', sort: 'price_asc', price: { min: '100', max: '500' } },
+                },
+                xianyuRecent: {
+                  summary: 'Xianyu newest listings',
+                  value: { marketplace: 'xianyu', query: 'iPhone 15', sort: 'recent', deliveryMode: 'live_only' },
                 },
                 storedOnly: {
                   summary: 'Read an exact Hub snapshot without external acquisition',
@@ -1910,7 +1933,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     '/data/aggregate/search': {
       post: {
         tags: ['Search'], operationId: 'aggregateDataSearch', summary: 'Search latest or stored data across one, several or all authorized platforms',
-        description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to discover logical platform identifiers; clients never choose a provider. Only existing platform and operation entitlements apply. Telegram, published opinion and saved categories are stored-only; refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence; the parent adds no customer purchase charge. Each refresh page acquires at most one page per continuing source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize and Key to continue; completed, unsupported and failed sources are not restarted. No exact total is promised. The opaque cursor references committed Hub evidence and binds the identity and query scope; missing evidence fails closed. Child cursors retain their existing route and page limits. sources[].carried marks a source not called in this batch; its counts describe its last acquired page. pageSize applies to stored mode only; historical live post operations fetch 20 items and product operations use their existing bounded page sizes. WeChat uses one native page without truncation or fill: wechat_mp selects articles, wechat_search selects all categories, raw=false; only declared items are projected, never categories. Both require social + native.wechat.search.search and a keyword of at most 100 characters. The same native operation price applies to each child; preview includes its runtime readiness. Native continue_flag and cursor are held inside committed child evidence; callers use the aggregate cursor. Old WeChat aggregate cursors must restart explicitly. WeChat results are archived but not automatically ingested into canonical search. mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.',
+        description: 'Defaults to mode=refresh: acquire one first page from each eligible live route with bounded concurrency, without mixing stored results or falling back to cached deliveries. platforms=[] or omitted means all currently authorized searchable platforms. Call /data/aggregate/sources to discover logical platform identifiers; clients never choose a provider. Only existing platform and operation entitlements apply. Telegram, published opinion and saved categories are stored-only; refresh reports skipped sources. Each child uses its existing price, quota and delivery evidence; the parent adds no customer purchase charge. Each refresh page acquires at most one page per continuing source. Return data.pageInfo.nextCursor unchanged with the same query/platforms/objectTypes/pageSize and Key to continue; completed, unsupported and failed sources are not restarted. No exact total is promised. The opaque cursor references committed Hub evidence and binds the identity and query scope; missing evidence fails closed. Child cursors retain their existing route and page limits. sources[].carried marks a source not called in this batch; its counts describe its last acquired page. pageSize applies to stored mode only; historical live post operations fetch 20 items and product operations use their existing bounded page sizes. WeChat uses one native page without truncation or fill: wechat_mp selects articles, wechat_search selects all categories, raw=false; only declared items are projected, never categories. Both require social + native.wechat.search.search and a keyword of at most 100 characters. The same native operation price applies to each child; preview includes its runtime readiness. Native continue_flag and cursor are held inside committed child evidence; callers use the aggregate cursor. Old WeChat aggregate cursors must restart explicitly. WeChat results are archived but not automatically ingested into canonical search. mode=stored performs one filtered canonical search, returns an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags require every exact tag. Date bounds are inclusive eventTime values, must include a timezone, and exclude undated records. RSS requires the explicit rss platform grant and mode=stored; objectTypes=[article] selects migrated subscription articles. RSS eventTime preserves its effective time (normalizedAt, publishedAt, collectedAt, createdAt in that order; legacy rows use publishedAt, discoveredAt, createdAt). RSS does not fetch feeds during search, and excludes unmigrated local-file news. Existing canonical-search quota and pricing apply. Business identifiers are caller-side attribution, never search keywords. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit source statuses. Ingestion after live delivery is asynchronous.',
         parameters: [idempotencyParameter, { name: 'Accept', in: 'header', required: false,
           schema: { type: 'string', enum: ['application/json', 'text/event-stream'], default: 'application/json' },
           description: 'SSE uses the same POST body, authorization and idempotency identity. No automatic reconnect; retry the exact body/key. Last-Event-ID event replay is not supported.' }],
@@ -5317,7 +5340,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             type: 'object',
             required: ['code', 'message'],
             properties: {
-              code: { type: 'string' }, message: { type: 'string' }, details: { type: 'object', additionalProperties: true },
+              code: { type: 'string' }, message: { type: 'string' }, details: {
+                type: 'object', additionalProperties: true,
+                description: 'For verified non-ecommerce source account refusals, HTTP 503 external_platform_capacity_unavailable retains its terminal meaning and includes reasonCode, outcome=rejected, retryable=false and action=contact_administrator. reasonCode distinguishes upstream_auth_invalid (source credential invalid), upstream_permission_denied (source permission denied), upstream_balance_exhausted (source balance exhausted), and upstream_token_limit_exceeded (source credential quota exhausted). These describe the data source account, not the caller’s Hub API key or wallet. Older saved responses and unclassified capacity failures may omit reasonCode; historical replay returns the original response unchanged.',
+              },
             },
           },
           requestId: { type: 'string' },
@@ -6229,9 +6255,9 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
       <tr><td><code>429 plan_burst_exceeded</code></td><td>瞬时并发/突发速率超限。降低发起速率即可，额度本身没有用完。</td></tr>
       <tr><td><code>429 external_platform_busy / external_platform_rate_limited</code></td><td>Hub 的并发或共享调用频率保护；按 retryAfterMs / Retry-After 退避，不能换 Key 绕过。</td></tr>
       <tr><td><code>429 external_platform_capacity_exceeded</code></td><td>上游返回限流；小红书错误详情中 upstreamDispatched=true。limit=null 表示上游阈值未知，不能当作 Hub 的每分钟限额。保留原 requestId 和幂等键核对结果，不自动重复付费调用。</td></tr>
-      <tr><td><code>429 external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>仅可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量；已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。</td></tr>
+      <tr><td><code>429 external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>仅可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量；已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。已显式开启 Hub 最大豁免的原始 LCY-delta Key 同样豁免这两项预算限制。</td></tr>
       <tr><td><code>502 response_unusable / outcome_unknown</code></td><td>保留 requestId 和原 key，停止自动重试；相同 key 只重放已提交结论。</td></tr>
-      <tr><td><code>503 external_platform_circuit_open</code></td><td>小红书的新拒绝响应提供共享上游保护范围、原因、failureThreshold、circuitOpenUntil 和 Retry-After；upstreamDispatched=false。期限表示允许重新检查准入的时间，不保证上游已经恢复。历史响应保持原样。</td></tr>
+      <tr><td><code>503 external_platform_circuit_open</code></td><td>熔断拒绝响应提供 <code>cause</code>（<code>upstream</code> 上游连续失败、<code>hub_response_parsing</code> Hub 无法解析上游响应、<code>hub_internal_cooldown</code> 内部冷却）、保护范围、规范化原因 <code>reason</code>（如 <code>upstream_balance_exhausted</code>）、可用时的 <code>upstream</code>（errorCode、上游 HTTP 状态、上游业务码、是否计费、失败时间）、failureThreshold、circuitOpenUntil 和 Retry-After；upstreamDispatched=false。期限表示允许重新检查准入的时间，不保证上游已经恢复。不含供应商名称或原文。历史响应保持原样。</td></tr>
       <tr><td><code>503 not_configured / contract_unverified / capacity_unavailable / cost_control_unavailable / cost_evidence_incomplete</code></td><td>由 operator 检查发布门禁和当前 endpoint/当前请求的成本证据；paid-ready 只绕过月度财务线，不绕过这些完整性检查。无关历史成本异常不会阻断该请求。</td></tr>
     </tbody></table>
     </section>
@@ -6498,13 +6524,13 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     </section>
 
     <section class="doc-page" data-doc-page="night-all">
-    <div class="notice">客户计费：历史 raw、crawl、user-info 分别使用同名计费键，按成功交付的请求结算，由调用身份所分配的 Hub 套餐决定单价（可为 0）。相同幂等请求重放不重复收费；成功交付旧快照沿用请求价格。小红书直连分支使用 social.posts.search / social.users.resolve / social.users.posts 等已发布业务计费键。免费不免除授权、配额或采集工作预算；上游服务采购价与客户价格相互独立。</div>
+    <div class="notice">客户计费：历史 raw、crawl、user-info、post-detail 分别使用同名计费键；新单帖评论使用 social.comments.list 计费键，按成功交付的请求结算，由调用身份所分配的 Hub 套餐决定单价（可为 0）。相同幂等请求重放不重复收费；成功交付旧快照沿用请求价格。小红书直连分支使用 social.posts.search / social.users.resolve / social.users.posts 等已发布业务计费键。免费不免除授权、配额或采集工作预算；上游服务采购价与客户价格相互独立。</div>
     <h2 id="night-all">Night-All 兼容层</h2>
     <p>Instagram 的 Hub 直连接口不把采集页大小当成固定 20 条：超量记录保留在同一次采集的完整归档里，每次最多交付请求的 <code>count/pageSize</code> 条，先读完剩余记录才推进上游游标。只读剩余记录的标准响应为 <code>meta.providerCalls=0</code>，raw 响应为 <code>meta.upstreamCallCount=0</code>；每次新分页请求仍按当前账户费率结算，幂等重放不重复收费。游标绑定原 Key/查询/页大小/type/接口，有效期 24 小时，最多 15 页；达到上限但仍有数据时返回 partial 和 <code>INSTAGRAM_PAGE_LIMIT_REACHED</code>。归档不可用或不匹配返回 <code>409 search_page_unavailable</code>，不会自动重新采集。旧失败请求的幂等结果保持不变。</p>
-    <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面三条 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
+    <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面这些 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
     <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。小红书平台项包含 <code>search_posts</code> 且 <code>search.ready=true</code> 表示独立的首屏 rollout gate 已开启；此时单 scalar query、有效页大小 20 的 page 1 raw 请求由 Hub-native connector 处理，已签发的 <code>mxec2</code> direct traversal cursor 继续走同一路径。独立 user-activity gate 开启后，单个 <code>username|userId|uid|profileUrl</code> 的 user-info，以及 posts-only、页大小 20、concurrency 1 的 crawl 也由 Hub-native connector 处理；crawl 只接受并返回 Hub 不透明 cursor，最多 15 页。<code>data.legacySearch</code> 仍保留小红书，因为 multi-identifier、channel、非 posts、非 20 页和自定义 params 等尚未迁移形态继续走历史路径。矩阵不会在请求时从 Night-All 的 capability 接口实时发现。</p>
     <p><code>data.legacySearch.contractVersion</code> 固定为 <code>night-all.legacy-search-capabilities.v1</code>。这是 Hub-pinned 的 operation dispatch 策略：目标平台必须同时出现在对应 operation 的 <code>supportedPlatforms</code> 与 <code>readyPlatforms</code>；它不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。</p>
-    <p>除微信 raw 搜索外，<code>/api/v1/search/raw|crawl|user-info</code> 是对应 <code>/api/v1/night-all/search/*</code> 路径的精确别名；两种写法进入同一服务与 paid fingerprint，切换路径不会产生第二次外部派发，也不应更换 <code>Idempotency-Key</code>。</p>
+    <p>除微信 raw 搜索外，<code>/api/v1/search/raw|crawl|user-info|post-detail|post-comments</code> 是对应 <code>/api/v1/night-all/search/*</code> 路径的精确别名；两种写法进入同一服务与 paid fingerprint，切换路径不会产生第二次外部派发，也不应更换 <code>Idempotency-Key</code>。</p>
     <p>微博、Instagram 和 Twitter 的单关键词 raw 搜索已由 Hub 按请求形状路由，无需调用方换 URL。单个 <code>keyword</code> 或 <code>query</code> 最多 500 字符；微博/Instagram 页大小至少 20，Twitter 最多 50，均受 Key 原有限额约束。不带非空 params、评论补取、缓存时长或并发参数；Instagram/Twitter 不要求详情补取。复杂形状和旧游标继续走历史处理。新分页返回 <code>mxraw1</code> 游标，下一页保持条件并传顶层 cursor，每页新幂等键，最多 15 页。微博默认尝试补取截断长文；未补齐时保留摘要并返回 <code>WEIBO_FULL_TEXT_INCOMPLETE</code>。微博/Instagram/Twitter/Facebook 新 raw 普通内容标题为空字符串，账号名称保持不变；旧请求仍精确重放原响应。平台授权和 raw 计费身份不变。</p>
     <div class="notice">微信已迁移：<code>/api/v1/search/raw</code> 的 <code>wechat_search/wechat/weixin/wechat_mp</code> 请求转入 <code>/api/v1/data/wechat/search/search</code>，返回新响应，并要求 <code>social + native.wechat.search.search</code> 权限和当前客户价格/余额。公众号默认文章检索；单关键词，旧页大小提示只接受默认 20，旧 <code>mxnc1</code> 游标不可复用。<code>/api/v1/data/search</code> 同样转入新合同；聚合微信实时子请求使用新接口、独立计费并映射明确的 items 与游标。只有 <code>/api/v1/night-all/search/raw</code> 的微信分支返回 410；不会转发或回退。历史请求可按 requestId 查阅，不会被重写。详见<a href="/docs/wechat-search/native/wechat.search.search">微信搜索新合同</a>。</div>
     <p>当 <code>platform=xiaohongshu</code> 时，Key 与 consumer 必须同时拥有平台 grant 和 operation grant：<code>raw → social.posts.search</code>、<code>crawl → social.users.posts</code>、<code>user-info → social.users.resolve</code>。该映射对 Hub-native direct 子集、历史兼容分支以及两组路径别名完全相同。</p>
@@ -6532,6 +6558,18 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: night-all-user-info-$(uuidgen)" \\
   -d '{"platform":"twitter","username":"openai"}'</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/post-detail</code></div><p>按一个明确平台的帖子 ID、<code>contentId</code>、平台专用标识或 <code>url</code> 获取完整正文、发布时间、作者及图片、视频、封面等媒体。<code>count/pageSize/limit</code> 最大 100；<code>includeRaw</code> 只接受 <code>false</code>。供应商、凭据和 endpoint 控制由 Hub 管理，不接受在 body 或 <code>params</code> 中注入。响应保持 <code>raw_info/raw_data</code> JSON 字符串 envelope。小红书详情优先使用已上线的 <code>/api/v1/data/post</code> 原生合同，此旧入口只作兼容过渡。</p></div>
+    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/search/post-detail" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: post-detail-$(uuidgen)" \\
+  -d '{"businessId":"agent:&lt;Agent标识&gt;:data_query:search_post_detail:twitter","platform":"twitter","postId":"&lt;平台帖子ID&gt;","url":"&lt;帖子链接&gt;","count":1,"includeRaw":false}'</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/post-comments</code></div><p>按一个明确平台的帖子 ID、<code>contentId</code>、平台专用标识或 <code>url</code> 获取单帖评论。<code>count/pageSize/limit</code> 默认 20、最大 100；可继续使用返回的 <code>page.nextCursor</code>，也兼容 <code>params</code> 中的上游续页状态。<code>includeRaw</code> 默认 <code>false</code>。新请求由 Hub 单帖评论合同执行，不调用 Night-All；需要目标平台与 social.comments.list 授权。供应商、凭据、endpoint 和扩大调用量控制由 Hub 管理。<code>raw_data</code> 应包含评论 ID、正文 ID、评论正文、作者、发布时间和互动量，并保留明确的分页状态。商品评论、搜索附带评论和 YouTube 频道评论不属于此合同。</p></div>
+    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/search/post-comments" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: post-comments-$(uuidgen)" \\
+  -d '{"businessId":"data-hub:&lt;策略标识&gt;:weibo:评论","platform":"weibo","postId":"&lt;平台正文ID&gt;","contentId":"&lt;同一个平台正文ID&gt;","url":"&lt;原文链接&gt;","count":100,"page":1,"includeRaw":false}'</code></pre>
     <div class="notice"><strong>crawl 采集工作预算与费用独立。</strong>单页有效条数（count → pageSize → limit，默认 20）仍受平台/Key 策略及上游最多 100 条限制。总工作量 = 身份数 × 每身份条数 × activityTypes 数（省略时为 1），由管理员在“开放能力 → 调用身份 → 平台配置”的 <code>maxCrawlWork</code> 中设置，范围 1–5000，默认 100；旧平台策略保留其不超过 100 的原限制。同类身份别名中完全相同的值只计一次，不推断 username 与 userId 是否为同一人。最多 50 个身份的独立限制仍生效。此预算是单请求处理量，不是累计配额、采购价或客户单价。</div>
     <p>例如两个账号各取 100 条、一个活动类型，工作量为 200：预算 100 时返回 <code>400 work_budget_exceeded</code>，管理员调至 200 或拆成两次单账号请求即可通过该预检（仍需满足其他授权与配额）。单账号、一个活动类型、count=100 本来就不超过 100；仅凭 target_count=100 不能判定完整请求工作量。免费价格不能跳过预检，公开请求也不能自报 maxCrawlWork。</p>
     <pre><code>{"error":{"code":"work_budget_exceeded","message":"Crawl work must not exceed 100","details":{"stage":"admission","upstreamDispatched":false,"retryable":false,"identityCount":2,"pageSize":100,"activityTypeCount":1,"requestedWork":200,"allowedWork":100}}}</code></pre>
@@ -6662,7 +6700,7 @@ curl -sS "$HUB_URL/api/v1/acquisitions/$ACQUISITION_REQUEST_ID" \
 
     <section class="doc-page" data-doc-page="errors">
     <h2 id="errors">错误与重试</h2>
-    <div class="notice"><strong>外采财务准入：</strong><code>external_platform_cost_budget_exhausted</code> 与 <code>external_platform_subsidy_budget_exhausted</code> 保留在兼容错误合同中，但只可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量。已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。API Key/套餐配额、共享供应方限流、全局与单 consumer 并发、熔断、合同、凭据、幂等和派发安全保护仍然适用。</div>
+    <div class="notice"><strong>外采财务准入：</strong><code>external_platform_cost_budget_exhausted</code> 与 <code>external_platform_subsidy_budget_exhausted</code> 保留在兼容错误合同中，但只可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量。已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。已显式开启 Hub 最大豁免的原始 LCY-delta Key 同样豁免这两项预算限制。API Key/套餐配额、共享供应方限流、全局与单 consumer 并发、熔断、合同、凭据、幂等和派发安全保护仍然适用。</div>
     <table><thead><tr><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
       <tr><td>400</td><td>字段、游标、页大小或幂等 Key 不合法</td><td>修正请求，不原样盲重试</td></tr>
       <tr><td>401 / 403</td><td>Key 无效，或平台未授权</td><td>检查 Key 与 capabilities</td></tr>
@@ -6689,13 +6727,14 @@ const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery']
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
   if (path === '/api/v2/data/search') return scopes.some(scope => scope.platforms.some(platform => DATA_SEARCH_V2_PLATFORMS.includes(platform)))
+  if (path === '/data/social/post-comments') return postCommentsPlatforms(scopes).length > 0
   if (path === '/requests/{requestId}/search-recovery') return scopes.some(scope => scope.platforms.includes('twitter'))
   if (['/data/social/crawl', '/data/social/user-info'].includes(path)) return hubSocialAccountPlatforms(path.split('/').at(-1), scopes).length > 0
   if (path === '/data/ip/risk/subscription') return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
   if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
-  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','youtube','web_search','xiaohongshu'].includes(value)))
+  if (path === '/data/services/pricing') return postCommentsPlatforms(scopes).length > 0 || scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','youtube','web_search','xiaohongshu'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
   let platform = operation?.['x-mx-required-platform']
@@ -6720,7 +6759,7 @@ const TENANT_PRODUCT_PATHS = {
   'web-search':Object.keys(webSearchPaths),
   [WECHAT_SELF_HOSTED.docs]: Object.keys(wechatSelfHostedPaths),
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
-  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths)],
+  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths), ...Object.keys(postCommentsPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
@@ -6772,6 +6811,13 @@ export function tenantOpenApiDocument(scopes) {
     entry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
     entry.requestBody.content['application/json'].example.platform = platforms[0]
   }
+  const commentEntry = document.paths['/data/social/post-comments']?.post
+  if (commentEntry) {
+    const platforms = postCommentsPlatforms(scopes)
+    commentEntry['x-mx-platform-options'] = platforms
+    commentEntry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
+    commentEntry.requestBody.content['application/json'].example.platform = platforms[0]
+  }
   const refs = new Set()
   const visit = value => {
     if (!value || typeof value !== 'object') return
@@ -6800,7 +6846,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === WECHAT_SELF_HOSTED.docs) return wechatSelfHostedGuide
   if (route.nativeKey) return nativeEndpointGuide(route.key)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
-  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + youtubeCommentsGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
+  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + youtubeCommentsGuide(path=>tenantDocumentPathAllowed(path,scopes)) + postCommentsGuide(scopes) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk-subscription') return ipRiskProductGuide
@@ -6871,7 +6917,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key === 'ip-risk-v2') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskV2Guide}</main>`)
   if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
   if (route.key === WECHAT_SELF_HOSTED.docs) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${wechatSelfHostedGuide}</main>`)
-  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${nativeServiceGuide(route.key)}</main>`)
+  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${postCommentsGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'strategy-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${strategySearchGuide()}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)
   if (tenant) {

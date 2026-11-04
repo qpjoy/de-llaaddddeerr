@@ -13,6 +13,7 @@
 | 项目 | 现状 | 来源 |
 |---|---|---|
 | Hub 工作负载 | Public `:18150`、Admin `:18151`、ingest、projector、classifier、retrieval **全部 hostNetwork**；除 retrieval（2 副本）外都是 1 副本 + Recreate | `deploy/k8s/internal/30–35-*.yaml` |
+| Internal 启动依赖门禁 | 已实现未部署：上述六个工作负载的 initContainer 等宿主 `127.0.0.1:5432` PostgreSQL 接受连接及已保存 HanLP URL `/health` 就绪，最长 900 秒后由 k8s 重试；不验证源库身份，不阻塞 kubelet 或 Launcher | [启动门禁说明](../../operations/internal-startup-dependencies-2026-10-27.md) |
 | 监听地址 | Public、Admin 监听 `0.0.0.0`（`MX_INSIGHT_HOST` 未设置时的默认值），所以 `127.0.0.1`、`10.88.88.88`、`192.168.1.2` 都能访问 | `server/config.mjs` |
 | Public 并发 | 因为 hostNetwork 绑固定端口不能加副本，改成一个 Pod 里跑 4 个进程 | `server/index.mjs` 中的 `PUBLIC_API_PROCESSES` |
 | k8s Service | 已有 `mx-insight-hub-public:18150`、`mx-insight-hub-admin:18151`（命名空间 `mx-insight-hub`），但外部调用方没用它 | 同上 30/31 清单 |
@@ -53,6 +54,7 @@ flowchart LR
 |---|---|---|---|
 | A 机的 `:18150` 就是 Hub 入口 | Public Pod 被调度到 B 机后，A 机 `:18150` 没人监听，Delta、Java、内网 Nginx 全部断开 | 过渡期把 Hub 钉在 A 机；之后在 A 机放 hub-edge 入口代理 | S1 → S2 |
 | `127.0.0.1:13141` 就是 Night-All | B 机上 Pod 的回环地址不是 A 机 | 过渡期把 Admin、ingest 钉在 A 机；之后改用 `night-all-legacy` Service | S1 → S2 |
+| Internal 启动门禁的 `127.0.0.1:5432` 就是宿主源库 | 调度到 B 机后会等待错误的本地目标 | 启用该清单前维持全部 Hub 工作负载在 A 机；S2 前把此生产门禁改为明确的源库服务身份与地址 | S1 → S2 |
 | 1 副本就等于单例（Admin 的通知、余额监控、支付报表等定时任务） | 多副本或重新调度期间可能同时跑两份 | Admin 保持 1 副本 + Recreate；新执行者靠 PG 仲裁，不依赖副本数 | 不变 |
 | 并发上限按进程平分 | 实际总量 = 配置值 × 副本数 | 改成全局信号量（见 [04](04-admission-and-concurrency.md)），完成之前 Public 不加副本 | S2 前置 |
 | 事件唤醒在进程内 | 跨 Pod 收不到 | 使用 PG `LISTEN/NOTIFY`：所有 Pod 连同一个主库，跨节点也能用 | 设计即支持 |

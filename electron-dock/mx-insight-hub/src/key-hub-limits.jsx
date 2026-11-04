@@ -12,7 +12,7 @@ export function canManageKeyHubLimits(session, key) {
 }
 
 export function KeyHubLimitsModal({ token, apiKey, onClose, onUnauthorized }) {
-  const [data, setData] = useState(null), [enabled, setEnabled] = useState(false)
+  const [data, setData] = useState(null), [enabled, setEnabled] = useState(false), [priority, setPriority] = useState(false)
   const [loading, setLoading] = useState(false), [saving, setSaving] = useState(false)
   const [reason, setReason] = useState(''), [error, setError] = useState(null), [notice, setNotice] = useState('')
   const active = useRef(null), mounted = useRef(true)
@@ -23,7 +23,8 @@ export function KeyHubLimitsModal({ token, apiKey, onClose, onUnauthorized }) {
     try {
       const result = await adminApi.keyHubLimits(token, apiKey.id, { signal: controller.signal })
       if (controller.signal.aborted) return
-      setData(result); setEnabled(result.effectiveExempt === true)
+      if (result.policyVersion !== 2) throw new Error('请先发布支持预算与自动熔断豁免的 Hub 新版本，再设置此开关。')
+      setData(result); setEnabled(result.effectiveExempt === true); setPriority(result.hubSupplierAdmission === 'priority')
     } catch (failure) {
       if (controller.signal.aborted) return
       setError(failure); if (failure.status === 401) onUnauthorized?.(failure)
@@ -42,10 +43,15 @@ export function KeyHubLimitsModal({ token, apiKey, onClose, onUnauthorized }) {
     try {
       const result = await adminApi.saveKeyHubLimits(token, apiKey.id, {
         hubRateLimitExempt: enabled, revision: data.revision, reason: reason.trim(),
+        // Older Hub versions reject unknown fields; send it only when offered.
+        ...(supplierModes ? { hubSupplierAdmission: priority ? 'priority' : 'bypass' } : {}),
       })
       if (!mounted.current) return
-      setData(result); setEnabled(result.effectiveExempt === true); setReason('')
-      setNotice(result.effectiveExempt ? '已保存：Hub 次数、频率与并发豁免已开启。' : '已保存：此 Key 恢复普通 Hub 限制。')
+      if (result.policyVersion !== 2) throw new Error('保存结果来自旧版 Hub；请完成发布后重新读取当前状态。')
+      setData(result); setEnabled(result.effectiveExempt === true); setPriority(result.hubSupplierAdmission === 'priority'); setReason('')
+      setNotice(!result.effectiveExempt ? '已保存：此 Key 恢复普通 Hub 限制。'
+        : result.effectiveSupplierPriority ? '已保存：豁免已开启，供应商并发与每分钟请求数改为优先排队。'
+          : '已保存：Hub 次数、频率、并发与预算豁免已开启。')
     } catch (failure) {
       if (!mounted.current) return
       // A lost response may follow a committed write. Never retry with a stale
@@ -57,9 +63,12 @@ export function KeyHubLimitsModal({ token, apiKey, onClose, onUnauthorized }) {
       if (failure.status === 401) onUnauthorized?.(failure)
     } finally { if (mounted.current) setSaving(false) }
   }
+  // Hubs before supplier priority return no mode; the choice is then hidden.
+  const supplierModes = typeof data?.hubSupplierAdmission === 'string'
   const unchanged = data?.source === 'explicit' && enabled === data.effectiveExempt
+    && (!supplierModes || priority === (data.hubSupplierAdmission === 'priority'))
   return <Modal title={`${apiKey.name} · Hub 限制开关`} size="large" busy={saving} closeOnBackdrop={false} onClose={() => !saving && onClose()}
-    description="仅管理这把原始 Key 的 Hub 次数、频率与并发限制。读取和保存设置不发起业务查询。">
+    description="仅管理这把原始 Key 的 Hub 次数、频率、并发与预算限制。读取和保存设置不发起业务查询。">
     <div className="mih-form">
       <p><strong>Key ID：</strong><code>{apiKey.id}</code></p>
       {loading ? <LoadingState label="正在读取 Hub 限制设置" /> : null}
@@ -67,15 +76,26 @@ export function KeyHubLimitsModal({ token, apiKey, onClose, onUnauthorized }) {
       {notice ? <p role="status">{notice}</p> : null}
       {data ? <form className="mih-form" onSubmit={save}>
         <section className="qp-card" aria-label="已保存的 Hub 限制状态">
-          <p><strong>当前状态：</strong>{data.source === 'legacy' ? '沿用历史策略 · 尚未显式设置' : data.effectiveExempt ? '豁免已开启' : '豁免已关闭 · 普通 Hub 限制'}</p>
-          {data.source === 'legacy' ? <p>{data.inheritedQuotaExempt ? '原有内部 Key 额度豁免继续生效；尚未显式开启本开关的次数、频率与并发豁免。' : '尚未显式开启本开关的次数、频率与并发豁免。'}</p> : null}
+          <p><strong>当前状态：</strong>{data.source === 'legacy' ? '沿用历史策略 · 尚未显式设置' : data.effectiveExempt ? (data.effectiveSupplierPriority ? '豁免已开启 · 供应商优先排队' : '豁免已开启') : '豁免已关闭 · 普通 Hub 限制'}</p>
+          {data.source === 'legacy' ? <p>{data.inheritedQuotaExempt ? '原有内部 Key 额度豁免继续生效；尚未显式开启本开关的次数、频率、并发与预算豁免。' : '尚未显式开启本开关的次数、频率、并发与预算豁免。'}</p> : null}
+          {data.businessWorkQuotaExempt === true ? <p>此 Key 不受套餐、调用者和 Key 的业务分页与采集工作量配额限制。接口自身的分页范围、并发和速率保护仍生效。</p> : null}
+          {data.walletOverdraftAllowed === true ? <p>余额不足时继续按合同价预占和结算。已结算欠款在租户钱包显示，后续充值优先抵欠。</p> : null}
           <small>版本 {data.revision}{data.updatedAt ? ` · 更新于 ${formatDate(data.updatedAt)}` : ''}</small>
         </section>
-        <Field label="豁免 Hub 次数、频率与并发限制" hint="开启后跳过 Hub 业务查询的请求次数配额、限频、普通执行并发门禁及限流冷却；关闭后恢复普通限制，并覆盖这把 Key 的历史额度豁免。">
-          <label><input type="checkbox" role="switch" aria-label="豁免 Hub 次数、频率与并发限制" checked={enabled} disabled={saving} onChange={event => { setEnabled(event.target.checked); setNotice('') }} /> {enabled ? '开启豁免' : '关闭豁免'}（{unchanged ? '已保存' : '待保存'}）</label>
+        <Field label="豁免 Hub 次数、频率、并发与预算限制" hint="产品/API 资源限速始终适用，包括此 Key。开启后跳过 Hub 业务查询的请求次数配额、限频、普通执行并发门禁、月度采购/补贴预算及自动供应商熔断等待；关闭后恢复普通限制，并覆盖这把 Key 的历史额度豁免。">
+          <label><input type="checkbox" role="switch" aria-label="豁免 Hub 次数、频率、并发与预算限制" checked={enabled} disabled={saving} onChange={event => { setEnabled(event.target.checked); setNotice('') }} /> {enabled ? '开启豁免' : '关闭豁免'}（{unchanged ? '已保存' : '待保存'}）</label>
         </Field>
-        <p>上游实际限流仍会返回错误。认证、授权、余额与计费、采购预算、非限流故障保护、结果待核对和幂等保护继续生效。设置只影响后续准入，不清零用量、不改历史结果，也不重发请求。</p>
-        <p>商品媒体传输限制、IP 订阅权益额度和供应商账本保护仍适用。</p>
+        {supplierModes && enabled ? <Field label="供应商并发与每分钟请求数" hint={priority
+          ? '按“管理”页的供应商并发与每分钟请求数发起；名额不足时在本次请求时限内排在其他 Key 前面等待，并保留至少 80% 的并发名额。上游刚返回限流时先放慢再逐步恢复；供应商明确未计费的限流拒绝会在同一请求内自动重试一次。等不到名额时返回“尚未调用上游、可重试”的繁忙错误。开启前请确认“管理”页的数值不低于这把 Key 平时的用量。'
+          : '不受“管理”页的供应商并发与每分钟请求数限制，请求直接到达供应商；供应商限流时直接返回错误。'}>
+          <select className="qp-input" value={priority ? 'priority' : 'bypass'} disabled={saving}
+            onChange={event => { setPriority(event.target.value === 'priority'); setNotice('') }}>
+            <option value="bypass">绕过（原方式）</option>
+            <option value="priority">优先排队</option>
+          </select>
+        </Field> : null}
+        <p>上游实际限流仍会返回错误。认证、授权、管理员主动暂停、合同价格与结算、合同隔离、结果待核对和幂等保护继续生效。上游充值后，新请求不必等待 Hub 的自动供应商熔断到期。设置只影响后续准入，不清零用量、不改历史结果，也不重发请求。</p>
+        <p>商品媒体传输限制和供应商账本保护仍适用。{data.walletOverdraftAllowed ? '有效 IP 订阅包内不另计费，超过日额度或总额度后按合同计费。' : 'IP 订阅仍受已购权益限制。'}</p>
         <Field label="变更原因" hint="将随本次设置写入管理审计记录。">
           <textarea className="qp-input" rows={3} minLength={3} maxLength={500} required value={reason} disabled={saving} onChange={event => setReason(event.target.value)} placeholder="例如：允许 LCY-delta 直接承接上游限流反馈" />
         </Field>

@@ -10,6 +10,21 @@ const row = { platform: 'instagram', editable: true, providers: ['justone', 'tik
   policy: { mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null, revision: 4 } }
 const draft = { mode: 'fixed', primaryProvider: 'justone', reason: '  Reviewed route change  ' }
 
+test('Facebook account editors require an independent saved business policy', () => {
+  const account = { platform: 'facebook', editable: true, providers: ['justone'], allowedModes: ['fixed', 'paused'],
+    policy: { mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null, revision: 1 } }
+  for (const id of ['crawl', 'user-info']) {
+    assert.equal(strategyPolicyEditor(id, account), 'facebook-account')
+    const paused = strategyPolicySummary(id, { ...account, policy: { ...account.policy, mode: 'paused' } })
+    assert.match(paused.title, /暂停/)
+    assert.match(paused.description, /已购/)
+    for (const invalid of [{ ...account, policy: null }, { ...account, editable: false },
+      { ...account, policy: { ...account.policy, primaryProvider: 'rapidapi' } },
+      { ...account, policy: { ...account.policy, revision: 0 } }]) assert.equal(strategyPolicyEditor(id, invalid), null)
+  }
+  assert.equal(strategyPolicyEditor('search', account), null)
+})
+
 test('strategy search has its own data-services product and reciprocal documentation', () => {
   assert.equal(productCategory(STRATEGY_SEARCH_PATH).key, 'services')
   assert.equal(productForPath(STRATEGY_SEARCH_PATH).label, '策略搜索')

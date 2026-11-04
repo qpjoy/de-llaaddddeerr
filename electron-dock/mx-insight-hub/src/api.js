@@ -321,6 +321,14 @@ export const publicDataApi = {
     { method: 'POST', body, idempotencyKey, retryOfRequestId },
   ),
   xiaohongshuPost: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(apiKey, '/api/v1/data/post', { method: 'POST', body, idempotencyKey }),
+  postDetail: (apiKey, body, { idempotencyKey, path = '/api/v1/search/post-detail', signal } = {}) => {
+    if (!['/api/v1/search/post-detail', '/api/v1/night-all/search/post-detail'].includes(path)) throw new Error('Unsupported post-detail path')
+    return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, signal })
+  },
+  postComments: (apiKey, body, { idempotencyKey, path = '/api/v1/search/post-comments', signal } = {}) => {
+    if (!['/api/v1/data/social/post-comments', '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'].includes(path)) throw new Error('Unsupported post-comments path')
+    return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, signal })
+  },
   xiaohongshuDiscovery: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => {
     const product = XHS_DISCOVERY_PRODUCTS.find(item => item.id === endpoint)
     if (!product) throw new Error('Unknown Xiaohongshu discovery endpoint')
@@ -552,6 +560,8 @@ export const adminApi = {
   probeWechatSelfHosted: (token, body) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/engine/probe`, { method: 'POST', body }),
   wechatSelfHostedJob: (token, id) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/jobs/${encodeURIComponent(id)}`),
   updateExternalPlatformProxy: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/proxy`, { method: 'PUT', body }),
+  resourceLimits: (token, options = {}) => request(token, `${ADMIN_ROOT}/data-products/resource-limits`, options),
+  saveResourceLimits: (token, body) => request(token, `${ADMIN_ROOT}/data-products/resource-limits`, { method: 'PUT', body }),
   productManagement: (token, query, options = {}) => request(token, `${ADMIN_ROOT}/data-products/management`, { ...options, query }),
   externalPlatformAdmission: (token, key) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/admission-policy`),
   saveExternalPlatformAdmission: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/admission-policy`, { method: 'PUT', body }),
@@ -616,6 +626,12 @@ export const adminApi = {
   twitterRetryPreparation: (token, requestId) => request(
     token, `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/twitter-retry`,
   ),
+  searchAdmissionDisposition: (token, requestId) => request(
+    token, `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/search-admission-disposition`,
+  ),
+  dispositionSearchAdmission: (token, requestId, body) => request(
+    token, `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/search-admission-disposition`, { method: 'POST', body },
+  ),
   verifyAcquisitionRequest: (token, requestId, candidate) => request(
     token,
     `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/verify-request`,
@@ -647,10 +663,15 @@ export const adminApi = {
   pricingTemplate: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/pricing-template`, body ? { method: 'POST', body } : {}),
   sourceConnections: token => request(token, `${ADMIN_ROOT}/source-connections`),
   platformSearchPolicies: token => request(token, `${ADMIN_ROOT}/platform-search-policies`),
+  requestFacebookQuotaCheck: (token, body) => request(token, `${ADMIN_ROOT}/platform-search-policies/facebook/quota-check`, { method: 'POST', body }),
   strategySearch: token => request(token, `${ADMIN_ROOT}/strategy-search`),
   strategySearchUsage: (token, days = 7) => request(token, `${ADMIN_ROOT}/strategy-search/usage?days=${encodeURIComponent(days)}`),
   strategySearchDataStatistics: (token, days = 7) => request(token, `${ADMIN_ROOT}/strategy-search/data-statistics?days=${encodeURIComponent(days)}`),
   updateInstagramSearchStrategy: (token, body) => request(token, `${ADMIN_ROOT}/strategy-search/search/instagram`, { method: 'PUT', body }),
+  updateFacebookAccountStrategy: (token, interfaceId, body) => {
+    if (!['crawl', 'user-info'].includes(interfaceId)) throw new Error('Unsupported Facebook account interface')
+    return request(token, `${ADMIN_ROOT}/strategy-search/${interfaceId}/facebook`, { method: 'PUT', body })
+  },
   updateTwitterSearchStrategy: (token, body) => request(token, `${ADMIN_ROOT}/strategy-search/search/twitter`, { method: 'PUT', body }),
   ecommerceRouting: token => request(token, `${ADMIN_ROOT}/ecommerce-routing`),
   updateEcommerceRoute: (token, marketplace, body) => request(token, `${ADMIN_ROOT}/ecommerce-routing/${encodeURIComponent(marketplace)}`, { method: 'PUT', body }),

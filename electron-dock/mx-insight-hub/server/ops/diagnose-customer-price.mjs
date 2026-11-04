@@ -17,6 +17,7 @@ const TRIGGER_CONTRACTS = new Map([
 export const FUNCTION_HASHES = Object.freeze({
   reserve056: 'ad3181fa193b6ed15a302a576bdb88e3be6c01a985301bb4ab926a3261b4fc93',
   reserve080: 'b16216cb668204306923156d7a89ee42d669a5d8b6ce92bfe96d64bdc46ece4c',
+  reserve176: 'abaf7cd73a47c8d1305928a6c6e0a75d06a4a17a8250f4ee690204f42f853f5d',
   reserve105: '142e5676457342feba7e0437283ce093aee1e6959bd15dea21f5e27999ad256d',
   price105: '00452f550a6a0ff875ad45db40fad11df1ac885d3005c6b7c29ac1ae8879e8c2',
 })
@@ -41,7 +42,7 @@ export function billingGeneration(functions) {
   const price = functions.find(row => row.proname === 'customer_price_for_usage')
   const reserveSha256 = typeof reserve?.prosrc === 'string' ? sha(reserve.prosrc) : null
   const priceSha256 = typeof price?.prosrc === 'string' ? sha(price.prosrc) : null
-  const generation = reserveSha256 === FUNCTION_HASHES.reserve105 && priceSha256 === FUNCTION_HASHES.price105
+  const generation = [FUNCTION_HASHES.reserve105, FUNCTION_HASHES.reserve176].includes(reserveSha256) && priceSha256 === FUNCTION_HASHES.price105
     ? 'tenant_default_105' : reserveSha256 === FUNCTION_HASHES.reserve080 ? 'unlisted_free_080'
       : reserveSha256 === FUNCTION_HASHES.reserve056 ? 'missing_entry_errors_056' : 'unverified'
   return { generation, reserveSha256, priceSha256 }

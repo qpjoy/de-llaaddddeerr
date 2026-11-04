@@ -7,6 +7,11 @@ export function quotaRecoverySql(kind, target, scopeType = "''", scopeKey = "''"
       AND recovery.scope_key = ${scopeKey}), '-infinity'::timestamptz)`
 }
 
+// Ended unusable responses do not hold later requests. Keep the duration
+// interface for historical diagnostics; idempotency and in-flight leases
+// continue to prevent duplicate execution of an existing request.
+export const RESPONSE_QUARANTINE_MS = 0
+
 export function quarantineRecoverySql(alias = 'call') {
   return `AND NOT EXISTS (SELECT 1 FROM control.admission_recoveries recovery
     WHERE recovery.kind = 'response_quarantine' AND recovery.target = ${alias}.id::text)`

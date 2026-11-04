@@ -12,19 +12,22 @@ export const HUB_SOCIAL_ENDPOINTS = Object.freeze(Object.fromEntries([
   endpointKey: `twitter-aio.${key}`, contractVersion: HUB_SOCIAL_VERSION,
 })])))
 export const hubSocialByPath = path => Object.values(HUB_SOCIAL_ENDPOINTS).find(row => row.path === path)
+// AIO /user/{id}/tweetsAndReplies: the account crawl's replies timeline.
+export const TWITTER_REPLIES_ENDPOINT_KEY = 'twitter-aio.user-replies'
 export const HUB_SOCIAL_OPERATIONS = Object.values(HUB_SOCIAL_ENDPOINTS).map(row => ({
   operationKey: row.operation, label: row.label, legacyGate: 'hubSocialVerified',
   contractVersion: HUB_SOCIAL_VERSION, endpointKeys: [row.endpointKey],
+  // Replies need their own reviewed price; posts stay available without it.
+  ...(row.key === 'crawl' ? { optionalEndpointKeys: [TWITTER_REPLIES_ENDPOINT_KEY] } : {}),
 }))
 const fail = message => { throw new AppError(400, 'invalid_social_request', message) }
+// X itself caps handles at 15 characters, but callers send whatever identifier
+// they hold; only the supplier can say whether a longer one names an account.
 export function validateTwitterUsername(value) {
-  if (/^[A-Za-z0-9_]{1,15}$/.test(value)) return
-  const tooLong = value.length > 15
-  throw new AppError(400, 'invalid_social_request', tooLong
-    ? `Twitter username exceeds the 15-character limit (received ${value.length} characters, excluding @)`
-    : 'Twitter username must contain 1 to 15 letters (A-Z), digits (0-9), or underscores, excluding @', {
-    platform: 'twitter', field: 'username', reason: tooLong ? 'username_too_long' : 'username_invalid_characters',
-    actualLength: value.length, maxLength: 15,
+  if (/^[A-Za-z0-9_]+$/.test(value)) return
+  throw new AppError(400, 'invalid_social_request',
+    'Twitter username must contain only letters (A-Z), digits (0-9), or underscores, excluding @', {
+    platform: 'twitter', field: 'username', reason: 'username_invalid_characters', actualLength: value.length,
   })
 }
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -122,7 +125,7 @@ function profile(user) {
     createdAt: timestamp(legacy.created_at || core.created_at),
   }
 }
-function post(result, { standardSearch = false } = {}) {
+function post(result, { standardSearch = false, timeline = null } = {}) {
   const tweet = result?.tweet || result
   if (!object(tweet)) return null
   const legacy = tweet.legacy
@@ -158,6 +161,10 @@ function post(result, { standardSearch = false } = {}) {
       shares: integer(legacy.retweet_count), quotes: integer(legacy.quote_count), views: integer(tweet.views?.count), bookmarks: integer(legacy.bookmark_count) },
     tags: (legacy.entities?.hashtags || []).map(tag => text(tag.text)).filter(Boolean), imageUrls: images, videoUrls: videos,
     ...(standardSearch ? { coverUrl } : {}),
+    // Only the replies timeline adds these, so other contracts keep their shape.
+    ...(timeline === 'replies' ? { conversationId: identifier(legacy.conversation_id_str), replyTo: identifier(legacy.in_reply_to_status_id_str)
+      ? { id: legacy.in_reply_to_status_id_str, userId: identifier(legacy.in_reply_to_user_id_str), username: text(legacy.in_reply_to_screen_name) || null }
+      : null } : {}),
   }
 }
 function rawProfile(item) {

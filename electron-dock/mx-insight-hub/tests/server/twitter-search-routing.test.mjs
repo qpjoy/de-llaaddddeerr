@@ -229,12 +229,15 @@ test('TikHub content manifests and owned receipts pin existing requests even aft
   assert.equal(await h.route(context, input()), 'rapidapi')
 })
 
-test('new intent checks known unresolved queries across suppliers without replaying arbitrary historical rows', async () => {
+test('new intent checks equal in-flight queries across suppliers without replaying arbitrary historical rows', async () => {
   const h = harness()
-  h.requests.set('older-key', row({ status: 'unknown', reservedAt: '2020-01-01T00:00:00Z' }))
-  await assert.rejects(h.route(context, input()), error => error.code === 'request_outcome_unknown'
+  h.requests.set('older-key', row({ status: 'reserved', leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() }))
+  await assert.rejects(h.route(context, input()), error => error.code === 'request_in_progress'
     && error.details.requestId === 'saved-request' && error.details.automaticRetryAllowed === false)
   assert.equal(h.calls.length, 0)
+  h.requests.get('older-key').status = 'unknown'
+  assert.equal(await h.route(context, input()), 'tikhub', 'an ended unknown receipt does not block a new intent')
+  h.requests.get('older-key').status = 'reserved'
   h.requests.get('older-key').acquisitionRequest.body.query = 'unrelated'
   assert.equal(await h.route(context, input()), 'tikhub')
 })

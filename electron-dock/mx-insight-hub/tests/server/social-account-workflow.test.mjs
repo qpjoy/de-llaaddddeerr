@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { HubService } from '../../server/hub-service.mjs'
 import { createApp } from '../../server/app.mjs'
+import { LcyHubLimitStore } from '../fixtures/lcy-hub-limit-store.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
@@ -89,6 +90,20 @@ async function harness(t, { platform = 'twitter', fetchImpl, maxPageSize = 500, 
   return { store, service, platformStore, gateway, context, key, controls, calls, historical, invoke, provider, config }
 }
 
+test('Twitter crawl reports the normalized per-page work before reserving or acquiring', async t => {
+  const h = await harness(t, { maxPageSize: 100 })
+  const body = { platform: 'twitter', usernames: ['example', '@EXAMPLE'], activityTypes: ['posts', 'replies'], count: 100 }
+  await assert.rejects(h.invoke(body, 'portrait-work-budget'), error => {
+    assert.equal(error.status, 400)
+    assert.equal(error.code, 'work_budget_exceeded')
+    assert.deepEqual(error.details, { stage: 'admission', upstreamDispatched: false, retryable: false,
+      jobCount: 2, pageSize: 100, requestedWork: 200, allowedWork: 100 })
+    return true
+  })
+  assert.equal(h.calls.length, 0)
+  assert.ok(!await h.store.getUsageRequestByIdempotencyKey(h.context.consumer.id, 'portrait-work-budget'))
+})
+
 test('Twitter screenshot-shaped nonnumeric ID and page_size=500 follows short pages and retains one immutable delivery', async t => {
   let page = 0
   const h = await harness(t, { fetchImpl: call => {
@@ -114,6 +129,54 @@ test('Twitter screenshot-shaped nonnumeric ID and page_size=500 follows short pa
 })
 
 for (const operation of ['crawl', 'user-info']) {
+  test(`Twitter ${operation} returns a typed unavailable account without crawling, quarantining or repurchasing`, async t => {
+    const wire = JSON.stringify({ data: { users: [{ __typename: 'UserUnavailable', reason: 'Suspended', message: 'private supplier text' }] } })
+    const h = await harness(t, { fetchImpl: () => new Response(wire) })
+    const body = { platform: 'twitter', userId: '42', ...(operation === 'crawl' ? { count: 10 } : {}) }
+    const check = error => {
+      assert.equal(error.status, 422)
+      assert.equal(error.code, 'social_account_unavailable')
+      assert.equal(error.message, 'The upstream provider reported that the Twitter account is suspended')
+      assert.equal(error.details.reason, 'suspended')
+      assert.equal(error.details.stage, 'account_lookup')
+      assert.equal(error.details.retryable, false)
+      assert.equal(error.details.outcome, 'rejected')
+      assert.doesNotMatch(JSON.stringify(error.details), /private/)
+      return true
+    }
+    await assert.rejects(h.invoke(body, 'unavailable-account', operation), check)
+    const call = [...h.platformStore.calls.values()][0]
+    const usage = structuredClone(h.store.requests.get(call.usageRequestId))
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(call.errorCode, 'social_account_unavailable')
+    assert.equal(call.billed, null)
+    assert.equal(h.platformStore.state.consecutiveFailures, 0)
+    assert.equal(await h.platformStore.contractCircuitState('rapidapi', 'twitter'), null)
+    assert.equal(Buffer.from(h.platformStore.restrictedResponseArchives.get(call.id).bodyBytes).toString(), wire)
+    await assert.rejects(h.invoke(body, 'unavailable-account', operation), check)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    assert.deepEqual(h.store.requests.get(call.usageRequestId), usage)
+  })
+  test(`Twitter ${operation} replays a saved unavailable-account body with its original wording`, async t => {
+    const wire = JSON.stringify({ data: { users: [{ result: { __typename: 'UserUnavailable', reason: 'Suspended' } }] } })
+    const h = await harness(t, { fetchImpl: () => new Response(wire) })
+    const body = { platform: 'twitter', userId: '42', ...(operation === 'crawl' ? { count: 10 } : {}) }
+    await assert.rejects(h.invoke(body, 'historical-unavailable', operation), { message: /account is suspended$/ })
+    // A receipt saved before account states were named keeps its message byte-for-byte.
+    const usage = h.store.requests.get([...h.platformStore.calls.values()][0].usageRequestId)
+    usage.responseBody = { ...usage.responseBody, error: { ...usage.responseBody.error,
+      message: 'The upstream provider reported that the Twitter account is unavailable' } }
+    const saved = JSON.stringify(usage.responseBody)
+    await assert.rejects(h.invoke(body, 'historical-unavailable', operation), error => {
+      assert.equal(error.status, 422)
+      assert.equal(error.message, 'The upstream provider reported that the Twitter account is unavailable')
+      assert.deepEqual(error.details, { ...usage.responseBody.error.details, requestId: usage.id })
+      return true
+    })
+    assert.equal(JSON.stringify(usage.responseBody), saved)
+    assert.equal(h.calls.length, 1)
+  })
   test(`Twitter ${operation} preserves a definitive missing-account receipt as 404 without another purchase`, async t => {
     const wire = '{"data":{},"userExists":false}'
     const h = await harness(t, { fetchImpl: () => new Response(wire, { headers: { 'content-type': 'application/json' } }) })
@@ -368,7 +431,7 @@ test('multiple accounts preserve independent continuation and consume each archi
   assert.equal(JSON.parse(second.body.data.raw_info).length, 2)
 })
 
-test('unknown transport outcome keeps acquired evidence and never retries or falls back automatically', async t => {
+test('unknown transport outcome keeps acquired evidence and never retries or falls back under its own key', async t => {
   const h = await harness(t, { fetchImpl: call => {
     if (!call.url.pathname.includes('/tweets')) return Response.json(profile())
     throw new Error('Synthetic connection lost after dispatch')
@@ -377,14 +440,16 @@ test('unknown transport outcome keeps acquired evidence and never retries or fal
   await assert.rejects(h.invoke(body), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
   assert.equal(h.calls.length, 2)
   await assert.rejects(h.invoke(body))
-  await assert.rejects(h.invoke(body, 'social-unknown-new-idem'))
   assert.equal(h.calls.length, 2)
+  // A new key is not held by the ended unknown; it repeats profile and content lookup.
+  await assert.rejects(h.invoke(body, 'social-unknown-new-idem'), { code: 'upstream_outcome_unknown' })
+  assert.equal(h.calls.length, 4)
   assert.equal(h.historical.length, 0)
   assert.ok([...h.platformStore.calls.values()].some(call => call.outcome === 'unknown'))
-  assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 2, 'each key archives its own profile response')
 })
 
-test('a lost evidence acknowledgement preserves the receipt and prevents automatic reacquisition', async t => {
+test('a lost evidence acknowledgement preserves the receipt and prevents reacquisition under the same key', async t => {
   const h = await harness(t)
   const original = h.platformStore.stageProviderEvidence.bind(h.platformStore)
   h.platformStore.stageProviderEvidence = async input => {
@@ -396,9 +461,11 @@ test('a lost evidence acknowledgement preserves the receipt and prevents automat
   assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
   h.platformStore.stageProviderEvidence = original
   await assert.rejects(h.invoke())
-  await assert.rejects(h.invoke(undefined, 'social-persistence-new-idem'))
   assert.equal(h.calls.length, 1)
   assert.equal(h.historical.length, 0)
+  const next = await h.invoke(undefined, 'social-persistence-new-idem')
+  assert.equal(next.status, 200, 'a new key is not held by the earlier persistence unknown')
+  assert.equal(h.calls.length, 3)
 })
 
 test('rate admission after acquired content returns partial and a continuation, then resumes without repeating profile lookup', async t => {
@@ -420,6 +487,86 @@ test('rate admission after acquired content returns partial and a continuation, 
   assert.equal(h.calls[2].params.cursor, 'page-two')
   assert.equal(h.calls.filter(call => !call.url.pathname.includes('/tweets')).length, 1)
 })
+
+function weiboPageFixture(validPosts) {
+  return call => {
+    if (call.url.pathname.endsWith('/fetch_user_info')) {
+      return Response.json({ code: 200, data: { user: { id: call.params.uid || '42', screen_name: call.params.custom || 'offline_user' } } })
+    }
+    assert.ok(call.url.pathname.endsWith('/fetch_user_posts'))
+    return Response.json({ code: 200, data: validPosts(call) })
+  }
+}
+
+test('Weibo keeps verified posts when its continuation cannot be projected, with exact failure evidence and no repurchase', async t => {
+  // Match the verified archive's shape and count without copying any provider values.
+  const posts = Array.from({ length: 19 }, (_, index) => ({ id: String(index + 1), text: 'Verified' }))
+  const badPage = { unexpected_rows: [{ id: 'private-provider-value' }] }
+  const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call => {
+    if (call.params.page === '1') return { data: { list: posts, since_id: 'next', has_more: true } }
+    assert.deepEqual([call.params.page, call.params.since_id], ['2', 'next'])
+    return badPage
+  }) })
+  await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'test')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
+    { idempotencyKey: 'weibo-partial-credit', actor: 'test' })
+  const body = { platform: 'weibo', usernames: ['offline_user'], activityTypes: ['posts'], count: 50 }
+  const key = 'weibo-later-page-unusable'
+  const result = await h.invoke(body, key)
+  assert.equal(result.status, 200)
+  const { data } = result.body
+  assert.deepEqual(data.items.map(row => row.content_id), posts.map(post => post.id))
+  assert.equal(data.page.returnedCount, 19)
+  assert.equal(data.status, 'partial')
+  assert.ok(data.warnings.some(warning => warning.code === 'weibo_posts_page_unusable'))
+  assert.deepEqual([data.page.hasMore, data.page.nextCursor], [false, null])
+  assert.doesNotMatch(JSON.stringify(result.body), /private-provider-value/)
+  const ledger = [...h.platformStore.calls.values()]
+  assert.deepEqual(ledger.map(call => [call.outcome, call.billed, call.costMinor]),
+    [['succeeded', true, 2], ['succeeded', true, 2], ['succeeded_unusable', true, 2]])
+  const failed = ledger[2]
+  assert.equal(failed.errorCode, 'invalid_social_contract')
+  assert.equal(Buffer.from(h.platformStore.restrictedResponseArchives.get(failed.id).bodyBytes).toString(),
+    JSON.stringify({ code: 200, data: badPage }))
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  const usage = h.store.requests.get(failed.usageRequestId)
+  assert.deepEqual([usage.status, usage.responseStatus, usage.unitsActual], ['committed', 200, 1])
+  assert.deepEqual(usage.acquisitionRequest.socialSearch.sources.map(source => source.callId), ledger.slice(0, 2).map(call => call.id))
+  assert.deepEqual((await h.invoke(body, key)).body, result.body)
+  assert.equal(h.store.customerCharges.get(usage.id).chargedMinor, 3)
+  assert.equal(h.calls.length, 3)
+})
+
+test('Weibo batch cursor can resume the next account without repurchasing the unusable posts page', async t => {
+  const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call => {
+    if (call.params.uid === '43') return { list: [{ id: 'second' }], has_more: false }
+    if (call.params.page === '1') return { list: [{ id: 'first' }], since_id: 'next', has_more: true }
+    return { unexpected_rows: [] }
+  }) })
+  const body = { platform: 'weibo', userIds: ['42', '43'], count: 50 }
+  const first = await h.invoke(body, 'weibo-multiple-partial')
+  assert.deepEqual(first.body.data.items.map(row => row.content_id), ['first'])
+  assert.ok(first.body.data.page.nextCursor)
+  const firstCalls = h.calls.length
+  const remaining = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'weibo-multiple-remaining')
+  assert.deepEqual(remaining.body.data.items.map(row => row.content_id), ['second'])
+  assert.equal(remaining.body.data.page.nextCursor, null)
+  assert.deepEqual(h.calls.slice(firstCalls).map(call => call.params.uid), ['43', '43'])
+})
+
+for (const otherAccount of [false, true]) {
+  test(`Weibo still fails on an unusable first posts page (other account has rows: ${otherAccount})`, async t => {
+    const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call =>
+      call.params.uid === '43' ? { list: [{ id: 'first', text: 'Verified other account' }], has_more: false } : { unexpected_rows: [] }) })
+    const body = { platform: 'weibo', userIds: otherAccount ? ['43', '42'] : ['42'], count: 50 }
+    const key = 'weibo-first-page-unusable'
+    await assert.rejects(h.invoke(body, key), { status: 502, code: 'external_platform_response_unusable' })
+    const ledger = [...h.platformStore.calls.values()]
+    assert.equal(ledger.at(-1).outcome, 'succeeded_unusable')
+    assert.equal(ledger.filter(call => call.outcome === 'succeeded' && call.itemCount > 0 && call.endpointKey === ledger.at(-1).endpointKey).length, otherAccount ? 1 : 0)
+    assert.equal(h.calls.length, otherAccount ? 4 : 2)
+  })
+}
 
 for (const platform of ['weibo', 'facebook']) {
   test(`${platform} real adapter keeps profile and posts receipts, bills once and never invokes Night-All`, async t => {
@@ -490,6 +637,21 @@ test('an empty advancing provider page continues, while a repeated token stops w
   assert.ok(result.body.data.warnings.some(warning => warning.code === 'upstream_pagination_stopped'))
 })
 
+test('an empty page repeating its own continuation ends the timeline normally', async t => {
+  let page = 0
+  const h = await harness(t, { fetchImpl: call => {
+    if (!call.url.pathname.includes('/tweets')) return Response.json(profile())
+    page++
+    return Response.json(page === 1 ? timeline(['1', '2'], 'end') : timeline([], 'end'))
+  } })
+  const result = await h.invoke({ platform: 'twitter', username: 'ui_batch_019', count: 10 })
+  assert.deepEqual(result.body.data.items.map(row => row.content_id), ['1', '2'])
+  assert.equal(h.calls.length, 3)
+  assert.equal(result.body.data.page.hasMore, false)
+  assert.deepEqual(result.body.data.warnings, [])
+  assert.equal(result.body.data.status, 'ok')
+})
+
 test('provider credential echoes never enter public deliveries, canonical records or replayed overflow', async t => {
   const h = await harness(t, { fetchImpl: call => {
     if (!call.url.pathname.includes('/tweets')) return Response.json(profile())
@@ -545,8 +707,12 @@ test('public HTTP social routes use the Hub workflow while legacy route aliases 
   assert.equal(h.calls.length, 3)
 })
 
-test('Twitter missing-account HTTP response and replay retain the durable Request ID with 404', async t => {
-  const h = await harness(t, { fetchImpl: () => Response.json({ data: {}, userExists: false }) })
+for (const [status, code, payload] of [
+  [404, 'social_account_not_found', { data: {}, userExists: false }],
+  [422, 'social_account_unavailable', { data: { users: [{ __typename: 'UserUnavailable' }] } }],
+]) {
+test(`Twitter ${code} HTTP response and replay retain the durable Request ID with ${status}`, async t => {
+  const h = await harness(t, { fetchImpl: () => Response.json(payload) })
   const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
     listenerMode: 'public', logger: { error() {} }, hubSocialGateway: { socialData: (context, input) => h.gateway.socialAccountData(context, input) } }))
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -556,17 +722,19 @@ test('Twitter missing-account HTTP response and replay retain the durable Reques
     body: JSON.stringify({ platform: 'twitter', user_id: 'Brain6ur', page_size: 30 }) })
   const response = await send(), body = await response.json()
   const usage = [...h.store.requests.values()][0]
-  assert.equal(response.status, 404)
-  assert.equal(body.error.code, 'social_account_not_found')
+  assert.equal(response.status, status)
+  assert.equal(body.error.code, code)
+  if (status === 422) assert.equal(body.error.details.reason, 'unavailable')
   assert.equal(body.requestId, usage.id)
   assert.equal(body.error.details.requestId, usage.id)
   assert.equal(response.headers.get('x-mx-insight-request-id'), usage.id)
   const replay = await send()
-  assert.equal(replay.status, 404)
+  assert.equal(replay.status, status)
   assert.equal(replay.headers.get('x-mx-insight-request-id'), usage.id)
   assert.deepEqual(await replay.json(), body)
   assert.equal(h.calls.length, 1)
 })
+}
 
 test('already-issued Twitter mxec2 cursors and exact historical replay keep the original contract', async t => {
   const h = await harness(t, { fetchImpl: call => Response.json(timeline(call.params.cursor ? ['2'] : ['1'], call.params.cursor ? null : 'old-next')) })
@@ -733,7 +901,7 @@ test('old numeric-handle failures and unresolved receipts never reserve, redispa
   assert.equal(h.store.requests.size, reservations)
 })
 
-test('previous 20-to-30-digit ID receipts replay without allowing a new oversized ID request', async t => {
+test('previous 20-to-30-digit ID receipts replay exactly; a new oversized digit string is only a handle', async t => {
   for (const id of ['12345678901234567890', '123456789012345678901234567890']) await t.test(`${id.length} digits`, async t => {
     const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
       ? timeline(['1'], null, 'old_account', id) : profile('old_account', id)) })
@@ -752,7 +920,9 @@ test('previous 20-to-30-digit ID receipts replay without allowing a new oversize
     h.store.reserve = () => { throw new Error('Historical oversized ID must not reserve') }
     assert.deepEqual((await h.invoke(body, key)).body, original.body)
     assert.deepEqual(saved, before)
-    await assert.rejects(h.invoke(body, `fresh-${id.length}-digit-id`), { code: 'invalid_social_request' })
+    // Too long for an ID, so a new request names a handle; it never reuses the receipt.
+    assert.deepEqual(normalizeHubSocialCompatRequest('crawl', body).jobs[0].identity, { kind: 'username', value: id })
+    await assert.rejects(h.invoke(body, `fresh-${id.length}-digit-id`), /Historical oversized ID must not reserve/)
     Object.assign(saved, { status: 'reserved', responseBody: null, responseStatus: null, leaseExpiresAt: new Date(Date.now() - 60000).toISOString() })
     await assert.rejects(h.invoke(body, key), { code: 'request_in_progress' })
     assert.equal(h.calls.length, calls)
@@ -760,8 +930,8 @@ test('previous 20-to-30-digit ID receipts replay without allowing a new oversize
   })
 })
 
-test('19-digit Twitter identifiers in username HTTP fields use ID lookup and preserve exact strings', async t => {
-  const id = '1234567890123456789'
+test('reported 19-digit Twitter identifier uses ID lookup and returns profile and posts over HTTP', async t => {
+  const id = '1952056883877212160'
   const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
     ? timeline(['1'], null, 'actual_account', id) : profile('actual_account', id)) })
   const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
@@ -775,6 +945,11 @@ test('19-digit Twitter identifiers in username HTTP fields use ID lookup and pre
     const body = await response.json()
     assert.equal(response.status, 200, JSON.stringify(body))
     assert.equal(JSON.parse(body.data.raw_info)[0].user_id, id)
+    if (operation === 'crawl') {
+      assert.equal(body.data.items.length, 1, 'known supplier post is delivered, not an empty result')
+      assert.equal(body.data.items[0].id, 'twitter:1')
+      assert.equal(body.data.items[0].author.id, id)
+    }
   }
   assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/users/by/ids', `/user/${id}/tweets`, '/user/users/by/ids'])
   assert.ok(h.calls.filter(call => call.url.pathname === '/user/users/by/ids').every(call => call.params.ids === id))
@@ -782,22 +957,26 @@ test('19-digit Twitter identifiers in username HTTP fields use ID lookup and pre
   assert.equal(h.historical.length, 0)
 })
 
-test('invalid Twitter username HTTP errors explain the limit before reserving or dispatching', async t => {
-  const h = await harness(t)
+test('Twitter handles over 15 characters reach the supplier; invalid characters fail before reserving or dispatching', async t => {
+  const h = await harness(t, { fetchImpl: () => Response.json({ data: {}, userExists: false }) })
   const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
     listenerMode: 'public', logger: { error() {} }, hubSocialGateway: { socialData: (context, input) => h.gateway.socialAccountData(context, input) } }))
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
   t.after(() => new Promise(resolve => server.close(resolve)))
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/social/crawl`, { method: 'POST',
-    headers: { Authorization: `Bearer ${h.key.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'http-invalid-twitter-handle' },
-    body: JSON.stringify({ platform: 'twitter', username: 'mx_health_probe_202607', count: 5 }) })
-  const body = await response.json()
-  assert.equal(response.status, 400)
-  assert.equal(body.error.code, 'invalid_social_request')
-  assert.match(body.error.message, /15-character limit.*22 characters/)
-  assert.deepEqual(body.error.details, { platform: 'twitter', field: 'username', reason: 'username_too_long', actualLength: 22, maxLength: 15 })
+  const send = (username, key) => fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/social/crawl`, { method: 'POST',
+    headers: { Authorization: `Bearer ${h.key.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+    body: JSON.stringify({ platform: 'twitter', username, count: 5 }) })
+  const invalid = await send('mx health probe', 'http-invalid-twitter-handle'), invalidBody = await invalid.json()
+  assert.equal(invalid.status, 400)
+  assert.equal(invalidBody.error.code, 'invalid_social_request')
+  assert.match(invalidBody.error.message, /letters.*digits.*underscores/)
+  assert.deepEqual(invalidBody.error.details, { platform: 'twitter', field: 'username', reason: 'username_invalid_characters', actualLength: 15 })
   assert.equal(h.calls.length, 0)
   assert.equal(h.store.requests.size, 0)
+  const long = await send('mx_health_probe_202607', 'http-long-twitter-handle'), longBody = await long.json()
+  assert.equal(long.status, 404, 'the supplier, not Hub, decides the long handle')
+  assert.equal(longBody.error.code, 'social_account_not_found')
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/mx_health_probe_202607'])
 })
 
 async function reviewStep(h, step) {
@@ -903,4 +1082,177 @@ for (const platform of ['twitter', 'facebook', 'weibo']) test(`LCY ${platform} a
   await assert.rejects(f.invoke({ platform, userId: '55', count: 20 }, 'account-switch-disabled'), error =>
     ['external_platform_busy', 'external_platform_circuit_open'].includes(error.code))
   assert.equal(f.calls.length, before)
+})
+
+const facebookPause = (h, operation, mode = 'paused', expectedRevision = 1) => h.gateway.strategySearchRoutingStore.update(operation, 'facebook', {
+  mode, primaryProvider: 'justone', fallbackProvider: null, expectedRevision, reason: 'Independent business pause regression',
+})
+
+test('Facebook profile pause preserves replay and content resolution; content pause leaves profiles available', async t => {
+  const h = await harness(t, { platform: 'facebook' })
+  const body = { platform: 'facebook', userId: '42' }
+  const first = await h.invoke(body, 'facebook-profile-before', 'user-info')
+  await facebookPause(h, 'user-info')
+  assert.deepEqual((await h.invoke(body, 'facebook-profile-before', 'user-info')).body, first.body)
+  assert.equal(h.calls.length, 1)
+  await assert.rejects(h.invoke({ ...body, userId: '43' }, 'facebook-profile-paused', 'user-info'), { code: 'facebook_account_paused' })
+  assert.equal(h.calls.length, 1)
+  const content = await h.invoke(body, 'facebook-content-active')
+  assert.equal(content.body.data.items.length, 1)
+  assert.equal(h.calls.length, 3, 'content still resolves a profile while profile business is paused')
+  await facebookPause(h, 'crawl')
+  await assert.rejects(h.invoke({ ...body, userId: '43' }, 'facebook-content-paused'), { code: 'facebook_account_paused' })
+  await facebookPause(h, 'user-info', 'fixed', 2)
+  await h.invoke(body, 'facebook-profile-resumed', 'user-info')
+  assert.equal(h.calls.length, 4)
+})
+
+test('Facebook business pause between resolution and posts prevents another paid dispatch', async t => {
+  let h
+  h = await harness(t, { platform: 'facebook', fetchImpl: async () => {
+    await facebookPause(h, 'crawl')
+    return Response.json({ code: 0, message: 'success', recordTime: '2026-10-15T00:00:00Z', data: { profile_id: '42', name: 'Fixture' } })
+  } })
+  const result = await h.invoke({ platform: 'facebook', userId: '42' }, 'facebook-pause-mid-flight')
+  assert.equal(h.calls.length, 1)
+  assert.equal(result.body.data.status, 'partial')
+  assert(result.body.data.warnings.some(row => row.code === 'social_page_fill_stopped' && row.message.includes('facebook_account_paused')))
+  assert(result.body.data.page.nextCursor)
+})
+
+test('Facebook paused content still delivers purchased overflow without supplier calls', async t => {
+  const h = await harness(t, { platform: 'facebook', fetchImpl: call => Response.json({ code: 0, message: 'success', recordTime: '2026-10-15T00:00:00Z', data: call.url.pathname.includes('profile-id')
+    ? { profile_id: '42', name: 'Fixture' }
+    : { posts: ['1','2'].map(id => ({ id, text: 'Purchased content', user: { id: '42' } })), has_more: false } }) })
+  const body = { platform: 'facebook', userId: '42', count: 1 }
+  const first = await h.invoke(body, 'facebook-buffer-first')
+  assert(first.body.data.page.nextCursor)
+  await facebookPause(h, 'crawl')
+  const second = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'facebook-buffer-second')
+  assert.equal(second.body.data.items.length, 1)
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(h.calls.length, 2)
+})
+
+test('LCY Facebook new acquisition bypasses zero budgets and recovered supplier circuit but preserves business pause', async t => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  const h = await harness(t, { platform: 'facebook', store: new LcyHubLimitStore() })
+  const rows = await h.controls.describeProvider(h.provider, { config: h.config, credentialConfigured: true })
+  for (const row of rows.filter(row => row.operationKey.includes('facebook_get_profile'))) {
+    await h.controls.updatePolicy(h.provider, row.operationKey, { expectedRevision: row.revision,
+      desiredState: 'active', reason: 'LCY zero-budget regression', priceBook: { unitCostMinorByEndpoint: Object.fromEntries(row.release.endpointKeys.map(key => [key, 2])),
+        currency: 'CNY', pricingAsOf: '2026-10-15T00:00:00Z', monthlyBudgetMinor: 0, monthlySubsidyBudgetMinor: 0,
+      } }, { runtime: { config: h.config, credentialConfigured: true } })
+  }
+  Object.assign(h.platformStore.state, { lastErrorCode: 'upstream_balance_exhausted', circuitOpenUntil: new Date(Date.now()+60000).toISOString() })
+  const result = await h.invoke({platform:'facebook',userId:'42'}, 'lcy-zero-budget-facebook')
+  assert.equal(result.status,200)
+  assert.equal(h.calls.length,2)
+  assert.equal(h.platformStore.calls.size,2)
+  assert([...h.platformStore.calls.values()].every(call => call.costMinor > 0))
+  await facebookPause(h, 'crawl')
+  await assert.rejects(h.invoke({platform:'facebook',userId:'42'}, 'lcy-facebook-explicit-pause'),{code:'facebook_account_paused'})
+  assert.equal(h.calls.length,2)
+})
+
+// Structure of a real AIO tweetsAndReplies page, anonymized; the account is
+// 42/ui_batch_019 and the page holds 14 of its replies among 30 tweets.
+const repliesPage = JSON.parse((await import('node:fs')).readFileSync(new URL('../fixtures/twitter-aio-user-replies.json', import.meta.url), 'utf8'))
+async function priceReplies(h, replies = 3) {
+  const row = (await h.controls.describeProvider(h.provider, { config: h.config, credentialConfigured: true }))
+    .find(row => row.operationKey === 'social.content.crawl')
+  await h.controls.updatePolicy(h.provider, 'social.content.crawl', {
+    expectedRevision: row.revision, desiredState: 'active', reason: 'Synthetic Twitter replies regression', priceBook: {
+      currency: 'USD', pricingAsOf: '2026-11-03T00:00:00Z', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000,
+      unitCostMinorByEndpoint: { 'twitter-aio.crawl': 2, ...(replies ? { 'twitter-aio.user-replies': replies } : {}) },
+    },
+  }, { runtime: { config: h.config, credentialConfigured: true } })
+}
+const repliesFetch = call => call.url.pathname.endsWith('/tweetsAndReplies')
+  ? Response.json(call.params.cursor ? timeline([], null) : repliesPage)
+  : call.url.pathname.endsWith('/tweets') ? Response.json(timeline(['1'])) : Response.json(profile())
+
+test('original paced LCY Key can acquire posts and replies at count 100 while a sibling still has its 100-work limit', async t => {
+  const h = await harness(t, { maxPageSize: 100, store: new LcyHubLimitStore(), fetchImpl: repliesFetch })
+  const key = h.store.apiKeys.get(h.key.id)
+  key.hubSupplierAdmission = 'priority'
+  const current = await h.service.authenticate(h.key.secret)
+  await priceReplies(h)
+  const body = { platform: 'twitter', usernames: ['ui_batch_019'], activityTypes: ['posts', 'replies'], count: 100 }
+  const sibling = await h.service.createApiKey({ consumerId: current.consumer.id, name: 'LCY-delta', platforms: ['twitter'],
+    capabilities: ['social.content.crawl', 'social.profile.get'] })
+  await assert.rejects(h.invoke(body, 'portrait-sibling-budget', 'crawl', await h.service.authenticate(sibling.secret)),
+    error => error.code === 'work_budget_exceeded' && error.details.requestedWork === 200 && error.details.allowedWork === 100)
+  assert.equal(h.calls.length, 0)
+  let rateChecks = 0
+  const acquire = h.platformStore.acquireProviderRateLimit.bind(h.platformStore)
+  h.platformStore.acquireProviderRateLimit = options => { rateChecks++; return acquire(options) }
+  const result = await h.invoke(body, 'portrait-paced-budget', 'crawl', current)
+  assert.equal(result.status, 200)
+  for (const path of ['/user/42/tweets', '/user/42/tweetsAndReplies']) assert.ok(h.calls.some(call => call.url.pathname === path))
+  assert.ok(rateChecks > 0)
+  assert.equal((await h.store.getUsageRequestByIdempotencyKey(current.consumer.id, 'portrait-paced-budget')).status, 'committed')
+  // A previously authenticated request must re-read a revoked exemption before another upstream call.
+  const calls = h.calls.length
+  key.hubRateLimitExempt = false
+  await assert.rejects(h.invoke({ ...body, usernames: ['another_account'] }, 'portrait-paced-revoked', 'crawl', current),
+    error => ['page_size_exceeded', 'work_budget_exceeded'].includes(error.code))
+  assert.equal(h.calls.length, calls)
+})
+
+test('paced LCY still hits a configured plan burst but not the plan month or window allowance', async t => {
+  const h = await harness(t, { store: new LcyHubLimitStore() })
+  h.store.apiKeys.get(h.key.id).hubSupplierAdmission = 'priority'
+  const current = await h.service.authenticate(h.key.secret)
+  Object.assign(h.store.plans[0].limits, { monthlyRequests: 1, maxRequests: 1, windowSeconds: 3600, burstRps: 1 })
+  const request = id => h.invoke({ platform:'twitter', username:'ui_batch_019', count:10 },id,'crawl',current)
+  assert.equal((await request('paced-burst-first')).status,200)
+  await assert.rejects(request('paced-burst-second'), {code:'plan_burst_exceeded'})
+  for (const row of h.store.requests.values()) row.reservedAt = new Date(Date.now()-5000).toISOString()
+  assert.equal((await request('paced-burst-after-window')).status,200)
+})
+
+test('Twitter replies use the replies timeline and price after one profile lookup, then drain the archived rest', async t => {
+  const h = await harness(t, { fetchImpl: repliesFetch })
+  await priceReplies(h)
+  const body = { platform: 'twitter', userId: 'ui_batch_019', count: 10, activityTypes: ['replies'] }
+  const first = await h.invoke(body, 'twitter-replies-first')
+  assert.equal(first.status, 200)
+  const items = first.body.data.items
+  assert.equal(items.length, 10)
+  assert.ok(items.every(row => row.activityType === 'replies' && row.author_id === '42' && row.replyTo?.id && row.parentExternalId === row.replyTo.id))
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/ui_batch_019', '/user/42/tweetsAndReplies'])
+  assert.equal(h.calls[1].params.count, '10')
+  const ledger = [...h.platformStore.calls.values()]
+  assert.deepEqual(ledger.map(call => [call.operation, call.endpointKey, call.costMinor]),
+    [['social.profile.get', 'twitter-aio.user-info', 2], ['social.content.crawl', 'twitter-aio.user-replies', 3]])
+  assert.equal(first.body.data.page.hasMore, true)
+  const second = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'twitter-replies-second')
+  assert.equal(second.body.data.items.length, 4)
+  assert.equal(new Set([...items, ...second.body.data.items].map(row => row.content_id)).size, 14)
+  // The archived four are free; only the timeline's next page is bought.
+  assert.deepEqual(h.calls.slice(2).map(call => [call.url.pathname, call.params.cursor]), [['/user/42/tweetsAndReplies', 'synthetic-bottom-cursor']])
+  assert.equal(second.body.data.page.hasMore, false)
+})
+
+test('Twitter replies without a reviewed replies price fail before the profile lookup; posts are unaffected', async t => {
+  const h = await harness(t, { fetchImpl: repliesFetch })
+  await assert.rejects(h.invoke({ platform: 'twitter', userId: 'ui_batch_019', count: 10, activityTypes: ['replies'] }, 'twitter-replies-unpriced'),
+    { status: 503, code: 'external_platform_cost_control_unavailable' })
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+  // The customer hold is released, not charged.
+  assert.deepEqual([...h.store.requests.values()].map(row => [row.status, row.unitsActual ?? 0]), [['released', 0]])
+  const posts = await h.invoke({ platform: 'twitter', userId: 'ui_batch_019', count: 10 }, 'twitter-posts-still-priced')
+  assert.deepEqual(posts.body.data.items.map(row => row.content_id), ['1'])
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/ui_batch_019', '/user/42/tweets'])
+})
+
+test('posts and replies together deliver the posts when replies cannot be priced', async t => {
+  const h = await harness(t, { fetchImpl: repliesFetch })
+  const result = await h.invoke({ platform: 'twitter', userId: 'ui_batch_019', count: 10, activityTypes: ['posts', 'replies'] }, 'twitter-posts-and-unpriced-replies')
+  assert.deepEqual(result.body.data.items.map(row => [row.content_id, row.activityType]), [['1', 'posts']])
+  assert.equal(result.body.data.status, 'partial')
+  assert.ok(result.body.data.warnings.some(warning => warning.code === 'social_page_fill_stopped' && /cost_control_unavailable/.test(warning.message)))
+  assert.ok(h.calls.every(call => !call.url.pathname.endsWith('/tweetsAndReplies')))
 })

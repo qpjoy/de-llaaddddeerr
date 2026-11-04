@@ -39,6 +39,7 @@ import {
   launcherNetworkLeaseMatchesProfile,
   launcherNetworkLeaseProfile,
   launcherNetworkLeaseProductId,
+  launcherProductKeepsDeviceAddress,
   launcherProductUserAccessBlocked,
   normalizeLauncherNetworkProductId,
   MX_H2I_PRODUCT_ID
@@ -89,11 +90,16 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
 
   onModuleInit(): void {
     const intervalMs = Math.max(1_000, this.config.launcherNetworkHandoverReconcileMs);
-    this.handoverReconcileTimer = setInterval(() => {
-      void this.reconcileExpiredHandovers();
-    }, intervalMs);
+    const reconcileInBackground = () => {
+      void this.reconcileExpiredHandovers().catch(() => {
+        // A transient store failure must not stop login or network control.
+        // Error details can contain connection credentials or SQL parameters.
+        console.warn(JSON.stringify({ event: 'launcher_network.handover.reconcile_failed', retry: 'next-interval' }));
+      });
+    };
+    this.handoverReconcileTimer = setInterval(reconcileInBackground, intervalMs);
     this.handoverReconcileTimer.unref?.();
-    void this.reconcileExpiredHandovers();
+    reconcileInBackground();
     const runtimeIntervalMs = effectiveRuntimeSnapshotIntervalMs(
       this.config.launcherNetworkRuntimeSnapshotIntervalMs
     );
@@ -336,6 +342,24 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
       && Boolean(previousAnonymousLease.capabilityDigest)
       ? previousAnonymousLease.leaseId
       : null;
+    // Products that keep one address per device hand it to the identity that is
+    // connecting now. The source is the device's newest lease whose capability
+    // this request presented; the store re-checks it inside the allocation.
+    const addressSourceLeaseId = product
+      && launcherProductKeepsDeviceAddress(product.productId)
+      && requestedPublicKey
+      ? leases
+        .filter((candidate) => (
+          launcherNetworkLeaseIsActive(candidate)
+          && candidate.productId === product.productId
+          && candidate.installId === requestedInstallId
+          && candidate.deviceId === requestedDeviceId
+          && candidate.publicKey === requestedPublicKey
+          && launcherLeaseCapabilityMatches(candidate, leaseCapability)
+        ))
+        .sort((left, right) => (Number(right.generation) || 0) - (Number(left.generation) || 0))[0]
+        ?.leaseId ?? null
+      : null;
     let lease: LauncherNetworkLease;
     try {
       lease = await this.store.enrollLauncherNetworkLease({
@@ -363,7 +387,8 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
         capabilityExpiresAt,
         legacyCapabilityClaimLeaseIds,
         replacementForLeaseId,
-        anonymousRenewalLeaseId
+        anonymousRenewalLeaseId,
+        addressSourceLeaseId
       });
     } catch (error) {
       rethrowLauncherNetworkPolicyError(error);

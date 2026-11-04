@@ -7,6 +7,7 @@ import { TIKHUB_CONTENT_SEARCH_RECIPES, normalizeTikHubContentSearchRequest,
 import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 import { rawSearchRecords } from '../../server/contracts/raw-search.mjs'
 import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
+import { projectContentPage } from '../../server/external-platforms/content-search-workflow.mjs'
 
 const capturedAt = '2026-10-15T04:00:00.000Z'
 const fixtures = { ...originalFixtures,
@@ -93,6 +94,16 @@ test('Bilibili fixed payload maps evidenced native metrics, genuine zero and nul
   assert.equal(project('bilibili', altered).items[0].forward_count, null, 'unverified stat.share/coin/video_review are not invented metrics')
 })
 
+test('Bilibili search keeps the item share URL ahead of stale URL aliases', () => {
+  const payload = structuredClone(fixtures.bilibili)
+  Object.assign(payload.data.result[0], {
+    share_url: 'https://www.bilibili.com/video/BVshare123',
+    arcurl: 'https://www.bilibili.com/video/BVstale456',
+  })
+  assert.equal(contentSearchDataItem(project('bilibili', payload).items[0]).url,
+    'https://www.bilibili.com/video/BVshare123')
+})
+
 test('Bilibili grouped articles retain their type and never acquire a guessed video URL; verified stat aliases remain nullable', () => {
   const projected = project('bilibili', { result: [
     { result_type: 'video', data: [{ id: '1', title: '视频', stat: { like: 17, reply: 4, favorite: 9, view: 123, coin: 88 } }] },
@@ -105,6 +116,70 @@ test('Bilibili grouped articles retain their type and never acquire a guessed vi
   assert.equal(projected.items[1].content_type, 'article')
   assert.equal(projected.items[1].url, null)
   assert.equal(projected.providerPage.hasMore, false)
+})
+
+// Reconstructed from the verified archive's field types/counts, not its raw body.
+const biliEmptyPage = () => ({ code: 0, data: { page: 1, pagesize: 20, numResults: 0, numPages: 0 } })
+
+test('Bilibili successful zero-count page may omit result and ends pagination without changing evidence', () => {
+  const payload = biliEmptyPage()
+  const original = { publicBody: { data: payload, meta: { capturedAt } }, restrictedResponseArchive: { sha256: 'immutable-archive' } }
+  const before = structuredClone(original)
+  const { projected, records } = projectContentPage(original, request('bilibili', { pageSize: 20 }))
+  assert.deepEqual(projected.items, [])
+  assert.deepEqual(projected.acquiredItems, [])
+  assert.deepEqual(records, [])
+  assert.deepEqual(projected.providerPage, { hasMore: false, nextParams: null, nextPage: null, paginationMode: 'page', sourceCount: 0 })
+  assert.equal(projected.nonPostCount, 0)
+  assert.equal(projected.duplicateCount, 0)
+  assert.deepEqual(original, before)
+  assert.equal(projected.publicBody, original.publicBody)
+  assert.equal(projected.restrictedResponseArchive, original.restrictedResponseArchive)
+  assert.equal(Object.hasOwn(projected.publicBody.data.data, 'result'), false)
+})
+
+test('Bilibili omitted result needs explicit numeric zero counts and matching page metadata', () => {
+  const mutations = [
+    p => { delete p.code }, p => { p.code = '0' }, p => { p.code = 200 },
+    ...['numResults', 'numPages'].flatMap(key => [
+      p => { delete p.data[key] },
+      ...[1, -1, '0', false, null].map(value => p => { p.data[key] = value }),
+    ]),
+    ...['page', 'pagesize'].flatMap(key => [
+      p => { delete p.data[key] },
+      ...[0, -1, '1', false, null, 1.5, Number.MAX_SAFE_INTEGER + 1, 21].map(value => p => { p.data[key] = value }),
+    ]),
+    ...[null, 'bad', {}].map(value => p => { p.data.result = value }),
+    ...['data', 'items', 'results', 'list', 'videos'].map(key => p => { p.data[key] = [{ id: 'unexpected-content' }] }),
+    p => { p.data.num_results = 1 }, p => { p.data.num_pages = 1 }, p => { p.data.page_size = 21 },
+    ...['has_more', 'hasMore'].flatMap(key => [true, 1, 'unknown'].map(value => p => { p.data[key] = value })),
+    p => { p.data.next_page = 2 }, p => { p.data.nextPage = 2 }, p => { p.data.next_cursor = 'next' },
+  ]
+  for (const mutate of mutations) {
+    const payload = biliEmptyPage()
+    mutate(payload)
+    assert.throws(() => project('bilibili', payload, { pageSize: 20 }), /invalid_content_search_shape/, JSON.stringify(payload))
+  }
+  assert.throws(() => project('bilibili', biliEmptyPage(), { page: 2, pageSize: 20 }), /invalid_content_search_shape/)
+  assert.throws(() => project('douyin', biliEmptyPage(), { pageSize: 20 }), /invalid_content_search_shape/)
+})
+
+test('Bilibili business rejection is checked before and after unwrapping the result page', () => {
+  for (const payload of [
+    { code: -412, data: { result: [], page: 1, numPages: 0 } },
+    { ...biliEmptyPage(), code: -412 },
+    { code: 0, data: { ...biliEmptyPage().data, code: -412 } },
+    { code: 0, data: { result: [], code: -412 } },
+  ]) assert.throws(() => project('bilibili', payload, { pageSize: 20 }), /content_search_business_rejected/)
+})
+
+test('Bilibili omitted inner result never overrides an existing outer result list', () => {
+  const payload = { ...biliEmptyPage(), result: [{ id: '1', type: 'video', title: 'Existing outer result' }] }
+  const projected = project('bilibili', payload, { pageSize: 20 })
+  assert.equal(projected.items.length, 1)
+  assert.equal(projected.items[0].content_id, '1')
+  assert.equal(projected.providerPage.hasMore, null)
+  assert.throws(() => project('bilibili', { ...biliEmptyPage(), result: null }, { pageSize: 20 }), /invalid_content_search_shape/)
 })
 
 test('Douyin V1 keeps full body, exact signed media and response session/cursor without reading echo or recommendations', () => {
@@ -255,29 +330,50 @@ test('Douyin related-words recognition requires the exact numeric discriminators
 })
 
 test('Douyin related-words recognition validates every word, including unsampled third and sixth entries', () => {
-  const changes = [row => { delete row.related_word }, row => { row.related_word = '' }, row => { row.related_word = 123 },
-    row => { row.word_record = null }, row => { row.word_record.words_image.url_list = [123] },
-    row => { row.word_record.force_update_rank = 'false' }, row => { row.extra_info = [] },
+  const rejected = [row => { delete row.related_word }, row => { row.related_word = 123 }, row => { row.word_record = null },
     row => { row.aweme_info = { aweme_id: 'hidden-real-post', desc: '潜在帖子' } },
     row => { row.word_record.hidden_post = { awemeId: 'hidden-real-post', video: {} } }]
-  for (const index of [2, 5]) for (const change of changes) {
-    const card = relatedWordsDouyinCard()
-    change(card.related_word_list[index])
-    assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/, `word ${index + 1} is fully validated`)
+  // Harmless suggestion differences no longer fail a paid page; posts still do.
+  const tolerated = [row => { row.related_word = '' }, row => { row.word_record.words_image.url_list = [123] },
+    row => { row.word_record.force_update_rank = 'false' }, row => { row.extra_info = [] }]
+  for (const index of [2, 5]) {
+    for (const change of rejected) {
+      const card = relatedWordsDouyinCard()
+      change(card.related_word_list[index])
+      assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/, `word ${index + 1} is fully validated`)
+    }
+    for (const change of tolerated) {
+      const card = relatedWordsDouyinCard()
+      change(card.related_word_list[index])
+      const projected = project('douyin', { data: [card], has_more: false })
+      assert.equal(projected.items.length, 0)
+      assert.equal(projected.nonPostCount, 1)
+    }
   }
   for (const related_word_list of [undefined, null, [], 'not-an-array']) {
     assert.throws(() => project('douyin', { data: [{ ...relatedWordsDouyinCard(), related_word_list }], has_more: false }), /invalid_content_search_identity/)
   }
 })
 
-test('Douyin related-words recognition rejects unknown scalar keys and hidden post containers throughout the fixed schema', () => {
-  const locations = [card => card, card => card.data, card => card.data.rs_extra_info, card => card.words_query_record,
-    card => card.card_info, card => card.ui_info, card => card.debug_diff_info, card => card.debug_data,
-    card => card.related_word_list[5], card => card.related_word_list[5].word_record,
+test('Douyin related-words envelope rejects unknown keys; word attributes are tolerated unless they hide a post', () => {
+  const envelope = [card => card, card => card.data, card => card.data.rs_extra_info, card => card.words_query_record,
+    card => card.card_info, card => card.ui_info, card => card.debug_diff_info, card => card.debug_data]
+  const words = [card => card.related_word_list[5], card => card.related_word_list[5].word_record,
     card => card.related_word_list[5].word_record.words_image, card => card.related_word_list[5].extra_info]
-  for (const locate of locations) for (const value of [null, 'unknown', {}, [{ aweme_id: 'hidden-post', desc: '不可静默丢弃' }]]) {
+  const hiddenPost = [{ aweme_id: 'hidden-post', desc: '不可静默丢弃' }]
+  for (const locate of envelope) for (const value of [null, 'unknown', {}, hiddenPost]) {
     const card = relatedWordsDouyinCard()
     locate(card).unrecognized = value
+    assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/)
+  }
+  for (const locate of words) {
+    for (const value of [null, 'unknown', {}]) {
+      const card = relatedWordsDouyinCard()
+      locate(card).unrecognized = value
+      assert.equal(project('douyin', { data: [card], has_more: false }).nonPostCount, 1)
+    }
+    const card = relatedWordsDouyinCard()
+    locate(card).unrecognized = hiddenPost
     assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/)
   }
 })

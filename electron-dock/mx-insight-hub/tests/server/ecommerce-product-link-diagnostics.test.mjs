@@ -22,9 +22,22 @@ test('offline link diagnostics report counts without source data and do not muta
   const before = Buffer.from(input.body_bytes)
   const report = inspectEcommerceProductLinks(input, 'taobao')
   assert.deepEqual(report, { state: 'projected', itemCount: 4, productCount: 3,
-    discardedCount: 1, urlCount: 2, upstreamUrlCount: 1, derivedUrlCount: 1, missingUrlCount: 1 })
+    discardedCount: 1, urlCount: 2, upstreamUrlCount: 1, derivedUrlCount: 1, missingUrlCount: 1,
+    imageProductCount: 0, missingImageCount: 3 })
   assert.doesNotMatch(JSON.stringify(report), /88000|restricted|example.invalid/u)
   assert.deepEqual(input.body_bytes, before)
+})
+
+test('offline diagnostics count JD products whose relative image path the current projection completes', () => {
+  const jfs = 'jfs/t1/504599/21/13618/50445/6a9535b8Ffb0c609e/0083320320a7a413.jpg'
+  const report = inspectEcommerceProductLinks(archive({ code: 0, message: null, recordTime: null, data: { products: [
+    { id: '100254062573', imageUrl: jfs, images: [] },
+    { id: '100254062574', imageUrl: 'jfs/unreviewed/shape.jpg', images: [] },
+  ] } }), 'jd')
+  assert.equal(report.productCount, 2)
+  assert.equal(report.imageProductCount, 1)
+  assert.equal(report.missingImageCount, 1)
+  assert.doesNotMatch(JSON.stringify(report), /jfs|360buyimg|10025406257/u)
 })
 
 test('offline diagnostics distinguish a JD collection failure from a successful empty page', () => {

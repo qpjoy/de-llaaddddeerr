@@ -1,6 +1,6 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { upstreamCapacityError } from './availability-errors.mjs'
-import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { bypassesSupplierLimits, isLcySupplierPriority, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { IpRiskBatch } from './ip-risk-batch.mjs'
@@ -28,7 +28,7 @@ export class IpRiskGateway {
   }
   get dispatchBudgetMs() { return this.adapter.dispatchBudgetMs }
   #enter(context) {
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (bypassesSupplierLimits(context)) return 'exempt'
     const limits = currentAdmissionLimits(this)
     const consumerActive = this.activeByConsumer.get(context.consumer.id) || 0
     if (this.active >= limits.maxConcurrency || consumerActive >= limits.maxConsumerConcurrency) return false
@@ -56,7 +56,7 @@ export class IpRiskGateway {
     ])
     if (!grants.includes(IP_RISK_PLATFORM) || !capabilities.includes(this.operation)) throw new AppError(403, 'capability_not_granted', 'IP risk access changed while waiting')
     if (!plan || plan.status !== 'active' || plan.versionStatus !== 'published') throw new AppError(503, 'plan_assignment_unavailable', 'An active published plan assignment is required')
-    if (this.adapter.capabilities && !(await this.adapter.capabilities({ hubRateLimitExempt: isHubRateLimitExempt(current) })).ready) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service changed while waiting')
+    if (this.adapter.capabilities && !(await this.adapter.capabilities({ hubRateLimitExempt: bypassesSupplierLimits(current) })).ready) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service changed while waiting')
     return { ...context, ...current }
   }
   async #credential(context) {
@@ -71,7 +71,7 @@ export class IpRiskGateway {
   async #enterOrQueue(context, { lease, expiresAt, signal, revalidate }) {
     await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (bypassesSupplierLimits(context)) return 'exempt'
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     const budget = this.dispatchBudgetMs
     if (!Number.isFinite(budget) || budget <= 0) throw new AppError(503, 'ip_risk_unavailable', 'IP risk dispatch time budget is unavailable', { upstreamDispatched: false })
@@ -178,12 +178,12 @@ export class IpRiskGateway {
       lease = true
       slot = await this.#enterOrQueue(context, { lease: dispatchLease, expiresAt: reservation.request.leaseExpiresAt, signal,
         revalidate: async current => { context = current; apiKeyValue = await this.#credential(context) } })
-      const rate = isHubRateLimitExempt(context) ? { allowed: true } : await this.platformStore.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute })
+      const rate = bypassesSupplierLimits(context) ? { allowed: true } : await this.platformStore.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute })
       if (!rate.allowed) throw new AppError(429, 'ip_query_rate_limited', 'IP query rate limit reached')
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       call = await this.platformStore.beginProviderCall({ tenantId: tenant.id, consumerId: consumer.id, apiKeyId: apiKey.id, usageRequestId: requestId,
         operation: this.operation, contractVersion: this.version, endpointKey: 'risk.query', endpointVersion: this.endpointVersion, marketplace: IP_RISK_PLATFORM, fingerprint })
-      evidence = await this.adapter.query(input.ip, { apiKey: apiKeyValue, requestId, hubRateLimitExempt: isHubRateLimitExempt(context) })
+      evidence = await this.adapter.query(input.ip, { apiKey: apiKeyValue, requestId, hubRateLimitExempt: bypassesSupplierLimits(context), dailyQuotaExempt: isHubRateLimitExempt(context) })
       const common = { callId: call.id, delivery, billed: null, costMinor: null, costKind: 'unknown', currency: null,
         latencyMs: evidence.latencyMs, responseArchive: evidence.responseArchive, restrictedResponseArchive: evidence.restrictedResponseArchive }
       if (evidence.outcome !== 'succeeded') {
@@ -200,7 +200,7 @@ export class IpRiskGateway {
       }
       const capturedAt = new Date()
       const responseBody = { contractVersion: this.version, data: { ip: input.ip, ...evidence.normalized },
-        meta: { capturedAt: capturedAt.toISOString(), sourceMode: 'live', pricingStatus: this.meterKey === 'ip.risk.subscription.product' ? 'subscription' : 'plan_based', chargeStatus: this.meterKey === 'ip.risk.subscription.product' ? 'included' : 'see_usage' }, requestId }
+        meta: { capturedAt: capturedAt.toISOString(), sourceMode: 'live', pricingStatus: this.meterKey === 'ip.risk.subscription.product' ? 'subscription' : 'plan_based', chargeStatus: this.meterKey === 'ip.risk.subscription.product' && !isLcySupplierPriority(context) ? 'included' : 'see_usage' }, requestId }
       await this.platformStore.commitLiveDelivery({ ...common, responseBody, capturedAt, freshUntil: capturedAt, staleUntil: capturedAt,
         itemCount: evidence.normalized.status === 'no_data' ? 0 : 1, usageUnitsActual: 1 })
       terminal = true

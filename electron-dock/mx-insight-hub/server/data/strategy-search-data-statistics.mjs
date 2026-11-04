@@ -3,7 +3,7 @@ import { strategySearchCatalog } from './strategy-search-catalog.mjs'
 
 export const STRATEGY_DATA_METRICS = ['newObjects', 'updatedObjects', 'contentRevisions', 'observations', 'observedObjects']
 export const STRATEGY_DATA_CONNECTORS = ['night-all', 'night-all-legacy',
-  'external-platform:tikhub', 'external-platform:justone', 'external-platform:rapidapi']
+  'external-platform:tikhub', 'external-platform:justone', 'external-platform:rapidapi', 'external-platform:night-all-a']
 const platforms = [...new Set([...strategySearchCatalog().interfaces.flatMap(row => row.platforms.map(item => item.platform)), 'social'])]
 export const STRATEGY_DATA_STREAMS = platforms.flatMap(platform => [
   `${platform}.search_posts.v1`, `${platform}.night-all-compat.v1`, `${platform}.external-platform.v1`,

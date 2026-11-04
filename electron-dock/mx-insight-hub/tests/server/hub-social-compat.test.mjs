@@ -24,7 +24,7 @@ test('screenshot aliases preserve nonnumeric Twitter user_id as username and lar
 })
 
 test('bare numeric Twitter identifiers use ID lookup across aliases without losing precision', () => {
-  for (const operation of ['crawl', 'user-info']) for (const value of ['42', '12345', '1234567890123456789']) {
+  for (const operation of ['crawl', 'user-info']) for (const value of ['42', '12345', '1234567890123456789', '1952056883877212160']) {
     const expected = normalize(operation, { platform: 'twitter', userId: value })
     for (const alias of [
       { username: value }, { usernames: [value] }, { userId: value }, { user_id: value }, { uid: value }, { userIds: [value] },
@@ -55,14 +55,13 @@ test('mixed Twitter identifiers infer each identity and reject invalid ID inputs
     { kind: 'username', value: 'sample_42' }, { kind: 'id', value: '1234567890123456789' }, { kind: 'username', value: '12345' },
   ])
   for (const field of ['username', 'userId']) {
-    assert.throws(() => normalize('crawl', { platform: 'twitter', [field]: '1'.repeat(20) }), error => {
-      assert.equal(error.code, 'invalid_social_request')
-      assert.match(error.message, /user ID.*1 to 19 digits/)
-      return true
-    })
+    // Too many digits for an ID: only a handle lookup can answer it.
+    const long = normalize('crawl', { platform: 'twitter', [field]: '1'.repeat(20) }).jobs[0]
+    assert.deepEqual(long.identity, { kind: 'username', value: '1'.repeat(20) })
+    assert.equal(dispatch(long).endpointPath, `/user/by/username/${'1'.repeat(20)}`)
     assert.throws(() => normalize('crawl', { platform: 'twitter', [field]: Number('1234567890123456789') }), { code: 'invalid_social_request' })
     for (const value of ['123456789012345678a', '1e18', '-123', '123.4', '１２３']) {
-      if (value === '1e18') assert.equal(normalize('crawl', { platform: 'twitter', [field]: value }).jobs[0].identity.kind, 'username')
+      if (['123456789012345678a', '1e18'].includes(value)) assert.equal(normalize('crawl', { platform: 'twitter', [field]: value }).jobs[0].identity.kind, 'username')
       else assert.throws(() => normalize('crawl', { platform: 'twitter', [field]: value }), { code: 'invalid_social_request' })
     }
   }
@@ -111,26 +110,21 @@ test('numeric Twitter IDs retain ID lookup and never deduplicate with an equal h
   assert.notEqual(combined.jobs[0].id, combined.jobs[1].id)
 })
 
-test('Twitter handles retain official bounds and report specific input errors before dispatch', () => {
-  for (const username of ['a', 'A_1234567890123', '123456789012345']) {
-    assert.equal(normalize('crawl', { platform: 'twitter', username: `@${username}` }).jobs[0].identity.kind, 'username')
-  }
-  for (const username of ['mx_health_probe_202607', '1234567890123456']) {
-    assert.throws(() => normalize('crawl', { platform: 'twitter', username: `@${username}` }), error => {
-      assert.equal(error.status, 400)
-      assert.equal(error.code, 'invalid_social_request')
-      assert.match(error.message, new RegExp(`15-character.*received ${username.length} characters`))
-      assert.equal(error.message.includes(username), false)
-      assert.deepEqual(error.details, { platform: 'twitter', field: 'username', reason: 'username_too_long',
-        actualLength: username.length, maxLength: 15 })
-      return true
-    })
+test('Twitter handles longer than X allows reach the supplier; only invalid characters fail before dispatch', () => {
+  for (const username of ['a', 'A_1234567890123', '123456789012345', 'mx_health_probe_202607', '1234567890123456']) {
+    const job = normalize('crawl', { platform: 'twitter', username: `@${username}` }).jobs[0]
+    assert.deepEqual(job.identity, { kind: 'username', value: username.toLowerCase() })
+    assert.equal(dispatch(job).endpointPath, `/user/by/username/${username.toLowerCase()}`)
   }
   for (const username of ['Alice Smith', 'name-with-dash', '中文账号', '@']) {
     assert.throws(() => normalize('crawl', { platform: 'twitter', username }), error => {
+      assert.equal(error.status, 400)
       assert.equal(error.code, 'invalid_social_request')
       assert.equal(error.details.reason, 'username_invalid_characters')
       assert.match(error.message, /letters.*digits.*underscores/)
+      assert.doesNotMatch(error.message, /15/)
+      assert.deepEqual(error.details, { platform: 'twitter', field: 'username', reason: 'username_invalid_characters',
+        actualLength: username.replace(/^@+/, '').length })
       return true
     })
   }
@@ -143,7 +137,9 @@ test('Twitter handles retain official bounds and report specific input errors be
 test('original Twitter contract uses the same actionable handle error without changing numeric handles', () => {
   const numeric = normalizeHubSocialRequest('user-info', { platform: 'twitter', username: '12345' })
   assert.equal(numeric.endpointPath, '/user/by/username/12345')
-  for (const username of ['mx_health_probe_202607', 'name-with-dash']) {
+  assert.equal(normalizeHubSocialRequest('user-info', { platform: 'twitter', username: 'mx_health_probe_202607' }).endpointPath,
+    '/user/by/username/mx_health_probe_202607')
+  for (const username of ['name-with-dash', 'Alice Smith']) {
     let expected
     try { normalize('user-info', { platform: 'twitter', username }) } catch (error) { expected = error }
     assert.throws(() => normalizeHubSocialRequest('user-info', { platform: 'twitter', username }), error => {

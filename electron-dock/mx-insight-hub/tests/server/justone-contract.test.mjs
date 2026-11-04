@@ -264,10 +264,13 @@ test('JD V1 accepts the reviewed data.products response shape and its data-level
     urlSource: null,
     pricing: { current: '199.00', original: null, currency: 'CNY' },
     shop: { id: 'jd-shop-1', name: '脱敏示例店铺' },
-    images: [],
+    images: ['https://img10.360buyimg.com/n0/jfs/t1/100001/1/10001/10001/0a1b2c3dF4e5f6a7b/0123456789abcdef.jpg'],
     signals: { sales: null, reviewCount: null, location: null },
     attributes: { brand: null, category: null },
   })
+  // The archive keeps the provider's relative path; only the projection completes it.
+  assert.equal(response.archiveObjects[1].rawItem.imageUrl, jdProductSearchV1Fixture.data.products[0].imageUrl)
+  assert.deepEqual(response.archiveObjects[1].normalizedItem.images, response.publicBody.data.items[0].images)
   // The reviewed fixture is a single-page result (currentPage 1 of totalPages 1).
   // An explicit false is the upstream saying "no more"; null stays reserved for
   // "upstream did not say" so callers can tell the two apart.
@@ -279,6 +282,31 @@ test('JD V1 accepts the reviewed data.products response shape and its data-level
     nextCursor: null,
   })
   assert.equal(response.archiveObjects[1].envelopePointer, '$.data.products[0]')
+})
+
+test('JD CDN-relative image paths become original-size HTTPS images on JD only', () => {
+  const jfs = 'jfs/t1/504599/21/13618/50445/6a9535b8Ffb0c609e/0083320320a7a413.jpg'
+  const base = 'https://img10.360buyimg.com/n0/'
+  const images = (item, marketplace = 'jd') => normalizeJustOneProductItem({ id: '100311907651', ...item }, marketplace).images
+
+  // The provider's published V1 shape: the picture only in imageUrl, images empty.
+  assert.deepEqual(images({ imageUrl: jfs, images: [] }), [`${base}${jfs}`])
+  assert.deepEqual(images({ imageUrl: 'jfs/t19333/236/1393573839/104655/af8a4ce5/5ad9d2e0N7b8a4e8c.png' }),
+    [`${base}jfs/t19333/236/1393573839/104655/af8a4ce5/5ad9d2e0N7b8a4e8c.png`])
+  // The same path in images and imageUrl is one picture; absolute URLs keep their meaning.
+  assert.deepEqual(images({ images: [jfs], imageUrl: jfs }), [`${base}${jfs}`])
+  assert.deepEqual(images({ imageUrl: `https://img14.360buyimg.com/n1/${jfs}` }), [`https://img14.360buyimg.com/n1/${jfs}`])
+
+  // Only the confirmed path shape is completed; anything else is still dropped.
+  for (const value of [
+    'jfs/example/product.jpg', `/${jfs}`, `//${jfs}`, `${jfs}?x=1`, `${jfs}.gif`, 'jfs/t1/../a/b.jpg',
+    ` ${jfs}`, 'tagUrl/jfs/t1/a/b.jpg',
+  ]) assert.deepEqual(images({ imageUrl: value }), [], value)
+  // And never on another marketplace, whose relative strings have no reviewed host.
+  for (const marketplace of ['taobao', 'tmall', 'xianyu', 'douyin_ec', 'xiaohongshu_ec']) {
+    const item = normalizeJustOneProductItem({ itemId: '1', goodsId: '1', productId: '1', imageUrl: jfs, images: [jfs] }, marketplace)
+    assert.deepEqual(item?.images ?? [], [], marketplace)
+  }
 })
 
 test('JD issues a continuation when its own page counters prove another page exists', () => {

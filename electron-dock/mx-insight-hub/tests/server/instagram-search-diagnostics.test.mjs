@@ -209,3 +209,25 @@ test('read-only database diagnosis traces an endpoint-wide blocker instead of tr
   assert.doesNotMatch(JSON.stringify(report), /private-/)
   assert.equal((await db.query('SELECT count(*)::int AS count FROM external_platform.provider_calls')).rows[0].count, 1)
 })
+
+test('offline diagnostics name section layouts and keys, count known media and flag unread layouts without values', () => {
+  const data = { status: 'ok', media_grid: { sections: [
+    { layout_type: 'one_by_two_right', feed_type: 'clips', layout_content: { one_by_two_item: { clips: { items: [{ media: row }] } }, fill_items: [{ media: { ...row, pk: '2', code: 'x' } }] } },
+    { layout_type: 'private value with spaces', layout_content: { future_item: { posts: ['private-post-body'] }, 'private key!': 1 } },
+  ], has_more: false } }
+  const result = inspectInstagramArchive(archive(data), snapshot)
+  const [first, second] = result.shape.sectionShapes
+  assert.equal(first.layoutType, 'one_by_two_right')
+  assert.deepEqual(first.sectionKeys, ['feed_type', 'layout_content', 'layout_type'])
+  assert.deepEqual(first.layoutKeys, ['fill_items', 'one_by_two_item'])
+  assert.deepEqual(first.nestedKeys, { one_by_two_item: ['clips'] })
+  assert.deepEqual(first.knownContainers, ['fill_items', 'one_by_two_item.clips.items'])
+  assert.equal(first.knownMediaCount, 2)
+  assert.equal(first.unrecognized, false)
+  assert.equal(second.layoutType, 'other')
+  assert.deepEqual(second.layoutKeys, ['future_item'])
+  assert.deepEqual(second.nestedKeys, { future_item: ['posts'] })
+  assert.equal(second.unrecognized, true)
+  assert.equal(result.resultCount, 2)
+  assert.doesNotMatch(JSON.stringify(result), /private-post-body|private value|private key|private-shortcode|private-query/u)
+})

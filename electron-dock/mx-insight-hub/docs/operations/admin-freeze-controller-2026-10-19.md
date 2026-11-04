@@ -119,3 +119,15 @@ Kubernetes 的 desired/current 分别描述目标和观察状态，scale 写入�
 冻结等待总预算仍为 120 秒，停止写入的确认条件不变。修复不操作 Delta、Launcher、MX-H2I 登录/联网、Pay 或共享控制面，也不部署新的 Hub 应用。生产恢复与重新发布仍须等待当前控制面回执。
 
 后续完整 shell 回归 **178/178** 通过，包含冻结/恢复/诊断专项 **30/30**；语法、差异格式和独立复核通过。轮询预算限制下一次读取及其 HTTP 请求时限，不对异常系统调度或 kubectl 内部多次 HTTP 请求提供进程级强制终止保证。测试使用离线 kubectl fixture，不证明生产控制面已恢复。
+
+## 2026-10-24：已完成的 Admin Pod 被误判为仍在停止
+
+操作者确认 HanLP 已通过。新截图停在 `pod_termination`，冻结等待 120 秒后失败，迁移尚未开始。最后确认的 Admin generation/observedGeneration 均为 `483`，desired/current/ready 均为 `0`；诊断中残留 Pod `mx-insight-hub-admin-875ccfcf9-vg6lv` 的 phase 为 `Succeeded`，容器为 `Completed`、退出码 `0`，没有 deletionTimestamp。EXIT 恢复请求已受理，但截图没有证明新 Admin Pod 已 Ready。
+
+原检查只按 Admin 标签列出所有 Pod 名称，要求列表完全为空，把已终止但尚未回收的 API 对象也视为潜在写入者。修复在同一个有时限的查询上增加 `--field-selector=status.phase!=Succeeded`，只排除成功终态。仍要求同一 Deployment 的控制器已观察 scale-to-zero、desired/current/ready 都为零，并在 Pod 查询之后再次核对 Deployment 状态完全一致。
+
+`Running`、`Pending`、`Unknown`、缺失 phase 和 `Failed` 均继续阻塞；不以单个容器的 `Completed` 或 `ready=false` 放行。仅设置 deletionTimestamp 的运行中 Pod 也继续阻塞。根据 [Kubernetes Pod 生命周期](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-phase)，`Succeeded` 表示全部容器成功终止且不会重启；节点失联时也可能被标记为 `Failed`，因此本次不放宽后者。诊断仍保留全部 Pod 元数据以便定位。
+
+没有清理或强制删除 Pod，没有延长等待期限，没有绕过冻结或修改失败恢复流程；不修改 Launcher/MX-H2I 登录、联网、SSO 或共享服务。同步脚本到 Internal 后，沿用 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0` 的 Hub 标准部署。本次为本地脚本修复，服务器发布结果仍待操作者回执。
+
+验证：新增保留 `Succeeded` 对象的用例在旧代码上重现 `pod_termination` 超时；修复后冻结/恢复专项 **41/41**、完整部署 shell 回归 **197/197** 通过，脚本语法与差异检查通过。用例包含成功终态与运行/终止中 Pod 混合、未知/失败/缺失 phase，以及查询期间重新扩容或替换 Deployment，均保留失败关闭行为；测试未访问实际集群。

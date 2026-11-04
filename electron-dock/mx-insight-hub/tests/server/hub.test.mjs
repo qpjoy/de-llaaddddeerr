@@ -227,7 +227,8 @@ test('optional external-platform configuration keeps credentials off the admin p
   assert.equal(disabled.justOne.contractVerified, false)
   assert.equal(disabled.justOne.dispatchEnabled, false)
   assert.equal(disabled.justOne.configurationError, null)
-  assert.equal(disabled.justOne.unknownFingerprintCooldownMs, 900_000)
+  assert.equal(disabled.justOne.unknownFingerprintCooldownMs, undefined)
+  assert.equal(disabled.justOne.responseQuarantineCooldownMs, 0)
   assert.equal(disabled.justOne.billing.source, 'unknown')
   assert.equal(disabled.justOne.billing.freeDailyCalls, null)
 
@@ -322,9 +323,10 @@ test('JustOne activation is fail-closed and strict preflight validates TTL and p
     /plus 30000/,
   )
 
+  // The retired unknown cooldown key is ignored; it can no longer isolate dispatch.
+  assert.equal(loadConfig({ ...base, MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '0' }).justOne.configurationError, null)
   for (const badEnvironment of [
     { MX_INSIGHT_JUSTONE_BILLING_JSON: '{' },
-    { MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '0' },
   ]) {
     const isolated = loadConfig({ ...base, ...badEnvironment })
     assert.equal(isolated.justOne.dispatchEnabled, false)
@@ -1184,14 +1186,17 @@ test('known upstream rejection releases reservation so explicit retry is possibl
 test('all legacy HTTP aliases include the Night-All code without exposing nested diagnostics', async () => {
   const tenant = await store.createTenant({ name: 'Rejection tenant' })
   const consumer = await store.createConsumer({ tenantId: tenant.id, name: 'Rejection consumer', businessId: 'rejection-test' })
-  await store.replaceGrants(consumer.id, ['reddit', 'douyin'])
-  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['reddit', 'douyin'] })
+  await store.replaceGrants(consumer.id, ['reddit', 'douyin', 'weibo'])
+  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['reddit', 'douyin', 'weibo'] })
   for (const prefix of ['/api/v1/search', '/api/v1/night-all/search']) {
     for (const operation of ['raw', 'crawl', 'user-info']) {
       const result = await call(`${prefix}/${operation}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${issued.secret}`, 'idempotency-key': `rejection-${prefix.includes('night-all')}-${operation}` },
-        body: { platform: operation === 'user-info' ? 'douyin' : 'reddit', [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
+        // Reddit raw runs in Hub since 2026-10-31. Weibo raw still forwards
+        // here: this service has no Hub raw-search gateway configured.
+        body: { platform: operation === 'user-info' ? 'douyin' : operation === 'raw' ? 'weibo' : 'reddit',
+          [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
       })
       assert.equal(result.response.status, 502)
       assert.equal(result.payload.error.code, 'night_all_rejected')

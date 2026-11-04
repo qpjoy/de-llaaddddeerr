@@ -58,11 +58,13 @@ test('comment docs, product visibility and quotes require one matching platform/
     assert.deepEqual(servicePriceDefinition(path), { platform: 'youtube', capabilities: [YOUTUBE_COMMENTS_CAPABILITY], meterKey: YOUTUBE_COMMENTS_CAPABILITY })
   }
   assert.ok(productAllowed('/data-products/social-content', granted))
-  assert.equal(productAllowed('/data-products/social-content', ungranted), false)
+  assert.equal(productAllowed('/data-products/social-content', ungranted), true, 'Xiaohongshu comments also grant the shared comments product')
+  assert.equal(productAllowed('/data-products/social-content', [ungranted[0]]), false)
   assert.match(publicDocsHtmlForPath('/docs/social-content', { tenant: true, scopes: granted }), /\/api\/v1\/data\/youtube\/comments/)
   assert.ok(tenantOpenApiDocument(granted).paths['/data/services/pricing'])
   const inventory = implementedRoutes()
-  assert.equal(inventory.filter(row => row.platform === 'youtube' && row.operation === YOUTUBE_COMMENTS_CAPABILITY).length, 2)
+  assert.equal(inventory.filter(row => row.platform === 'youtube' && row.operation === YOUTUBE_COMMENTS_CAPABILITY
+    && Object.values(YOUTUBE_COMMENT_PATHS).includes(row.path)).length, 2)
   assert.equal(inventory.some(row => row.path === '/api/v1/data/search' && row.provider === 'night-all'), false)
   const xhs = PROVISIONING_OPERATIONS.find(row => row.id === 'tikhub:social.comments.list')
   assert.equal(xhs.platform, 'xiaohongshu')

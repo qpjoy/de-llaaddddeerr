@@ -1347,7 +1347,7 @@ test('memory provider-call audit records an unknown retry target only once and i
   )
 })
 
-test('endpoint contract quarantine is global while unknown fingerprints remain consumer-local', async () => {
+test('an unusable response does not quarantine another consumer on the same endpoint', async () => {
   const store = new MemoryExternalPlatformStore({
     usageStore: { requests: new Map() },
     uncertainCooldownMs: 60_000,
@@ -1373,8 +1373,7 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
     ownerRequestId: randomUUID(),
     expiresAt: new Date(Date.now() + 30_000),
   })
-  assert.equal(quarantined.kind, 'blocked')
-  assert.equal(quarantined.reason, 'succeeded_unusable')
+  assert.deepEqual(quarantined, { kind: 'acquired' })
 
   store.calls.clear()
   store.calls.set('unknown', {
@@ -1400,7 +1399,7 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
   assert.deepEqual(independentConsumer, { kind: 'acquired' })
 })
 
-test('endpoint upgrade releases Taobao V1 quarantine while unchanged JD V1 stays blocked', async () => {
+test('ended unusable Taobao and JD calls allow both upgraded and unchanged contracts', async () => {
   const store = new MemoryExternalPlatformStore({
     usageStore: { requests: new Map() },
     uncertainCooldownMs: 60_000,
@@ -1450,11 +1449,10 @@ test('endpoint upgrade releases Taobao V1 quarantine while unchanged JD V1 stays
     expiresAt: new Date(Date.now() + 30_000),
   })
 
-  assert.equal(unchanged.kind, 'blocked')
-  assert.equal(unchanged.reason, 'succeeded_unusable')
+  assert.deepEqual(unchanged, { kind: 'acquired' })
 })
 
-test('memory dispatch lease bypasses only the exact referenced unknown request', async () => {
+test('memory dispatch lease ignores ended unknown and unusable calls but still holds pending ones', async () => {
   const consumerId = randomUUID()
   const retryOfRequestId = randomUUID()
   const completedAt = new Date().toISOString()
@@ -1469,10 +1467,7 @@ test('memory dispatch lease bypasses only the exact referenced unknown request',
     retryOfRequestId,
   })
   const storeWith = (...calls) => {
-    const store = new MemoryExternalPlatformStore({
-      usageStore: { requests: new Map() },
-      uncertainCooldownMs: 60_000,
-    })
+    const store = new MemoryExternalPlatformStore({ usageStore: { requests: new Map() } })
     for (const call of calls) store.calls.set(call.id, call)
     return store
   }
@@ -1491,15 +1486,8 @@ test('memory dispatch lease bypasses only the exact referenced unknown request',
   }
 
   assert.deepEqual(await acquire(storeWith(exactUnknown)), { kind: 'acquired' })
-
-  const anotherUnknown = {
-    ...exactUnknown,
-    id: 'another-unknown',
-    usageRequestId: randomUUID(),
-  }
-  const unknownBlocked = await acquire(storeWith(exactUnknown, anotherUnknown))
-  assert.equal(unknownBlocked.kind, 'blocked')
-  assert.equal(unknownBlocked.reason, 'unknown')
+  assert.deepEqual(await acquire(storeWith(exactUnknown, { ...exactUnknown, id: 'another-unknown', usageRequestId: randomUUID() })),
+    { kind: 'acquired' })
 
   const pendingBlocked = await acquire(storeWith({
     ...exactUnknown,
@@ -1517,12 +1505,14 @@ test('memory dispatch lease bypasses only the exact referenced unknown request',
     fingerprint: OTHER_FINGERPRINT,
     outcome: 'succeeded_unusable',
   }))
-  assert.equal(unusableBlocked.kind, 'blocked')
-  assert.equal(unusableBlocked.reason, 'succeeded_unusable')
+  assert.deepEqual(unusableBlocked, { kind: 'acquired' })
+  assert.deepEqual(await acquire(storeWith({ ...exactUnknown, id: 'future-unusable',
+    outcome: 'succeeded_unusable', completedAt: new Date(Date.now() + 3600000).toISOString() })), { kind: 'acquired' })
+  assert.deepEqual(await acquire(storeWith({ ...exactUnknown, id: 'unavailable-note',
+    outcome: 'succeeded_unusable', errorCode: 'upstream_note_unavailable' })), { kind: 'acquired' })
 })
 
-test('Postgres dispatch lease excludes only the referenced unknown usage request', async () => {
-  const retryOfRequestId = randomUUID()
+test('Postgres dispatch lease retains pending checks with response cooldown disabled', async () => {
   const queries = []
   const completedAt = new Date('2026-09-03T00:00:00.000Z')
   const store = new PostgresExternalPlatformStore({
@@ -1535,17 +1525,16 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
         if (/SELECT outcome, error_code, completed_at/u.test(sql)) {
           return {
             rows: [{
-              outcome: 'unknown',
+              outcome: 'pending',
               error_code: null,
-              completed_at: completedAt,
-              blocked_until: new Date(completedAt.getTime() + 60_000),
+              completed_at: null,
+              blocked_until: null,
             }],
           }
         }
         throw new Error(`unexpected SQL: ${sql}`)
       },
     },
-    uncertainCooldownMs: 60_000,
   })
 
   const result = await store.acquireDispatchLease({
@@ -1556,44 +1545,35 @@ test('Postgres dispatch lease excludes only the referenced unknown usage request
     contractVersion: CONTRACT_V1,
     ownerRequestId: randomUUID(),
     expiresAt: new Date(Date.now() + 30_000),
-    retryOfRequestId,
+    retryOfRequestId: randomUUID(),
   })
 
   assert.equal(result.kind, 'blocked')
-  assert.equal(result.reason, 'unknown')
-  assert.equal(queries[0].values[7], retryOfRequestId)
-  assert.equal(queries[0].values[8], CONTRACT_V1)
-  assert.equal(queries[0].values[9], 'justone')
-  assert.match(queries[0].sql, /call\.provider_key = \$10/u)
+  assert.equal(result.reason, 'pending')
+  for (const { sql } of queries) assert.doesNotMatch(sql, /outcome = 'unknown'/u)
+  assert.equal(queries[0].values.length, 10)
+  assert.equal(queries[0].values[5], ENDPOINT_KEY)
+  assert.equal(queries[0].values[6], CONTRACT_V1)
+  assert.equal(queries[0].values[7], 'justone')
+  assert.equal(queries[0].values[8], 0)
+  assert.match(queries[0].sql, /\$9::double precision > 0/u)
+  assert.match(queries[0].sql, /call\.provider_key = \$8/u)
   assert.match(
     queries[0].sql,
     /call\.dispatch_fingerprint = \$3[\s\S]*?call\.dispatch_fingerprint IS NULL[\s\S]*?call\.request_fingerprint = \$3/u,
   )
-  assert.match(
-    queries[0].sql,
-    /call\.outcome = 'unknown'[\s\S]*?call\.usage_request_id <> \$8/u,
-  )
   assert.match(queries[0].sql, /call\.outcome = 'pending'/u)
   assert.match(
     queries[0].sql,
-    /call\.endpoint_key = \$7[\s\S]*?call\.contract_version = \$9[\s\S]*?call\.outcome = 'succeeded_unusable'/u,
+    /call\.endpoint_key = \$6[\s\S]*?call\.contract_version = \$7[\s\S]*?call\.outcome = 'succeeded_unusable'/u,
   )
   assert.match(queries[0].sql, /call\.error_code IS DISTINCT FROM 'upstream_note_unavailable'/u)
-  assert.equal(queries[1].values[5], retryOfRequestId)
-  assert.equal(queries[1].values[6], CONTRACT_V1)
-  assert.equal(queries[1].values[7], 'justone')
-  assert.match(queries[1].sql, /WHERE provider_key = \$8/u)
+  assert.deepEqual(queries[1].values.slice(3), [ENDPOINT_KEY, 'justone', 0, CONTRACT_V1])
+  assert.match(queries[1].sql, /\$6::double precision > 0/u)
+  assert.match(queries[1].sql, /WHERE provider_key = \$5/u)
   assert.match(
     queries[1].sql,
-    /dispatch_fingerprint = \$3[\s\S]*?dispatch_fingerprint IS NULL[\s\S]*?request_fingerprint = \$3/u,
-  )
-  assert.match(
-    queries[1].sql,
-    /outcome = 'unknown'[\s\S]*?usage_request_id <> \$6/u,
-  )
-  assert.match(
-    queries[1].sql,
-    /endpoint_key = \$5[\s\S]*?contract_version = \$7[\s\S]*?outcome = 'succeeded_unusable'/u,
+    /endpoint_key = \$4[\s\S]*?contract_version = \$7[\s\S]*?outcome = 'succeeded_unusable'/u,
   )
   assert.match(queries[1].sql, /error_code IS DISTINCT FROM 'upstream_note_unavailable'/u)
 })

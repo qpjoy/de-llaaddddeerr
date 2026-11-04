@@ -6,6 +6,8 @@ import { ErrorState } from './components.jsx'
 import { AcquisitionComparison } from './acquisition-comparison.jsx'
 import { acquisitionComparisonSessionFor } from './acquisition-comparison.js'
 import { TwitterRequestRetry } from './twitter-request-retry.jsx'
+import { SearchAdmissionDisposition } from './search-admission-disposition.jsx'
+import { PlatformDiagnosticGuidance } from './platform-diagnostics.jsx'
 import './request-diagnostics.css'
 
 const shown = value => value == null || value === '' ? '未记录' : String(value)
@@ -84,7 +86,10 @@ function RequestValidation({ token, run, session, onUnauthorized }) {
       if ([401, 403].includes(error.status)) onUnauthorized?.(error)
     } finally { session.update({ loading: false }) }
   }
-  if (run.platform === 'twitter' && run.status === 'unknown') return <TwitterRequestRetry {...{ token, run, session }}/>
+  if (run.platform === 'twitter' && run.status === 'unknown') return <>
+    <SearchAdmissionDisposition {...{ token, run, session, onUnauthorized }}/>
+    <TwitterRequestRetry {...{ token, run, session }}/>
+  </>
   if (!run.replayAvailable) return <p className="mih-diagnostic-note">该请求尚无可复现的已提交响应，暂不支持按原参数重新验证。处理中或结果未知时，请先核对原请求结果。</p>
   if (original) return <AcquisitionComparison {...{ token, original, session }} savedOnly/>
   return <section className="mih-diagnostic-validation">
@@ -158,6 +163,7 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
             ['请求时间', formatDate(run.reservedAt)], ['完成时间', formatDate(run.completedAt)],
           ]}/>
           <p className="mih-diagnostic-guidance">{run.guidance}</p>
+          <PlatformDiagnosticGuidance analysis={run.analysis?.platformAnalysis} requestId={run.requestId}/>
           <EvidenceAnalysis analysis={run.analysis}/>
           <RequestValidation token={token} run={run} onUnauthorized={onUnauthorized} session={acquisitionComparisonSessionFor(comparisonSessions || localComparisonSessions, token, run.requestId)}/>
           <h4>客户结算</h4>
@@ -166,8 +172,22 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
             ['记录扣款（最小货币单位）', `${run.customerCharge.chargedMinor} ${run.customerCharge.currency || ''}`],
           ]}/> : <p>没有客户扣款记录；不能据此判断供应商是否计费。</p>}
           {run.customerCharge?.enforcementMode === 'shadow' ? <p className="mih-diagnostic-note">shadow 是影子计费记录，不代表实际钱包扣款。</p> : null}
+          {run.refusal ? <>
+            <h4>拒绝原因（熔断保护）</h4>
+            <Facts entries={[
+              ['问题归属', run.refusal.cause === 'upstream' ? '上游供应商' : run.refusal.cause === 'hub_response_parsing' ? 'Hub 解析' : '未找到触发记录'],
+              ['供应商', run.refusal.provider], ['是否派发', '未派发，未产生供应商费用'], ['拒绝时间', formatDate(run.refusal.refusedAt)],
+              ...(run.refusal.trigger ? [
+                ['上游错误码', run.refusal.trigger.errorCode], ['上游 HTTP', run.refusal.trigger.httpStatus],
+                ['上游业务码', run.refusal.trigger.businessCode], ['触发平台', run.refusal.trigger.marketplace],
+                ['供应商计费', run.refusal.trigger.billed === false ? '未计费' : run.refusal.trigger.billed === true ? '已计费' : '未知'],
+                ['触发调用', run.refusal.trigger.callId], ['失败时间', formatDate(run.refusal.trigger.failedAt)],
+              ] : []),
+            ]}/>
+            <p className="mih-diagnostic-note">触发记录是拒绝前 {run.refusal.windowMinutes} 分钟内该供应商最近一次失败，用来说明保护为何打开，不是本请求的调用。</p>
+          </> : null}
           <h4>当次上游调用</h4>
-          {!run.providerCalls.length && !run.connectorCalls.length ? <p>未找到当次调用记录。缓存交付、调度前拒绝或证据缺失都可能造成此情况。</p> : null}
+          {!run.providerCalls.length && !run.connectorCalls.length ? <p>{run.refusal ? '本请求被熔断保护拒绝，没有派发到供应商。' : '未找到当次调用记录。缓存交付、调度前拒绝或证据缺失都可能造成此情况。'}</p> : null}
           {run.providerCalls.map(call => <Call key={call.id} call={call} provider/>)}
           {run.connectorCalls.map(call => <Call key={call.id} call={call}/>)}
           {run.callsTruncated ? <p>调用记录过多，每类仅显示前 50 条，以上不是完整调用链。</p> : null}

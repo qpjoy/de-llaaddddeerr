@@ -1,6 +1,6 @@
 import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
-import { upstreamCapacityError } from './availability-errors.mjs'
-import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
@@ -47,7 +47,6 @@ function upstreamFailure(error) {
 export async function runTwitterSearchFill({ gateway,context,delivery,request,deadlineAt,signal,
   resolveCredential,enterCapacity,leaveCapacity,revalidateIdentity,providerCostControl,projectDelivery,assertSearchDispatchAllowed,rejectedFallback }, { clock=Date.now }={}) {
   const store=gateway.platformStore, started=performance.now()
-  if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
   const identity={ tenantId:context.tenant.id,consumerId:context.consumer.id,apiKeyId:context.apiKey.id,
     path:'/api/v1/data/search',query:request.query,pageSize:request.pageSize,type:request.resultType,scopeHash:request.scopeHash }
   const history=await store.twitterDeliveredIdsFor({ ...identity,previousDeliveryId:request.fill?.previousDeliveryId,
@@ -99,7 +98,6 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
   }
   const authorizeAcquisition=async()=>{
     context=await revalidateIdentity()
-    if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
     // Historical fresh keys may leave replay and purchase again after their
     // TTL. Preserve that behavior while checking the same cross-supplier
     // query boundary as a new TikHub request, after owning the parent lease.
@@ -112,9 +110,9 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     const shared=await store.providerState('rapidapi')
     const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared
     const contract=await store.contractCircuitState?.('rapidapi','twitter')
-    if([state,contract].some(row=>row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil)>clock())) {
-      throw new AppError(503,'external_platform_circuit_open','External data is temporarily unavailable')
-    }
+    const blocked=await openCircuitError({store,state,contract,now:clock(),config:gateway.config,
+      message:'External data is temporarily unavailable',marketplace:'twitter'})
+    if(blocked) throw blocked
     const credential=await resolveCredential()
     if(!credential.ready) throw new AppError(503,'external_platform_not_configured','External data is unavailable')
     const control=await gateway.operationControlStore.authorizeDispatch('rapidapi',delivery.operation,
@@ -159,7 +157,8 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     const claim=await store.acquireTwitterFillDeliveryLease(dispatchLease)
     if(claim!==true && claim?.kind!=='acquired') throw new AppError(409,'request_in_progress','An equal Twitter delivery is in progress')
     ownsLease=true
-    if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
+    // An equal ended delivery no longer blocks; an explicit retry is still revalidated.
+    if(delivery.twitterManualRetry) await store.validateTwitterManualRetry(dispatchLease.twitterManualRetry)
     if(request.buffer) {
       const archived=await store.twitterPageFor({ ...identity,callId:request.buffer.callId })
       if(!archived || archived.bodySize>MAX_BYTES) throw unavailable()
@@ -188,8 +187,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
             ?'external_platform_response_unusable':'request_in_progress'
           throw new AppError(409,code,'An equal search is pending or has an unresolved result',{upstreamDispatched:false})
         }
-        if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
-        if(entered==='exempt' && !isHubRateLimitExempt(context)) {
+        if(entered==='exempt' && !bypassesSupplierLimits(context)) {
           leaveCapacity(entered); entered=false
         }
         if(!entered) {
@@ -212,7 +210,9 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         }
         const {credential,control,cost}=acquisition
         currentCost=await store.reserveProviderCostWorkflow({ ...delivery,apiKeyId:context.apiKey.id,costControls:[cost] })
-        const rate=isHubRateLimitExempt(context)?{allowed:true}:await store.acquireProviderRateLimit({ limit:(await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,windowMs:60000 })
+        const rate=await acquireSupplierRate(context,store,{ limit:(await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,windowMs:60000,
+          signal,providerState:()=>store.providerState('rapidapi'),deadline:deadlineAt-(gateway.config.timeoutMs || 30000)-5000,
+          maxWaitMs:currentAdmissionLimits(gateway).maxWaitMs })
         if(!rate.allowed) throw new AppError(429,'external_platform_rate_limited','External data rate limit is exhausted')
         if(!enoughTime()) throw new AppError(503,'twitter_fill_deadline','The bounded search deadline has been reached')
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')

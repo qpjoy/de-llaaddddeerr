@@ -350,3 +350,63 @@ bash scripts/verify-wechat-self-hosted.sh
 - 幂等重放返回原任务；
 - 批量两条都完成；
 - 计费关闭时，该 Key 的使用记录为 0。
+
+## 11. Facebook 内容搜索 → Night-All-A（2026-10-31）
+
+状态：**已实现未部署、未提交。** 用户要求把 Night-All-A 上的 Facebook 自建爬虫接入「策略搜索 → 内容搜索 / Facebook」，默认全局同时最多 2 个请求打到 Night-All-A，并能在管理页切换到自建、调整速率。
+
+### 11.1 和微信自建引擎的区别
+
+| | 微信自建引擎（第 1–10 节） | Facebook 自建（本节） |
+|---|---|---|
+| 对外合同 | 新接口，202 + 轮询 | **不新增接口**：沿用 `/api/v1/data/search`、`/api/v2/data/search`、`/api/v1/search/raw`、`/api/v1/night-all/search/raw` 的 Facebook 内容搜索，Delta 无需改动 |
+| 选路 | 独立能力项 | Facebook 搜索策略新增模式 `selfhosted`（「自建：仅 Night-All-A」），与 auto / rapidapi / justone / paused 并列 |
+| 上游 | Night-All `127.0.0.1:13141` 同步接口 | Night-All-A `100.127.0.1:8100`：`POST /api/tasks`（`connector_id=facebook-protocol`、`capability=search.posts`、`max_attempts=1`、`timeout_seconds=40`）→ 轮询 `GET /api/runs/{id}` → 超时 `POST /api/tasks/{id}/cancel` |
+| 互斥 | 单执行槽，同步提交 | 准入名额：全局在途上限 + 启动间隔（下文） |
+
+Internal（`100.127.0.6`）经 VPN 访问 Night-All-A。Public 是 hostNetwork，走宿主机路由。地址沿用旧适配器的 `nightAllAConfig()`（默认 `http://100.127.0.1:8100`，只接受该主机的 8100/8101），**没有新增环境变量**；若部署已配置 `MX_INSIGHT_NIGHT_ALL_A_SESSION_COOKIE` / `CSRF_TOKEN` 会一并带上。旧的 `MX_INSIGHT_NIGHT_ALL_A_ENABLED` 只管 Admin 控制台转发，与本功能无关。
+
+### 11.2 全局名额与速率
+
+- **位置：** `control.facebook_selfhosted_admission` 单行（迁移 173），所有 Public 进程、副本共用；`SELECT … FOR UPDATE` 串行化。限额存在 `control.platform_search_policies` 的 `selfhosted_max_concurrency`（默认 **2**，1–8）和 `selfhosted_requests_per_minute`（默认 **12**，1–120），随策略一起保存，带修订号和审计事件。
+- **规则：** 先进先出排队；只有队首能拿名额；在途租约数 < 上限，且距上次启动 ≥ `60 秒 / 每分钟次数` 才放行（均匀间隔，不攒突发）。**不豁免任何 Key**，LCY-delta 托管 Key 同样受限。
+- **时长（内置值）：** Night-All-A 任务 40 秒超时；Hub 单次预算 60 秒（含容器启动、入库、取消往返）；排队最多 25 秒（60 + 25 < Delta 的 90 秒超时），超时返回 `503 external_platform_busy`（`stage=facebook_selfhosted_admission`），不转付费供应商。
+- **释放：** 运行到终态或确认取消即释放；结果未知（运行中超时、5xx、断连）**不释放**，租约在 预算 + 60 秒 后自然过期，保证名额可信。
+- **每进程那层**（网关并发、供应商 RPM 桶）对 `night-all-a` 设为宽松值，只由上面的全局规则约束。
+
+### 11.3 结果判定
+
+| Night-All-A | Hub 判定 | 名额 | 对外 |
+|---|---|---|---|
+| run `succeeded` | succeeded，`billed=false`（自建无采购成本） | 释放 | 正常结果；`result_state=partial/permission_limited` 时 raw 附 `FACEBOOK_SELFHOSTED_PARTIAL` 警告 |
+| 连接被拒 / DNS 失败 | rejected（未创建任务） | 释放 | 503 `facebook_selfhosted_unavailable` |
+| 提交 4xx（422 参数） | rejected | 释放 | 400 `invalid_facebook_search`（查询或游标超过 500 字） |
+| run `failed`：`auth_expired`、`verification_required`、`credential_missing` | rejected，计入熔断 | 释放 | 503 `facebook_selfhosted_unavailable`，`action=contact_administrator` |
+| run `failed`：`account_rate_limited` / `soft_blocked` | rejected | 释放 | 429 `facebook_selfhosted_rate_limited`（建议 300 / 60 秒后重试） |
+| 排队中超时且 Night-All-A 确认取消 | rejected（未到 Facebook） | 释放 | 503 |
+| 运行中超时、提交 5xx、`cancelled`/`orphaned` | **unknown** | **保留到过期** | 502 `facebook_selfhosted_outcome_unknown` |
+| 结果无法规范化 | succeeded_unusable | 释放 | 502 `external_platform_response_unusable` |
+
+熔断：连续 3 次计入熔断的失败后暂停 120 秒（`night-all-a` 自己的熔断，不影响 RapidAPI/JustOne）。
+
+### 11.4 计量与入库
+
+- 客户侧计量与 Facebook 内容搜索原规则相同（标准搜索按条、raw 按次），与供应商无关。供应商调用记 `provider_key=night-all-a`、`operation=selfhosted.facebook.search`，成本 0。
+- 原始结果（run.result）作为受限原始响应保存，标准搜索的缓冲续页与 RapidAPI/JustOne 同一套机制；canonical 入库连接器为 `external-platform:night-all-a`。
+- 每次派发 `pages = min(3, ceil(pageSize/10))`。Night-All-A 返回的游标超过 500 字时不再续页（对方会拒收）。游标绑定供应商：切换模式后旧游标仍在原供应商续页。
+
+### 11.5 代码位置
+
+`migrations/173_facebook_selfhosted_search.sql`、`server/adapters/night-all-a-facebook.mjs`、`server/external-platforms/facebook-selfhosted-admission.mjs`、`platform-search-policy.mjs`（`admitSelfhosted` 等）、`gateway.mjs`（`searchFacebook` 路由与错误映射）、`facebook-search-fill.mjs`、`facebook-search-store.mjs`、`server/contracts/facebook-search.mjs`（`nightAllAFacebookPost`）、`server/index.mjs`、`server/workers/ingest.mjs`；页面 `src/platform-search-policy.jsx`、`src/strategy-search-model.js`；测试 `tests/server/facebook-selfhosted.test.mjs`（9 项，含 PGlite 真实 SQL 名额测试）。
+
+### 11.6 上线步骤
+
+1. 正常部署 Hub，迁移 173 随部署执行。保存的模式不变（例如当前「暂停新搜索」）。
+2. 在 Internal 上确认可达且账号可用（只读，不触发采集）：`curl -s http://100.127.0.1:8100/api/health`；`curl -s 'http://100.127.0.1:8100/api/runs?connector_id=facebook-protocol&limit=5'`。`search.posts` **需要登录**：Night-All-A 必须为 facebook-protocol 配好有效 Cookie 会话和网络出口（见 Night-All-A `collectors/protocol/facebook/README.md`）；2026-10-12 文档记载登录能力尚未实测。
+3. 「策略搜索 → 管理 → 内容搜索 / Facebook」选「自建：仅 Night-All-A」，按需调整「同时在途上限」「每分钟最多启动」，填写原因并保存。
+4. 用一次真实搜索验收；页面上的在途数、排队数、最近启动时间应随之变化。
+
+
+## 12. 单帖评论的执行归属（2026-11-02）
+
+`/api/v1/data/social/post-comments` 与两个旧 search/post-comments 入口的新采集由 Hub 固定供应商合同执行，覆盖 13 平台。复用现有供应商准入、PG 受限归档、交付清单、计费与规范化评论入库，不新增引擎、消息组件或存储。Night-All 旧评论回执只读重放，未知请求不迁移重买。此项不改变 Night-All/Night-All-A 自建引擎职责和 MX-H2I 登录联网。代码已实现，生产未部署/验收；详细平台、价格授权与分页边界见 [帖子评论迁移](../../integrations/post-comments-migration.md)。

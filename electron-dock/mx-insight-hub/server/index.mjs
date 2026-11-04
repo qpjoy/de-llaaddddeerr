@@ -35,17 +35,22 @@ import { deploymentAdmissionLimits } from './external-platforms/admission-runtim
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { IpSearchAdminService } from './external-platforms/ipsearch-admin.mjs'
 import { JustOneAdapter } from './adapters/justone.mjs'
+import { RAPIDAPI_TAOBAO_TMALL_HOST } from './contracts/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
+import { NightAllAFacebookAdapter, NIGHT_ALL_A_FACEBOOK_BUDGET_MS } from './adapters/night-all-a-facebook.mjs'
+import { FACEBOOK_SELFHOSTED_ENDPOINT, FACEBOOK_SELFHOSTED_PROVIDER } from './contracts/facebook-search.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
+import { normalizePostCommentsRequest, POST_COMMENTS_RECIPES, POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../shared/social-account-contract.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
 import { createPeripheralRuntime } from './peripherals/runtime.mjs'
 import { AdmissionRecoveryService } from './operations/admission-recovery.mjs'
+import { SearchAdmissionDispositionService } from './operations/search-admission-disposition.mjs'
 import { createSso, readSsoProfile } from './identity/sso.mjs'
 import { loadConfig } from './config.mjs'
 import { AppError } from './core/errors.mjs'
@@ -201,7 +206,6 @@ export async function createRuntime(config = loadConfig()) {
     usageStore: store,
     circuitFailureThreshold: config.justOne.circuitFailureThreshold,
     circuitOpenMs: config.justOne.circuitOpenMs,
-    uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
     responseQuarantineCooldownMs: config.justOne.responseQuarantineCooldownMs,
   })
   const externalPlatformCredentialStore = createExternalPlatformCredentialStore({
@@ -218,7 +222,6 @@ export async function createRuntime(config = loadConfig()) {
     authorizationPlatform: 'social',
     circuitFailureThreshold: config.justOne.circuitFailureThreshold,
     circuitOpenMs: config.justOne.circuitOpenMs,
-    uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
     responseQuarantineCooldownMs: config.justOne.responseQuarantineCooldownMs,
   })
   const tikHubPlatformStore = createExternalPlatformStore({
@@ -229,7 +232,6 @@ export async function createRuntime(config = loadConfig()) {
     rateLimitBurst: config.tikHub.rateLimitBurst,
     circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
     circuitOpenMs: config.tikHub.circuitOpenMs,
-    uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
     responseQuarantineCooldownMs: config.tikHub.responseQuarantineCooldownMs,
   })
   // The other half of the account-search platforms is served by this vendor.
@@ -243,7 +245,6 @@ export async function createRuntime(config = loadConfig()) {
     rateLimitBurst: config.tikHub.rateLimitBurst,
     circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
     circuitOpenMs: config.tikHub.circuitOpenMs,
-    uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
     responseQuarantineCooldownMs: config.tikHub.responseQuarantineCooldownMs,
   })
   const tikHubCredentialStore = createExternalPlatformCredentialStore({
@@ -264,8 +265,7 @@ export async function createRuntime(config = loadConfig()) {
   const rapidApiProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress, { providerKey: 'rapidapi' }) : null
   const rapidApiCredentialStore = createExternalPlatformCredentialStore({ pool, providerKey: 'rapidapi', environmentConfigured: rapidConfig.configured })
   const rapidApiStore = createExternalPlatformStore({ pool, usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'twitter',
-    circuitFailureThreshold: rapidConfig.circuitFailureThreshold, circuitOpenMs: rapidConfig.circuitOpenMs,
-    uncertainCooldownMs: rapidConfig.unknownFingerprintCooldownMs })
+    circuitFailureThreshold: rapidConfig.circuitFailureThreshold, circuitOpenMs: rapidConfig.circuitOpenMs })
   const rapidApiAdapter = pool && config.listenerMode !== 'admin' && !rapidConfig.configurationError
     ? new RapidApiAdapter({ apiKey: rapidConfig.apiKey, fetchImpl: createRapidApiProxyFetch(rapidApiProxyStore), credentialResolver: async () => (await rapidApiCredentialStore.readCredentialSnapshot('rapidapi')).source === 'database'
       ? await rapidApiCredentialStore.readCredential('rapidapi') : rapidConfig.apiKey, timeoutMs: rapidConfig.timeoutMs }) : null
@@ -299,12 +299,31 @@ export async function createRuntime(config = loadConfig()) {
   ].map(([providerKey, adapter, providerConfig, credentialStore]) => [providerKey, new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
     usageStore: store, platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey,
       authorizationPlatform: 'facebook', circuitFailureThreshold: providerConfig.circuitFailureThreshold,
-      circuitOpenMs: providerConfig.circuitOpenMs, uncertainCooldownMs: providerConfig.unknownFingerprintCooldownMs }),
+      circuitOpenMs: providerConfig.circuitOpenMs }),
     adapter, config: providerConfig, providerKey, credentialStore, operationControlStore: externalPlatformControlStore,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(120000, config.reservationLeaseMs),
   })]))
+  // Self-hosted Night-All-A over the VPN. The cluster-wide in-flight cap and
+  // start spacing live in the Facebook search policy; these per-process
+  // values only stay out of their way. It has no procurement cost.
+  const facebookSelfhostedConfig = { timeoutMs: NIGHT_ALL_A_FACEBOOK_BUDGET_MS, freshTtlMs: rapidConfig.freshTtlMs,
+    staleTtlMs: rapidConfig.staleTtlMs, maxConcurrency: 32, maxConsumerConcurrency: 32, maxRequestsPerMinute: 600,
+    circuitFailureThreshold: 3, circuitOpenMs: 120000, billing: { currency: 'CNY', monthlyBudgetMinor: 0,
+      monthlySubsidyBudgetMinor: 0, unitCostMinorByEndpoint: { [FACEBOOK_SELFHOSTED_ENDPOINT]: 0 } } }
+  const facebookSelfhostedGateway = new ExternalPlatformGateway({ usageStore: store,
+    platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey: FACEBOOK_SELFHOSTED_PROVIDER,
+      authorizationPlatform: 'facebook', circuitFailureThreshold: facebookSelfhostedConfig.circuitFailureThreshold,
+      circuitOpenMs: facebookSelfhostedConfig.circuitOpenMs }),
+    adapter: config.storeDriver === 'postgres' && config.listenerMode !== 'admin' ? new NightAllAFacebookAdapter({
+      baseUrl: config.nightAllA.baseUrl, headers: config.nightAllA.sessionCookie
+        ? { cookie: `dq_admin_session=${config.nightAllA.sessionCookie}`, ...(config.nightAllA.csrfToken ? { 'x-csrf-token': config.nightAllA.csrfToken } : {}) } : {},
+    }) : null,
+    config: facebookSelfhostedConfig, providerKey: FACEBOOK_SELFHOSTED_PROVIDER,
+    operationControlStore: { authorizeDispatch: async () => null, describeProvider: async () => [] },
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(120000, config.reservationLeaseMs),
+  })
   const facebookSearch = (context, input) => facebookGateways.rapidapi.searchFacebook(context, input, {
-    policyStore: platformSearchPolicyStore, fallbackGateway: facebookGateways.justone,
+    policyStore: platformSearchPolicyStore, fallbackGateway: facebookGateways.justone, selfhostedGateway: facebookSelfhostedGateway,
   })
   const tikHubAdapter = config.storeDriver === 'postgres'
     && !config.tikHub.configurationError
@@ -390,10 +409,32 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: externalPlatformCredentialStore,
   })
+  // Taobao/Tmall product search through the RapidAPI listing of the same
+  // backend: the Twitter/Facebook RapidAPI key and System Proxy, but its own
+  // per-marketplace breaker so neither side can pause the other. The saved
+  // ecommerce route decides whether it is primary, backup or unused.
+  const ecommerceRapidApiAdapter = rapidApiAdapter ? new JustOneAdapter({
+    credentialResolver: async () => (await rapidApiCredentialStore.readCredentialSnapshot('rapidapi')).source === 'database'
+      ? await rapidApiCredentialStore.readCredential('rapidapi') : rapidConfig.apiKey,
+    fetchImpl: createRapidApiProxyFetch(rapidApiProxyStore),
+    timeoutMs: config.justOne.timeoutMs, connectTimeoutMs: config.justOne.connectTimeoutMs,
+    transport: { provider: 'rapidapi', host: RAPIDAPI_TAOBAO_TMALL_HOST }, logger: console,
+  }) : null
+  const ecommerceRapidApiGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
+    ecommerceRoutingStore, usageStore: store,
+    platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'ecommerce',
+      providerCircuit: 'marketplace', circuitFailureThreshold: rapidConfig.circuitFailureThreshold, circuitOpenMs: rapidConfig.circuitOpenMs }),
+    adapter: ecommerceRapidApiAdapter,
+    config: { ...rapidConfig, timeoutMs: config.justOne.timeoutMs, freshTtlMs: config.justOne.freshTtlMs, staleTtlMs: config.justOne.staleTtlMs },
+    providerKey: 'rapidapi', credentialStore: rapidApiCredentialStore, operationControlStore: externalPlatformControlStore,
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
+  })
+  externalPlatformGateway.productSearchGateways = ecommerceRapidApiGateway.productSearchGateways = Object.freeze({
+    justone: externalPlatformGateway, rapidapi: ecommerceRapidApiGateway,
+  })
   const xiaohongshuHotNotesStore = createExternalPlatformStore({
     pool, usageStore: store, providerKey: 'justone', authorizationPlatform: 'xiaohongshu',
     circuitFailureThreshold: config.justOne.circuitFailureThreshold, circuitOpenMs: config.justOne.circuitOpenMs,
-    uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
     responseQuarantineCooldownMs: config.justOne.responseQuarantineCooldownMs,
   })
   const xiaohongshuHotNotesGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
@@ -432,7 +473,6 @@ export async function createRuntime(config = loadConfig()) {
         rateLimitBurst: providerConfig.rateLimitBurst,
         circuitFailureThreshold: providerConfig.circuitFailureThreshold,
         circuitOpenMs: providerConfig.circuitOpenMs,
-        uncertainCooldownMs: providerConfig.unknownFingerprintCooldownMs,
         responseQuarantineCooldownMs: providerConfig.responseQuarantineCooldownMs }),
       adapter: justone ? justOneAdapter : tikHubAdapter, config: providerConfig, providerKey,
       apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
@@ -459,6 +499,20 @@ export async function createRuntime(config = loadConfig()) {
     resolveProvider: async context => (await resolveTwitterSearchRoute({ consumerId: context.consumer.id })).provider })
   const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
+  socialAccountDataGateways.facebook.strategySearchRoutingStore = strategySearchRoutingStore
+  const postCommentsGateways = Object.fromEntries(Object.entries(POST_COMMENTS_RECIPES)
+    .map(([platform, recipe]) => [platform, nativeSearchGateway(platform, recipe.provider)]))
+  const postComments = (context, input) => {
+    // Route legacy supplier cursor identities to the gateway's immutable-replay
+    // check. The workflow forbids using them for a new provider dispatch.
+    const normalized = normalizePostCommentsRequest(input.body, {
+      businessId: context.consumer.businessId, allowHistoricalRedditCursor: true,
+      allowHistoricalKuaishouCursor: true,
+    })
+    return postCommentsGateways[normalized.platform].postComments(context, {
+      ...input, platform: normalized.platform, path: POST_COMMENTS_PATH,
+    })
+  }
   const socialDataGateway = { socialData: (context, input) => {
     if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
     // Twitter owns receipt-aware validation: historical identities may need
@@ -542,6 +596,7 @@ export async function createRuntime(config = loadConfig()) {
       && operation.canaryConsumerIds.includes(String(context.consumer.id).toLowerCase())
   }
   const service = new HubService({
+    strategySearchRoutingStore,
     store,
     adapter,
     twitterRetryStore: rapidApiStore,
@@ -604,6 +659,7 @@ export async function createRuntime(config = loadConfig()) {
     externalFacebookCapabilities: async options => {
       const policy = await platformSearchPolicyStore.facebook()
       if (policy.mode === 'paused') return { ready: false }
+      if (policy.mode === 'selfhosted') return { ready: Boolean(await facebookSelfhostedGateway.adapter?.resolveCredential()) }
       const operationKeys = ['social.facebook.search', 'native.j.facebook_post_search_v1']
       const states = await Promise.allSettled(Object.entries(facebookGateways).map(async ([provider, gateway]) => {
         const credential = await (provider === 'rapidapi' ? rapidApiCredentialStore : externalPlatformCredentialStore).describeCredential(provider)
@@ -611,15 +667,13 @@ export async function createRuntime(config = loadConfig()) {
         return [provider, Object.values(readiness).some(Boolean)]
       }))
       const ready = Object.fromEntries(states.filter(row => row.status === 'fulfilled').map(row => row.value))
-      // A due check permits one demand-triggered probe; it does not replenish
-      // the subscription. Use the same shortened billing-window schedule as admission.
-      const checkAt = policy.next_recovery_check_at || policy.blocked_until
-      const blocked = checkAt ? new Date(checkAt).getTime() > Date.now()
-        : policy.used >= policy.monthly_limit || policy.remaining === 0
+      // Same supplier-header/one-shot check decision as actual admission.
+      const blocked = !policy.rapid_available
       return { ready: Boolean((policy.mode !== 'justone' && ready.rapidapi && !blocked) || (policy.mode !== 'rapidapi' && ready.justone)) }
     },
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
+    externalPostComments: postComments,
     externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
       : input.normalized.platform === 'twitter' ? hubSocialGateway.searchRaw(context, input)
@@ -701,10 +755,11 @@ export async function createRuntime(config = loadConfig()) {
     strategySearchRoutingStore,
     peripherals,
     wechatSelfHosted: wechatSelfHosted.service,
+    searchAdmissionDisposition: pool ? new SearchAdmissionDispositionService({ pool, apiKeyPepper: config.apiKeyPepper }) : null,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,
         ipRiskGateway.platformStore, ipRiskV2Gateway.platformStore, ...[...webSearch.gateways.values()].map(g => g.platformStore)]
-        .map(s => [s.providerKey, { cooldownMs: s.uncertainCooldownMs, responseQuarantineCooldownMs: s.responseQuarantineCooldownMs, burst: s.rateLimitBurst }])) }) : null,
+        .map(s => [s.providerKey, { responseQuarantineCooldownMs: s.responseQuarantineCooldownMs, burst: s.rateLimitBurst }])) }) : null,
     service,
     store,
     adapter,
@@ -764,11 +819,12 @@ export async function createRuntime(config = loadConfig()) {
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
+    ecommerceRapidApiGateway, ecommerceRapidApiAdapter,
     xiaohongshuHotNotesGateway, xiaohongshuHotNotesStore,
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways, socialAccountDataGateways, socialDataGateway, strategySearchRoutingStore,
+    nativeSearchGateways, socialAccountDataGateways, postCommentsGateways, socialDataGateway, strategySearchRoutingStore,
   }
 }
 
@@ -799,6 +855,7 @@ export async function start(config = loadConfig()) {
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()
     await runtime.justOneAdapter?.close()
+    await runtime.ecommerceRapidApiAdapter?.close()
     await runtime.store.close()
     await runtime.retrievalPool?.end()
     await runtime.pool?.end()

@@ -2,6 +2,10 @@
 
 状态：设计方案，未修改生产路由。本文用于先建立只读基线，再按同一个 probe ID 串起客户端、Domestic、公网 Nginx、Internal Nginx/Caddy、Kubernetes Service/Pod 和应用日志。
 
+2026-10-22 补充：本文第 5 节的 Luopan 调用点取自 demo，不能代替正式产品及其 pnpm 补丁。
+正式 `/Users/qpjoy/workspace/mingxi/luopan/po-frontend` 的当前等待链、依赖一致性、海外后台任务和
+Domestic 容量分析见 [53](./53-luopan-login-and-domestic-capacity-review-2026-10-22.md)。现场量化仍按本文方法执行。
+
 ## 1. 当前路径与需要先确认的事实
 
 ### 1.1 Launcher Admin

@@ -201,12 +201,15 @@ test('HTTP forwarding and credential management preserve separate Public and Adm
   assert.equal(calls, 1)
 })
 
-test('unknown outcome blocks automatic redispatch; rejected payload is archived', async () => {
+test('unknown outcome keeps its own key while a new key may query again; rejected payload is archived', async () => {
   let calls = 0
   const f = await enterpriseFixture({ fetchImpl: async () => { calls++; throw new Error('network detail must not leak') } })
   await assert.rejects(f.gateway.queryEnterprise(f.context, request), { code: 'external_platform_outcome_unknown' })
-  await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request, idempotencyKey: 'enterprise-second-0002' }))
-  assert.equal(calls, 1)
+  await assert.rejects(f.gateway.queryEnterprise(f.context, request))
+  assert.equal(calls, 1, 'the same key never redispatches an unknown outcome')
+  await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request, idempotencyKey: 'enterprise-second-0002' }),
+    { code: 'external_platform_outcome_unknown' })
+  assert.equal(calls, 2, 'an ended unknown does not hold a new key')
   const denied = await enterpriseFixture({ fetchImpl: async () => new Response(JSON.stringify({ status: '102', message: 'balance', data: null })) })
   await assert.rejects(denied.gateway.queryEnterprise(denied.context, request))
   assert.equal(denied.platformStore.restrictedResponseArchives.size, 1)

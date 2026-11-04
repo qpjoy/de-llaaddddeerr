@@ -1,5 +1,21 @@
 # MX Launcher 设计文档索引
 
+## 下游用户接口接入（2026-10-27，文档 v1）
+
+面向下游开发者，按当前源码整理的调用契约：
+
+1. [57 · 用户、身份与 SDK 接入](57-downstream-user-integration.md)：创建/更新/导入用户、服务账号、密码登录、token 校验、应用准入、改密/删除，以及本地账号绑定与 409 排查。
+2. [58 · Oversea 用户订阅接口](58-oversea-user-subscription-api.md)：用户权益、ensure/远端同步、ready 判断、YAML/订阅链接、H2O 配置、完整调用示例和错误处理。
+3. [59 · 浏览器 SSO、注册与账号自助](59-browser-account-api.md)：OIDC/BFF 接入、登录注册表单、资料/密码/设备管理、Auth 服务端账号接口及邀请码管理。
+
+先读 57，再按需要接入 58/59。三篇均列明鉴权、参数、响应、副作用、重试边界和源码依据；
+其中也标出了旧 OpenAPI 示例与当前实现的差异。此版本只补充文档，不改接口、数据库或部署，
+不要求现有 MX-H2I/Luopan 切换登录和联网流程。目标环境的入口、凭据与实际部署版本仍需联调确认。
+
+## 架构与历史专题
+
+- [60 · Launcher 间歇慢与 504 排查](60-launcher-504-triage-2026-10-27.md)：10 月 27 日日志确认公网 Nginx 到 Internal :80 建连超时，23:34 容器探针恢复，底层原因待查；含只读采集、恢复分支及后台数据库异常退出 API 的独立本地修复。
+
 本目录同时保存历史方案、当前实现基线和目标架构。涉及 MX-H2I 网络行为时，优先按以下
 顺序阅读：
 
@@ -15,7 +31,15 @@
    Launcher Admin 与 Luopan bootstrap/standalone 路径的只读探针、代理耗时、WireGuard
    证据、应用/数据库分层和 MX-H2I 不回归边界。
 
+5. [55-luopan-client-optimization-with-mx-h2i-2026-10-23.md](./55-luopan-client-optimization-with-mx-h2i-2026-10-23.md)：
+   对照 MX-H2I 的连接状态机、deadline、取消、peer 并行、旧连接回滚、服务复用和后台恢复，
+   给出 Luopan 客户端优化优先级与 MX-H2I 共存保护边界。
+
 相关专题：
+
+- [54-luopan-standalone-execution-flow-windows-macos.md](./54-luopan-standalone-execution-flow-windows-macos.md)：正式 Luopan 调用 standalone 的共同主链、Windows/macOS 原生操作、串行与并行汇合点、真正后台任务、主线程同步阻塞、服务/会话复用及本机未应用补丁的差异；仅分析，未改运行行为。
+
+- [53-luopan-login-and-domestic-capacity-review-2026-10-22.md](./53-luopan-login-and-domestic-capacity-review-2026-10-22.md)：正式 Luopan 登录等待链、海外订阅后台化、SDK 补丁一致性、Domestic 三类转发路径，以及 2 vCPU/4 GiB/峰值 100 Mbps 的 100 QPS 容量和流量费用预算；含本次只读探测、修复优先级与 MX-H2I 保护边界，未改运行代码或部署。
 
 - [51-internal-server-storage-deploy-incident-2026-10-19.md](./51-internal-server-storage-deploy-incident-2026-10-19.md)：`INTERNAL-STORAGE-DEPLOY-20261019` 服务器排查交接入口；汇总 NVMe 超时、etcd 已迁移、Launcher/Hub 发布、DataPort 锁、Pay/Rig 修复状态、只读复查与待办。故障尚未结案，保留 MX-H2I 登录/联网边界。
 - [50-internal-gateway-port80-ownership.md](./50-internal-gateway-port80-ownership.md)：Nginx/Caddy 启动顺序引发的 Hub 404、明确 80 端口归属及仅更新共享网关的恢复步骤。

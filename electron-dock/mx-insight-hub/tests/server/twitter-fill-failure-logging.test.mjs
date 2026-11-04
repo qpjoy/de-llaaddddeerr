@@ -10,7 +10,7 @@ import { executeDataSearchV2 } from '../../server/data/search-protocol.mjs'
 import { SearchProtocolStore } from '../../server/data/search-protocol-store.mjs'
 
 const secret='PRIVATE-query-cursor-authorization-sql-detail'
-async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false, wrapped=false, malicious=false, pageSize=1, pages=null, requestDeadline=false }={}) {
+async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false, wrapped=false, malicious=false, pageSize=1, pages=null, requestDeadline=false, rateLimited=false }={}) {
   const usage=new MemoryStore(), pepper='twitter-failure-logging-offline-pepper'
   let diagnosticWrites=0
   const recordFailure=usage.recordRequestFailure.bind(usage)
@@ -38,6 +38,9 @@ async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false,
   let calls=0
   const adapter=new RapidApiAdapter({apiKey:secret,timeoutMs:100,fetchImpl:async(_url,options)=>{
     calls++
+    if(rateLimited) return Response.json({message:'synthetic upstream refusal'},{status:429,headers:{
+      'retry-after':'17','x-ratelimit-limit':'10','x-ratelimit-remaining':'0','x-ratelimit-reset':'17',
+      authorization:secret,'set-cookie':secret}})
     if(requestDeadline) return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',
       ()=>reject(new DOMException('synthetic upstream request deadline','AbortError')),{once:true}))
     const page=pages?.[calls-1] || {ids:['1'],next:null}
@@ -55,7 +58,7 @@ async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false,
   if(method) store[method]=async()=>{throw wrapped?Object.assign(new Error(secret),{code:'external_platform_call_persistence_unknown',cause:failure}):failure}
   const body={platform:'twitter',query:secret,pageSize,type:'stable'}
   let fallbackCalls=0
-  const rejectedFallback=requestDeadline?{begin:async()=>{},allowed:async()=>true,prepare:async()=>{},
+  const rejectedFallback=requestDeadline||rateLimited?{begin:async()=>{},allowed:async()=>true,prepare:async()=>{},
     run:async()=>{fallbackCalls++;throw new Error('an unknown deadline must never switch suppliers')}}:null
   const invoke=({cursor,idempotencyKey='same-offline-failure-key'}={})=>gateway.searchRaw(context,{
     body:{...body,...(cursor?{cursor}:{})},normalized:{platform:'twitter',query:secret,pageSize,...(cursor?{cursor}:{})},
@@ -68,6 +71,31 @@ async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false,
   return {usage,store,logs,invoke,invokeV2,context,v2Executions:()=>v2Executions,calls:()=>calls,
     fallbackCalls:()=>fallbackCalls,diagnosticWrites:()=>diagnosticWrites}
 }
+
+test('Twitter 429 header evidence stays operational and same-key replay preserves the saved rejection without redispatch',async()=>{
+  const f=await fixture({rateLimited:true})
+  let original
+  await assert.rejects(f.invoke(),error=>{original=error;return error.status===429&&error.code==='social_upstream_rejected'})
+  const saved=[...f.usage.requests.values()][0],call=[...f.store.calls.values()][0]
+  const archive=f.store.responseArchives.get(call.id),charge=structuredClone(f.usage.customerCharges.get(saved.id))
+  assert.equal(saved.status,'committed');assert.equal(call.outcome,'rejected');assert.equal(call.httpStatus,429);assert.equal(call.billed,null)
+  assert.equal(original.details.retryable,false);assert.equal(original.details.limit,null)
+  assert.equal(original.details.upstreamDispatched,true);assert.equal(original.details.requestId,saved.id)
+  assert.equal(archive.rawPayload.response.rateLimit.retryAfterSeconds,17)
+  assert.equal(archive.rawPayload.response.rateLimit.headers['x-ratelimit-remaining'],0)
+  assert.doesNotMatch(JSON.stringify(saved.responseBody),/rateLimit|retryAfterSeconds|ratelimit|PRIVATE/u)
+  assert.equal(f.store.state.consecutiveFailures,0)
+  const before=structuredClone(saved),beforeArchive=structuredClone(archive)
+  await assert.rejects(f.invoke(),error=>{
+    assert.equal(error.status,original.status);assert.equal(error.code,original.code)
+    assert.equal(error.message,original.message);assert.deepEqual(error.details,original.details)
+    return true
+  })
+  assert.equal(f.calls(),1);assert.equal(f.fallbackCalls(),0)
+  assert.deepEqual(f.usage.requests.get(saved.id),before)
+  assert.deepEqual(f.store.responseArchives.get(call.id),beforeArchive)
+  assert.deepEqual(f.usage.customerCharges.get(saved.id),charge)
+})
 
 test('a real Twitter request deadline remains an owned v2 unknown without another execution or supplier switch',async()=>{
   const f=await fixture({requestDeadline:true})

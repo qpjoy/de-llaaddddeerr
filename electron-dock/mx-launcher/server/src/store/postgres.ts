@@ -228,6 +228,7 @@ import {
   planLauncherProductUserAccessBackfill,
   assertLauncherAnonymousEnrollmentPolicy,
   nextAvailableLauncherNetworkLeaseSequence,
+  launcherNetworkLeaseAddressCarryOver,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
   launcherNetworkLeaseMatchesProfile,
@@ -3671,14 +3672,27 @@ export class PostgresStore implements PlatformStore {
       ) {
         throw new Error('Launcher lease public key rotation requires a separate migration');
       }
-      const sequence = previous
-        ? previous.sequence
-        : nextAvailableLauncherNetworkLeaseSequence(
-          product,
-          leaseProfile,
-          leases,
-          now
-        );
+      const addressSource = normalizedInput.addressSourceLeaseId
+        ? leases.find((lease) => lease.leaseId === normalizedInput.addressSourceLeaseId) ?? null
+        : null;
+      const address = launcherNetworkLeaseAddressCarryOver(
+        product,
+        leaseProfile,
+        addressSource,
+        previous,
+        { installId, deviceId, publicKey: normalizedInput.publicKey?.trim() || null },
+        now
+      );
+      const sequence = address
+        ? address.sequence
+        : previous
+          ? previous.sequence
+          : nextAvailableLauncherNetworkLeaseSequence(
+            product,
+            leaseProfile,
+            leases,
+            now
+          );
       const generationRows = await manager.query(
         `SELECT nextval('mx_launcher_lease_generation_seq')::text AS generation`
       ) as Array<{ generation: string }>;
@@ -3692,12 +3706,23 @@ export class PostgresStore implements PlatformStore {
         product,
         sequence,
         previous,
-        nowIso
+        nowIso,
+        address
       );
+      // The address now belongs to this identity. uq_mx_launcher_active_lease_ip
+      // allows one active lease per address, checked per statement: the source
+      // lease must be released before the new one is written, in this transaction.
+      if (address && addressSource) {
+        const released = releaseLauncherNetworkLease(addressSource, {
+          requestedBy: 'launcher-network-address-carry-over',
+          requestId: input.requestId ?? null
+        }, nowIso);
+        await this.saveRecordTo(records, 'launcher-network-lease', released.leaseId, released, released.siteId);
+      }
       await this.saveRecordTo(records, 'launcher-network-lease', lease.leaseId, lease, lease.siteId);
-      return { lease, previous };
+      return { lease, previous, addressFromLeaseId: address ? addressSource?.leaseId ?? null : null };
     });
-    const { lease, previous } = allocation;
+    const { lease, previous, addressFromLeaseId } = allocation;
     await this.recordAudit({
       eventType: previous ? 'launcher_network.lease.refreshed' : 'launcher_network.lease.enrolled',
       actorKind: lease.identityKind === 'user' ? 'user' : 'install',
@@ -3723,7 +3748,8 @@ export class PostgresStore implements PlatformStore {
         osVersion: lease.osVersion,
         appVersion: lease.appVersion,
         sourceIp: lease.sourceIp,
-        sdkTestMode
+        sdkTestMode,
+        ...(addressFromLeaseId ? { addressFromLeaseId } : {})
       }
     });
     return lease;

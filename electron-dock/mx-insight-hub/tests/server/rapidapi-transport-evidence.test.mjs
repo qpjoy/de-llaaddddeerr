@@ -96,6 +96,55 @@ test('RapidAPI complete invalid JSON retains exact bytes and no transport diagno
   assert.equal(error.restrictedResponseArchive.bodyBytes.toString(), 'not json')
 })
 
+test('Twitter HTTP 429 retains only fixed numeric rate headers before rejecting without changing public evidence', async () => {
+  const started = Date.now()
+  const error = await failed(async () => Response.json({ message: 'synthetic rejection' }, { status: 429, headers: {
+    'retry-after': '12', 'x-ratelimit-limit': '10', 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1790000000',
+    'x-ratelimit-requests-limit': '1000', 'x-ratelimit-requests-remaining': '700', 'x-ratelimit-requests-reset': '86400',
+    'authorization': SECRET, 'set-cookie': SECRET, 'x-ratelimit-private-limit': SECRET,
+    'x-rapidapi-requests-limit': '999',
+  } }))
+  assert.deepEqual(error.evidence, { outcome: 'rejected', billed: null, httpStatus: 429, businessCode: null,
+    errorCode: 'social_upstream_rejected', affectsCircuit: false })
+  const saved = error.responseArchive.rawPayload.response.rateLimit
+  assert.ok(Date.parse(saved.observedAt) >= started && Date.parse(saved.observedAt) <= Date.now())
+  assert.deepEqual({ ...saved, observedAt: null }, { observedAt: null, httpStatus: 429, retryAfterSeconds: 12, headers: {
+    'x-ratelimit-limit': 10, 'x-ratelimit-remaining': 0, 'x-ratelimit-reset': 1790000000,
+    'x-ratelimit-requests-limit': 1000, 'x-ratelimit-requests-remaining': 700, 'x-ratelimit-requests-reset': 86400,
+  } })
+  assert.doesNotMatch(JSON.stringify(error.responseArchive), /synthetic-rapidapi|authorization|cookie|private-limit|monthly|x-rapidapi-requests/u)
+  assert.doesNotMatch(JSON.stringify(error), /rateLimit|retryAfterSeconds|ratelimit/u)
+})
+
+test('Twitter Retry-After date and rate headers survive a body read failure without changing its existing unknown outcome', async () => {
+  const until = new Date(Date.now() + 60000).toUTCString()
+  const error = await failed(async () => new Response(new ReadableStream({
+    start(controller) { controller.error(causeWithCode('UND_ERR_SOCKET')) },
+  }), { status: 429, headers: { 'retry-after': until, 'x-ratelimit-remaining': '0' } }))
+  assert.equal(error.evidence.outcome, 'unknown'); assert.equal(error.evidence.httpStatus, 429)
+  assert.equal(error.restrictedResponseArchive, null)
+  const saved = error.responseArchive.rawPayload.response.rateLimit
+  assert.equal(saved.retryAfterSeconds, Math.max(0, Math.ceil((Date.parse(until) - Date.parse(saved.observedAt)) / 1000)))
+  assert.equal(saved.headers['x-ratelimit-remaining'], 0)
+  detail(error, 'body', ['UND_ERR_SOCKET'])
+})
+
+test('Twitter malformed headers are null and invalid bodies keep their existing classification and exact archive', async () => {
+  for (const invalid of [SECRET, '-1', '1.5', '1e3', '9007199254740992', '1'.repeat(256)]) {
+    const error = await failed(async () => new Response('not json', { status: 429, headers: {
+      'retry-after': invalid, 'x-ratelimit-limit': invalid, 'x-ratelimit-requests-remaining': invalid,
+    } }))
+    assert.equal(error.evidence.outcome, 'rejected'); assert.equal(error.evidence.affectsCircuit, false)
+    assert.equal(error.restrictedResponseArchive.bodyBytes.toString(), 'not json')
+    const saved = error.responseArchive.rawPayload.response.rateLimit
+    assert.equal(saved.retryAfterSeconds, null)
+    assert.ok(Object.values(saved.headers).every(value => value === null))
+    assert.doesNotMatch(JSON.stringify(error.responseArchive), /synthetic-rapidapi/u)
+  }
+  const preheader = await failed(async () => { throw causeWithCode('ENOTFOUND') })
+  assert.equal(preheader.responseArchive.rawPayload.response.rateLimit, undefined)
+})
+
 test('RapidAPI body-size abort is not reported as a deadline expiration', async () => {
   const error = await failed(async () => new Response('{}', {
     status: 200, headers: { 'content-length': String(4 * 1024 * 1024 + 1) },

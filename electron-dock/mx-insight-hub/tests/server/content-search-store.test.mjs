@@ -302,7 +302,7 @@ for (const postgres of [false, true]) {
     }
   })
 
-  test(`${name} content parent lease serializes buffer-only delivery and unknown state is found without own supplier calls`, options, async t => {
+  test(`${name} content parent lease serializes buffer-only delivery without own supplier calls`, options, async t => {
     const f = await fixture(t, postgres), lease = { consumerId: f.consumerId, fingerprint, ownerRequestId: f.target.id, expiresAt: ago(-60000) }
     assert.equal(await f.store.acquireDeliveryLease(lease), true)
     assert.equal(await f.store.acquireDeliveryLease({ ...lease, ownerRequestId: randomUUID() }), false)
@@ -317,10 +317,8 @@ for (const postgres of [false, true]) {
       f.providerStore.restrictedResponseArchives.delete(f.ownCallId)
       f.providerStore.calls.delete(f.ownCallId)
     }
-    await f.setUsage(f.target.id, { status: 'unknown', fingerprint, responseStatus: null })
-    assert.equal(await f.store.unknownFor(f.saved.delivery, f.path), true)
-    assert.equal(await f.store.unknownFor({ ...f.saved.delivery, apiKeyId: randomUUID() }, f.path), false)
-    assert.equal(await f.store.unknownFor(f.saved.delivery, '/api/v1/night-all/search/raw'), false)
+    // An ended unknown parent no longer has an equal-search check; same-key replay owns it.
+    assert.equal(typeof f.store.unknownFor, 'undefined')
   })
 }
 

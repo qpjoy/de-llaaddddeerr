@@ -166,3 +166,33 @@ test('buffered terminal pages and traversal limits report accurate counts withou
   invalid.items[40].pk = null
   assert.throws(() => project(invalid), /invalid_instagram_post_identity/)
 })
+
+test('one-by-two and two-by-two search sections deliver their clips, fill items and channel media', () => {
+  const clip = { ...post, id: '11', code: 'clip' }, fill = { ...post, id: '12', code: 'fill' }, channel = { ...post, id: '13', code: 'channel' }
+  const data = { status: 'ok', media_grid: { sections: [
+    { layout_type: 'one_by_two_right', layout_content: { one_by_two_item: { clips: { items: [{ media: clip }], max_id: 'x' } }, fill_items: [{ media: fill }] } },
+    { layout_type: 'two_by_two_left', layout_content: { two_by_two_item: { channel: { media: channel, title: 'Reels' } } } },
+    { layout_type: 'media_grid', layout_content: { medias: [{ media: post }] } },
+  ], has_more: true, next_max_id: 'next', rank_token: 'rank' } }
+  const result = project(data)
+  assert.deepEqual(result.items.map(row => row.content_id).sort(), ['11', '12', '13', post.id].sort())
+  assert.equal(result.publicBody.data.status, 'ok')
+  assert.equal(result.publicBody.data.page.hasMore, true)
+})
+
+test('a section layout Hub cannot read is reported as partial instead of a silent empty page', () => {
+  const data = { status: 'ok', media_grid: { sections: [
+    { layout_type: 'future_layout', layout_content: { future_item: { posts: [{ media: post }] } } },
+    { layout_content: { medias: [{ media: { ...post, id: '21', code: 'known' } }] } },
+    { layout_content: {} },
+  ], has_more: true, next_max_id: 'next', rank_token: 'rank' } }
+  const result = project(data)
+  assert.deepEqual(result.items.map(row => row.content_id), ['21'])
+  assert.equal(result.publicBody.data.status, 'partial')
+  assert.deepEqual(result.publicBody.data.warnings.map(warning => warning.code), ['INSTAGRAM_UNRECOGNIZED_SECTIONS'])
+  assert.match(result.publicBody.data.warnings[0].message, /^1 search grid section/u)
+  assert.equal(result.publicBody.data.page.hasMore, true)
+  assert.throws(() => project({ status: 'ok', media_grid: { sections: [{ layout_content: { fill_items: {} } }] } }), /invalid_instagram_media_grid/)
+  assert.throws(() => project({ status: 'ok', media_grid: { sections: [{ layout_content: { two_by_two_item: { channel: { media: [] } } } }] } }),
+    /invalid_instagram_media_grid/)
+})

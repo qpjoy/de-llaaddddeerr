@@ -39,7 +39,8 @@ import { FeishuAuthService } from './feishu-auth.service.js';
 const USER_ACCESS_TOKEN_TTL_SECONDS = USER_SESSION_TTL_SECONDS;
 const SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const OAUTH_RATE_LIMIT_WINDOW_SECONDS = 5 * 60;
-const PASSWORD_SOURCE_ATTEMPT_LIMIT = 60;
+// User password attempts have no per-IP bucket: offices and customer sites log
+// in through one shared egress address, so the account buckets carry the limit.
 const PASSWORD_SUBJECT_ATTEMPT_LIMIT = 25;
 const PASSWORD_SOURCE_SUBJECT_ATTEMPT_LIMIT = 10;
 const SERVICE_SOURCE_ATTEMPT_LIMIT = 30;
@@ -174,7 +175,7 @@ export class SdkGatewayController {
       grantType: 'password-change',
       sourceIp,
       subject: principal.userId,
-      sourceLimit: PASSWORD_SOURCE_ATTEMPT_LIMIT,
+      sourceLimit: null,
       subjectLimit: PASSWORD_SUBJECT_ATTEMPT_LIMIT,
       sourceSubjectLimit: PASSWORD_SOURCE_SUBJECT_ATTEMPT_LIMIT
     });
@@ -313,7 +314,7 @@ export class SdkGatewayController {
       grantType: 'password',
       sourceIp,
       subject: user?.userId ?? username,
-      sourceLimit: PASSWORD_SOURCE_ATTEMPT_LIMIT,
+      sourceLimit: null,
       subjectLimit: PASSWORD_SUBJECT_ATTEMPT_LIMIT,
       sourceSubjectLimit: PASSWORD_SOURCE_SUBJECT_ATTEMPT_LIMIT
     });
@@ -437,18 +438,19 @@ export class SdkGatewayController {
     grantType: 'password' | 'client-credentials' | 'password-change';
     sourceIp?: string;
     subject: string;
-    sourceLimit: number;
+    /** null: no bucket shared by every account behind one address. */
+    sourceLimit: number | null;
     subjectLimit: number;
     sourceSubjectLimit: number;
   }): Promise<void> {
     const source = input.sourceIp?.trim() || 'unknown-source';
     const subject = input.subject.trim().toLowerCase() || 'unknown-subject';
     const decisions = await this.store.consumeAuthenticationRateLimits([
-      {
+      ...(input.sourceLimit === null ? [] : [{
         bucketKey: authenticationRateLimitBucketKey(`${input.grantType}-source`, source),
         limit: input.sourceLimit,
         windowSeconds: OAUTH_RATE_LIMIT_WINDOW_SECONDS
-      },
+      }]),
       {
         bucketKey: authenticationRateLimitBucketKey(`${input.grantType}-subject`, subject),
         limit: input.subjectLimit,

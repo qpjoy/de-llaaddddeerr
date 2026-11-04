@@ -16,15 +16,19 @@
 
 Twitter 的 `x/tw` 归一为 `twitter`。业务调用方不必区分 `username` 与 `userId`：顶层 `username/usernames/userId/userIds/user_id/uid`，以及对应 `params` 账号别名（包括 `screen_name/screenName`），都根据账号字符串内容自动识别。非数字值按用户名解释，例如 `ui_batch_019`；但它可能只是下游任务编号，不能由参数形状推断该平台账号存在。没有可确认账号时应返回明确失败，不把资料对象算成一条内容或把解析失败伪装成分页耗尽。
 
-无 `@` 的纯 ASCII 数字字符串按用户 ID 查询，须符合 [X 官方 ID 查询 API](https://docs.x.com/x-api/users/get-user-by-id) 的 `[0-9]{1,19}`。例如 `username: "1234567890123456789"` 和 `userId: "1234567890123456789"` 均调用 ID 查询，不再受用户名 15 字符限制。数字 ID 使用字符串传输，避免 JavaScript 数值精度丢失；不能使用科学计数法或格式化后的数值代替原始 ID。
+产品展示的 Twitter 单输入框默认自动识别，并提供「账号查询方式」：自动、`username`、`userId`、`user_id`、`uid`、`url`。自动模式把 1–19 位纯数字作为字符串写入 `userId`，例如 `1952056883877212160`；更长的数字串和其他文本写入 `username`。手动 ID 字段仅接受 1–19 位数字；手动 username 接受英文字母、数字或下划线，不限长度，纯数字用户名自动加 `@` 以固定用户名语义；这里的用户名是 handle，不是显示昵称。主页链接通过 `url` 提交。批量与其他受支持参数继续在接口调试中填写。切换方式不自动查询；从调试结果或未完成请求恢复时展示「原请求参数」，保留原字段、值和幂等身份，用户明确选择新方式才重新解释输入。本功能只依赖 Hub，不需要 Delta 配合升级。
 
-账号值显式带 `@`，或通过 `url/urls/profileUrl/profile_url` 字段提交 Twitter / X 主页 URL，表示用户名，即使账号名全部由数字组成。例如 `username: "@12345"` 或 `url: "https://x.com/12345"` 查询用户名 `12345`；裸字符串 `"12345"` 则查询用户 ID。产品展示中 Twitter 使用一个用户名 / ID 输入框自动识别，不要求选择字段，数字用户名请加 `@`；主页 URL 可通过接口调试的 URL 字段提交；其他平台保留原账号字段选择。
+无 `@` 的 1–19 位纯 ASCII 数字字符串（[X 官方 ID 查询 API](https://docs.x.com/x-api/users/get-user-by-id) 的 `[0-9]{1,19}`）先按用户 ID 查询。例如 `username: "1234567890123456789"` 和 `userId: "1234567890123456789"` 均先调用 ID 查询。只有供应商明确报告该 ID 没有账号（`userExists:false` 空资料，或 `UserUnavailable` 且原因为 not_found/deleted）时，Hub 才在同一请求内按同名用户名再查一次，并返回该次结果；账号被封禁、受保护、停用或原因不明，以及超时、未知或无法解析的结果，都不会触发第二次采购。第二次查找在派发前被准入拒绝时，返回已保存的 ID 查找结果。两次查找是同一个 Hub 请求，按原规则只计一次客户请求，供应商调用各自留档。超过 19 位的数字串不可能是 ID，直接按用户名查询。数字 ID 使用字符串传输，避免 JavaScript 数值精度丢失；不能使用科学计数法或格式化后的数值代替原始 ID。
 
-用户名去掉 `@` 后仍须满足 `[A-Za-z0-9_]{1,15}`，与 [X 官方账号查询 API](https://docs.x.com/x-api/users/get-user-by-username) 一致；此规则不套用到显示名称或数字用户 ID。格式错误保留 HTTP 400 / `invalid_social_request`，消息说明长度或字符问题，`error.details` 返回 `platform: "twitter"`、`field: "username"`、`reason`、`actualLength`、`maxLength: 15`。其中 `reason` 为 `username_too_long` 或 `username_invalid_characters`，不会回显整个输入。以 22 字符账号为例，消息是 `Twitter username exceeds the 15-character limit (received 22 characters, excluding @)`。这是请求参数错误，不能按空数据或瞬时供应商故障处理。
+账号值显式带 `@`，或通过 `url/urls/profileUrl/profile_url` 字段提交 Twitter / X 主页 URL，表示用户名，即使账号名全部由数字组成。例如 `username: "@12345"` 或 `url: "https://x.com/12345"` 查询用户名 `12345`；裸字符串 `"12345"` 则先查询用户 ID，该 ID 没有账号时再查询用户名 `12345`。产品展示中 Twitter 使用一个用户名 / ID 输入框自动识别，不要求选择字段，数字用户名请加 `@`；主页 URL 可通过接口调试的 URL 字段提交；其他平台保留原账号字段选择。
+
+用户名去掉 `@` 后须由英文字母、数字或下划线组成；此规则不套用到显示名称或数字用户 ID。X 官方限制用户名为 15 字符（[账号查询 API](https://docs.x.com/x-api/users/get-user-by-username)），但 2026-11-01 起 Hub 不再按长度拒绝，更长的标识照常交给供应商查找，由供应商回答是否存在。含其他字符时保留 HTTP 400 / `invalid_social_request`，`error.details` 返回 `platform: "twitter"`、`field: "username"`、`reason: "username_invalid_characters"`、`actualLength`，不会回显整个输入；`username_too_long` 与 `maxLength` 不再出现。这是请求参数错误，不能按空数据或瞬时供应商故障处理。
 
 历史请求只能在原 Key、路径、原始请求体及旧指纹均匹配时回放已保存的回执；自动识别规则更新不会重写历史响应，也不会按旧规则重新调用供应商。旧 `mxds1` 游标不能用于身份解释发生变化的新请求；调用方应先核对目标账号，再显式决定是否使用新幂等键从第一页重新查询，不能自动换键重跑。未发生身份变化的已有游标仍须满足原绑定和分页规则。
 
 `count/pageSize/page_size/limit` 支持 1–500，仍受 Key entitlement 和批量总工作量限制。crawl 优先 `count > pageSize > page_size > limit`；user-info 优先 `limit > count > pageSize > page_size`。`pageSize` 与 `page_size` 同时提交须一致。`pageSize` 是每个工作项逻辑页上限，批量请求的总条数还受当前 Key 允许的工作量约束，不能用多账号绕开上限。
+
+账号 crawl 按去重后的账号与活动组合计数。每页工作量为 `jobCount × pageSize`，上限为消费者与 Key 的有效 `maxPageSize` 和 1000 中的最小值。新请求在该预算检查被拒绝时返回 HTTP 400 `work_budget_exceeded`，`error.details` 给出 `jobCount`、`pageSize`、`requestedWork`、`allowedWork` 以及 `stage=admission`、`upstreamDispatched=false`、`retryable=false`。例如预算为 100、两个工作项各取 100 条时，本页请求工作量为 200。新采集可将每项页长设为 50，按 Hub 游标继续直到达到总目标或数据耗尽。每个新页使用独立幂等键，后续页沿用第一页的页长。预算拒绝应在 Hub 内处理，不能改用 Night-All 凭据绕过。
 
 `includeRaw` 仅允许 `false` 或省略；现有业务 `raw_info/raw_data` 字符串仍保留。`concurrency`（1–20）及 `cacheMaxAgeHours`（0–720）作为历史提示接收，不覆盖 Hub 并发、幂等和准入规则，也不承诺强制缓存命中。不得提交任意供应商、端点、请求凭据、原生游标或扩大采购的控制参数。
 
@@ -32,7 +36,8 @@ Twitter 的 `x/tw` 归一为 `twitter`。业务调用方不必区分 `username` 
 
 | 平台 | activityTypes |
 | --- | --- |
-| Twitter、Facebook、哔哩哔哩、快手、YouTube | `posts` |
+| Twitter | `posts`、`replies` |
+| Facebook、哔哩哔哩、快手、YouTube | `posts` |
 | Instagram | `posts`、`reels`、`stories`、`tagged_posts`、`highlights`、`followers`、`following` |
 | 抖音、小红书 | `posts`、`likes` |
 | 微博 | `posts`、`original_posts` |
@@ -42,6 +47,8 @@ Twitter 的 `x/tw` 归一为 `twitter`。业务调用方不必区分 `username` 
 | Reddit | `posts`、`comments` |
 
 接口调试可提交完整请求；产品展示提供单账号 `posts` 和单账号资料，按当前 Key 对平台及操作授权过滤。
+
+Twitter `replies`（2026-11-03 起）对应账号主页的「回复」，但只返回该账号自己发出的回复：同一时间线里该账号的普通发帖，以及被回复的他人帖子都不计入，普通发帖请用 `posts`。回复自己串推的条目也算回复，`isSelfReply` 为 `true`。每条在原有内容字段之外增加 `replyTo`（被回复帖子的 `id`，以及其账号的 `userId`、`username`）、`parentExternalId`（同 `replyTo.id`）、`conversationId`、`isSelfReply`，兼容字段为 `reply_to_content_id`、`reply_to_user_id`、`reply_to_user_name`、`conversation_id`。同一账号的一页时间线里回复通常不到一半，Hub 会续取多页凑够 `count`，因此短页或 `partial` 更常见，按 `hasMore/nextCursor/warnings` 续页。`replies` 与 `posts` 共用 `social.content.crawl` 授权；服务端尚未开通时返回 HTTP 503 / `external_platform_cost_control_unavailable`，此时不会查询账号，也不计费。同时请求 `["posts","replies"]` 时，replies 未开通只影响 replies，posts 照常返回并带 `social_page_fill_stopped` 提示。
 
 ## 请求与返回
 
@@ -79,11 +86,24 @@ Content-Type: application/json
 
 ## 分页与原请求保护
 
+微博 `crawl` 在同一账号、同一活动已经取得有效帖子后，如果后续帖子页由 TikHub 返回 HTTP 200、业务码 200，但无法按数据合同解析，Hub 返回 HTTP 200、`data.status=partial` 及 `weibo_posts_page_unusable`。结果包含此前验证过的帖子。这个账号的本次遍历到此停止；批量请求如有 `nextCursor`，可继续其他待采集任务。消费方应标注样本不完整。首个帖子页就不可用时仍返回 502。既有失败回执按原结果回放。
+
+要核对历史失败的具体字段，在 Internal 使用 Hub 的[微博账号归档诊断脚本](../../server/ops/diagnose-weibo-account.mjs)及对应 Hub request ID。脚本从数据库只读提取该请求自己的归档，在本地校验长度与 SHA-256，并用 Hub 解析器回放；输出结构计数和失败类别。可以按脚本首部的命令在当前 Pod 中运行，无需发布或重新采集。
+
+例如，dev Run #626000 目标为 50 条，第一页的 `data.data.list` 有 19 条，归档回放也解析出 19 条。第二页返回 HTTP 200，回放结果为 `unrecognized_collection`。这表示解析器找不到帖子数组；如果供应商返回了可识别的空数组，诊断会显示该数组的 `count: 0`。这次回放不能证明该账号只有 19 条帖子。
+
 首页省略 `cursor`，`page` 为 1。后续原样传回 `data.pageInfo.nextCursor` 或相同的 `data.page.nextCursor`，保持账号、平台、活动、过滤条件和页大小，并使用新的 `Idempotency-Key`。Hub 游标将完整采购页余量、已交付身份和后续工作关联到同一遍历；最多 15 个公开页，有效 24 小时，仍受上游页数、期限、归档大小和准入限制。资料批量遇到中断也可通过返回的游标继续。
 
 短页、空页或 `partial` 不代表耗尽；检查 `hasMore/nextCursor/warnings`。没有可用游标时停止自动续页；若同时出现 `pagination_completeness_unknown`，即使 `hasMore=false`、`nextCursor=null` 也只表示当前无法继续，不能确认数据耗尽。遇到服务限流或未知请求，保存原请求标识并先只读核对，不自动新建请求绕过保护。已有旧 Twitter `mxec2` 游标与精确旧幂等请求由原合同继续处理；新账号游标不与旧 Night-All、`data/search` 或其他操作互换。切换旧转发调用方时从第一页明确开始。
 
 `409 request_in_progress` 表示并发保护拒绝，不能解释为空结果或自动换键重试。
+2026-11-01 起取消不可用响应冷却：已结束的坏响应不再阻止后续新请求，同一幂等键的原失败仍精确回放。
+旧版本的 `409 external_platform_response_unusable` 表示近期不可用响应触发派发保护，并不表示原请求仍在执行；
+历史诊断分支返回 `details.upstreamDispatched=false` 和 `details.blockedUntil`。新版本默认不再进入此冷却分支。
+Twitter 返回 `{"data":{"users":[{}]}}` 仍是不可用资料，不能当作账号不存在或成功空结果，
+也不触发数字 ID 到用户名的自动回退。裸数字先查 ID；明确的数字用户名使用 `@11` 或 `https://x.com/11`。
+已执行请求改账号身份属于新查询，不能作为恢复旧 unknown 的手段。新请求仍执行幂等、在途去重、授权、速率、熔断和账务检查。
+具体证据和本地修复边界见 [Twitter 空资料与后续 409](../operations/twitter-empty-profile-409-2026-11-01.md)。
 `An equal request is already in progress` 来自同幂等键预留检查；
 `An equal account delivery is in progress` 来自同消费者、平台和请求指纹的账号交付锁，
 不同幂等键的相同账号/同页请求也会命中。后者错误里的 `requestId` 是被拒绝请求的账本ID，
@@ -96,3 +116,13 @@ Content-Type: application/json
 本轮保留平台与供应商的独立运行状态；没有执行线上付费探测或部署，也不根据离线 fixture 宣称所有平台实时可用。下游接入时应核对其原 Key 新能力授权、已启用操作及真实客户端解析；旧入口的删除需要等待迁移流量和请求证据验证。
 
 运行时 HTML 文档：`/docs/strategy-search`；下载 OpenAPI：`/docs/openapi.json`。两者按当前调用身份的有效 scope 过滤平台及操作。产品入口为《策略搜索》的接口调试、产品展示、接入指南及 Admin 管理页。
+
+Facebook 在策略搜索管理中按“内容搜索 / 账号内容 / 账号资料”分别启停。账号内容和资料保持 JustOne 固定路由，各自可暂停新采购；账号内容的前置资料解析跟随账号内容状态，不受独立账号资料开关影响。新 `/data/social/*` 与旧 `/search/*`、`/night-all/search/*` 账号入口都检查对应业务状态；已保存响应重放和已采购缓冲保留。共享上游操作的暂停仍会阻止所有依赖该操作的业务。部署与验证见 [Facebook 业务暂停说明](../operations/facebook-business-pause-2026-10-30.md)。
+
+### 2026-10-30：明确的 Twitter 账号不可用
+
+账号查找响应的唯一候选若为 `UserUnavailable`，新版 Hub 返回 HTTP 422 / `social_account_unavailable`，详情为 `platform=twitter`、`stage=account_lookup`、`outcome=rejected`、`retryable=false`。`reason` 只归一化明确枚举：`suspended`、`deactivated`、`deleted`、`protected`、`not_found`；未识别的原因统一为 `unavailable`，不解析自由文本或推断账号永久状态。原 `userExists:false` 的 404 合同保留。
+
+2026-11-01 起新失败的 `error.message` 写明已知原因，例如 `The upstream provider reported that the Twitter account is suspended`（另有 is deactivated、is protected、was deleted、was not found）；原因为 `unavailable` 或未识别时保留 `...is unavailable`。HTTP、`error.code` 与 `details` 不变，调用方应继续按 `details.reason` 判断，不解析 message；已保存的旧失败按原字节回放。管理台错误面板按 `details.reason` 显示中文原因，如「账号已被 Twitter 封禁（suspended）」。
+
+Delta 对这两类明确账号状态停止自动重试及 Night-All 回退，保留失败检查点、请求 ID、原始错误体，输出中文原因；不会伪装为成功空列表。普通格式异常、上游 HTTP 错误、授权与限流仍遵循各自原规则。供应商回执、幂等结果和客户计费规则不变；旧 502 不改写，不从旧错误码反推账号状态。

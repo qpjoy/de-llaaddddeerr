@@ -218,8 +218,24 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
 })
 
 export const JUSTONE_SUPPORTED_MARKETPLACES = Object.freeze(Object.keys(JUSTONE_ENDPOINTS))
-export const justOneProductAdapterId = marketplace => Object.hasOwn(JUSTONE_ENDPOINTS, marketplace)
-  ? `justone:${JUSTONE_ENDPOINTS[marketplace].endpointKey}` : null
+
+// The same JustOne backend is also sold through RapidAPI for Taobao/Tmall:
+// identical path, parameters and response; only authentication and billing
+// differ (handoff document, 2026-10-01). Every supplier listed here serves the
+// marketplace's one reviewed endpoint contract, so the unified product shape,
+// sorting, filters and pagination are the same whichever one dispatches.
+export const RAPIDAPI_TAOBAO_TMALL_HOST = 'taobao-tmall-all-api1.p.rapidapi.com'
+const PRODUCT_SEARCH_SUPPLIERS = Object.freeze({
+  taobao: Object.freeze(['justone', 'rapidapi']),
+  tmall: Object.freeze(['justone', 'rapidapi']),
+})
+export const productSearchProviders = marketplace => Object.hasOwn(JUSTONE_ENDPOINTS, marketplace)
+  ? PRODUCT_SEARCH_SUPPLIERS[marketplace] ?? Object.freeze(['justone']) : Object.freeze([])
+export const productAdapterId = (provider, marketplace) => productSearchProviders(marketplace).includes(provider)
+  ? `${provider}:${JUSTONE_ENDPOINTS[marketplace].endpointKey}` : null
+export const productAdapterProvider = (adapterId, marketplace) => productSearchProviders(marketplace)
+  .find(provider => productAdapterId(provider, marketplace) === adapterId) ?? null
+export const justOneProductAdapterId = marketplace => productAdapterId('justone', marketplace)
 
 export const JUSTONE_BUSINESS_CODES = Object.freeze({
   100: Object.freeze({ category: 'authentication', errorCode: 'upstream_auth_invalid' }),
@@ -440,6 +456,9 @@ export function normalizeJustOneProductSearchRequest(body, {
   // only while producing a response, never while validating a request.
   encodeCursor: _encodeCursor,
   maxPageSize,
+  // The supplier that will dispatch this request. Routing chooses it; the
+  // public body can never name one.
+  providerKey = 'justone',
 } = {}) {
   if (!plainObject(body)) throw new JustOneContractError('invalid_request', 'request body must be an object')
   const allowed = new Set(['marketplace', 'query', 'page', 'cursor', 'sort', 'price', 'deliveryMode'])
@@ -465,12 +484,17 @@ export function normalizeJustOneProductSearchRequest(body, {
   }
   const scope = cursorScope({ marketplace, query, sort, price })
   const state = decodedCursor(cursor, decodeCursor)
-  // Old cursors stay on their original baseline; defaults only select fresh
-  // traversals. Callers cannot submit an adapter override in the public body.
-  const adapterId = state ? state.adapterId ?? justOneProductAdapterId(marketplace)
-    : defaultAdapterId ?? justOneProductAdapterId(marketplace)
-  if (adapterId !== justOneProductAdapterId(marketplace)) {
-    throw new JustOneContractError(state ? 'invalid_cursor' : 'unsupported_product_adapter', 'Product adapter is not supported for this marketplace')
+  // Old cursors stay on their original endpoint contract; defaults only select
+  // fresh traversals. A cursor binds the contract, not the supplier: every
+  // supplier of a marketplace serves the same endpoint, so a traversal may
+  // continue on whichever one the route selects. Callers cannot submit an
+  // adapter override in the public body.
+  const adapterId = productAdapterId(providerKey, marketplace)
+  if (!adapterId || (!state && defaultAdapterId != null && defaultAdapterId !== adapterId)) {
+    throw new JustOneContractError('unsupported_product_adapter', 'Product adapter is not supported for this marketplace')
+  }
+  if (state && state.adapterId != null && !productAdapterProvider(state.adapterId, marketplace)) {
+    throw new JustOneContractError('invalid_cursor', 'Product adapter is not supported for this marketplace')
   }
   if (state && (state.marketplace !== marketplace || state.scope !== scope)) {
     throw new JustOneContractError('cursor_scope_mismatch', 'cursor does not belong to this search')
@@ -688,13 +712,34 @@ function firstUrl(object, keys, secret = null) {
   return null
 }
 
-function imageUrls(item, secret = null) {
+// JD search V1 returns its main picture as a CDN-relative path, `imageUrl:
+// "jfs/t1/<...>/<name>.jpg"`, beside an empty `images` array -- 48 of 48 items
+// in the provider's published getApiJdSearchItemListV1 sample -- so every JD
+// product used to arrive with `images: []` (2026-11-02 investigation). The JD
+// image CDN serves such a path under a size segment, and `n0` is the stored
+// original (800x800 in a 2026-11-03 probe, where `n1` gave 350x350). Only this
+// exact path shape on this one marketplace is completed: a relative string of
+// any other shape, or from any other marketplace, still yields no image rather
+// than a guessed address.
+const RELATIVE_IMAGE_URLS = Object.freeze({
+  jd: Object.freeze({
+    pattern: /^jfs\/t\d{1,8}\/(?:[A-Za-z0-9_-]{1,128}\/){1,16}[A-Za-z0-9_-]{1,128}\.(?:jpe?g|png|webp)$/u,
+    base: 'https://img10.360buyimg.com/n0/',
+  }),
+})
+
+function marketplaceImageUrl(value, marketplace) {
+  const relative = RELATIVE_IMAGE_URLS[marketplace]
+  return relative && typeof value === 'string' && relative.pattern.test(value) ? `${relative.base}${value}` : value
+}
+
+function imageUrls(item, marketplace, secret = null) {
   const result = []
   const seen = new Set()
   const add = (value) => {
     const candidate = plainObject(value)
       ? firstUrl(value, ['url', 'imageUrl', 'image_url', 'src'], secret)
-      : safeUrl(value, secret)
+      : safeUrl(marketplaceImageUrl(value, marketplace), secret)
     if (!candidate || seen.has(candidate)) return
     seen.add(candidate)
     result.push(candidate)
@@ -797,7 +842,7 @@ export function normalizeJustOneProductItem(rawItem, marketplace, { secret = nul
       currency: firstScalar(item, ['currency', 'currencyCode'], 16) || 'CNY',
     }),
     shop: Object.freeze({ id: shopId, name: shopName }),
-    images: Object.freeze(imageUrls(item, secret)),
+    images: Object.freeze(imageUrls(item, marketplace, secret)),
     signals: Object.freeze({
       sales: firstScalar(item, ['orderPayUV', 'sales', 'saleCount', 'soldCount', 'volume'], 128),
       reviewCount: firstScalar(item, ['commentCount', 'comment_count', 'reviewCount'], 128),

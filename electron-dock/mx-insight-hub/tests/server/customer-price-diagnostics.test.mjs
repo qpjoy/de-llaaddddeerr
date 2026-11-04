@@ -22,7 +22,7 @@ const entry = { id: entryId, meter_key: 'raw', billing_unit: 'request', unit_pri
 const meters = ['raw', 'crawl', 'user-info', 'ecommerce.products.search']
 const files = {
   '056': '056_commercial_billing_ledger.sql', '080': '080_unpriced_customer_operations.sql',
-  '105': '105_tenant_default_request_price.sql',
+  '105': '105_tenant_default_request_price.sql', '176': '176_lcy_business_quota_overdraft.sql',
 }
 async function body(version, name) {
   const source = await readFile(new URL(`../../migrations/${files[version]}`, import.meta.url), 'utf8')
@@ -33,7 +33,7 @@ async function body(version, name) {
 }
 async function functions(version = '105') {
   const rows = [{ proname: 'reserve_customer_charge', prosrc: await body(version, 'reserve_customer_charge') }]
-  if (version === '105') rows.push({ proname: 'customer_price_for_usage', prosrc: await body(version, 'customer_price_for_usage') })
+  if (['105', '176'].includes(version)) rows.push({ proname: 'customer_price_for_usage', prosrc: await body('105', 'customer_price_for_usage') })
   return rows
 }
 const triggerDefinition = 'CREATE TRIGGER usage_requests_reserve_customer_charge AFTER INSERT ON public.usage_requests FOR EACH ROW EXECUTE FUNCTION billing.reserve_customer_charge()'
@@ -53,7 +53,7 @@ function poolFixture({ binding = row, entries = [entry], functionRows, trigger =
 }
 
 test('known production function hashes match exact migration bodies; altered implementations are unverified', async () => {
-  for (const [version, generation] of [['056', 'missing_entry_errors_056'], ['080', 'unlisted_free_080'], ['105', 'tenant_default_105']]) {
+  for (const [version, generation] of [['056', 'missing_entry_errors_056'], ['080', 'unlisted_free_080'], ['105', 'tenant_default_105'], ['176', 'tenant_default_105']]) {
     const rows = await functions(version)
     assert.equal(createHash('sha256').update(rows[0].prosrc).digest('hex'), FUNCTION_HASHES[`reserve${version}`])
     assert.equal(billingGeneration(rows).generation, generation)

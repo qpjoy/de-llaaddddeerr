@@ -1,4 +1,5 @@
 import { AppError } from './errors.mjs'
+import { acquirePacedProviderRate } from '../external-platforms/priority-admission.mjs'
 
 // Deployment-owned IDs only. Names and request-supplied flags never confer an
 // exemption. Empty lists preserve the existing policy for every caller.
@@ -49,18 +50,38 @@ export function isHubRateLimitExempt(context) {
   return isLcyHubLimitIdentity(context) && context.apiKey.hubRateLimitExempt === true
 }
 
+// The original LCY Key in paced mode keeps the public request envelope, but
+// consumer, plan and Key page/work allowances do not gate business requests.
+// Call with the current authenticated identity again after waiting for capacity.
+export function effectiveBusinessPageLimit(context, ...limits) {
+  return isLcySupplierPriority(context) ? 1000 : Math.min(...limits)
+}
+
+// 'priority' keeps every Hub quota, budget and shared-circuit exemption above,
+// but the Key meets supplier concurrency and RPM: it queues ahead of other Keys
+// instead of reaching the supplier unpaced. Saved with the exemption switch.
+export function isLcySupplierPriority(context) {
+  return isHubRateLimitExempt(context) && context.apiKey.hubSupplierAdmission === 'priority'
+}
+
+// The original exemption: supplier concurrency and RPM are skipped entirely.
+export function bypassesSupplierLimits(context) {
+  return isHubRateLimitExempt(context) && !isLcySupplierPriority(context)
+}
+
 export function isLcyRateCircuitExempt(context) {
   return isLcyHubLimitIdentity(context) && context.apiKey.hubRateLimitExempt !== false
     && (context.apiKey.hubRateLimitExempt === true || context.apiKey.accessProfile === 'managed_full')
 }
 
-// Retain the stored shared circuit and all non-rate failures. LCY bypasses its
-// rate deadline; other internal callers retain the ten-second rate cooldown.
+// An explicitly exempt LCY Key may send a new request after upstream recovery
+// without waiting for Hub's shared automatic circuit. Never reset shared state
+// or bypass per-request unknown/duplicate evidence or contract quarantine here.
 export function internalCircuitState(store, context, state) {
-  // Baidu's retained business-601 classification is also an explicit supplier
-  // rate failure. Older generic IP rejection codes are deliberately not guessed.
-  if (state?.lastErrorCode === 'ip_channel_rate_limited' && isHubRateLimitExempt(context)) {
-    return { ...state, rateCircuitExempt: true, circuitOpenUntil: null }
+  if (state && isHubRateLimitExempt(context)) {
+    return { ...state, hubCircuitExempt: true,
+      rateCircuitExempt: ['upstream_rate_limited', 'ip_channel_rate_limited'].includes(state.lastErrorCode),
+      circuitOpenUntil: null }
   }
   if (state?.lastErrorCode !== 'upstream_rate_limited') return state
   if (isLcyRateCircuitExempt(context)) return { ...state, rateCircuitExempt: true, circuitOpenUntil: null }
@@ -71,8 +92,23 @@ export function internalCircuitState(store, context, state) {
   return { ...state, internalCooldown: true, circuitOpenUntil: new Date(Math.min(until, failedAt + 10_000)).toISOString() }
 }
 
-export async function acquireTikHubRateLimit(store, context, platformStore, options) {
-  if (isInternalTraffic(store, context) || typeof platformStore.acquireProviderRateLimit !== 'function') {
+// Provider RPM for one supplier dispatch. The original exemption (and `bypass`,
+// a caller's own internal-traffic exemption) skips it; priority waits for
+// tokens until `deadline`; every other Key gets the single attempt it had.
+export async function acquireSupplierRate(context, platformStore, {
+  limit, windowMs = 60_000, tokens, deadline, maxWaitMs, signal, providerState, bypass = false,
+}) {
+  const priority = isLcySupplierPriority(context)
+  if (!priority && (bypass || isHubRateLimitExempt(context))) return { allowed: true, retryAfterMs: 0 }
+  if (priority) return acquirePacedProviderRate(platformStore, { limit, windowMs, tokens, deadline, maxWaitMs, signal, providerState })
+  return platformStore.acquireProviderRateLimit({ limit, windowMs, ...(tokens === undefined ? {} : { tokens }) })
+}
+
+// `pacing` ({ deadline, maxWaitMs, signal, providerState }) lets a priority LCY caller wait
+// for tokens within its own deadline; callers with their own wait loop omit it.
+export async function acquireTikHubRateLimit(store, context, platformStore, options, pacing = {}) {
+  const priority = isLcySupplierPriority(context)
+  if ((!priority && isInternalTraffic(store, context)) || typeof platformStore.acquireProviderRateLimit !== 'function') {
     return { allowed: true, retryAfterMs: 0 }
   }
   // A live policy may be lower than an atomic multi-call workflow. Reject the
@@ -81,5 +117,6 @@ export async function acquireTikHubRateLimit(store, context, platformStore, opti
     return { allowed: false, retryAfterMs: null, reason: 'workflow_exceeds_provider_rate',
       requiredTokens: options.tokens, maxRequestsPerMinute: options.limit }
   }
+  if (priority) return acquirePacedProviderRate(platformStore, { ...options, ...pacing })
   return platformStore.acquireProviderRateLimit(options)
 }

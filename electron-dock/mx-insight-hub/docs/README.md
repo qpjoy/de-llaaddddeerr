@@ -2,6 +2,13 @@
 
 Last reviewed: 2026-10-21.
 
+## 数据源与接口目录（2026-10-30）
+
+- [总览、供应商、支持平台与 Night-All 剩余依赖](data-inventory/README.md)：按当前源码核对，区分业务能力、底层合同、治理目录与生产状态。
+- [逐项接口明细](data-inventory/interfaces.md)：native、企业、业务入口、电商资源版本、Web Search 与 Night-All-A 允许派发操作。
+- [数据源治理目录与固定清洗输入](data-inventory/source-directory.md)：完整初始化目录；规划项不计为已运行来源。
+- [可统计的 JSON 清单](data-inventory/inventory.json)：通过 `node scripts/generate-data-inventory.mjs` 离线更新，`--check` 校验漂移。
+
 ## 自建采集服务架构 Spider-Man（活文档，2026-10-23 建立）
 
 - [Spider-Man：自建采集服务架构](architecture/spider_man/README.md)：Night-All、Night-All-A、Hub 自建引擎（首个为微信 wechat_mp）、事件中心（Hub → Delta → Java）、多节点演进（A 机 hub-edge 保持原地址、`night-all-legacy` Service）、准入全局化（PG 租约）。看这一个目录就能了解自建服务的现状与目标形态；后续改动必须同步更新。均为设计，未实现。
@@ -12,6 +19,18 @@ Last reviewed: 2026-10-21.
 
 ## 容量与熔断排查（2026-10-09）
 
+- [京东商品图片全空：相对图片路径被投影丢弃（2026-11-03）](operations/ecommerce-jd-images-2026-11-03.md)：京东搜索 V1 只在 `imageUrl` 给 `jfs/t1/...` 相对路径、`images` 为空，原投影只收完整地址，导致 `images: []`。现仅对京东、仅对该路径形状补成 `https://img10.360buyimg.com/n0/` 原图地址；官方样例 48/48 有图且可访问。已部署，线上样本请求 `a9204dde` 的原归档在 Public Pod 只读复验 48/48 有图，根因闭环；旧回执、快照与下游已存空数组不变，新实时采集与下游展示尚未验收。
+- [Twitter 账号内容只有 32 条：时间线到底按正常结束返回（2026-10-31）](operations/twitter-account-timeline-end-2026-10-31.md)：`8c042908` 第 3 页为空且游标未变，是 Twitter 时间线结束而不是 Hub 漏页；空页重复自身游标不再附 `upstream_pagination_stopped`，状态为 `ok`。按 Request ID 复查用 `scripts/inspect-social-account-request.sql`。
+- [电商数据：上游供应商可切换、淘宝/天猫备用通道、TikHub 电商接口（2026-10-29）](operations/ecommerce-supplier-routing-2026-10-29.md)：JustOne 余额不足（601）导致电商搜索整体被拒。统一商品搜索新增按平台的「固定 / 主用 + 备用」供应商路由：主用不能执行或明确拒绝且未计费时，同一请求改由备用执行一次；已计费或结果未知时不切换。淘宝/天猫新增同一 JustOne 后端的 RapidAPI 通道，熔断按平台隔离，不影响 Twitter。TikHub 没有淘宝、京东、天猫、闲鱼接口；其小红书电商与 TikTok Shop 的 17 个接口作为电商专用接口接入。附只读诊断与启用顺序。
+- [小红书搜索 503：TikHub 共享熔断被 Hub 自身失败触发（2026-10-29）](operations/tikhub-shared-circuit-hub-failures-2026-10-29.md)：`0a92d464` 被 TikHub 共享熔断拒绝（`reason=upstream_failure`、无上游证据）。Hub 自身的解析失败、补全内部错误、写库失败此前也计入共享熔断，会连带暂停所有 TikHub 平台；现改为只有供应商故障计入。已核实本次由 10 次 Reddit 搜索解析失败（已计费）触发。原因是 Reddit 出现了新的非帖子节点（`SearchInFeedSurveyUnit` 调查卡片、`SearchErrorMessage` 提示）：现在不含帖子的节点直接排除，“无结果”提示返回空页，其他提示记为 Reddit 错误。小红书搜索等 5 处拒绝附带触发调用证据；新增可用于任意平台的只读熔断诊断。
+- [Twitter 搜索 409：同查询仍在执行，Hub 改为先等待（2026-10-29）](operations/twitter-admission-in-flight-wait-2026-10-29.md)：`a19f3831` 被同一 Key、同一查询、仍在执行的 `4954dc7f` 挡住（不是冷却；Delta 所有策略共用一个 Key，同关键词几乎同时调度就会撞上）。v2 新请求现在由 Hub 服务端最多等 40 秒、对方结束后自动放行；超时或调用方断开才返回原 409，其他拒绝不变。
+- [抖音搜索 502：第 3 页相关搜索卡片被误判（2026-10-29）](operations/douyin-related-words-2026-10-29.md)：三页都是上游 200 且已计费；相关搜索卡片的一个词与旧的固定逐词结构不一致，整页按帖子判失败，前两页 14 条也没交付。卡片外层仍严格，单个词放宽但仍拒绝藏有帖子字段的内容；诊断新增 `invalidPaths`；附部署后只读验证。
+- [YouTube 搜索结果缺作者与播放量（2026-10-29）](operations/youtube-search-metrics-2026-10-29.md)：作者为字符串、播放量为精确文本未被读取，已修复；点赞等字段 YouTube 搜索本来不提供；附只读字段诊断。
+- [Instagram 熔断：JustOne 余额不足（2026-10-28）](operations/instagram-justone-balance-2026-10-28.md)：上游余额不足（601）而非 Hub 解析；熔断拒绝返回 cause、原因码与上游 HTTP/业务码，诊断中心显示拒绝原因；附恢复步骤。切到 TikHub 后 0 条为 Hub 未识别新版搜索网格布局（fill_items / one_by_two / two_by_two），已补解析，未知布局改报 partial。
+- [微信综合搜索 HTTP 400（2026-10-28）](operations/wechat-search-rejection-2026-10-28.md)：已验证通用拒绝、综合搜索参数（非公众号路径、与 TikHub V5.3.2 合同一致）、独立费用证据；受控复测中官方示例关键词同样被拒（`10c2337c`），确认供应商侧故障；附 TikHub 英文工单与提交入口。
+- [B 站搜索缺省 result 的零结果页（2026-10-28）](operations/bilibili-empty-search-2026-10-28.md)：已验证空页证据、限定解析兼容、历史账务保留与发布验收。
+- [Twitter 历史未知请求与后续采集恢复（2026-10-28）](operations/twitter-search-admission-disposition-2026-10-28.md)：精确请求的管理员准入处置、历史与账务保留、部署及生产操作步骤；`17b94611` 实为上游成功、Hub 持久化未知；改为只拦截仍在执行的同查询请求（未知结果不再阻断新 key、删除供应商未知冷却、响应隔离固定 5 分钟），保留同 key 保护与人工恢复，附范围诊断与上线验证。
+- [Instagram 熔断与 Twitter 429（2026-10-27）](operations/instagram-twitter-availability-2026-10-27.md)：两条请求的证据边界、只读核查命令、Instagram 错误详情与 Twitter 限流头留存。
 - [小红书补全突发、上游 429 与共享熔断](operations/capacity-circuit-2026-10-09.md)：线上证据、令牌桶突发上限、延迟成功结算保护、公开错误信息与发布验收。
 - [小红书告警归类与现场核查（2026-10-14—2026-10-21）](operations/xiaohongshu-alert-review-2026-10-14-2026-10-21.md)：飞书告警的分层归类、TikHub 字段核对、Delta/Hub 状态边界与只读现场核查命令。
 

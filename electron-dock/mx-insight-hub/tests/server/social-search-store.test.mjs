@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { SocialSearchStateStore, SOCIAL_SEARCH_STATE_VERSION } from '../../server/external-platforms/social-search-store.mjs'
 import { YOUTUBE_COMMENTS_VERSION } from '../../server/contracts/youtube-comments.mjs'
+import { POST_COMMENTS_VERSION, POST_COMMENTS_PATH } from '../../server/contracts/post-comments.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { MemoryExternalPlatformStore, PostgresExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 
@@ -21,7 +22,8 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
   const identity = { tenantId: randomUUID(), consumerId: randomUUID(), apiKeyId: randomUUID(), path, scopeHash }
   const sourceId = randomUUID(), targetId = randomUUID(), callId = randomUUID(), ownCallId = randomUUID(), accountId = randomUUID()
   const capturedAt = ago(1000)
-  const manifest = { version: workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_VERSION : SOCIAL_SEARCH_STATE_VERSION, scopeHash, previousDeliveryId: null, capturedAt,
+  const manifest = { version: workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_VERSION
+    : workflowKind === 'post-comments' ? POST_COMMENTS_VERSION : SOCIAL_SEARCH_STATE_VERSION, scopeHash, previousDeliveryId: null, capturedAt,
     state: { jobs: [{ query: 'fixture', providerPage: 1, providerCursor: null, done: true,
       started: true, upstreamPages: 1, buffer: null, resolvedIdentity: { userId: '42' }, profiles: [{ userId: '42', name: 'Fixture' }] }] }, deliveredIds: [['already-delivered']] }
   const source = { id: sourceId, ...identity, platform, status: 'committed', responseStatus: 200, fingerprint: 'c'.repeat(64),
@@ -133,6 +135,23 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
 for (const postgres of [false, true]) {
   const name = postgres ? 'PGlite' : 'Memory'
   const options = { skip: postgres && !modulePath ? 'Set MX_INSIGHT_TEST_PGLITE_MODULE to the local PGlite module' : false }
+  test(`${name} single-post comment manifests retain paid overflow and settle once in their own scope`, options, async t => {
+    const f = await fixture(t, postgres, 'justone', POST_COMMENTS_PATH, 'post-comments')
+    const before = await f.getUsage(f.source.id), saved = clone(f.saved)
+    saved.usageUnitsActual = 1
+    saved.manifest.state.jobs[0].buffer = { callId: f.ownCallId, offset: 2, hash: 'd'.repeat(64),
+      projectionHash: 'e'.repeat(64), expected: clone(f.expected), providerPage: 1, providerCursor: { cursor: 'original-page' } }
+    await f.store.commitDelivery(saved)
+    const history = await f.store.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 })
+    assert.equal(history.state.jobs[0].buffer.offset, 2)
+    assert.deepEqual(history.state.jobs[0].buffer.providerCursor, { cursor: 'original-page' })
+    assert.deepEqual(await f.getUsage(f.source.id), before)
+    assert.equal((await f.counts()).captures, 1)
+    assert.equal((await f.counts()).charge, 'captured')
+    assert.equal(await f.store.pageFor({ ...f.identity, path: '/api/v1/data/social/crawl', callId: f.callId, expected: f.expected }), null)
+    const accountStore = new SocialSearchStateStore(f.providerStores, { platform: 'facebook' })
+    await assert.rejects(accountStore.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 }), { code: 'search_page_unavailable' })
+  })
   test(`${name} YouTube comment manifests keep their own path/version and settle one parent without rewriting source receipts`, options, async t => {
     const f = await fixture(t, postgres, 'tikhub', '/api/v1/data/youtube/channel-comments', 'youtube-comments')
     const before = await f.getUsage(f.source.id)
@@ -241,7 +260,7 @@ for (const postgres of [false, true]) {
     }
   })
 
-  test(`${name} social parent lease serializes buffered delivery and finds unknown parents without supplier calls`, options, async t => {
+  test(`${name} social parent lease serializes buffered delivery without supplier calls`, options, async t => {
     const f = await fixture(t, postgres), lease = { consumerId: f.consumerId, fingerprint, ownerRequestId: f.target.id, expiresAt: ago(-60000) }
     assert.equal(await f.store.acquireDeliveryLease(lease), true)
     assert.equal(await f.store.acquireDeliveryLease({ ...lease, ownerRequestId: randomUUID() }), false)
@@ -249,10 +268,8 @@ for (const postgres of [false, true]) {
     assert.equal(await f.store.acquireDeliveryLease({ ...lease, ownerRequestId: randomUUID() }), false)
     await f.store.releaseDeliveryLease(lease)
     assert.equal(await f.store.acquireDeliveryLease(lease), true)
-    await f.setUsage(f.target.id, { status: 'unknown', responseStatus: null })
-    assert.equal(await f.store.unknownFor(f.saved.delivery, f.path), true)
-    assert.equal(await f.store.unknownFor({ ...f.saved.delivery, apiKeyId: randomUUID() }, f.path), false)
-    assert.equal(await f.store.unknownFor(f.saved.delivery, '/api/v1/data/social/user-info'), false)
+    // An ended unknown parent no longer has an equal-request check; same-key replay owns it.
+    assert.equal(typeof f.store.unknownFor, 'undefined')
   })
 
   test(`${name} user-info sources and profile resolver receipts cannot be reused under crawl or post descriptors`, options, async t => {

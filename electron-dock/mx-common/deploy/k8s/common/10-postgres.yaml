@@ -41,7 +41,7 @@ spec:
   replicas: 1
   # Template changes never restart the shared database (Hub, DataPort). CPU and
   # memory changes reach the live Pod in place via electron-dock
-  # `scripts/manage.sh db apply`; argument changes wait for a planned restart.
+  # `scripts/manage.sh db apply`; argument/volume changes wait for a planned restart.
   updateStrategy:
     type: OnDelete
   selector:
@@ -156,6 +156,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        # POSIX dynamic shared memory for queries. The runtime's 64Mi default
+        # exhausted under Hub usage aggregation (SQLSTATE 53100). This is a
+        # ceiling, not reserved RAM; actual use counts toward container memory.
+        # Keep it separate from the retained database volume.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -190,7 +190,7 @@ for (const change of [{ ...fixed('rapidapi'), mode: 'paused' }, fixed('rapidapi'
   })
 }
 
-for (const version of [1, 2]) test(`v${version}: TikHub unknown after the saved RapidAPI 400 blocks same key, new key and cross-version acquisition`, async () => {
+for (const version of [1, 2]) test(`v${version}: TikHub unknown after the saved RapidAPI 400 blocks its same key while new keys and versions acquire again`, async () => {
   const f = await fixture(), body = { ...BODY, ...(version === 2 ? { timeWindow: WINDOW } : {}) }
   f.setReply(async provider => {
     if (provider === 'rapidapi') return rejection(400)
@@ -203,13 +203,16 @@ for (const version of [1, 2]) test(`v${version}: TikHub unknown after the saved 
   assert.equal(row.status, 'unknown')
   assert.equal(row.acquisitionRequest.searchProvider, 'tikhub')
   assert.deepEqual(f.providerCalls().map(call => [call.providerKey, call.outcome]), [['rapidapi', 'rejected'], ['tikhub', 'unknown']])
-  for (const [retryVersion, key] of [[version, `unknown-v${version}-first`], [version, `unknown-v${version}-new-key`],
-    [version === 1 ? 2 : 1, `unknown-v${version}-other-api`]]) {
-    const retryBody = { ...BODY, ...(retryVersion === 2 ? { timeWindow: WINDOW } : {}) }
-    await assert.rejects(f.invoke(retryBody, key, retryVersion), error =>
-      ['request_outcome_unknown', 'search_admission_blocked'].includes(error.code))
-  }
+  await assert.rejects(f.invoke(body, `unknown-v${version}-first`, version), { code: 'request_outcome_unknown' })
   assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 1 })
+  // Each new key or API version is a new acquisition; the synthetic supplier fails it the same way.
+  let expected = 1
+  for (const [retryVersion, key] of [[version, `unknown-v${version}-new-key`], [version === 1 ? 2 : 1, `unknown-v${version}-other-api`]]) {
+    const retryBody = { ...BODY, ...(retryVersion === 2 ? { timeWindow: WINDOW } : {}) }
+    await assert.rejects(f.invoke(retryBody, key, retryVersion), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
+    expected++
+    assert.deepEqual(f.calls, { rapidapi: expected, tikhub: expected })
+  }
   assert.equal(f.usage.requests.get(row.id).status, 'unknown')
 })
 

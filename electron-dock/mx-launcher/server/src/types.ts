@@ -2480,6 +2480,12 @@ export interface LauncherNetworkLeaseInput {
    * capability validation; request bodies are never copied into this field.
    */
   anonymousRenewalLeaseId?: string | null;
+  /**
+   * Server-internal: the device's newest lease whose capability the request
+   * presented, for products that keep one address per device. Controllers
+   * derive it from stored leases; request bodies are never copied into it.
+   */
+  addressSourceLeaseId?: string | null;
 }
 
 export interface LauncherNetworkLeaseReleaseInput {
@@ -2504,6 +2510,11 @@ export interface LauncherNetworkLease {
   userId: string | null;
   cidr: string;
   leaseIp: string;
+  /**
+   * Range the address was allocated from, when it differs from leaseProfile:
+   * the lease kept its device's address across an identity switch.
+   */
+  addressProfile?: LauncherLeaseProfile | null;
   serviceVip: string;
   internalControlIp: string;
   domesticGatewayIp: string;

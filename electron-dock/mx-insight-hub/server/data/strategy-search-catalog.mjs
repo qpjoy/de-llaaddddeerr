@@ -1,12 +1,14 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { WECHAT_LEGACY_SEARCH_PLATFORMS } from '../contracts/wechat-search-alias.mjs'
 import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../../shared/social-account-contract.mjs'
+import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
+import { NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-comments.mjs'
 
 const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
   kuaishou: '快手', linkedin: 'LinkedIn', reddit: 'Reddit', telegram: 'Telegram',
   tiktok: 'TikTok', twitter: 'Twitter / X', weibo: '微博', xiaohongshu: '小红书',
-  youtube: 'YouTube', zhihu: '知乎', wechat_search: '微信搜索', wechat_mp: '微信公众号',
+  youtube: 'YouTube', zhihu: '知乎', xianyu: '闲鱼', wechat_search: '微信搜索', wechat_mp: '微信公众号',
 }
 const READ_ONLY_REASON = '此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。'
 
@@ -29,9 +31,9 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPoli
   }
   if (platform === 'facebook') return {
     platform, label: LABELS[platform], editable: true, migrationStatus: 'hub_native',
-    providers: ['rapidapi', 'justone'], allowedModes: ['auto', 'rapidapi', 'justone', 'paused'],
+    providers: ['rapidapi', 'justone', 'night-all-a'], allowedModes: ['auto', 'rapidapi', 'justone', 'selfhosted', 'paused'],
     policy: facebookPolicy == null ? null : structuredClone(facebookPolicy),
-    routeSummary: '内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；标准搜索先消费已采购余量，再有界补齐当前页，raw 保持既有分页。游标绑定供应商，未知结果不触发切换。',
+    routeSummary: '内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；自建模式只派发到 Night-All-A（100.127.0.1:8100），全集群同时在途与每分钟启动次数按管理页设置限制，不转付费供应商。标准搜索先消费已采购余量，再有界补齐当前页，raw 保持既有分页。游标绑定供应商，未知结果不触发切换。',
   }
   if (['bilibili', 'douyin', 'kuaishou', 'zhihu'].includes(platform)) return {
     ...row, migrationStatus: 'hub_native',
@@ -72,23 +74,25 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPoli
   return row
 }
 
-function accountPlatform(platform, operation) {
+function accountPlatform(platform, operation, accountPolicy = null) {
   const row = historicalPlatform(platform, operation)
   const legacy = NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation].includes(platform)
   return {
     ...row, migrationStatus: 'hub_native',
+    ...(platform === 'facebook' ? { editable: true, allowedModes: ['fixed', 'paused'],
+      policy: accountPolicy == null ? null : structuredClone(accountPolicy) } : {}),
     readOnlyReason: 'Hub 账号接口按已审核的平台及活动合同执行固定路由，当前未提供可互换的供应商策略。关键词搜索的供应商配置不会改变账号内容或资料路由；操作状态、凭据和准入仍独立检查。',
     routeSummary: `POST /api/v1/data/social/${operation} 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。${legacy
       ? platform === 'xiaohongshu' ? '旧 /search 与 /night-all/search 入口继续保持原先按请求形状直连或转发的规则。'
         : '旧 /search 与 /night-all/search 入口仍经 Night-All，供下游逐步切换。'
-      : '旧兼容入口未声明此平台与业务组合，不能据此认为旧入口也新增支持。'}目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。`,
+      : '旧兼容入口未声明此平台与业务组合，不能据此认为旧入口也新增支持。'}${platform === 'facebook' ? '本业务启停同时控制新接口与旧兼容入口的新采购；其他业务独立，账号内容所需的解析跟随账号内容状态。已保存结果与已采购余量仍可交付。' : ''}目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。`,
   }
 }
 
 // This is an Admin product/routing inventory, not a readiness declaration.
 // The compatibility sets deliberately exclude unsupported operation/platform
 // pairs; provider credential state and paid dispatch remain in their gateways.
-export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null } = {}) {
+export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null, facebookCrawlPolicy = null, facebookProfilePolicy = null } = {}) {
   return {
     interfaces: [
       {
@@ -104,13 +108,33 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
         id: 'crawl', label: '账号内容',
         paths: ['/api/v1/search/crawl', '/api/v1/night-all/search/crawl', '/api/v1/data/social/crawl'],
         description: '按已知账号获取内容。data/social/crawl 由 Hub 执行，要求平台及 social.content.crawl 授权；单页上限 500，仍受 Key 上限约束。旧兼容入口保持原路由和原平台范围，迁移从第一页开始。',
-        platforms: HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS.map(platform => accountPlatform(platform, 'crawl')),
+        platforms: HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS.map(platform => accountPlatform(platform, 'crawl', facebookCrawlPolicy)),
       },
       {
         id: 'user-info', label: '账号资料',
         paths: ['/api/v1/search/user-info', '/api/v1/night-all/search/user-info', '/api/v1/data/social/user-info'],
         description: '按已知账号获取资料，不是关键词搜账号。data/social/user-info 由 Hub 执行，要求平台及 social.profile.get 授权；旧兼容入口保持原路由和原平台范围。接口可见不会自动增加调用权限。',
-        platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info')),
+        platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info', facebookProfilePolicy)),
+      },
+      {
+        id: 'post-detail', label: '帖子详情',
+        paths: ['/api/v1/search/post-detail', '/api/v1/night-all/search/post-detail'],
+        description: '按帖子 ID、contentId 或 URL 获取单篇完整正文、发布时间、作者和媒体。小红书已由 /api/v1/data/post 提供 Hub-native 合同；此兼容入口服务其他平台的历史请求，供应商与凭据由 Hub/Night-All 管理。',
+        platforms: NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS.map(platform => ({
+          ...historicalPlatform(platform, 'post-detail'),
+          routeSummary: platform === 'xiaohongshu'
+            ? '小红书详情使用 Hub /api/v1/data/post；此旧入口保留历史兼容，不改变现有登录、联网或已签发结果。'
+            : 'Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。',
+        })),
+      },
+      {
+        id: 'post-comments', label: '帖子评论',
+        paths: ['/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'],
+        description: '按帖子 ID、contentId 或 URL 获取单篇帖子的评论列表；支持 cursor/params 续页，单页最多 100 条。商品评论、搜索附带评论和频道评论接口不属于此合同。',
+        platforms: NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS.map(platform => ({
+          ...historicalPlatform(platform, 'post-comments'),
+          routeSummary: 'Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。',
+        })),
       },
     ],
   }

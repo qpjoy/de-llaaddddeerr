@@ -1,5 +1,7 @@
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from '../core/errors.mjs'
 import { NIGHT_ALL_LEGACY_OPERATIONS, parseNightAllLegacyArray } from '../contracts/night-all-legacy.mjs'
+import { NIGHT_ALL_POST_DETAIL_OPERATION, normalizeNightAllPostDetailRequest } from '../contracts/night-all-post-detail.mjs'
+import { NIGHT_ALL_POST_COMMENTS_OPERATION, normalizeNightAllPostCommentsRequest } from '../contracts/night-all-post-comments.mjs'
 import { NIGHT_ALL_COUNT_MISMATCH_WARNING } from '../contracts/night-all-count-audit.mjs'
 
 const COMMON_FIELDS = new Set([
@@ -36,11 +38,15 @@ const FALLBACK_WINDOWS_MS = {
   raw: 15 * 60 * 1_000,
   crawl: 60 * 60 * 1_000,
   'user-info': 60 * 60 * 1_000,
+  [NIGHT_ALL_POST_DETAIL_OPERATION]: 60 * 60 * 1_000,
+  [NIGHT_ALL_POST_COMMENTS_OPERATION]: 60 * 60 * 1_000,
 }
 const OPERATION_PAGE_SIZE_LIMIT = {
   raw: 1_000,
   crawl: 100,
   'user-info': 100,
+  [NIGHT_ALL_POST_DETAIL_OPERATION]: 100,
+  [NIGHT_ALL_POST_COMMENTS_OPERATION]: 100,
 }
 const SAFE_CONTINUATION_PARAMETER_KEYS = new Set([
   'cursor', 'pcursor', 'after', 'maxid', 'endcursor', 'continuationtoken',
@@ -157,6 +163,12 @@ export function normalizeNightAllCompatibilityRequest(operation, body, {
   maxPageSize,
   maxCrawlWork = Math.min(maxPageSize, 100),
 }) {
+  if (operation === NIGHT_ALL_POST_DETAIL_OPERATION) {
+    return normalizeNightAllPostDetailRequest(body, { businessId, canonicalizePlatform, maxPageSize })
+  }
+  if (operation === NIGHT_ALL_POST_COMMENTS_OPERATION) {
+    return normalizeNightAllPostCommentsRequest(body, { businessId, canonicalizePlatform, maxPageSize })
+  }
   assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
   assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
 

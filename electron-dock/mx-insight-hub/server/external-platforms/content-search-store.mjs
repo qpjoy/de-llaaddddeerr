@@ -144,17 +144,6 @@ export class ContentSearchStateStore {
     return page ? { ...page, sourceUsageRequestId: usage.id } : null
   }
 
-  async unknownFor(delivery, path) {
-    if (!uuid(delivery.usageRequestId) || !sha(delivery.fingerprint) || !identityValid({ ...delivery, path })) throw fail()
-    if (!this.pool) return [...this.usage.requests.values()].some(row => scopeMatches(row, { ...delivery, path }, this.platform)
-      && row.status === 'unknown' && row.fingerprint === delivery.fingerprint
-      && Date.now() - Date.parse(row.reservedAt ?? row.createdAt ?? new Date().toISOString()) <= 86400000)
-    return (await this.pool.query(`SELECT 1 FROM usage_requests WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3
-      AND platform=$4 AND fingerprint=$5 AND status='unknown' AND acquisition_request->>'path'=$6
-      AND reserved_at>=now()-interval '24 hours' LIMIT 1`,
-    [delivery.tenantId, delivery.consumerId, delivery.apiKeyId, this.platform, delivery.fingerprint, path])).rows.length > 0
-  }
-
   async acquireDeliveryLease(input) {
     // Keep the existing RapidAPI standard-search mutex during rolling upgrades;
     // supplier-native child operations still have their own procurement leases.

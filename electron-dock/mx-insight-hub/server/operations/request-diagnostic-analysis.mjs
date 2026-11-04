@@ -1,5 +1,7 @@
 // Interpret only the already projected, read-only request diagnostic DTO.
 // No request/response bodies, arbitrary log text, I/O, or model invocation.
+import { platformDiagnosticAnalysis } from './platform-diagnostic-analysis.mjs'
+
 export function analyzeRequestDiagnostic(run) {
   const providers = Array.isArray(run.providerCalls) ? run.providerCalls : []
   const connectors = Array.isArray(run.connectorCalls) ? run.connectorCalls : []
@@ -46,6 +48,24 @@ export function analyzeRequestDiagnostic(run) {
       '请求状态为 released；客户扣费与供应商费用仍应分别查看对应账本。', ['status'])
   }
 
+  const refusal = run.refusal?.kind === 'circuit' ? run.refusal : null
+  if (refusal) {
+    const trigger = refusal.trigger
+    summary = refusal.cause === 'hub_response_parsing' ? 'Hub 无法解析供应商响应，解析保护拒绝了本请求。'
+      : refusal.cause === 'upstream' ? '供应商连续失败，Hub 熔断保护拒绝了本请求。'
+      : 'Hub 熔断保护拒绝了本请求，未找到触发它的近期失败记录。'
+    add('circuit_refusal', 'confirmed', 'Hub 熔断保护拒绝，未调用供应商',
+      '网关账本记录 circuit_rejected 且没有供应商调用 ID：本请求没有派发，也没有供应商费用。', ['refusal.kind', 'refusal.provider', 'refusal.upstreamDispatched'])
+    if (trigger) {
+      add('circuit_trigger_recorded', 'confirmed', '拒绝前该供应商最近一次失败',
+        `${trigger.errorCode || trigger.outcome}；HTTP ${trigger.httpStatus ?? '无'}，业务码 ${trigger.businessCode ?? '无'}，平台 ${trigger.marketplace ?? '未记录'}。这是账本中拒绝前的最近一次失败，用来说明保护为何打开；它不是本请求的调用。`,
+        ['refusal.trigger.errorCode', 'refusal.trigger.httpStatus', 'refusal.trigger.businessCode', 'refusal.trigger.failedAt'])
+      nextSteps.push(refusal.cause === 'hub_response_parsing'
+        ? '按触发调用 ID 查看受限响应，确认供应商返回格式变化后修复 Hub 解析并发布；保护会在修复后自然停止。'
+        : '按原因码处理上游：余额或额度不足需充值，限流需降速或升级档位；也可在策略搜索“管理”中把该平台切到可用的备用供应商。')
+    }
+  }
+
   if (timeouts.length) {
     add('connector_timeout_recorded', 'confirmed', '连接器记录了等待超时',
       'failureKind=timeout 确认 Hub 等待边界发生超时；不能仅凭耗时推断部署超时配置、下游停止、供应商失败或最终费用。', timeouts)
@@ -64,6 +84,22 @@ export function analyzeRequestDiagnostic(run) {
     nextSteps.push('保留原请求及任务身份，先核对最终结果与结算；不自动重发、换幂等键、解除 unknown 或释放冻结。')
   }
 
+  const unavailableAccount = refs(providers, call => call.provider === 'rapidapi'
+    && call.operation === 'social.profile.get' && call.outcome === 'rejected'
+    && ['social_account_not_found', 'social_account_unavailable'].includes(call.errorCode), 'providerCalls', ['outcome', 'errorCode'])
+  // A definite account refusal ends the request unless it was the ID half of a
+  // bare-digit lookup that the same request then answered by username.
+  if (unavailableAccount.length && successfulDelivery) {
+    add('twitter_id_lookup_fell_back', 'confirmed', '账号 ID 下无账号，已按同名用户名查找',
+      '裸纯数字先按账号 ID 查找；供应商明确报告该 ID 没有账号后，同一请求按同名用户名再查一次。两次供应商调用各自留档，客户请求只计一次。', unavailableAccount)
+  } else if (unavailableAccount.length) {
+    if (run.status === 'committed' && [404, 422].includes(run.responseStatus)) {
+      summary = '供应商明确报告 Twitter 账号未找到或不可用，账号采集已停止。'
+    }
+    add('twitter_account_unavailable', 'confirmed', '账号查找返回业务否定结果',
+      '这不是额度耗尽或通用解析失败；供应商报告的账号状态不证明账号永久不存在。历史响应和费用保持原记录。', unavailableAccount)
+    nextSteps.push('查看保存响应中的账号原因，核实账号标识与当前状态；不自动重试或切换供应商重新采购。')
+  }
   const rejected = refs(providers, call => call.outcome === 'rejected', 'providerCalls', ['outcome', 'httpStatus', 'businessCode', 'errorCode'])
   const tikhubRateLimited = refs(providers,
     call => call.provider === 'tikhub' && (call.httpStatus === 429 || call.errorCode === 'upstream_rate_limited'),
@@ -78,7 +114,7 @@ export function analyzeRequestDiagnostic(run) {
     add('provider_rejection_recorded', 'confirmed', '已保存供应商拒绝证据',
       '调用账本记录 rejected；HTTP 与业务码需要一起阅读。若 Hub 交付了存量回退，这些拒绝不等于最终交付失败。具体原因以已核实错误说明及原调用记录为准。', rejected)
   }
-  if (!providers.length && !connectors.length) {
+  if (!providers.length && !connectors.length && !refusal) {
     add('call_evidence_missing', 'unresolved', '没有可用的当次调用记录',
       '本查询未返回供应商或连接器记录；缺少记录不能单独证明没有外部调用，也不能确认未计费。', ['providerCalls', 'connectorCalls'])
   }
@@ -112,5 +148,6 @@ export function analyzeRequestDiagnostic(run) {
     version: 1, mode: 'recorded_evidence', readOnly: true, modelInvoked: false,
     summary, findings: findings.slice(0, 12), nextSteps: nextSteps.slice(0, 6),
     semanticRelevance: 'not_assessed',
+    platformAnalysis: platformDiagnosticAnalysis(run),
   }
 }

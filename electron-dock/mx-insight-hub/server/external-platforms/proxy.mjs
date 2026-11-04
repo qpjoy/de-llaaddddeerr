@@ -4,6 +4,7 @@ import { fetch as proxyFetch, ProxyAgent } from 'undici'
 import { AppError } from '../core/errors.mjs'
 import { resolveProviderProxyRoute } from '../agent/control-store.mjs'
 import { relayRequestUrl } from './egress-relay.mjs'
+import { RAPIDAPI_TAOBAO_TMALL_HOST } from '../contracts/justone.mjs'
 
 // Probe policy defaults. A probe only has to prove that the egress reaches the
 // target origin, so its deadline must accommodate a healthy but high-latency
@@ -25,6 +26,11 @@ export const DEFAULT_PROXY_PROBE_POLICY = Object.freeze({
 // "unreachable" and which made a stable 7788 route look dead under upstream
 // rate limiting.
 const ROUTE_FAILURE_STATUSES = new Set([407, 502, 503, 504])
+
+const RAPIDAPI_LISTING_ORIGINS = Object.freeze([
+  'https://facebook-scraper3.p.rapidapi.com',
+  `https://${RAPIDAPI_TAOBAO_TMALL_HOST}`,
+])
 
 const PROVIDER_ROUTES = Object.freeze({
   ...Object.fromEntries(SEARCH_UPSTREAMS.map(p=>[p.key,{origin:new URL(p.url).origin,probeUrl:new URL('/',p.url).href}])),
@@ -288,9 +294,10 @@ function createProviderProxyFetch(store, {
   const selection = new Map()
   return async (url, options = {}) => {
     const target = new URL(url)
-    const facebook = providerKey === 'rapidapi' && target.origin === 'https://facebook-scraper3.p.rapidapi.com'
-    if ((!facebook && target.origin !== origin) || target.username || target.password) throw new Error('Unexpected provider origin')
-    const probeUrl = facebook ? 'https://facebook-scraper3.p.rapidapi.com/' : defaultProbeUrl
+    // One RapidAPI key serves several reviewed listings, each on its own host.
+    const listing = providerKey === 'rapidapi' && RAPIDAPI_LISTING_ORIGINS.includes(target.origin)
+    if ((!listing && target.origin !== origin) || target.username || target.password) throw new Error('Unexpected provider origin')
+    const probeUrl = listing ? `${target.origin}/` : defaultProbeUrl
     const route = await store.route()
     const policy = resolveProbePolicy(route.probePolicy)
     const candidates = [...route.proxyUrls, ...(route.directFallback ? [null] : [])]

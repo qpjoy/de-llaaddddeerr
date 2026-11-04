@@ -1,6 +1,7 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, isLcySupplierPriority, effectiveBusinessPageLimit } from '../core/internal-traffic-policy.mjs'
+import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
 import { circuitOpenError, ecommerceCapacityError, upstreamCapacityError } from './availability-errors.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
@@ -13,12 +14,14 @@ import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hu
 import { normalizeHubSocialCompatRequest } from '../contracts/hub-social-compat.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import {
   ECOMMERCE_DELIVERY_MODES,
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
   JUSTONE_OPERATION,
   JustOneContractError,
   normalizeJustOneProductSearchRequest,
+  productAdapterId,
 } from '../contracts/justone.mjs'
 import {
   JUSTONE_RELEASED_RESOURCES,
@@ -45,14 +48,21 @@ import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
 import { socialAccountPlan } from './social-account-delivery.mjs'
 import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
+import { postCommentsPlan } from './post-comments-workflow.mjs'
+import { StrategySearchRoutingStore } from './strategy-search-routing.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
-import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
+import { waitForFacebookSelfhostedAdmission } from './facebook-selfhosted-admission.mjs'
+import { NightAllAUpstreamError } from '../adapters/night-all-a-facebook.mjs'
+import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY,
+  FACEBOOK_SELFHOSTED_OPERATION, FACEBOOK_SELFHOSTED_PROVIDER } from '../contracts/facebook-search.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+// Pause before the single priority retry of an unbilled supplier rate refusal.
+const RATE_REFUSAL_RETRY_DELAY_MS = 1_000
 
 function operationReadyForConsumer(operation, consumerId) {
   if (operation?.effectiveState === 'active') return true
@@ -218,6 +228,13 @@ function replayedFailure(request) {
   return new AppError(status, code, message, { ...storedDetails, requestId: request.id })
 }
 
+const JUSTONE_CAPACITY_FAILURES = Object.freeze({
+  100: { reasonCode: 'upstream_auth_invalid', message: 'The data source credential is invalid; contact the administrator' },
+  600: { reasonCode: 'upstream_permission_denied', message: 'The data source permission is denied; contact the administrator' },
+  601: { reasonCode: 'upstream_balance_exhausted', message: 'The data source balance is exhausted; contact the administrator' },
+  602: { reasonCode: 'upstream_token_limit_exceeded', message: 'The data source credential quota is exhausted; contact the administrator' },
+})
+
 function publicFailure(error, { ecommerce = false } = {}) {
   const evidence = error.evidence || {}
   if (error instanceof WebSearchUpstreamError) {
@@ -227,6 +244,20 @@ function publicFailure(error, { ecommerce = false } = {}) {
       code, 'Search request failed; reuse the same request identifier to verify its outcome', {
         ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
         outcome: evidence.outcome, retryable: false })
+  }
+  if (error instanceof NightAllAUpstreamError) {
+    const base = { reasonCode: evidence.errorCode, outcome: evidence.outcome, retryable: false }
+    if (evidence.outcome === 'unknown') return new AppError(502, 'facebook_selfhosted_outcome_unknown',
+      'The self-hosted Facebook collection outcome is unknown; reuse the same request identifier to verify it', base)
+    if (evidence.outcome === 'succeeded_unusable') return new AppError(502, 'external_platform_response_unusable',
+      'The self-hosted Facebook result could not be normalized; do not retry automatically', { ...base, upstreamAccepted: true })
+    if (evidence.errorCode === 'facebook_selfhosted_invalid_input') return new AppError(400, 'invalid_facebook_search',
+      'The self-hosted Facebook collector accepts a query and continuation of at most 500 characters', base)
+    if (evidence.errorCode === 'facebook_selfhosted_rate_limited') return new AppError(429, 'facebook_selfhosted_rate_limited',
+      'The self-hosted Facebook account is cooling down; retry later', { ...base, retryAfterMs: evidence.retryAfterMs ?? 300_000 })
+    return new AppError(503, 'facebook_selfhosted_unavailable', ['facebook_selfhosted_session_invalid', 'facebook_selfhosted_misconfigured'].includes(evidence.errorCode)
+      ? 'The self-hosted Facebook collector needs administrator attention' : 'The self-hosted Facebook collector could not complete this search',
+    { ...base, ...(['facebook_selfhosted_session_invalid', 'facebook_selfhosted_misconfigured'].includes(evidence.errorCode) ? { action: 'contact_administrator' } : {}) })
   }
   if (error instanceof RapidApiUpstreamError) {
     if (evidence.errorCode === 'social_egress_unavailable') return new AppError(503, 'social_egress_unavailable', 'Social data egress is unavailable; no business request was dispatched', { outcome: 'rejected', retryable: false })
@@ -253,7 +284,28 @@ function publicFailure(error, { ecommerce = false } = {}) {
     || (error instanceof JustOneUpstreamError && [302, 303].includes(evidence.businessCode))) {
     return upstreamCapacityError(evidence)
   }
+  // The same backend's RapidAPI listing refuses at its own gateway, without a
+  // business code. Publish those exactly like JustOne's equivalents.
+  if (ecommerce && error instanceof JustOneUpstreamError && evidence.businessCode == null
+    && evidence.outcome === 'rejected' && evidence.billed === false) {
+    if (evidence.errorCode === 'upstream_balance_exhausted') {
+      return ecommerceCapacityError(evidence.errorCode, { requestDispatched: true })
+    }
+    if (['upstream_auth_invalid', 'upstream_permission_denied'].includes(evidence.errorCode)) {
+      return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
+    }
+    if (evidence.errorCode === 'upstream_proxy_unreachable') {
+      return new AppError(503, 'external_platform_unavailable', 'External product search is unavailable; no request was dispatched')
+    }
+  }
   if (error instanceof JustOneUpstreamError && [100, 600, 601, 602].includes(evidence.businessCode)) {
+    const reason = JUSTONE_CAPACITY_FAILURES[evidence.businessCode]
+    // Delta treats this top-level code as terminal. Add a reviewed subreason
+    // without exposing supplier messages or changing historical replay.
+    if (!ecommerce && evidence.outcome === 'rejected' && evidence.errorCode === reason.reasonCode) {
+      return new AppError(503, 'external_platform_capacity_unavailable', reason.message,
+        { reasonCode: reason.reasonCode, outcome: 'rejected', retryable: false, action: 'contact_administrator' })
+    }
     return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
   }
   if (evidence.outcome === 'succeeded_unusable') {
@@ -327,6 +379,9 @@ export class ExternalPlatformGateway {
     admissionPolicies = null,
     credentialStore = null,
     ecommerceRoutingStore = null,
+    strategySearchRoutingStore = new StrategySearchRoutingStore(usageStore.pool),
+    // Product-search supplier -> gateway, shared by every gateway in the map.
+    productSearchGateways = null,
     // Everything in this class is provider-shaped rather than provider-specific:
     // the adapter, config, stores and credential all arrive by injection. The
     // provider key is the last constant, so naming it here lets a second vendor
@@ -338,6 +393,7 @@ export class ExternalPlatformGateway {
   }) {
     this.providerKey = providerKey
     this.usageStore = usageStore
+    this.strategySearchRoutingStore = strategySearchRoutingStore
     this.platformStore = platformStore
     this.adapter = adapter
     this.config = config
@@ -347,6 +403,7 @@ export class ExternalPlatformGateway {
     this.admissionPolicies = admissionPolicies
     this.credentialStore = credentialStore
     this.ecommerceRoutingStore = ecommerceRoutingStore
+    this.productSearchGateways = productSearchGateways
     this.defaultPolicy = defaultPolicy
     this.logger = logger
     this.active = 0
@@ -356,11 +413,15 @@ export class ExternalPlatformGateway {
   }
 
   #enter(context) {
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      return isLcySupplierPriority(context)
+        ? enterPriority(this, context.consumer.id, currentAdmissionLimits(this).maxConcurrency) : 'exempt'
+    }
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
     if (
-      this.active >= currentAdmissionLimits(this).maxConcurrency
+      ordinaryCapacityBlocked(this, currentAdmissionLimits(this).maxConcurrency)
+      || this.active >= currentAdmissionLimits(this).maxConcurrency
       || (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context)) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)
     ) return false
     this.active += 1
@@ -372,11 +433,28 @@ export class ExternalPlatformGateway {
     // Release the captured admission, not the current mutable Key setting.
     // Exempt work neither occupies nor releases an ordinary caller's slot.
     if (admission === 'exempt') return
+    leavePriority(this, admission)
     this.active = Math.max(0, this.active - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
     else this.activeByConsumer.set(consumerId, next)
     this.concurrencyQueue.drain()
+  }
+
+  // Priority work waits even where an ordinary caller would take an immediate
+  // answer: it used to bypass this gate, so refusing it now would be new.
+  async #enterWithPriority(context, { delivery, expiresAt, signal, platform, canWait, revalidate }) {
+    try {
+      return await waitForPriorityCapacity(this, { enter: () => this.#enter(context),
+        leave: admission => this.#leave(context.consumer.id, admission), expiresAt, signal,
+        revalidate: canWait ? revalidate : null, details: { platform, operation: delivery?.operation } })
+    } catch (error) {
+      if (canWait && delivery) {
+        await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+          status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
+      }
+      throw error
+    }
   }
 
   async #revalidateWaitingIdentity(context, platform, plan) {
@@ -399,7 +477,10 @@ export class ExternalPlatformGateway {
   async #enterOrQueue(context, { lease, delivery, expiresAt, signal, platform, canWait, revalidate }) {
     await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      if (!isLcySupplierPriority(context)) return 'exempt'
+      return this.#enterWithPriority(context, { delivery, expiresAt, signal, platform, canWait, revalidate })
+    }
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false
     const policy = admissionQueuePolicy(this)
@@ -457,6 +538,14 @@ export class ExternalPlatformGateway {
         status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
       throw error
     }
+  }
+
+  // Best effort: a refusal must not fail because its explanation is unreadable.
+  async #circuitEvidence(contractOpen, marketplace = null) {
+    try {
+      return await this.platformStore.latestFailureEvidence?.(contractOpen
+        ? { marketplace: marketplace ?? null, unusableOnly: true } : {}) ?? null
+    } catch { return null }
   }
 
   async #resolvedCredential() {
@@ -584,21 +673,73 @@ export class ExternalPlatformGateway {
     }
   }
 
-  async search(context, { body, idempotencyKey, retryOfRequestId, path, signal }) {
+  // `productSearchGateways` maps each product supplier to its gateway. With it
+  // the saved route chooses the primary supplier and, under `priority`, hands a
+  // request to the backup once: before dispatch when the primary cannot run, or
+  // after a definite refusal the primary did not bill. A charged, unusable or
+  // unknown result never switches suppliers. Callers never see which one ran.
+  async search(context, { body, idempotencyKey, retryOfRequestId, path, signal }, {
+    gateways = this.productSearchGateways ?? null, reservation = null, selection: routedSelection = null,
+    fallbackUsed = false, attempt = null,
+  } = {}) {
+    const input = { body, idempotencyKey, retryOfRequestId, path, signal }
+    const routing = gateways && this.ecommerceRoutingStore ? this.ecommerceRoutingStore : null
     let defaultAdapterId
+    let selection = routedSelection
+    const forward = (provider, reserved, options) => {
+      if (!gateways?.[provider]) throw new AppError(503, 'ecommerce_route_unavailable', 'The selected product supplier is unavailable')
+      return gateways[provider].search(context, input, { gateways, reservation: reserved, ...options })
+    }
+    const backup = async () => {
+      if (!routing || fallbackUsed || selection?.mode !== 'priority' || selection.primaryProvider !== this.providerKey) return null
+      // The administrator may have changed the route while this request waited.
+      const latest = await routing.selection(selection.marketplace).catch(() => null)
+      return latest?.revision === selection.revision && gateways[latest.fallbackProvider] ? latest : null
+    }
     const normalize = ({ policy, codec }) => normalizeJustOneProductSearchRequest(body, {
-      defaultAdapterId, decodeCursor: codec.decode, encodeCursor: codec.encode, maxPageSize: policy.maxPageSize,
+      providerKey: this.providerKey, defaultAdapterId, decodeCursor: codec.decode, encodeCursor: codec.encode,
+      maxPageSize: policy.maxPageSize,
     })
-    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal }, {
+    return this.#deliver(context, input, {
       operation: JUSTONE_OPERATION,
       capabilityMessage: 'E-commerce product search is not granted for this API key',
+      reservation,
+      ...(attempt != null ? { callOrdinal: attempt } : {}),
       normalize,
+      route: routing && !reservation ? async reserved => {
+        // An unreadable route keeps replay and cache delivery working; live
+        // dispatch below still fails closed on it.
+        selection = await routing.selection(String(body.marketplace).trim()).catch(() => null)
+        if (selection && selection.primaryProvider !== this.providerKey) {
+          return { result: await forward(selection.primaryProvider, reserved, { selection }) }
+        }
+        return null
+      } : null,
       resolveLiveRoute: async ({ normalized, policy, codec }) => {
         // Configuration only governs new acquisition. Saved responses, cache
         // reads and existing traversal cursors survive a default-route edit.
-        if (!body.cursor) defaultAdapterId = await this.ecommerceRoutingStore?.select(normalized.marketplace)
+        if (selection) defaultAdapterId = productAdapterId(this.providerKey, normalized.marketplace)
+        else if (!body.cursor) defaultAdapterId = await this.ecommerceRoutingStore?.select(normalized.marketplace)
         return normalize({ policy, codec })
       },
+      unavailable: routing ? async (reserved, availability) => {
+        if (!availability?.safeToFallback) return null
+        const next = await backup()
+        if (!next) return null
+        // Both suppliers share this operation and fingerprint; the backup must
+        // be able to take the dispatch lease this gateway is holding.
+        if (availability.dispatchLeaseHeld) await this.platformStore.releaseDispatchLease(availability.dispatchLease)
+        return { result: await forward(next.fallbackProvider, reserved, { selection: next, fallbackUsed: true }) }
+      } : null,
+      retryRejected: routing ? async ({ error, reserved, settle }) => {
+        const evidence = error.evidence
+        if (evidence?.outcome !== 'rejected' || evidence.billed !== false || evidence.errorCode === 'invalid_request') return null
+        const next = await backup()
+        if (!next) return null
+        // The refusal still counts against the primary's own breaker.
+        await settle({ affectsCircuit: evidence.affectsCircuit !== false, circuitCategory: evidence.circuitCategory ?? null, handOff: true })
+        return { result: await forward(next.fallbackProvider, reserved, { selection: next, fallbackUsed: true, attempt: 1 }) }
+      } : null,
       dispatch: ({ policy, codec, credential }) => this.adapter.searchProducts(body, {
         defaultAdapterId,
         decodeCursor: codec.decode,
@@ -759,8 +900,26 @@ export class ExternalPlatformGateway {
         const current = await this.#revalidateWaitingIdentity(context, platform, { operation: capability })
         const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
-        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Account work exceeds the current Key entitlement')
+        context = current
+        return current
+      },
+      enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
+      leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
+    } })
+    return this.#deliver(context, prepared.input, prepared.plan)
+  }
+
+  async postComments(context, input) {
+    const prepared = postCommentsPlan({ gateway: this, context, input, dependencies: {
+      resolveCredential: () => this.#resolvedCredential(),
+      revalidateIdentity: async ({ totalLimit }) => {
+        const current = await this.#revalidateWaitingIdentity(context, input.platform, { operation: 'social.comments.list' })
+        const policy = await this.usageStore.getPolicy(current.consumer.id, input.platform)
+        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, input.platform)
+        if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Comment count exceeds the current Key entitlement')
         context = current
         return current
       },
@@ -777,7 +936,7 @@ export class ExternalPlatformGateway {
         const current = await this.#revalidateWaitingIdentity(context, 'youtube', { operation: 'social.comments.list' })
         const policy = await this.usageStore.getPolicy(current.consumer.id, 'youtube')
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, 'youtube')
-        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Comment count exceeds the current Key entitlement')
         context = current
         return current
@@ -811,7 +970,7 @@ export class ExternalPlatformGateway {
         ...(platform === 'xiaohongshu' ? { requiredCapabilities: ['social.posts.search'] } : {}) })
       const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
       const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
-      if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+      if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
         entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
       context = current
       return current
@@ -969,7 +1128,7 @@ export class ExternalPlatformGateway {
               platformSearch: true, operation: 'social.content.search' })
             const currentPolicy = await this.usageStore.getPolicy(context.consumer.id, 'twitter')
             const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, 'twitter')
-            const maxPageSize = Math.min(currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+            const maxPageSize = effectiveBusinessPageLimit(current, currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
               entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)
             if (request.pageSize > maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
             context = current
@@ -1039,13 +1198,13 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchFacebook(context, input, { policyStore, fallbackGateway, reservation = null, request: previousRequest = null, attempt = 0, providerCalls = 0 } = {}) {
+  async searchFacebook(context, input, { policyStore, fallbackGateway, selfhostedGateway = null, reservation = null, request: previousRequest = null, attempt = 0, providerCalls = 0 } = {}) {
     const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
     const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
     const request = previousRequest || normalizeFacebookSearch(normalized, codec, dataSearch)
-    const rapid = this.providerKey === 'rapidapi'
+    const rapid = this.providerKey === 'rapidapi', selfhosted = this.providerKey === FACEBOOK_SELFHOSTED_PROVIDER
     const providerRequest = request.forProvider(this.providerKey)
-    let admission = null, observationFailed = false, observationComplete = false
+    let admission = null, observationFailed = false, observationComplete = false, selfhostedAdmission = null
     const observe = async quota => {
       if (observationFailed || observationComplete) return
       try {
@@ -1067,18 +1226,19 @@ export class ExternalPlatformGateway {
       return fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt: attempt + 1, providerCalls: previousCalls })
     }
     return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
-      operation: dataSearch || rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
+      operation: selfhosted ? FACEBOOK_SELFHOSTED_OPERATION : dataSearch || rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
       authorizationPlatform: 'facebook', platformSearch: true, meterKey: dataSearch ? 'facebook' : 'raw',
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
-      replayWindowMs: dataSearch?.replayWindowMs, dataSearch: Boolean(dataSearch), billingUnknown: rapid, allowZeroCost: rapid,
-      reservation, callOrdinal: attempt,
+      replayWindowMs: dataSearch?.replayWindowMs, dataSearch: Boolean(dataSearch), billingUnknown: rapid, billingFree: selfhosted,
+      allowZeroCost: rapid || selfhosted, reservation, callOrdinal: attempt,
       normalize: ({ policy }) => {
         if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
         return { ...providerRequest, ...request }
       },
       assemble: dataSearch ? ({ delivery, deadlineAt, signal }) => {
         if (!rapid) throw new AppError(503, 'facebook_search_unavailable', 'The Facebook standard search coordinator is unavailable')
-        const gateways = { rapidapi: this, ...(fallbackGateway ? { justone: fallbackGateway } : {}) }
+        const gateways = { rapidapi: this, ...(fallbackGateway ? { justone: fallbackGateway } : {}),
+          ...(selfhostedGateway ? { [FACEBOOK_SELFHOSTED_PROVIDER]: selfhostedGateway } : {}) }
         return runFacebookSearchFill({ gateway: this, gateways, context, delivery, request, policyStore, deadlineAt, signal,
           resolveCredential: provider => gateways[provider].#resolvedCredential(),
           enterCapacity: (provider, options) => gateways[provider].#enterOrQueue(context,
@@ -1089,7 +1249,7 @@ export class ExternalPlatformGateway {
               platformSearch: true, operation: FACEBOOK_OPERATION.operationKey })
             const currentPolicy = await this.usageStore.getPolicy(context.consumer.id, 'facebook')
             const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, 'facebook')
-            if (request.pageSize > Math.min(currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+            if (request.pageSize > effectiveBusinessPageLimit(current, currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
               entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) {
               throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
             }
@@ -1102,6 +1262,10 @@ export class ExternalPlatformGateway {
       route: async reserved => {
         const policy = await policyStore.facebook()
         if (policy.mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+        if (rapid && (request.provider === FACEBOOK_SELFHOSTED_PROVIDER || (!request.provider && policy.mode === 'selfhosted'))) {
+          if (!selfhostedGateway) throw new AppError(503, 'facebook_search_unavailable', 'The self-hosted Facebook collector is unavailable')
+          return { result: await selfhostedGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt }) }
+        }
         if (rapid && (request.provider === 'justone' || (!request.provider && policy.mode === 'justone'))) {
           return { result: await fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt }) }
         }
@@ -1117,15 +1281,31 @@ export class ExternalPlatformGateway {
         return policy.mode === 'auto' && !request.provider ? { result: await next(reserved) } : null
       } : null,
       admit: rapid ? async (reserved, { revalidate, delivery, deadlineAt }) => {
-        admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => isHubRateLimitExempt(context), requestId: delivery.usageRequestId,
+        admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => bypassesSupplierLimits(context), requestId: delivery.usageRequestId,
           deadlineAt, timeoutMs: this.config.timeoutMs || 30000, signal, revalidate, logger: this.logger })
         if (admission.allowed) return null
         const policy = await policyStore.facebook()
         if (policy.mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
         if (policy.mode === 'auto') return { result: await next(reserved) }
         throw new AppError(503, 'facebook_search_capacity_unavailable', 'Search capacity is temporarily unavailable')
+      } : selfhosted ? async (reserved, { delivery, deadlineAt }) => {
+        // The dispatch lease stays held while queueing; recheck only the
+        // strategy and the caller's access before a slot is used.
+        selfhostedAdmission = await waitForFacebookSelfhostedAdmission({ policyStore, requestId: delivery.usageRequestId,
+          deadlineAt, budgetMs: this.config.timeoutMs, signal, logger: this.logger, revalidate: async () => {
+            if ((await policyStore.facebook()).mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+            context = await this.#revalidateWaitingIdentity(context, 'facebook', { platformSearch: true, operation: FACEBOOK_SELFHOSTED_OPERATION })
+          } })
+        return null
       } : null,
       dispatch: async ({ credential }) => {
+        if (selfhosted) {
+          try { return await this.adapter.execute({ ...request, ...providerRequest }, { signal }) }
+          catch (error) {
+            if (!(error instanceof NightAllAUpstreamError) || error.evidence.outcome === 'unknown') selfhostedAdmission.retain = true
+            throw error
+          }
+        }
         try {
           let result = rapid ? await this.adapter.execute({ ...request, ...providerRequest }, credential)
             : await this.adapter.forwardNative(FACEBOOK_JUSTONE_KEY, { params: providerRequest.upstreamQuery }, credential)
@@ -1153,7 +1333,11 @@ export class ExternalPlatformGateway {
         await settle()
         return { result: await next(reserved, 1) }
       } : null,
-      cleanup: rapid ? () => observe() : null,
+      // A self-hosted lease is freed once the run is terminal or confirmed
+      // cancelled; an unknown run keeps its slot until the lease expires.
+      cleanup: rapid ? () => observe() : selfhosted ? async () => {
+        if (selfhostedAdmission && !selfhostedAdmission.retain) await policyStore.releaseSelfhosted(selfhostedAdmission)
+      } : null,
       costUnknown: () => admission?.probe === true,
       finalize: ({ result }) => {
         result.publicBody.data.meta.upstreamCallCount = providerCalls + 1
@@ -1247,9 +1431,7 @@ export class ExternalPlatformGateway {
       : null
     let policy = {
       ...consumerPolicy,
-      maxPageSize: keyEntitlement
-        ? Math.min(consumerPolicy.maxPageSize, keyEntitlement.maxPageSize)
-        : consumerPolicy.maxPageSize,
+      maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize, keyEntitlement?.maxPageSize ?? consumerPolicy.maxPageSize),
     }
     const codec = createExternalPlatformCursorCodec(this.apiKeyPepper, context.consumer.id)
     let normalized
@@ -1615,6 +1797,12 @@ export class ExternalPlatformGateway {
         errorCode,
       })
       if (operationControlError) throw operationControlError
+      const contractOpen = Boolean(contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now)
+      if (authorizationPlatform === 'instagram' && circuitOpen) {
+        throw circuitOpenError(contractOpen ? contractCircuit : state, this.config,
+          'Instagram 搜索暂时受保护，请保留请求 ID 核查原因。', { scope: contractOpen ? 'platform_contract' : null,
+            evidence: await this.#circuitEvidence(contractOpen, normalized.marketplace) })
+      }
       if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
         && state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now) {
         const capacity = ecommerceCapacityError(state.lastErrorCode, {
@@ -1622,9 +1810,13 @@ export class ExternalPlatformGateway {
         })
         if (capacity) throw capacity
       }
-      if (this.providerKey === 'tikhub' && circuitOpen
-        && !(contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now)) {
-        throw circuitOpenError(state, this.config, 'External data is temporarily unavailable')
+      if (this.providerKey === 'tikhub' && circuitOpen && !contractOpen) {
+        throw circuitOpenError(state, this.config, 'External data is temporarily unavailable',
+          { evidence: await this.#circuitEvidence(false) })
+      }
+      if (circuitOpen) {
+        throw circuitOpenError(contractOpen ? contractCircuit : state, this.config, 'External product search is unavailable',
+          { scope: contractOpen ? 'platform_contract' : null, evidence: await this.#circuitEvidence(contractOpen, normalized.marketplace) })
       }
       throw new AppError(503, errorCode, 'External product search is unavailable')
     }
@@ -1732,8 +1924,7 @@ export class ExternalPlatformGateway {
         context = await this.#revalidateWaitingIdentity(context, authorizationPlatform, plan)
         const currentPolicy = { ...this.defaultPolicy, ...await this.usageStore.getPolicy(context.consumer.id, authorizationPlatform) }
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, authorizationPlatform)
-        policy = { ...currentPolicy, maxPageSize: entitlement
-          ? Math.min(currentPolicy.maxPageSize, entitlement.maxPageSize) : currentPolicy.maxPageSize }
+        policy = { ...currentPolicy, maxPageSize: effectiveBusinessPageLimit(context, currentPolicy.maxPageSize, entitlement?.maxPageSize ?? currentPolicy.maxPageSize) }
         try { plan.normalize({ body, policy, codec }) }
         catch (error) {
           if (error instanceof JustOneContractError || error instanceof SocialAccountContractError) throw new AppError(400, error.code, error.message)
@@ -1750,8 +1941,9 @@ export class ExternalPlatformGateway {
             })
             if (capacity) throw capacity
           }
-          throw circuitOpenError(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock() ? contract : latest,
-            this.config, 'External data is temporarily unavailable')
+          const contractOpen = Boolean(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock())
+          throw circuitOpenError(contractOpen ? contract : latest, this.config, 'External data is temporarily unavailable',
+            { scope: contractOpen ? 'platform_contract' : null, evidence: await this.#circuitEvidence(contractOpen, normalized.marketplace) })
         }
         resolvedCredential = await this.#resolvedCredential()
         if (!resolvedCredential.ready) throw new AppError(503, 'external_platform_not_configured', 'External data configuration changed while waiting')
@@ -1833,14 +2025,16 @@ export class ExternalPlatformGateway {
         costControls: [costControl],
       })
 
-      const rateLimit = isHubRateLimitExempt(context) || (this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context))
+      const rateLimit = typeof this.platformStore.acquireProviderRateLimit !== 'function'
         ? { allowed: true, retryAfterMs: 0 }
-        : typeof this.platformStore.acquireProviderRateLimit === 'function'
-        ? await this.platformStore.acquireProviderRateLimit({
+        : await acquireSupplierRate(context, this.platformStore, {
             limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 90,
-            windowMs: 60_000,
+            windowMs: 60_000, signal,
+            bypass: this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context),
+            providerState: () => this.platformStore.providerState(this.providerKey),
+            deadline: new Date(reservation.request.leaseExpiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000,
+            maxWaitMs: currentAdmissionLimits(this).maxWaitMs,
           })
-        : { allowed: true, retryAfterMs: 0 }
       if (!rateLimit.allowed) {
         // Facebook's auto policy may choose its other supplier before any
         // RapidAPI dispatch. The route itself preserves administrator mode and
@@ -1903,7 +2097,7 @@ export class ExternalPlatformGateway {
             deadlineAt: new Date(reservation.request.leaseExpiresAt).getTime() })
           if (routed) { ownsReservation = false; return routed.result }
         } catch (error) {
-          if (error.details?.stage === 'facebook_quota_admission') {
+          if (['facebook_quota_admission', 'facebook_selfhosted_admission'].includes(error.details?.stage)) {
             await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
               status: error.status || 503, errorCode: error.code || 'facebook_quota_state_unavailable' })
             ownsReservation = false
@@ -2038,7 +2232,7 @@ export class ExternalPlatformGateway {
         })
       } catch (error) {
         if (!(error instanceof JustOneUpstreamError)
-          && !(error instanceof RapidApiUpstreamError || error instanceof WebSearchUpstreamError)
+          && !(error instanceof RapidApiUpstreamError || error instanceof WebSearchUpstreamError || error instanceof NightAllAUpstreamError)
           && !(plan.nativeForwarding && error instanceof TikHubUpstreamError)) throw error
         const evidence = error.evidence
         const persistedEvidence = persistedCallEvidence(error)
@@ -2061,15 +2255,50 @@ export class ExternalPlatformGateway {
         // evidence must record the error too. Recording a fallback the caller
         // never saw would make a later idempotent replay contradict the
         // original response.
+        const settleRejected = async ({ affectsCircuit = false, circuitCategory = null, handOff = false } = {}) => {
+          await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected',
+            httpStatus: evidence.httpStatus, businessCode: evidence.businessCode, ...lastDispatchEvidence,
+            errorCode: evidence.errorCode, affectsCircuit, circuitCategory })
+          callSettled = true
+          ownsReservation = false
+          if (!handOff) return
+          // Another attempt (a backup supplier, or this one again) continues this
+          // usage request with the same operation and fingerprint. Release the
+          // lease, procurement hold and concurrency slot it would collide with.
+          if (costReservation) {
+            await this.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id, usageRequestId: activeRequestId })
+            costReservation = null
+          }
+          if (ownsLease) {
+            await this.platformStore.releaseDispatchLease({ consumerId: context.consumer.id, operation: plan.operation,
+              fingerprint: requestFingerprint, ownerRequestId: activeRequestId })
+            ownsLease = false
+          }
+          if (entered) { this.#leave(context.consumer.id, entered); entered = false }
+        }
         if (plan.retryRejected) {
-          const routed = await plan.retryRejected({ error, reserved: reservation, settle: async () => {
-            await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected',
-              httpStatus: evidence.httpStatus, businessCode: evidence.businessCode, ...lastDispatchEvidence,
-              errorCode: evidence.errorCode, affectsCircuit: false })
-            callSettled = true
-            ownsReservation = false
-          } })
+          const routed = await plan.retryRejected({ error, reserved: reservation, settle: settleRejected })
           if (routed) return routed.result
+        }
+        // Priority LCY only: a rate-limit refusal the supplier certainly did not
+        // bill (a RapidAPI gateway 429, a JustOne 302) is retried once in this
+        // request after a short pause, if a whole upstream timeout still fits.
+        // A charged, unknown or other refusal keeps its error, as does any retry.
+        if (plan.callOrdinal == null && isLcySupplierPriority(context) && evidence.outcome === 'rejected'
+          && evidence.billed === false && evidence.errorCode === 'upstream_rate_limited'
+          && this.admissionClock() + RATE_REFUSAL_RETRY_DELAY_MS + (this.config.timeoutMs || 30000) + 5000
+            < new Date(reservation.request.leaseExpiresAt).getTime()) {
+          // The refusal still counts, so the retry's own RPM pacing slows down.
+          await settleRejected({ affectsCircuit: evidence.affectsCircuit !== false,
+            circuitCategory: evidence.circuitCategory ?? null, handOff: true })
+          try {
+            await sleep(RATE_REFUSAL_RETRY_DELAY_MS, undefined, { signal })
+          } catch (cause) {
+            if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+            throw cause
+          }
+          return await this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal },
+            { ...plan, reservation, callOrdinal: 1, route: null })
         }
         const deliverableSnapshot = allowStoredFallback ? snapshot : null
         const fallbackBody = deliverableSnapshot

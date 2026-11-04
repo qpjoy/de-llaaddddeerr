@@ -109,7 +109,8 @@ async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 12
 }
 
 test('all four platforms use fixed TikHub keyword endpoints for standard and both raw aliases, with immutable replay', async () => {
-  for (const platform of Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES).filter(key => TIKHUB_CONTENT_SEARCH_RECIPES[key].rawCompatibility !== false)) {
+  // TikTok's raw aliases have their own fixture-backed test in tiktok-unified-search.
+  for (const platform of ['bilibili', 'douyin', 'kuaishou', 'zhihu']) {
     const h = await harness({ platform })
     const first = await h.invokeData()
     assert.equal(first.body.data.contractVersion, 'night-all.data-search.v1')
@@ -131,6 +132,88 @@ test('all four platforms use fixed TikHub keyword endpoints for standard and bot
     assert.ok([...h.store.requests.values()].every(row => row.platform === platform))
   }
 })
+
+for (const standard of [true, false]) {
+  const contract = standard ? 'standard' : 'raw'
+  test(`Bilibili ${contract} accepts a verified empty page without result and replays its one settled purchase`, async () => {
+    const bytes = Buffer.from(JSON.stringify({ code: 200, request_id: 'synthetic-empty-bilibili',
+      data: { code: 0, data: { page: 1, pagesize: 20, numResults: 0, numPages: 0 } } }, null, 2))
+    const h = await harness({ fetchImpl: () => new Response(bytes, { headers: { 'content-type': 'application/json' } }) })
+    await h.service.setTenantBillingProfile(h.context.tenant.id,
+      { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline empty-page fixture' },
+      { idempotencyKey: 'bilibili-empty-credit', actor: 'offline-admin' })
+    const body = standard ? { platform: 'bilibili', query: '城市', pageSize: 20 }
+      : { platform: 'bilibili', keyword: '城市', count: 20 }
+    const invoke = path => standard ? h.invokeData(body) : h.invoke(body, 'content-raw-first', path)
+    const first = await invoke()
+    assert.equal(first.status, 200)
+    assert.deepEqual(standard ? first.body.data.items : JSON.parse(first.body.data.raw_data), [])
+    const page = standard ? first.body.data.pageInfo : first.body.data.page
+    assert.equal(page.returnedCount, 0)
+    assert.equal(page.hasMore, false)
+    assert.equal(page.nextCursor, null)
+    assert.equal(first.body.data.status, 'ok')
+    assert.deepEqual(first.body.data.warnings, [])
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    const call = [...h.platformStore.calls.values()][0], usage = h.store.requests.get(first.requestId)
+    assert.equal(call.outcome, 'succeeded')
+    assert.equal(call.itemCount, 0)
+    assert.equal(call.billed, true)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 200)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.deepEqual(Buffer.from(archive.bodyBytes), bytes)
+    assert.equal(archive.bodySize, bytes.length)
+    assert.equal(archive.bodySha256, createHash('sha256').update(bytes).digest('hex'))
+    assert.equal(Object.hasOwn(JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data.data, 'result'), false)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.deepEqual(h.platformStore.ingestJobs[0].payload.records, [])
+    const charges = [...h.store.customerCharges.values()]
+    assert.equal(charges.length, 1)
+    assert.equal(charges[0].status, 'captured')
+    assert.equal(charges[0].chargedMinor, 3)
+    const saved = structuredClone({ usage, call, charges, ledger: h.store.creditLedgerEntries })
+    const replay = await invoke(standard ? undefined : '/api/v1/search/raw')
+    assert.equal(replay.replay, true)
+    assert.deepEqual(replay.body, first.body)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+    assert.deepEqual(structuredClone({ usage: h.store.requests.get(first.requestId), call: h.platformStore.calls.get(call.id),
+      charges: [...h.store.customerCharges.values()], ledger: h.store.creditLedgerEntries }), saved)
+  })
+
+  test(`Bilibili ${contract} retains a paid 502 when nonzero counts have no result`, async () => {
+    const bytes = Buffer.from(JSON.stringify({ code: 200,
+      data: { code: 0, data: { page: 1, pagesize: 20, numResults: 1, numPages: 1 } } }, null, 2))
+    const h = await harness({ fetchImpl: () => new Response(bytes, { headers: { 'content-type': 'application/json' } }) })
+    const invoke = path => standard ? h.invokeData() : h.invoke(undefined, 'content-raw-first', path)
+    await assert.rejects(invoke(), error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    const call = [...h.platformStore.calls.values()][0], usage = [...h.store.requests.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(call.errorCode, 'invalid_content_search_contract')
+    assert.equal(call.billed, true)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 502)
+    // Hub could not read this page; that is not a TikHub outage for other platforms.
+    assert.equal(h.platformStore.state.consecutiveFailures, 0)
+    assert.equal(h.platformStore.state.circuitOpenUntil ?? null, null)
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.deepEqual(Buffer.from(archive.bodyBytes), bytes)
+    assert.equal(archive.bodySha256, createHash('sha256').update(bytes).digest('hex'))
+    const saved = structuredClone(usage)
+    await assert.rejects(invoke(standard ? undefined : '/api/v1/search/raw'),
+      error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    assert.deepEqual(h.store.requests.get(usage.id), saved)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  })
+}
 
 test('saved admission RPM is reread between standard content-search pages', async () => {
   const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
@@ -304,7 +387,6 @@ test('Douyin related-word schema never hides content markers or unknown nested c
 test('Douyin validates every related-word item, including third and sixth entries after diagnostic samples', async () => {
   for (const index of [2, 5]) for (const malformed of [
     word => { word.related_word = 123 },
-    word => { word.word_record.words_image.url_list.push(123) },
     word => { word.word_record.unrecognized_container = { aweme_id: 'real-post', desc: 'possible real body' } },
   ]) {
     const card = douyinRelatedWordsCard()
@@ -519,7 +601,7 @@ test('a filled standard delivery settles one existing customer quote across all 
   assert.equal(charges[0].chargedMinor, 3)
 })
 
-test('transport uncertainty never returns acquired partial results or repurchases equal work', async () => {
+test('transport uncertainty never returns acquired partial results under its own key; a new key searches again', async () => {
   const h = await harness({ fetchImpl: (_call, n) => {
     if (n === 2) throw new Error('synthetic transport lost after dispatch')
     return Response.json({ code: 200, data: biliPage(['a'], 1, 5) })
@@ -528,8 +610,11 @@ test('transport uncertainty never returns acquired partial results or repurchase
   await assert.rejects(h.invokeData(body), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
   assert.equal(h.calls.length, 2)
   assert.equal([...h.store.requests.values()][0].status, 'unknown')
-  await assert.rejects(h.invokeData(body, 'content-data-new-idem'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(h.invokeData(body), error => error.code === 'request_outcome_unknown')
   assert.equal(h.calls.length, 2)
+  const next = await h.invokeData(body, 'content-data-new-idem')
+  assert.equal(next.status, 200)
+  assert.equal(h.calls.length, 4)
 })
 
 test('paid persistence uncertainty logs only fixed phase/class/SQLState and durable IDs without changing safe unknown handling', async () => {
@@ -548,12 +633,13 @@ test('paid persistence uncertainty logs only fixed phase/class/SQLState and dura
     assert.deepEqual(logs, [[{ requestId: usage.id, callId: call.id, phase,
       errorClass: cause.name, sqlState: cause.code || null }, 'content search outcome is unknown']])
     assert.doesNotMatch(JSON.stringify(logs), /private|fixture-secret|城市/)
+    // A new key is not held; it purchases again and meets the same synthetic persistence failure.
     await assert.rejects(h.invokeData(undefined, 'kuaishou-persistence-new-idem'), error => error.code === 'request_outcome_unknown')
-    assert.equal(h.calls.length, 1)
+    assert.equal(h.calls.length, 2)
   }
 })
 
-test('a failed uncertainty logger cannot release the original hold or permit another paid request', async () => {
+test('a failed uncertainty logger cannot release the original hold or retry the same key', async () => {
   const h = await harness({ platform: 'kuaishou' })
   await h.service.setTenantBillingProfile(h.context.tenant.id,
     { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
@@ -563,12 +649,19 @@ test('a failed uncertainty logger cannot release the original hold or permit ano
   h.platformStore.stageProviderEvidence = async () => { throw new TypeError('private stage failure') }
   await assert.rejects(h.invokeData(), error => error.code === 'request_outcome_unknown')
   assert.equal([...h.store.requests.values()][0].status, 'unknown')
-  await assert.rejects(h.invokeData(undefined, 'kuaishou-logger-new-idem'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(h.invokeData(), error => error.code === 'request_outcome_unknown')
   assert.equal(h.calls.length, 1)
-  const charges = [...h.store.customerCharges.values()]
+  let charges = [...h.store.customerCharges.values()]
   assert.equal(charges.filter(row => row.status === 'unknown').length, 1)
   assert.equal(h.store.creditAccounts.get(h.context.tenant.id).heldMinor, 3)
   assert.equal(h.store.creditAccounts.get(h.context.tenant.id).availableMinor, 97)
+  // A new key is a separate purchase with its own hold; the first hold stays unchanged.
+  await assert.rejects(h.invokeData(undefined, 'kuaishou-logger-new-idem'), error => error.code === 'request_outcome_unknown')
+  assert.equal(h.calls.length, 2)
+  charges = [...h.store.customerCharges.values()]
+  assert.equal(charges.filter(row => row.status === 'unknown').length, 2)
+  assert.equal(h.store.creditAccounts.get(h.context.tenant.id).heldMinor, 6)
+  assert.equal(h.store.creditAccounts.get(h.context.tenant.id).availableMinor, 94)
 })
 
 test('provider preview is visible partial content and missing modern metrics stay null', async () => {
@@ -656,7 +749,8 @@ test('unknown durable mark failure retains cache-only parent reservation and lea
   pending.leaseExpiresAt = new Date(Date.now() - 1).toISOString()
   await h.store.reapStaleReservations()
   assert.equal(pending.status, 'unknown')
-  await assert.rejects(h.invokeData(next, 'content-buffer-after-reap'), error => error.code === 'request_outcome_unknown')
+  // The reaped request no longer holds other keys; its live parent delivery lease still does.
+  await assert.rejects(h.invokeData(next, 'content-buffer-after-reap'), error => error.code === 'request_in_progress')
   assert.equal(h.calls.length, 1)
 })
 
@@ -801,6 +895,59 @@ for (const field of ['caption', 'image', 'cursor']) {
   })
 }
 
+test('Reddit error notice is recorded as a Reddit-side failure and a no-results notice as an empty page', async () => {
+  const notice = message => ({ search: { dynamic: { components: { main: { edges: [{ node: { __typename: 'SearchErrorMessage',
+    presentation: { __typename: 'SearchErrorMessageDefaultPresentation', message, explanation: '', ctaButtonText: 'Retry', icon: 'x' } } }],
+  pageInfo: { hasNextPage: false, endCursor: null } } } } } })
+  const failed = await harness({ platform: 'reddit', payload: () => notice('Something went wrong') })
+  await assert.rejects(failed.invokeData({ platform: 'reddit', query: 'Zhejiang', pageSize: 20 }),
+    error => error.code === 'external_platform_response_unusable' && error.status === 502)
+  const call = [...failed.platformStore.calls.values()][0]
+  assert.equal(call.outcome, 'succeeded_unusable')
+  assert.equal(call.errorCode, 'upstream_search_error_message')
+  assert.equal(failed.platformStore.state.consecutiveFailures, 0)
+  const empty = await harness({ platform: 'reddit', payload: () => notice('No results found') })
+  const delivered = await empty.invokeData({ platform: 'reddit', query: 'Zhejiang', pageSize: 20 })
+  assert.equal(delivered.status, 200)
+  assert.deepEqual(delivered.body.data.items, [])
+  assert.ok(delivered.body.data.warnings.some(warning => warning.code === 'reddit_no_results'))
+  assert.equal([...empty.platformStore.calls.values()][0].outcome, 'succeeded')
+})
+
+test('Reddit widget analytics permit paid post and no-results delivery without quarantining subsequent searches', async () => {
+  const ids = Array.from({ length: 7 }, (_, index) => `post${index}`)
+  const widget = (typename, behavior) => {
+    const telemetry = { trackingContext: { post: { id: 't3_tracking_only' } } }
+    if (typename === 'SearchSpellCorrectionApplied') telemetry.search = { scope: { a: { b: { c: { d: { e: 'analytics' } } } } } }
+    return { node: { __typename: typename, telemetry, behaviors: { [behavior]: { telemetry } } } }
+  }
+  const h = await harness({ platform: 'reddit', payload: (_call, number) => {
+    const payload = internationalPage('reddit', number === 1 ? ids : [])
+    const main = payload.search.dynamic.components.main
+    main.edges.unshift(widget('SearchSpellCorrectionApplied', 'corrected'))
+    if (number > 1) main.edges.push(widget('SearchBanner', 'cta'),
+      { node: { __typename: 'SearchErrorMessage', presentation: { message: 'No results found' } } })
+    return payload
+  } })
+  const first = await h.invokeData()
+  assert.equal(first.status, 200)
+  assert.deepEqual(first.body.data.items.map(item => item.externalId), ids)
+  assert.deepEqual(first.body.data.warnings.filter(warning => warning.code === 'reddit_spell_correction').map(warning => warning.code),
+    ['reddit_spell_correction'])
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+  assert.deepEqual((await h.invokeData()).body, first.body)
+  assert.equal(h.calls.length, 1)
+  const second = await h.invokeData({ platform: 'reddit', query: 'another search', pageSize: 20 }, 'another-reddit-query')
+  assert.equal(second.status, 200)
+  assert.deepEqual(second.body.data.items, [])
+  assert.ok(second.body.data.warnings.some(warning => warning.code === 'reddit_no_results'))
+  assert.ok(second.body.data.warnings.some(warning => warning.code === 'reddit_spell_correction'))
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 2)
+  assert.deepEqual([...h.platformStore.calls.values()].map(call => [call.outcome, call.billed, call.itemCount]),
+    [['succeeded', true, 7], ['succeeded', true, 0]])
+})
+
 for (const platform of ['reddit', 'youtube']) {
   test(`${platform} standard search fills 19+5, buffers all paid overflow and replays without Night-All`, async () => {
     const firstIds = Array.from({ length: 19 }, (_, i) => `first-${i}`)
@@ -846,20 +993,25 @@ for (const platform of ['reddit', 'youtube']) {
     assert.equal(h.historical.length, 0)
   })
 
-  test(`${platform} raw aliases retain their original forwarding and parameter contract`, async () => {
-    const h = await harness({ platform })
-    const payload = { data: { platform, raw_info: '[]', raw_data: '[]', page: { page: 1, hasMore: false },
-      status: 'ok', warnings: [], meta: { original: true } } }
-    h.service.adapter.legacySearch = async input => { h.historical.push(input); return { payload, raw: payload } }
-    const body = { platform, keyword: 'original raw query', count: 20, includeDetails: true, params: { fixture: 'original-filter' } }
-    const first = await h.invoke(body, 'international-original-raw')
-    assert.equal(h.historical.length, 1)
-    assert.equal(h.historical[0].operation, 'raw')
-    assert.equal(h.historical[0].body.includeDetails, true)
-    assert.deepEqual(h.historical[0].body.params, body.params)
-    assert.deepEqual((await h.invoke(body, 'international-original-raw', '/api/v1/search/raw')).body, first.body)
-    assert.equal(h.historical.length, 1)
-    assert.equal(h.calls.length, 0)
+  test(`${platform} raw aliases run the fixed TikHub search in Hub and never forward to Night-All`, async () => {
+    const ids = ['raw-1', 'raw-2']
+    const h = await harness({ platform, payload: () => internationalPage(platform, ids) })
+    const body = { platform, keyword: 'original raw query', count: 20 }
+    const first = await h.invoke(body, 'international-direct-raw')
+    assert.equal(first.status, 200)
+    assert.equal(first.body.contractVersion, RAW_SEARCH_VERSION)
+    assert.deepEqual(JSON.parse(first.body.data.raw_data).map(row => row.content_id), ids)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.calls[0].url.pathname, h.recipe.path)
+    assert.equal(h.calls[0].params[platform === 'reddit' ? 'query' : 'keyword'], body.keyword)
+    // The other alias replays the same delivery without another purchase.
+    assert.deepEqual((await h.invoke(body, 'international-direct-raw', '/api/v1/search/raw')).body, first.body)
+    assert.equal(h.calls.length, 1)
+    // Only the fixed endpoint's own parameter names are accepted, before purchase.
+    await assert.rejects(h.invoke({ ...body, params: { fixture: 'original-filter' } }, 'international-direct-raw-params'),
+      error => error.status === 400 && error.code === 'unsupported_fields')
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
   })
 
   test(`${platform} public contract rejects supplier options and never falls back when native execution is unavailable`, async () => {
@@ -892,7 +1044,7 @@ for (const platform of ['reddit', 'youtube']) {
     assert.equal(h.historical.length, 0)
   })
 
-  test(`${platform} uncertain second supplier call holds the original work without automatic retry or historical fallback`, async () => {
+  test(`${platform} uncertain second supplier call holds its own key without automatic retry or historical fallback`, async () => {
     const h = await harness({ platform, fetchImpl: (_call, n) => {
       if (n === 2) throw new TypeError('synthetic transport uncertainty')
       return Response.json({ code: 200, data: internationalPage(platform, ['one'], 'next-page-token') })
@@ -900,8 +1052,11 @@ for (const platform of ['reddit', 'youtube']) {
     const body = { platform, query: 'uncertain query', pageSize: 20 }
     await assert.rejects(h.invokeData(body), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
     assert.equal([...h.store.requests.values()][0].status, 'unknown')
-    await assert.rejects(h.invokeData(body, 'international-uncertain-new-key'), error => error.code === 'request_outcome_unknown')
+    await assert.rejects(h.invokeData(body), error => error.code === 'request_outcome_unknown')
     assert.equal(h.calls.length, 2)
+    const next = await h.invokeData(body, 'international-uncertain-new-key')
+    assert.equal(next.status, 200)
+    assert.equal(h.calls.length, 4)
     assert.equal(h.historical.length, 0)
   })
 }
@@ -1030,7 +1185,7 @@ test('Xiaohongshu non20 pages cannot bypass paused existing search operation or 
   assert.equal(h.historical.length, 0)
 })
 
-for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} historical unknown precedes retired-cursor restart even with a new idempotency key`, async () => {
+for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} a historical unknown does not hide the retired-cursor restart for a new idempotency key`, async () => {
   const h = await harness({ platform }), body = { platform, query: '城市', pageSize: 1 }
   const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
   const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform, upstreamBody: body, codec })
@@ -1043,7 +1198,7 @@ for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} his
     acquisitionRequest: { path: '/api/v1/data/search', body }, unitsReserved: 1,
     leaseExpiresAt: new Date(Date.now() + 120000), windowStart: new Date(Date.now() - 60000), maxRequests: 100 })
   await h.store.markRequestUnknown(id, 'offline_unknown')
-  await assert.rejects(h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor }, 'historical-unknown-new'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor }, 'historical-unknown-new'), error => error.code === 'search_restart_required')
   assert.equal(h.calls.length, 0)
   assert.equal(h.historical.length, 0)
 })

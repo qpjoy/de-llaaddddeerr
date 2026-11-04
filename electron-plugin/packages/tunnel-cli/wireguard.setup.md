@@ -77,6 +77,102 @@ currently IPv4-only; `::/0` blocks native IPv6 bypass rather than providing
 IPv6 egress. Linux enrollment installs the `resolvconf` helper needed by
 `wg-quick` to apply DNS.
 
+## `wg create` reports `fopen: Permission denied` as root
+
+On hosts with the standard [AppArmor `wg` profile](https://gitlab.com/apparmor/apparmor/-/raw/master/profiles/apparmor.d/wg),
+`wg` may read key files under `/etc/wireguard`, but not under
+`/etc/qp-wireguard`. Older CLI versions put the temporary pre-shared key in
+the latter directory. The live `wg set ... preshared-key FILE` operation can
+therefore fail even when the caller is root. The fix keeps that temporary key
+under `/etc/wireguard` with mode `0600` and removes it after use. This does not
+require weakening AppArmor or file permissions.
+
+Confirm the denial and whether the failed attempt saved a profile. These
+commands do not display private keys:
+
+```bash
+command -v wg
+wg --version
+sudo journalctl -k --since '-15 min' --no-pager |
+  grep -E 'apparmor="DENIED".*(profile="wg"|comm="wg")' || true
+sudo stat -c '%a %U %n' /etc/qp-wireguard/server/us01/clients/us0105.conf
+```
+
+The old implementation saved the server peer and client profile before the
+live update. A failed creation may therefore leave an existing profile while
+`./us0105.conf` was never exported. Do not revoke/recreate it or restart the
+server to repair this: preserve its original keys. If the saved profile exists,
+the following recovery runs as root on the server, validates it against the
+unique saved peer block, and applies only that peer. Run it without concurrent
+peer creation/revocation. It refuses to overwrite an existing export; if the
+destination already exists, choose another unused output filename.
+
+```bash
+sudo bash <<'BASH'
+(
+  set +x
+  set -euo pipefail
+  umask 077
+  instance=us01
+  name=us0105
+  client_ip=100.127.100.5
+  dev="qpwgs-$instance"
+  server="/etc/wireguard/$dev.conf"
+  profile="/etc/qp-wireguard/server/$instance/clients/$name.conf"
+  output="$PWD/$name.conf"
+  fail() { printf 'Recovery stopped: %s\n' "$1" >&2; exit 1; }
+  [[ -f "$server" && -f "$profile" && ! -L "$profile" ]] || fail 'Saved configuration/profile missing or unsafe.'
+  [[ ! -e "$output" && ! -L "$output" ]] || fail 'Export already exists; choose an unused output path.'
+
+  # Extract exactly one complete named block, without printing its contents.
+  block=$(awk -v begin="# BEGIN_QP_WG_PEER $name" -v end="# END_QP_WG_PEER $name" '
+    $0 == begin { starts++; inside = 1; next }
+    $0 == end { if (!inside) bad = 1; ends++; inside = 0; next }
+    inside { text = text $0 "\n" }
+    END {
+      if (bad || inside || starts != 1 || ends != 1) exit 1
+      printf "%s", text
+    }
+  ' "$server") || fail 'Expected exactly one complete saved peer block.'
+  value() {
+    awk -v prefix="$1" '
+      index($0, prefix) == 1 { count++; result = substr($0, length(prefix) + 1) }
+      END { if (count != 1 || result == "") exit 1; print result }
+    '
+  }
+  [[ "$(value '# qp-wg-instance: ' < "$profile")" == "$instance" &&
+     "$(value '# qp-wg-client-name: ' < "$profile")" == "$name" &&
+     "$(value '# qp-wg-client-ip: ' < "$profile")" == "$client_ip" ]] || fail 'Profile metadata does not match the requested peer.'
+  address=$(value 'Address = ' < "$profile") || fail 'Missing or duplicate profile address.'
+  [[ "${address%/*}" == "$client_ip" &&
+     "$(value 'AllowedIPs = ' <<< "$block")" == "$client_ip/32" ]] || fail 'Saved peer/profile IP mismatch.'
+  public_key=$(value 'PrivateKey = ' < "$profile" | wg pubkey) || fail 'Cannot derive the saved client public key.'
+  [[ "$public_key" == "$(value 'PublicKey = ' <<< "$block")" ]] || fail 'Client public key does not match the saved server peer.'
+  psk=$(value 'PresharedKey = ' < "$profile") || fail 'Missing or duplicate saved pre-shared key.'
+  [[ "$psk" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]] || fail 'Saved pre-shared key is not a valid base64 WireGuard key.'
+  [[ "$psk" == "$(value 'PresharedKey = ' <<< "$block")" ]] || fail 'Saved pre-shared keys do not match.'
+  [[ "$(grep -Fxc "PublicKey = $public_key" "$server")" == 1 &&
+     "$(grep -Fxc "AllowedIPs = $client_ip/32" "$server")" == 1 ]] || fail 'Public key or IP is duplicated in the server configuration.'
+  wg show "$dev" >/dev/null || fail 'Selected interface is not running; no lifecycle action was taken.'
+
+  tmp_psk=$(mktemp "/etc/wireguard/.$dev.psk.XXXXXX")
+  trap 'rm -f -- "$tmp_psk"' EXIT
+  chmod 0600 "$tmp_psk"
+  printf '%s\n' "$psk" > "$tmp_psk"
+  wg set "$dev" peer "$public_key" preshared-key "$tmp_psk" allowed-ips "$client_ip/32"
+  set -o noclobber
+  cat "$profile" > "$output"
+  chmod 0600 "$output"
+  printf 'Recovered %s on %s; exported %s\n' "$name" "$dev" "$output"
+)
+BASH
+```
+
+This repairs the local peer installation and exports the existing client
+profile. It does not establish that the remote client has enrolled or completed
+a handshake. If no profile was saved, use the fixed CLI to create the peer
+normally instead of running this recovery.
+
 ## Lifecycle and port rotation
 
 Use `qp-tunnel-cli wg` consistently for managed instances. The repository script

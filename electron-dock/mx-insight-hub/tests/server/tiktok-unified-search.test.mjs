@@ -11,6 +11,7 @@ import { ExternalPlatformGateway } from '../../server/external-platforms/gateway
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
+import { RAW_SEARCH_VERSION } from '../../server/contracts/raw-search.mjs'
 
 const DATA_PATH = '/api/v1/data/search'
 const RAW_PATH = '/api/v1/night-all/search/raw'
@@ -77,6 +78,7 @@ async function harness(t, { grant = true, unknown = false } = {}) {
     providerKey: 'tikhub', apiKeyPepper: 'tiktok-unified-test-fixture-pepper-long-enough', reservationLeaseMs: 120000,
     operationControlStore: controls, logger: { warn() {} } })
   service.externalDataSearch = (context, input) => gateway.searchContent(context, input)
+  service.externalRawSearch = (context, input) => gateway.searchContent(context, input)
   const tenant = await service.createTenant({ name: 'TikTok fixture' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'TikTok caller' })
   if (grant) await store.setPlatformGrant(consumer.id, 'tiktok', true)
@@ -135,33 +137,36 @@ test('TikTok unified search preserves the standard contract and charges once per
   assert.equal(h.store.creditAccounts.get(h.tenant.id).availableMinor, 0)
 })
 
-test('TikTok legacy aliases retain raw strings and cannot consume a standard-search cursor', async t => {
+test('TikTok raw aliases run the fixed TikHub search in Hub, never Night-All, and keep the raw envelope', async t => {
   const h = await harness(t), input = { platform: 'tiktok', query: QUERY, pageSize: 1 }
-  const standard = await h.request(DATA_PATH, input, 'tiktok-mixed-standard')
-  const badCursor = await h.request(RAW_PATH, { platform: 'tiktok', keyword: QUERY, count: 20,
-    cursor: standard.body.data.pageInfo.nextCursor }, 'tiktok-mixed-invalid')
-  assert.equal(badCursor.response.status, 400)
-  assert.equal(badCursor.body.error.code, 'invalid_cursor')
   const legacy = { platform: 'tiktok', keyword: QUERY, count: 20 }
-  const first = await h.request(RAW_PATH, legacy, 'tiktok-legacy-first')
+  const first = await h.request(RAW_PATH, legacy, 'tiktok-raw-first')
   assert.equal(first.response.status, 200)
-  assert.equal(first.body.data.raw_info, RAW_INFO)
-  assert.equal(first.body.data.raw_data, RAW_ROWS)
-  assert.equal(first.body.traceId, 'upstream-raw-trace')
-  assert.equal(first.body.data.items, undefined)
-  assert.match(first.body.data.page.nextCursor, /^mxnc1\./)
-  const replay = await h.request('/api/v1/search/raw', legacy, 'tiktok-legacy-first')
+  assert.equal(first.body.contractVersion, RAW_SEARCH_VERSION)
+  const rows = JSON.parse(first.body.data.raw_data)
+  // A 20-row page is filled from both fixture pages, in order, with full text.
+  assert.deepEqual(rows.map(row => row.content_id), ['9223372036854775807', '9223372036854775808'])
+  assert.ok(rows.every(row => row.platform_name === 'tiktok' && row.content === TEXT))
+  assert.equal(JSON.parse(first.body.data.raw_info)[0].user_id, '9223372036854775806')
+  assert.deepEqual([first.body.data.page.hasMore, first.body.data.page.nextCursor], [false, null])
+  assert.deepEqual(h.calls.map(call => [call.path, call.body.offset, call.body.search_id]), [
+    ['/api/v1/tiktok/web/fetch_general_search', '0', ''],
+    ['/api/v1/tiktok/web/fetch_general_search', '10', 'tiktok-native-standard-continuation'],
+  ])
+  // The other alias replays the same delivery without another purchase.
+  const replay = await h.request('/api/v1/search/raw', legacy, 'tiktok-raw-first')
   assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
   assert.deepEqual(replay.body, first.body)
   assert.equal(h.calls.length, 2)
-  const conflict = await h.request(DATA_PATH, input, 'tiktok-legacy-first')
+  const conflict = await h.request(DATA_PATH, input, 'tiktok-raw-first')
   assert.equal(conflict.response.status, 409)
   assert.equal(conflict.body.error.code, 'idempotency_conflict')
-  const next = await h.request('/api/v1/search/raw', { ...legacy, cursor: first.body.data.page.nextCursor }, 'tiktok-legacy-next')
-  assert.equal(next.response.status, 200)
-  assert.deepEqual(h.calls.at(-1).body.params, { offset: 10, search_id: 'tiktok-search-session' })
-  assert.equal(h.calls.at(-1).body.page, 2)
-  assert.equal(h.calls.length, 3)
+  // A standard-search cursor cannot continue a raw traversal.
+  const standard = await h.request(DATA_PATH, input, 'tiktok-mixed-standard')
+  const badCursor = await h.request(RAW_PATH, { ...legacy, cursor: standard.body.data.pageInfo.nextCursor }, 'tiktok-mixed-invalid')
+  assert.equal(badCursor.response.status, 400)
+  assert.equal(badCursor.body.error.code, 'invalid_cursor')
+  assert.ok(h.calls.every(call => call.path === '/api/v1/tiktok/web/fetch_general_search'), 'Night-All is never called')
 })
 
 test('TikTok unified entry retains platform authorization and never retries an unknown acquisition', async t => {

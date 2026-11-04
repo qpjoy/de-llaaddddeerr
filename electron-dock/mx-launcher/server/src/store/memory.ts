@@ -48,6 +48,7 @@ import {
   buildLauncherNetworkLease,
   buildLauncherProductUserAccess,
   nextAvailableLauncherNetworkLeaseSequence,
+  launcherNetworkLeaseAddressCarryOver,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
   launcherNetworkLeaseMatchesProfile,
@@ -2670,6 +2671,22 @@ export class MemoryStore implements PlatformStore {
     return handover;
   }
 
+  // Mirrors uq_mx_launcher_active_lease_ip (status 'active', expired or not), so a
+  // write order Postgres rejects fails here too.
+  private assertActiveLeaseIpAvailable(lease: LauncherNetworkLease): void {
+    if (lease.status !== 'active' || !lease.productId || !lease.leaseIp) return;
+    for (const other of this.launcherNetworkLeases.values()) {
+      if (
+        other.leaseId !== lease.leaseId
+        && other.status === 'active'
+        && other.productId === lease.productId
+        && other.leaseIp === lease.leaseIp
+      ) {
+        throw new Error('duplicate key value violates unique constraint "uq_mx_launcher_active_lease_ip"');
+      }
+    }
+  }
+
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): LauncherNetworkLease {
     const installId = input.installId?.trim() || `inst_${randomUUID()}`;
     const deviceId = input.deviceId?.trim() || `dev_${randomUUID()}`;
@@ -2801,7 +2818,18 @@ export class MemoryStore implements PlatformStore {
     ) {
       throw new Error('Launcher lease public key rotation requires a separate migration');
     }
-    const sequence = previous?.sequence ?? nextAvailableLauncherNetworkLeaseSequence(
+    const addressSource = normalizedInput.addressSourceLeaseId
+      ? leases.find((lease) => lease.leaseId === normalizedInput.addressSourceLeaseId) ?? null
+      : null;
+    const address = launcherNetworkLeaseAddressCarryOver(
+      product,
+      leaseProfile,
+      addressSource,
+      previous,
+      { installId, deviceId, publicKey: normalizedInput.publicKey?.trim() || null },
+      now
+    );
+    const sequence = address?.sequence ?? previous?.sequence ?? nextAvailableLauncherNetworkLeaseSequence(
       product,
       leaseProfile,
       leases,
@@ -2816,8 +2844,20 @@ export class MemoryStore implements PlatformStore {
       { ...normalizedInput, generation: this.launcherNetworkLeaseGeneration },
       product,
       sequence,
-      previous
+      previous,
+      now.toISOString(),
+      address
     );
+    // The address now belongs to this identity; release the source first, as
+    // the Postgres store must (uq_mx_launcher_active_lease_ip).
+    if (address && addressSource) {
+      const released = releaseLauncherNetworkLease(addressSource, {
+        requestedBy: 'launcher-network-address-carry-over',
+        requestId: input.requestId ?? null
+      });
+      this.launcherNetworkLeases.set(released.leaseId, released);
+    }
+    this.assertActiveLeaseIpAvailable(lease);
     this.launcherNetworkLeases.set(lease.leaseId, lease);
     this.recordAudit({
       eventType: previous ? 'launcher_network.lease.refreshed' : 'launcher_network.lease.enrolled',
@@ -2844,7 +2884,8 @@ export class MemoryStore implements PlatformStore {
         osVersion: lease.osVersion,
         appVersion: lease.appVersion,
         sourceIp: lease.sourceIp,
-        sdkTestMode
+        sdkTestMode,
+        ...(address && addressSource ? { addressFromLeaseId: addressSource.leaseId } : {})
       }
     });
     return lease;

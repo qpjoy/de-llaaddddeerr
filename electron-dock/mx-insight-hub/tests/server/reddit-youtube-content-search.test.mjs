@@ -20,7 +20,8 @@ test('new recipes preserve Night-All defaults, stable endpoint keys and standard
   assert.deepEqual(request('reddit').upstreamQuery, { query: '城市', search_type: 'post', sort: 'NEW', time_range: 'all', safe_search: 'unset', allow_nsfw: '0', after: '', need_format: false })
   assert.deepEqual(request('youtube').upstreamQuery, { keyword: '城市', sort_by: 'upload_date', continuation_token: '' })
   for (const platform of ['reddit', 'youtube']) {
-    assert.equal(TIKHUB_CONTENT_SEARCH_RECIPES[platform].rawCompatibility, false)
+    // Raw aliases run here since 2026-10-31; public params stay standard-only.
+    assert.equal(TIKHUB_CONTENT_SEARCH_RECIPES[platform].rawCompatibility, true)
     assert.equal(TIKHUB_CONTENT_SEARCH_RECIPES[platform].publicParams, false)
     assert.equal(Object.hasOwn(request(platform).upstreamQuery, 'page_size'), false)
     assert.equal(Object.hasOwn(request(platform).upstreamQuery, 'pageSize'), false)
@@ -199,4 +200,157 @@ test('Reddit empty dynamic results never use top navigation or request paginatio
   assert.equal(output.providerPage.hasMore, null)
   assert.equal(output.providerPage.nextParams, null)
   assert.throws(() => project('reddit', dynamic([{ node: { unknown: { post: post('hidden') } } }], { hasNextPage: false })), /invalid_content_search_entry/)
+})
+
+// Shapes seen in production on 2026-10-29 (calls 93494c87 and 0bf7cf68).
+const searchPost = id => ({ __typename: 'SearchPost', behaviors: {}, telemetry: {}, post: { __typename: 'SubredditPost', ...post(id) } })
+const notice = (message, explanation = '') => ({ __typename: 'SearchErrorMessage', behaviors: { cta: {} },
+  presentation: { __typename: 'SearchErrorMessageDefaultPresentation', message, explanation, ctaButtonText: 'Try again', icon: 'search' },
+  telemetry: { __typename: 'SearchElementTelemetry', events: [], trackingContext: {} } })
+
+// Sanitized structure from hash-verified receipts c08af475 and 9787feef
+// (2026-10-30). trackingContext.post is analytics metadata, not a search result.
+const trackedWidget = (typename, behavior) => ({ __typename: typename,
+  behaviors: { [behavior]: { telemetry: { trackingContext: { post: { id: 't3_analytics_only' } } } } } })
+
+test('Reddit correction tracking context does not discard seven adjacent posts or mutate the receipt', () => {
+  const ids = Array.from({ length: 7 }, (_, i) => `result${i}`)
+  const payload = dynamic([{ node: trackedWidget('SearchSpellCorrectionApplied', 'corrected') },
+    { node: { __typename: 'SearchListComponent', children: ids.map(searchPost) } }],
+  { hasNextPage: true, endCursor: 'next-page' })
+  const before = structuredClone(payload), output = project('reddit', payload)
+  assert.deepEqual(output.items.map(item => item.content_id), ids)
+  assert.equal(output.nonPostCount, 1)
+  assert.deepEqual(output.providerPage.nextParams, { after: 'next-page' })
+  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_spell_correction'])
+  assert.deepEqual(payload, before)
+})
+
+test('Reddit spelling telemetry excludes deep search metadata only at the three known locations', () => {
+  const deep = { search: { scope: { a: { b: { c: { d: { e: 'analytics' } } } } } } }
+  const telemetry = { trackingContext: { post: { id: 't3_tracking' }, ...deep }, ...deep }
+  const correction = { __typename: 'SearchSpellCorrectionApplied', telemetry,
+    behaviors: { corrected: { telemetry }, original: { telemetry } } }
+  const payload = dynamic([{ node: correction }, { node: { children: Array.from({ length: 7 }, (_, i) => searchPost(`p${i}`)) } }],
+    { hasNextPage: true, endCursor: 'next' })
+  const before = structuredClone(payload)
+  const freeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value) } }
+  freeze(payload)
+  const output = project('reddit', payload)
+  assert.deepEqual(output.items.map(item => item.content_id), Array.from({ length: 7 }, (_, i) => `p${i}`))
+  assert.equal(output.nonPostCount, 1)
+  assert.equal(output.providerPage.hasMore, true)
+  assert.deepEqual(output.providerPage.nextParams, { after: 'next' })
+  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_spell_correction'])
+  assert.deepEqual(payload, before)
+  for (const node of [{ ...correction, presentation: deep },
+    { ...correction, behaviors: { corrected: { telemetry, content: { post: post('hidden') } } } },
+    { ...correction, behaviors: { other: { telemetry } } },
+    { ...correction, __typename: 'UnknownWidget' },
+    { __typename: 'SearchBanner', telemetry: deep }]) {
+    assert.throws(() => project('reddit', dynamic([{ node }])), /invalid_content_search_entry/)
+  }
+  const banner = { __typename: 'SearchBanner', telemetry: { trackingContext: deep },
+    behaviors: { cta: { telemetry: { trackingContext: deep } }, dismiss: { telemetry: { trackingContext: deep } } } }
+  assert.equal(project('reddit', dynamic([{ node: banner }])).nonPostCount, 1)
+})
+
+test('Reddit correction and banner tracking metadata permit an explicit no-results terminal page', () => {
+  const widgets = [trackedWidget('SearchSpellCorrectionApplied', 'corrected'), trackedWidget('SearchBanner', 'cta')]
+  const output = project('reddit', dynamic([...widgets, notice('No results found')].map(node => ({ node })),
+    { hasNextPage: false, endCursor: 'last-edge' }))
+  assert.deepEqual(output.items, [])
+  assert.equal(output.nonPostCount, 3)
+  assert.equal(output.providerPage.hasMore, false)
+  assert.equal(output.providerPage.nextParams, null)
+  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_spell_correction', 'reddit_no_results'])
+  assert.throws(() => project('reddit', dynamic([...widgets, notice('Something went wrong')].map(node => ({ node })),
+    { hasNextPage: false })), /upstream_search_error_message/)
+})
+
+test('Reddit widget metadata exception is limited to known telemetry paths and preserves real posts', () => {
+  for (const [typename, behaviors] of [['SearchSpellCorrectionApplied', ['corrected', 'original']], ['SearchBanner', ['cta', 'dismiss']]]) {
+    for (const behavior of behaviors) {
+      const node = trackedWidget(typename, behavior)
+      node.telemetry = { trackingContext: { post: null } }
+      assert.equal(project('reddit', dynamic([{ node }])).nonPostCount, 1)
+      node.post = post('actual')
+      assert.deepEqual(project('reddit', dynamic([{ node }])).items.map(item => item.content_id), ['actual'])
+      delete node.post
+      for (const extra of [{ presentation: { post: post('hidden') } },
+        { content: { telemetry: { trackingContext: { post: post('hidden') } } } }]) {
+        assert.throws(() => project('reddit', dynamic([{ node: { ...node, ...extra } }])), /invalid_content_search_entry/)
+      }
+    }
+  }
+  assert.throws(() => project('reddit', dynamic([{ node: { __typename: 'SearchBanner',
+    telemetry: { events: [{ post: post('hidden') }] } } }])), /invalid_content_search_entry/)
+  for (const node of [trackedWidget('SearchUnknownWidget', 'corrected'),
+    trackedWidget('SearchSpellCorrectionApplied', 'unknown'), trackedWidget('SearchBanner', 'corrected')]) {
+    assert.throws(() => project('reddit', dynamic([{ node }])), /invalid_content_search_entry/)
+  }
+})
+
+test('Reddit search widgets such as in-feed surveys are excluded without failing the page', () => {
+  const output = project('reddit', dynamic([
+    { node: { __typename: 'SearchListComponent', behaviors: {}, presentation: {}, children: [searchPost('a'), searchPost('b')] } },
+    { node: { __typename: 'SearchInFeedSurveyUnit' } }], { hasNextPage: false }))
+  assert.deepEqual(output.items.map(item => item.content_id), ['a', 'b'])
+  assert.equal(output.nonPostCount, 1)
+  assert.equal(output.providerPage.warnings, undefined)
+})
+
+test('Reddit no-results notice is an empty page; any other notice is a Reddit-side error, never an empty page', () => {
+  for (const [message, explanation] of [['Hm... we couldn’t find any results for “x”', 'Double-check your spelling'], ['No results found', ''], ['没有找到相关结果', '']]) {
+    const output = project('reddit', dynamic([{ node: notice(message, explanation) }], { hasNextPage: false }))
+    assert.deepEqual(output.items, [])
+    assert.equal(output.nonPostCount, 1)
+    assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_no_results'])
+    assert.equal(output.providerPage.hasMore, false)
+  }
+  for (const message of ['Something went wrong', 'Server error. Try again later.', '']) {
+    assert.throws(() => project('reddit', dynamic([{ node: notice(message) }], { hasNextPage: false })), /upstream_search_error_message/)
+  }
+  const mixed = project('reddit', dynamic([{ node: searchPost('a') }, { node: notice('Something went wrong') }], { hasNextPage: false }))
+  assert.deepEqual(mixed.items.map(item => item.content_id), ['a'])
+  assert.deepEqual(mixed.providerPage.warnings.map(warning => warning.code), ['reddit_search_notice'])
+})
+
+test('Reddit final page keeps its Relay endCursor with hasNextPage=false and ends pagination', () => {
+  // Production 2026-10-29 (call 0bf7cf68): a no-results notice page carried
+  // endCursor, startCursor and hasPreviousPage alongside hasNextPage=false.
+  const finalInfo = { endCursor: 'last-edge-cursor', startCursor: 'first-edge-cursor', hasNextPage: false, hasPreviousPage: true }
+  for (const edges of [[{ node: notice('No results found') }], [{ node: searchPost('a') }]]) {
+    const output = project('reddit', dynamic(edges, finalInfo))
+    assert.equal(output.providerPage.hasMore, false)
+    assert.equal(output.providerPage.nextParams, null)
+  }
+  const next = project('reddit', dynamic([{ node: searchPost('a') }], { endCursor: 'next-cursor', hasNextPage: true }))
+  assert.deepEqual(next.providerPage.nextParams, { after: 'next-cursor' })
+  assert.throws(() => project('reddit', dynamic([{ node: searchPost('a') }], { hasNextPage: true })), /missing_content_search_continuation/)
+})
+
+test('Reddit unknown widgets that carry a post still fail the page instead of dropping it', () => {
+  for (const node of [{ __typename: 'SearchCarousel', items: [{ __typename: 'SubredditPost', id: 'hidden' }] },
+    { __typename: 'SearchPromo', target: { id: 't3_hidden' } },
+    { __typename: 'SearchHighlight', content: { postTitle: '标题' } },
+    { __typename: 'SearchNested', a: { b: { c: { d: { e: { f: { g: {} } } } } } } }]) {
+    assert.throws(() => project('reddit', dynamic([{ node }], { hasNextPage: false })), /invalid_content_search_entry/, node.__typename)
+  }
+})
+
+test('YouTube formatted search keeps a plain-string author and exact view-count text, never abbreviated or relative values', () => {
+  const output = project('youtube', { videos: [
+    video('a', { author: '方脸说', channel_id: 'UC123', view_count: '12,345 views', published_time: '3 years ago' }),
+    video('b', { author: '频道二', view_count: '6789次观看' }),
+    video('c', { author: '频道三', view_count: '1.2M views' }),
+    video('d', { author: '频道四', view_count: '12万次观看' }),
+    video('e', { author: '  ', view_count: 'No views' }),
+  ], has_more: false })
+  const items = output.items.map(contentSearchDataItem)
+  assert.deepEqual(items.map(item => item.author.name), ['方脸说', '频道二', '频道三', '频道四', null])
+  assert.equal(items[0].author.id, 'UC123')
+  assert.deepEqual(items.map(item => item.metrics.views), [12345, 6789, null, null, 0])
+  assert.equal(items[0].publishedAt, null)
+  assert.deepEqual({ ...items[0].metrics, views: null }, noMetrics)
 })

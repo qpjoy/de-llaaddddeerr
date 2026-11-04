@@ -368,6 +368,48 @@ test('Facebook 301 preserves the failed receipt and existing customer settlement
   }
 })
 
+test('Facebook capacity failures distinguish account causes and replay the same saved refusal', async () => {
+  const reasons = [[100, 'upstream_auth_invalid', /credential is invalid/u],
+    [600, 'upstream_permission_denied', /permission is denied/u],
+    [601, 'upstream_balance_exhausted', /balance is exhausted/u],
+    [602, 'upstream_token_limit_exceeded', /credential quota is exhausted/u]]
+  for (const route of ['raw', 'standard']) for (const [code, reasonCode, message] of reasons) {
+    const h = await harness({ mode: 'justone', respond: () => Response.json({ code,
+      message: 'private-provider-token-and-balance', data: null, requestId: 'private-provider-id', recordTime: '2026-10-29T15:52:13Z' }) })
+    const invoke = () => route === 'raw' ? h.invoke()
+      : invokeStandard(h, { platform: 'facebook', query: 'Unitree', pageSize: 20 }, 'facebook-capacity-fixture')
+    let first
+    await assert.rejects(invoke(), error => {
+      first = error
+      assert.equal(error.status, 503)
+      assert.equal(error.code, 'external_platform_capacity_unavailable')
+      assert.equal(error.details.reasonCode, reasonCode)
+      assert.equal(error.details.outcome, 'rejected')
+      assert.equal(error.details.retryable, false)
+      assert.equal(error.details.action, 'contact_administrator')
+      assert.match(error.message, message)
+      assert.doesNotMatch(JSON.stringify([error.message, error.details]), /private-|justone|fixture-only-key/u)
+      return true
+    })
+    const call = [...h.stores.justone.calls.values()][0]
+    assert.equal(call.businessCode, code)
+    assert.equal(call.errorCode, reasonCode)
+    assert.equal(call.billed, false)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(h.stores.justone.restrictedResponseArchives.size, 1)
+    assert.equal(h.stores.justone.ingestJobs.length, 0)
+    h.policy.mode = 'paused'
+    await assert.rejects(invoke(), error => {
+      assert.equal(error.status, first.status)
+      assert.equal(error.code, first.code)
+      assert.equal(error.message, first.message)
+      assert.deepEqual(error.details, first.details)
+      return true
+    })
+    assert.equal(h.calls.length, 1)
+  }
+})
+
 test('ambiguous or malformed paid responses never fall through or retry', async () => {
   for (const options of [{ rapidStatus: 'timeout' }, { rapidStatus: 503 }, { malformed: true }]) {
     const h = await harness(options)
@@ -727,7 +769,7 @@ test('Facebook known RapidAPI quota admission returns available rows without cro
   assert.deepEqual(auto.calls.map(row => row.provider), ['justone'])
 })
 
-test('Facebook later unknown acquisition never becomes a partial success or an automatic retry', async () => {
+test('Facebook later unknown acquisition never becomes a partial success or an automatic retry of its own key', async () => {
   for (const mode of ['rapidapi', 'justone']) {
     for (const type of ['fresh', 'stable']) {
       const h = await harness({ mode, respond: ({ provider, ordinal }) => {
@@ -741,13 +783,16 @@ test('Facebook later unknown acquisition never becomes a partial success or an a
       assert.equal(h.stores[mode].restrictedResponseArchives.size, 1)
       assert.equal(h.stores[mode].ingestJobs.length, 1)
       await assert.rejects(invokeStandard(h, body, `fb-unknown-${mode}-${type}`), { code: 'request_outcome_unknown' })
-      await assert.rejects(invokeStandard(h, body, `fb-unknown-new-${mode}-${type}`), { code: 'request_outcome_unknown' })
       assert.equal(h.calls.length, 2)
+      // An ended unknown does not hold a new key; it makes its own acquisition.
+      await assert.rejects(invokeStandard(h, body, `fb-unknown-new-${mode}-${type}`),
+        { code: mode === 'rapidapi' ? 'social_upstream_outcome_unknown' : 'external_platform_outcome_unknown' })
+      assert.equal(h.calls.length, 3)
     }
   }
 })
 
-test('Facebook evidence persistence failures retain a diagnostic code and prevent a second acquisition', async () => {
+test('Facebook evidence persistence failures retain a diagnostic code and prevent a second acquisition under the same key', async () => {
   for (const mode of ['rapidapi', 'justone']) for (const method of ['stageProviderEvidence', 'finishProviderStep']) {
     const h = await harness({ mode })
     h.stores[mode][method] = async () => { throw new Error('synthetic evidence persistence failure') }
@@ -764,8 +809,9 @@ test('Facebook evidence persistence failures retain a diagnostic code and preven
     assert.equal(h.stores[mode].restrictedResponseArchives.size, 1)
     assert.equal(h.stores[mode].ingestJobs.length, 0)
     await assert.rejects(invokeStandard(h, body, key), { code: 'request_outcome_unknown' })
-    await assert.rejects(invokeStandard(h, body, `${key}-new`), { code: 'request_outcome_unknown' })
     assert.equal(h.calls.length, 1)
+    await assert.rejects(invokeStandard(h, body, `${key}-new`), { code: 'request_outcome_unknown' })
+    assert.equal(h.calls.length, 2, 'a new key is not held by the earlier persistence unknown')
   }
 })
 
@@ -1114,8 +1160,8 @@ test('PostgreSQL quota serializes replicas, recovers from reset/probes and audit
     const sql = await readFile(new URL('../../migrations/143_facebook_platform_search.sql', import.meta.url), 'utf8')
     await pool.query('CREATE SCHEMA IF NOT EXISTS control')
     await pool.query(sql.slice(sql.indexOf('CREATE TABLE'), sql.indexOf('ALTER TABLE')))
-    for (const [column, migration] of [['billing_cycle_day', '149_facebook_billing_window.sql'], ['waiters', '151_facebook_rapid_admission_queue.sql']]) {
-      const table = column === 'waiters' ? 'facebook_rapid_quota' : 'platform_search_policies'
+    for (const [column, migration] of [['billing_cycle_day', '149_facebook_billing_window.sql'], ['waiters', '151_facebook_rapid_admission_queue.sql'], ['supplier_remaining', '169_facebook_supplier_quota.sql']]) {
+      const table = ['waiters', 'supplier_remaining'].includes(column) ? 'facebook_rapid_quota' : 'platform_search_policies'
       const present = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema='control' AND table_name=$1 AND column_name=$2`, [table, column])
       if (!present.rowCount) await pool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
     }
@@ -1128,15 +1174,15 @@ test('PostgreSQL quota serializes replicas, recovers from reset/probes and audit
     await pool.query("UPDATE control.facebook_rapid_quota SET reset_at=now()-interval '1 second'")
     const reset = await store.admitRapid(); assert.equal(reset.allowed, true); assert.equal(reset.probe, true)
     await store.observeRapid(reset, { ok: true, remaining: 999 })
-    await pool.query("UPDATE control.facebook_rapid_quota SET used=1000, remaining=0, reset_at=NULL, blocked_until=now()-interval '1 second'")
+    await pool.query("UPDATE control.facebook_rapid_quota SET used=1000, remaining=0, reset_at=now()-interval '1 second'")
     const probes = await Promise.all(Array.from({ length: 12 }, () => store.admitRapid()))
     assert.equal(probes.filter(r => r.allowed).length, 1)
     const probe = probes.find(r => r.allowed); assert.equal(probe.probe, true)
     await store.observeRapid(probe, { ok: true })
     assert.equal((await store.admitRapid()).allowed, false, 'HTTP 200 alone can mean a billed overage')
-    await pool.query("UPDATE control.facebook_rapid_quota SET blocked_until=now()-interval '1 second'")
+    await pool.query("UPDATE control.facebook_rapid_quota SET reset_at=now()-interval '1 second'")
     await store.observeRapid(await store.admitRapid(), { ok: true, remaining: 998, resetSeconds: 2500000 })
-    assert.equal((await store.facebook()).used, 2)
+    assert.equal((await store.facebook()).used, 1002)
     const policy = await store.facebook()
     const update = { mode: 'justone', monthlyLimit: 900, probeIntervalHours: 72, expectedRevision: policy.revision, reason: 'Test audited change' }
     await store.update('facebook', update)

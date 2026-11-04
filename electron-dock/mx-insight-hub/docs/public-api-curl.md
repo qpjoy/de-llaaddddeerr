@@ -12,7 +12,7 @@
 以下示例可在 Bash 或 Zsh 中执行。`HUB_URL` 是不含 `/api/v1` 的服务 origin。
 请先根据 `GET /api/v1/data/capabilities` 确认当前 consumer 的平台授权。
 `HUB_PLATFORM=telegram` 仅用于第 4 节的 Hub 搜索示例；Night-All 兼容层使用独立的
-分平台变量，避免把 Telegram 误当成三个 legacy operation 的共同支持平台。所有
+分平台变量，避免把 Telegram 误当成 legacy operation 的共同支持平台。所有
 默认值只说明请求格式和 operation 选择，不会绕过平台授权或 Hub dispatch eligibility
 检查。
 
@@ -136,7 +136,7 @@ curl -sS "$HUB_URL/docs/openapi.json"
 ### `GET /api/v1/data/capabilities`
 
 参数：无。`data.platforms` 只描述当前 consumer 已授权的 Hub 数据面；
-`data.legacySearch` 是三条 Night-All compatibility operation 的 Hub-pinned、按 grants
+`data.legacySearch` 是 raw、crawl、user-info 三条 Night-All compatibility operation 的 Hub-pinned、按 grants
 过滤的 dispatch 矩阵，其固定版本为
 `night-all.legacy-search-capabilities.v1`。矩阵由当前 Hub 发布版本固定，不会在请求时从
 Night-All `/api/v1/search/capabilities` 实时发现。选择 `HUB_PLATFORM`、调用
@@ -1262,11 +1262,40 @@ missing_event_time|outside_window|missing_heat` 定位漏斗原因，再用返�
 POST /api/v1/night-all/search/raw
 POST /api/v1/night-all/search/crawl
 POST /api/v1/night-all/search/user-info
+POST /api/v1/night-all/search/post-detail
+POST /api/v1/night-all/search/post-comments
 ```
 
-除下述微信 raw 分支外，旧客户端可继续调用对应的 `/api/v1/search/raw|crawl|user-info`。每个旧路径与
+除下述微信 raw 分支外，旧客户端可继续调用对应的 `/api/v1/search/raw|crawl|user-info|post-detail|post-comments`。每个旧路径与
 `/api/v1/night-all/search/*` 对应路径进入同一个服务和 paid fingerprint；仅切换路径不会
 获得第二次外部派发，也不应生成新的 `Idempotency-Key`。
+
+`post-detail` 用于按一个明确平台的 `postId`、`contentId`、平台专用帖子 ID 或 `url` 获取完整正文、发布时间、作者和媒体。请求仍需带 `Idempotency-Key`，`count/pageSize/limit` 最大为 100；`includeRaw` 只接受 `false`。`provider`、凭据、endpoint 和其他供应方路由控制由 Hub 管理，不能放在请求体或 `params` 中。响应保留 Night-All 的 `raw_info/raw_data` JSON 字符串 envelope，`raw_data` 应包含完整帖子字段。小红书详情继续使用已上线的 `POST /api/v1/data/post` 原生合同；该旧入口只作为兼容过渡，其他平台按平台逐步接入 Hub-native 详情适配器。详情入口不改变 MX-H2I 的登录和联网路径。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/search/post-detail" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"businessId":"agent:<Agent标识>:data_query:search_post_detail:twitter","platform":"twitter","postId":"<平台帖子ID>","url":"<帖子链接>","count":1,"includeRaw":false}'
+```
+
+`post-comments` 用于智能策略、用户刷新和 Agent 获取单个帖子的评论列表。请求至少提供
+`postId`、`contentId`、平台专用帖子/视频 ID 或 `url` 之一；`count/pageSize/limit` 默认 20、最大 100。
+`cursor` 或 `params` 中的续页状态只应沿用上一页返回的 `page.nextCursor`/`page.nextParams`，每一页使用新的
+`Idempotency-Key`。`includeRaw=true`、provider、凭据、endpoint 和扩大评论工作量的控制字段会被 Hub 拒绝。
+返回的 `raw_data` 应保留评论 ID、正文 ID、评论正文、作者、发布时间、互动量以及 `page.nextCursor/hasMore`
+等分页状态；商品评论、搜索附带评论和 YouTube 频道评论不能替代此接口。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/search/post-comments" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"businessId":"data-hub:<策略标识>:weibo:评论","platform":"weibo","postId":"<平台正文ID>","contentId":"<同一个平台正文ID>","url":"<原文链接>","count":100,"page":1,"includeRaw":false}'
+```
 
 2026-09-30 起，`/api/v1/search/raw` 的 `wechat_search`（含 `wechat/weixin` 别名）和
 `wechat_mp` 请求使用 `/api/v1/data/wechat/search/search` 的新合同，返回
@@ -1331,7 +1360,7 @@ Hub-native 子集会稳定返回 `400 invalid_user_profile_url`（非官方小�
 `400 cursor_page_mismatch`（显式 page 与 direct crawl cursor 冲突）或
 `404 user_not_found`（无法解析目标用户）。
 
-三条历史执行路径的 cursor/compound/composite/page/offset continuation 统一由 Hub 加密包装为
+历史执行路径的 cursor/compound/composite/page/offset continuation 统一由 Hub 加密包装为
 `mxnc1`，并绑定 consumer、operation、platform、稳定 query/account scope 和下一页。
 所有可继续的分页形态统一从 `data.page.nextCursor` 读取 Hub 游标，下一次原样放入请求的
 顶层 `cursor`，保持原查询条件和条数不变。调用方不按平台或 `paginationMode` 拼装续页参数，
@@ -1362,7 +1391,7 @@ params、生成新 Key，并从 page 1 发起新查询；旧 continuation 不能
 | `user-info` Hub-native 子集 | `xiaohongshu + 单用户 + page 1` | 独立 user-activity gate；公共 capability presence 不是 live-ready 证明 |
 | `user-info` 历史形状 | `twitter`、批量或其他不支持形状 | `data.legacySearch.operations["user-info"]` |
 
-**Telegram 不支持这三条 compatibility route。** 第 4 节的
+**Telegram 不支持这些 compatibility route。** 第 4 节的
 `HUB_PLATFORM=telegram` 只用于 Hub 搜索；Telegram 已存数据应使用第 7 节的专用
 Hub API。替换本文示例变量前，应同时确认 platform grant、`supportedPlatforms` 和
 `readyPlatforms`。
@@ -1380,7 +1409,7 @@ compatibility snapshot 和 raw ingest lineage 均保留这些上游业务字段�
 这不构成认证凭据透传契约：API Key、access token、Authorization、cookie、password
 等认证凭据不属于业务响应，Night-All 和 Hub 均不得将其作为响应返回或记录。如果
 响应中意外出现认证凭据，应按安全事件处理，而不能把它视为兼容行为。当前 Hub 不提供
-业务数据脱敏、过滤或截断；任何将来的独立 projection/API 也不能静默改写这三条接口或其快照。
+业务数据脱敏、过滤或截断；任何将来的独立 projection/API 也不能静默改写这些接口或其快照。
 
 分页控制是唯一的治理改写：公开响应和 compatibility snapshot 使用 Hub `mxnc1` 并在第 15 页
 终止，但长正文、`raw_info`、`raw_data`、provider/endpoint 业务字段和上游 correlation 均保持

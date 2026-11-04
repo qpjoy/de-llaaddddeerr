@@ -1,15 +1,37 @@
 import { createHash } from 'node:crypto'
-import { HUB_SOCIAL_ENDPOINTS, normalizeTwitterResponse } from '../contracts/hub-social.mjs'
+import { HUB_SOCIAL_ENDPOINTS, TWITTER_REPLIES_ENDPOINT_KEY, normalizeTwitterResponse } from '../contracts/hub-social.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
 import { AppError } from '../core/errors.mjs'
 import { FACEBOOK_HOST, FACEBOOK_ENDPOINT, projectFacebookSearch } from '../contracts/facebook-search.mjs'
 import { rapidQuotaObservation } from '../external-platforms/platform-search-policy.mjs'
+import { twitterAccountFailure } from '../contracts/twitter-account-failure.mjs'
 
 export const TWITTER_AIO_HOST = 'twitter-aio.p.rapidapi.com'
-const TWITTER_ENDPOINTS = new Set(Object.values(HUB_SOCIAL_ENDPOINTS).map(endpoint => endpoint.endpointKey))
+const TWITTER_ENDPOINTS = new Set([...Object.values(HUB_SOCIAL_ENDPOINTS).map(endpoint => endpoint.endpointKey), TWITTER_REPLIES_ENDPOINT_KEY])
 const MAX_BYTES = 4 * 1024 * 1024
+const RATE_LIMIT_HEADERS = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
+  'x-ratelimit-requests-limit', 'x-ratelimit-requests-remaining', 'x-ratelimit-requests-reset']
+const unsignedHeader = value => typeof value === 'string' && /^\d{1,16}$/u.test(value)
+  && Number.isSafeInteger(Number(value)) ? Number(value) : null
+
+function twitterRateLimitObservation(response) {
+  const observedAt = new Date()
+  const retryAfter = response.headers.get('retry-after')
+  let retryAfterSeconds = unsignedHeader(retryAfter)
+  if (retryAfterSeconds === null && typeof retryAfter === 'string'
+    && /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/u.test(retryAfter)) {
+    const until = new Date(retryAfter)
+    if (Number.isFinite(until.getTime()) && until.toUTCString() === retryAfter) {
+      retryAfterSeconds = Math.max(0, Math.ceil((until.getTime() - observedAt.getTime()) / 1000))
+    }
+  }
+  // Preserve fixed numeric evidence only. Generic reset can be seconds or an
+  // epoch timestamp; Requests headers do not prove a monthly or hard quota.
+  return { observedAt: observedAt.toISOString(), httpStatus: response.status, retryAfterSeconds,
+    headers: Object.fromEntries(RATE_LIMIT_HEADERS.map(name => [name, unsignedHeader(response.headers.get(name))])) }
+}
 // Fetch hides DNS/TCP/TLS errors in cause or AggregateError. Retain only fixed
 // technical codes; exception messages, stacks and URLs can contain credentials.
 const SAFE_FAILURE_CODES = new Set([
@@ -95,7 +117,7 @@ export class RapidApiAdapter {
     const controller = new AbortController()
     let deadlineExceeded = false
     const timer = setTimeout(() => { deadlineExceeded = true; controller.abort() }, this.timeoutMs)
-    let response, bytes, raw, bodyText, quota, failure = null, phase = 'request', parsed = false
+    let response, bytes, raw, bodyText, quota, rateLimit, failure = null, phase = 'request', parsed = false
     const startedAt = performance.now()
     const capturedAt = new Date().toISOString()
     const scrub = createCredentialEchoRedactor(key)
@@ -112,6 +134,7 @@ export class RapidApiAdapter {
         payloadSha256: bytes ? createHash('sha256').update(bytes).digest('hex') : null,
         rawPayload: { response: { httpStatus: response?.status ?? null, requestId: scrub(response?.headers.get('x-rapidapi-request-id') || '') || null,
           ...(failure ? { transportFailure: failure } : {}),
+          ...(rateLimit ? { rateLimit } : {}),
           ...(facebook ? { quota } : {}) } }, capturedAt } : null,
       restrictedResponseArchive: bytes ? { state, capturedAt, httpStatus: response.status, contentType: response.headers.get('content-type'),
         bodySize: bytes.length, bodySha256: createHash('sha256').update(bytes).digest('hex'), bodyBytes: bytes,
@@ -121,6 +144,7 @@ export class RapidApiAdapter {
     try {
       response = await this.fetch(url, { method: 'GET', redirect: 'error', signal: controller.signal,
         headers: { 'x-rapidapi-host': host, 'x-rapidapi-key': key, 'user-agent': HUB_USER_AGENT } })
+      if (!facebook) rateLimit = twitterRateLimitObservation(response)
       phase = 'body'
       if (facebook) quota = rapidQuotaObservation(response)
       bytes = await readBody(response, controller)
@@ -142,12 +166,13 @@ export class RapidApiAdapter {
       // AIO explicitly reports a negative account lookup with HTTP 200. Keep
       // this business result separate from malformed profiles, only for the
       // new account workflow; historical social/search contracts stay intact.
-      if (request.accountCompatibility === true && request.operation === 'user-info'
-        && request.endpointKey === 'twitter-aio.user-info' && raw?.userExists === false
-        && raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data) && Object.keys(raw.data).length === 0
-        && raw.error == null && (raw.errors == null || Array.isArray(raw.errors) && raw.errors.length === 0)) {
+      const accountFailure = request.accountCompatibility === true && request.operation === 'user-info'
+        && request.endpointKey === 'twitter-aio.user-info' ? twitterAccountFailure(raw) : null
+      if (accountFailure) {
         throw new RapidApiUpstreamError({ outcome: 'rejected', billed: null, httpStatus: response.status,
-          businessCode: null, errorCode: 'social_account_not_found', affectsCircuit: false }, persistence('rejected'))
+          businessCode: null, errorCode: accountFailure.code, affectsCircuit: false,
+          ...(accountFailure.code === 'social_account_unavailable' ? { accountReason: accountFailure.reason } : {}),
+        }, persistence('rejected'))
       }
       let publicBody
       try { publicBody = facebook ? projectFacebookSearch(safe(raw), request, 'rapidapi', capturedAt,

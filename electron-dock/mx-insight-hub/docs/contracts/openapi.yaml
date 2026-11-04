@@ -4,7 +4,7 @@ info:
   version: 1.0.0-alpha
   description: >-
     Stable consumer contract. Night-All and provider details are normally
-    private implementation concerns; the three explicitly namespaced
+    private implementation concerns; the explicitly namespaced
     /night-all/search compatibility routes are the documented exception and
     preserve the legacy envelope. Eligible Xiaohongshu raw calls may use a
     Hub-native projection with the same raw_info/raw_data field types;
@@ -38,6 +38,341 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /data/social/post-comments:
+    post: &hub_post_comments
+      tags:
+      - 社媒与内容数据
+      operationId: social_post_comments
+      summary: 按帖子获取评论
+      x-mx-platform-options:
+      - twitter
+      - reddit
+      - kuaishou
+      - instagram
+      - weibo
+      - douyin
+      - tiktok
+      - zhihu
+      - linkedin
+      - bilibili
+      - facebook
+      - xiaohongshu
+      - youtube
+      x-mx-required-capabilities:
+      - social.comments.list
+      x-mx-meter-key: social.comments.list
+      x-mx-doc-path: /docs/social-content
+      description: Hub 单帖评论接口。旧 /api/v1/search/post-comments 与 /api/v1/night-all/search/post-comments 共用此入口。count
+        默认 20、最大 100；使用返回的 Hub cursor 继续。每个成功交付页按 social.comments.list 结算一次，精确幂等重放不重复计费。需要目标平台及 social.comments.list
+        授权。
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - platform
+              anyOf:
+              - required:
+                - postId
+              - required:
+                - post_id
+              - required:
+                - contentId
+              - required:
+                - content_id
+              - required:
+                - itemId
+              - required:
+                - item_id
+              - required:
+                - tweetId
+              - required:
+                - tweet_id
+              - required:
+                - noteId
+              - required:
+                - note_id
+              - required:
+                - awemeId
+              - required:
+                - aweme_id
+              - required:
+                - statusId
+              - required:
+                - status_id
+              - required:
+                - videoId
+              - required:
+                - video_id
+              - required:
+                - postUrn
+              - required:
+                - post_urn
+              - required:
+                - urn
+              - required:
+                - url
+              properties:
+                platform:
+                  type: string
+                  enum:
+                  - twitter
+                  - reddit
+                  - kuaishou
+                  - instagram
+                  - weibo
+                  - douyin
+                  - tiktok
+                  - zhihu
+                  - linkedin
+                  - bilibili
+                  - facebook
+                  - xiaohongshu
+                  - youtube
+                postId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                post_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                contentId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                content_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                itemId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                item_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                tweetId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                tweet_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                noteId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                note_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                awemeId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                aweme_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                statusId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                status_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                videoId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                video_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                postUrn:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                post_urn:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                urn:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                url:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                count:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 20
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                cursor:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                  description: 原样使用 data.page.nextCursor。params.cursor 是同义字段。
+                page:
+                  type: integer
+                  minimum: 1
+                  maximum: 1000
+                  default: 1
+                params:
+                  type: object
+                  description: 仅允许当前平台的固定排序与续页字段；不接受 provider、凭据或请求地址。旧原生续页状态视为新遍历的起点，之后只返回 Hub 游标。
+                businessId:
+                  type: string
+                  description: 可省略；提交时必须等于当前消费者的绑定值。
+                business_id:
+                  type: string
+                includeRaw:
+                  type: boolean
+                  default: false
+                cacheMaxAgeHours:
+                  type: number
+                  minimum: 0
+                  maximum: 720
+                  description: 兼容字段；新采集不使用旧快照替代刷新。
+            example:
+              platform: twitter
+              postId: '2117082385997250767'
+              count: 20
+              includeRaw: false
+      responses:
+        '200':
+          description: 评论及明确的分页状态。未知时间或指标为 null；publishedTime 保留相对发布时间原文。
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contractVersion:
+                    const: mx-insight-hub.post-comments.v1
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    properties:
+                      platform:
+                        type: string
+                      postId:
+                        type: string
+                        minLength: 1
+                        maxLength: 8192
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          description: commentId/content_id 是评论 ID；postId/contentId 是原帖 ID。包含 text/content、author、publishedAt、publishedTime、metrics
+                            与已取得的父评论关系。
+                      raw_data:
+                        type: string
+                        description: items 的 JSON 字符串。
+                      raw_info:
+                        const: '[]'
+                      page:
+                        type: object
+                        properties:
+                          hasMore:
+                            type:
+                            - boolean
+                            - 'null'
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          returnedCount:
+                            type: integer
+                            minimum: 0
+                          paginationStatus:
+                            enum:
+                            - continuable
+                            - exhausted
+                            - unknown
+                            - limit_reached
+                        required:
+                        - hasMore
+                        - nextCursor
+                        - returnedCount
+                        - paginationStatus
+                        additionalProperties: true
+                      pageInfo:
+                        type: object
+                        properties:
+                          hasMore:
+                            type:
+                            - boolean
+                            - 'null'
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          returnedCount:
+                            type: integer
+                            minimum: 0
+                          paginationStatus:
+                            enum:
+                            - continuable
+                            - exhausted
+                            - unknown
+                            - limit_reached
+                        required:
+                        - hasMore
+                        - nextCursor
+                        - returnedCount
+                        - paginationStatus
+                        additionalProperties: true
+        '400':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+        '401':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+        '402':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+        '403':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+        '409':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+        '429':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+        '502':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+        '503':
+          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+  /search/post-comments:
+    post:
+      <<: *hub_post_comments
+      operationId: social_post_comments_alias_1
+  /night-all/search/post-comments:
+    post:
+      <<: *hub_post_comments
+      operationId: social_post_comments_alias_2
   /api/v2/data/search:
     servers:
       - url: /
@@ -119,7 +454,7 @@ paths:
         '400': {description: Invalid window, fields, idempotency key or version-bound cursor}
         '401': {description: API key required}
         '403': {description: Existing Live key/platform/operation grants required}
-        '409': {description: 'search_admission_blocked permits delayed same-body/key retry with explicit not_started and retry flags; idempotency_conflict, request_in_progress and request_outcome_unknown retain their protections; never fall back to v1'}
+        '409': {description: 'search_admission_blocked permits delayed same-body/key retry with explicit not_started and retry flags; another request holds it only while that request is still in flight (an ended attempt, even unknown, never does), and Hub first waits up to 40 seconds for it before refusing and retryAfterSeconds (at most 300) is when its lease ends; idempotency_conflict, request_in_progress and request_outcome_unknown retain their protections; never fall back to v1'}
         '422': {description: search_v2_platform_unsupported}
         '429': {description: Existing quota/admission/financial limit}
         '502': {description: Retained source failure}
@@ -6273,7 +6608,7 @@ paths:
   /night-all/search/{operation}:
     post: &nightAllCompatibilityPost
       operationId: searchNightAllCompatibility
-      summary: Call one of the three Night-All legacy search operations.
+      summary: Call a Night-All legacy search, post-detail, or post-comments operation.
       x-mx-required-capabilities-by-platform-operation:
         xiaohongshu:
           raw: social.posts.search
@@ -6349,7 +6684,7 @@ paths:
         - name: operation
           in: path
           required: true
-          schema: { type: string, enum: [raw, crawl, user-info] }
+          schema: { type: string, enum: [raw, crawl, user-info, post-detail, post-comments] }
         - name: Idempotency-Key
           in: header
           required: true
@@ -6942,8 +7277,7 @@ paths:
         the aggregate cursor. Old WeChat aggregate cursors must restart explicitly. WeChat results are archived but
         not automatically ingested into canonical search. mode=stored performs one filtered canonical search, returns
         an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags
-        require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude
-        undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the
+        require every exact tag. Date bounds are inclusive eventTime values, must include a timezone, and exclude undated records. RSS requires the explicit rss platform grant and mode=stored; objectTypes=[article] selects migrated subscription articles. RSS eventTime preserves its effective time (normalizedAt, publishedAt, collectedAt, createdAt in that order; legacy rows use publishedAt, discoveredAt, createdAt). RSS does not fetch feeds during search, and excludes unmigrated local-file news. Existing canonical-search quota and pricing apply. Business identifiers are caller-side attribution, never search keywords. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the
         same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start
         a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation
         with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit
@@ -8855,11 +9189,11 @@ paths:
                 username:
                   type: string
                   maxLength: 2048
-                  description: Twitter 自动识别账号字符串，与 userId 字段相同：裸纯数字字符串按 1–19 位账号 ID 查询；其他值按用户名查询，去掉 @ 后须为 1–15 位英文字母、数字或下划线。纯数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
+                  description: Twitter 自动识别账号字符串，与 userId 字段相同：1–19 位裸纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
                 userId:
                   type: string
                   maxLength: 2048
-                  description: 与 username 使用相同的自动识别规则；裸纯数字字符串按 1–19 位账号 ID 查询，含字母或下划线按用户名查询，@ 显式表示用户名。
+                  description: 与 username 使用相同的自动识别规则；1–19 位裸纯数字字符串先按账号 ID、该 ID 没有账号时再按用户名查询，其他值按用户名查询，@ 显式表示用户名。
                 user_id:
                   type: string
                   maxLength: 2048
@@ -8918,7 +9252,7 @@ paths:
           description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
             表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
         '400':
-          description: 参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。
+          description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。
         '401':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '402':
@@ -8926,7 +9260,9 @@ paths:
         '403':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '404':
-          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
+          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
+        '422':
+          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':
@@ -8978,11 +9314,11 @@ paths:
                 username:
                   type: string
                   maxLength: 2048
-                  description: Twitter 自动识别账号字符串，与 userId 字段相同：裸纯数字字符串按 1–19 位账号 ID 查询；其他值按用户名查询，去掉 @ 后须为 1–15 位英文字母、数字或下划线。纯数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
+                  description: Twitter 自动识别账号字符串，与 userId 字段相同：1–19 位裸纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
                 userId:
                   type: string
                   maxLength: 2048
-                  description: 与 username 使用相同的自动识别规则；裸纯数字字符串按 1–19 位账号 ID 查询，含字母或下划线按用户名查询，@ 显式表示用户名。
+                  description: 与 username 使用相同的自动识别规则；1–19 位裸纯数字字符串先按账号 ID、该 ID 没有账号时再按用户名查询，其他值按用户名查询，@ 显式表示用户名。
                 user_id:
                   type: string
                   maxLength: 2048
@@ -9020,7 +9356,7 @@ paths:
           description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
             表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
         '400':
-          description: 参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。
+          description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。
         '401':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '402':
@@ -9028,7 +9364,9 @@ paths:
         '403':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '404':
-          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
+          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
+        '422':
+          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':
@@ -9345,7 +9683,7 @@ paths:
                   minimum: 1
                   maximum: 15
                   default: 1
-              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
+              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。channelId 与 handle/c/user URL 同传时以 ID 为准，不额外解析或验证 URL 对应关系；/channel/ID URL 与 channelId 冲突则拒绝。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
             example:
               videoId: dQw4w9WgXcQ
               maxComments: 50
@@ -9384,13 +9722,13 @@ paths:
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       comments:
                         type: array
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       raw_data:
                         type: string
                         description: 本页 items 的 JSON 字符串，兼容下游记录计数。
@@ -9653,7 +9991,7 @@ paths:
                   minimum: 1
                   maximum: 15
                   default: 1
-              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
+              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。channelId 与 handle/c/user URL 同传时以 ID 为准，不额外解析或验证 URL 对应关系；/channel/ID URL 与 channelId 冲突则拒绝。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
             example:
               channelUrl: https://www.youtube.com/@example
               maxVideos: 5
@@ -9693,13 +10031,13 @@ paths:
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       comments:
                         type: array
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       raw_data:
                         type: string
                         description: 本页 items 的 JSON 字符串，兼容下游记录计数。

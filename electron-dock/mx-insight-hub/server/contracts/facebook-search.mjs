@@ -10,6 +10,16 @@ export const FACEBOOK_ENDPOINT = 'facebook-scraper3.search'
 export const FACEBOOK_JUSTONE_KEY = 'j.facebook_post_search_v1'
 export const FACEBOOK_OPERATION = Object.freeze({ operationKey: 'social.facebook.search', label: 'Facebook 帖子搜索',
   legacyGate: 'hubSocialVerified', contractVersion: FACEBOOK_VERSION, endpointKeys: [FACEBOOK_ENDPOINT], allowZeroCost: true })
+// Self-hosted Night-All-A collector. Its own operation keeps dispatch leases
+// and provider-call evidence apart from the RapidAPI parent delivery lease.
+export const FACEBOOK_SELFHOSTED_PROVIDER = 'night-all-a'
+export const FACEBOOK_SELFHOSTED_OPERATION = 'selfhosted.facebook.search'
+export const FACEBOOK_SELFHOSTED_ENDPOINT = 'night-all-a.facebook.search.posts'
+export const FACEBOOK_SELFHOSTED_VERSION = 'mx-insight-hub.facebook-selfhosted.v1'
+// Night-All-A's search.posts input schema caps query and cursor at 500 chars
+// and walks at most 5 GraphQL pages of about 10 posts per task.
+export const FACEBOOK_SELFHOSTED_MAX_INPUT = 500
+const FACEBOOK_PROVIDERS = ['rapidapi', 'justone', FACEBOOK_SELFHOSTED_PROVIDER]
 const dateFields = ['start_date', 'startDate', 'start', 'startTime', 'end_date', 'endDate', 'end', 'endTime']
 const invalid = message => { throw new AppError(400, 'invalid_facebook_search', message) }
 function date(value, fallback) {
@@ -41,7 +51,7 @@ export function normalizeFacebookSearch(normalized, codec, dataSearch = null, no
   if (body.cursor) {
     try {
       state = codec.decode(body.cursor)
-      if (state.version !== FACEBOOK_VERSION || state.scope !== scope || !['rapidapi', 'justone'].includes(state.provider)
+      if (state.version !== FACEBOOK_VERSION || state.scope !== scope || !FACEBOOK_PROVIDERS.includes(state.provider)
         || (state.projectionVersion !== undefined && ![1, FACEBOOK_PROJECTION_VERSION].includes(state.projectionVersion))
         || !Number.isInteger(state.page) || state.page < 2 || state.page > 15 || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= now
         || (!(dataSearch && state.buffer && state.providerCursor == null)
@@ -66,6 +76,11 @@ export function normalizeFacebookSearch(normalized, codec, dataSearch = null, no
     fingerprintBody: dataSearch ? { ...normalized, type: dataSearch.resultType }
       : { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...body },
     forProvider(provider) {
+      if (provider === FACEBOOK_SELFHOSTED_PROVIDER) return { operation: FACEBOOK_SELFHOSTED_OPERATION,
+        endpointKey: FACEBOOK_SELFHOSTED_ENDPOINT, endpointContractVersion: FACEBOOK_SELFHOSTED_VERSION, endpointVersion: 'v1',
+        upstreamQuery: { query, start_date: state.startDate, end_date: state.endDate,
+          pages: Math.min(3, Math.ceil(pageSize / 10)), ...(state.providerCursor ? { cursor: state.providerCursor } : {}) },
+        standardSearch: Boolean(dataSearch), allowOverflow: true }
       return provider === 'rapidapi' ? { endpointKey: FACEBOOK_ENDPOINT, endpointContractVersion: FACEBOOK_VERSION,
         endpointVersion: 'v1', endpointPath: '/search/posts', upstreamQuery: { query, start_date: state.startDate,
           end_date: state.endDate, ...(state.providerCursor ? { cursor: state.providerCursor } : {}) },
@@ -202,16 +217,42 @@ export function facebookStandardMedia(row, { projectionVersion = FACEBOOK_PROJEC
   return { coverUrl, images, videos }
 }
 
+// A Night-All-A run stores each fb_scraper post under record.raw. Expose its
+// nested feedback/attachments under the supplier aliases facebookRow reads;
+// an absent count stays absent and an explicit null stays unknown.
+export function nightAllAFacebookPost(record) {
+  if (!object(record)) throw new Error('invalid_facebook_identity')
+  const post = object(record.raw) ? record.raw : object(record.attributes?.entity) ? record.attributes.entity : null
+  if (!post) throw new Error('invalid_facebook_identity')
+  const feedback = object(post.feedback) ? post.feedback : {}
+  const total = value => object(value) ? value.total : undefined
+  const attachments = Array.isArray(post.attachments) ? post.attachments.filter(object) : []
+  const media = type => attachments.filter(item => item.type === type)
+  const author = object(post.author) ? post.author : {}
+  const avatar = firstText(author.profile_picture_url, author.profile_picture?.uri, author.profile_picture?.url, author.avatar)
+  return { ...post, post_id: post.post_id ?? post.id, url: firstText(post.url, record.source_url),
+    created_time: post.created_time ?? record.published_at,
+    ...(Object.keys(author).length ? { author: { ...author, ...(avatar ? { profile_picture_url: avatar } : {}) } } : {}),
+    reactions_count: total(feedback.reactions), comments_count: total(feedback.comments), reshare_count: total(feedback.shares),
+    video_view_count: feedback.view_count ?? media('video').find(item => item.view_count != null)?.view_count,
+    image_urls: media('photo').map(item => item.url), video_urls: media('video').map(item => item.url),
+    ...(media('video')[0]?.thumbnail ? { video_thumbnail: media('video')[0].thumbnail } : {}) }
+}
+
 export function projectFacebookSearch(raw, request, provider, capturedAt, { allowOverflow = false } = {}) {
-  const items = provider === 'justone' ? raw?.business_data ?? raw?.results : raw?.results
+  const selfhosted = provider === FACEBOOK_SELFHOSTED_PROVIDER
+  const items = provider === 'justone' ? raw?.business_data ?? raw?.results
+    : selfhosted ? Array.isArray(raw?.items) ? raw.items.map(nightAllAFacebookPost) : null : raw?.results
   if (!raw || typeof raw !== 'object' || !Array.isArray(items)) throw new Error('invalid_facebook_response')
   if (items.length > 10000) throw new Error('facebook_page_too_large')
   const row = request.projectionVersion === 1 ? facebookRowV1 : facebookRow
   const rows = items.map(post => row(post, capturedAt))
   // Suppliers do not accept count. Never silently discard paid business rows.
   if (rows.length > request.pageSize && !allowOverflow) throw new Error('facebook_page_exceeds_requested_count')
-  const cursor = raw.cursor || raw.next_cursor || raw.nextCursor || raw.pagination?.next_cursor || raw.pagination?.nextCursor || null
+  let cursor = raw.cursor || raw.next_cursor || raw.nextCursor || raw.pagination?.next_cursor || raw.pagination?.nextCursor || null
   if (cursor != null && (typeof cursor !== 'string' || cursor.length > 4096)) throw new Error('invalid_facebook_continuation')
+  // Night-All-A would refuse a longer cursor; end the continuation instead.
+  if (selfhosted && cursor?.length > FACEBOOK_SELFHOSTED_MAX_INPUT) cursor = null
   const hasMore = Boolean(cursor) && cursor !== request.providerCursor && request.page < 15
   const publicBody = { contractVersion: RAW_SEARCH_VERSION, data: { platform: 'facebook', query: request.query,
     raw_info: '[]', raw_data: JSON.stringify(rows), items: rows,

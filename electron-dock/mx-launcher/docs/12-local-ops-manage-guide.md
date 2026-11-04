@@ -318,6 +318,20 @@ Direct-IP HTTP URL 和经 Domestic edge 暴露的公网域名 HTTPS URL；两条
 Caddy 只对 `.env` 中的精确 `HY2_SYSTEM_SUBSCRIPTION_PATH` 使用 system Basic Auth，不能
 改回 `/peer_*.yaml` 通配；默认发布 TCP `3434`，端口冲突时沿用 plan 选择的 `3435`。
 
+### Oversea 安装与 H Delivery 状态
+
+`Install / Sync` 的 `installed` 和 `artifact-push-remote-ssh` passed 表示真实远端安装已完成。
+历史 reachability plan 固定返回 `h-endpoint-blocked / internal-only`，它没有消费终端探测结果，
+不能据此认定 Domestic WG、H2I 或 Internal DNS 故障。Admin 将这个组合展示为
+`pending-evidence`（待验证），并同时列出三个验证条件；不改动原始 plan 或执行门禁，也不
+直接提升为 `h-endpoint-ready`。终端仍需验证订阅拉取以及到目标 Oversea 的连接。
+
+迁移区的 `Target runtime: 0/N source user(s) synced` 是另一项检查：源站用户在目标站的
+active account 必须具有 `runtimeSync.status=synced`。先 Preview、Add Target（保留源站），
+再 Sync Target。已有安装报告并不证明后续追加的用户已同步；Cut Over 仍要求全部 synced
+且本页具有 15 分钟内、匹配源站/目标站及用户集合的成功 Sync Target 证据。不要为了消除
+H Delivery 的待验证提示重建、轮换或重启现役 Domestic/Internal WG。
+
 ### 生产 Domestic/Internal 硬隔离
 
 已有 MX-H2I 用户在线时，Domestic ↔ Internal WireGuard 属于现役数据面。Oversea 的 New、

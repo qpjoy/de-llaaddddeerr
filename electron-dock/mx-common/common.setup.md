@@ -1,5 +1,7 @@
 ```bash
-# 配置 HanLP
+# 在 mx-common 目录部署 HanLP：32Gi 上限 / cap=5，逐个加载、5 worker 并发服务
+# 首次修改会 Recreate HanLP；同镜像 ID、同模板再次部署不额外重启。
+# 仍执行原有构建缓存/导入流程；不是只读检查。
 bash scripts/manage.sh deploy hanlp
 # 构建需要代理时（只作用于镜像构建）
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp
@@ -12,8 +14,10 @@ kubectl -n mx-common get service/mx-common-hanlp
 kubectl -n mx-common get endpoints/mx-common-hanlp
 kubectl -n mx-common rollout status deployment/mx-common-hanlp
 
-# 5x3 5 worker(s) x 3 thread(s)
-kubectl -n mx-common set env deployment/mx-common-hanlp MAX_CONCURRENT_INFERENCES-
+# 32Gi 是上限，不会预占；request 保持 1Gi，实际峰值仍需要主机余量。
+# 16 CPU、cap=5 得到 5 worker × 3 threads，保留 1 个交互槽。
+# 不要移除 cap，否则扩大内存会自动增加模型副本；cap=1 会一直限制并发。
+# 模型加载期间搜索/索引可能失败或等待；实际内存峰值仍须观察。
 
 # hanlp重建后查看稳定性
 kubectl -n mx-common get pods -l app.kubernetes.io/name=mx-common-hanlp

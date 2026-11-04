@@ -1,27 +1,39 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
+import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
+import { POST_COMMENTS_RECIPES } from '../contracts/post-comments.mjs'
 import { WECHAT_SEARCH_OPERATION, WECHAT_SEARCH_PATH } from '../contracts/wechat-search-alias.mjs'
 import { hubSocialAccountPlatforms } from '../contracts/hub-social-docs.mjs'
 import { HUB_SOCIAL_COMPAT_ACTIVITIES } from '../contracts/hub-social-compat.mjs'
 
 const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
-const XIAOHONGSHU_CAPABILITIES = { raw: 'social.posts.search', crawl: 'social.users.posts', 'user-info': 'social.users.resolve' }
+const XIAOHONGSHU_CAPABILITIES = {
+  raw: 'social.posts.search', crawl: 'social.users.posts', 'user-info': 'social.users.resolve',
+  'post-detail': 'social.posts.resolve', 'post-comments': 'social.comments.list',
+}
 
 export function strategySearchGuide(scopes = null) {
   // Document existing effective scopes only. Platform and operation capability
   // must belong to the same scope; this view never grants or merges Key rights.
-  const platforms = operation => NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation].filter(platform =>
+  const platforms = operation => (operation === 'post-detail'
+    ? NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS
+    : operation === 'post-comments'
+      ? Object.keys(POST_COMMENTS_RECIPES)
+      : NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation]).filter(platform =>
     scopes == null || scopes.some(scope => scope.platforms?.includes(platform)
-      && (platform !== 'xiaohongshu' || scope.capabilities?.includes(XIAOHONGSHU_CAPABILITIES[operation]))))
+      && (operation === 'post-comments' ? scope.capabilities?.includes('social.comments.list') : platform !== 'xiaohongshu' || scope.capabilities?.includes(XIAOHONGSHU_CAPABILITIES[operation]))))
   const rows = [
     ['关键词搜索', 'raw', 'platform + keyword / query', 'raw_data：内容列表'],
     ['账号内容', 'crawl', 'platform + username / userId / uid', 'raw_info + raw_data：账号与内容'],
     ['账号资料', 'user-info', 'platform + username / userId / uid', 'raw_info：账号资料'],
+    ['帖子详情', 'post-detail', 'platform + postId / contentId / 专用帖子 ID / url', 'raw_data：完整正文、作者、时间与媒体'],
+    ['帖子评论', 'post-comments', 'platform + postId / contentId / url；可带 cursor 或 params', 'raw_data：评论 ID、正文 ID、正文、作者、时间与互动量'],
   ].filter(([, operation]) => platforms(operation).length).map(([label, operation, params, output]) =>
     `<tr><td>${label}</td><td><code>POST /api/v1/night-all/search/${operation}</code><br><code>POST /api/v1/search/${operation}</code></td><td>${params}</td><td>${output}</td><td>${platforms(operation).map(escape).join('、')}</td></tr>`).join('')
   const standard = platforms('raw')
   const examplePlatform = standard.includes('instagram') ? 'instagram' : standard[0]
   const twitter = standard.includes('twitter')
   const facebook = standard.includes('facebook')
+  const commentsPlatforms = platforms('post-comments')
   const newlyDirectStandard = standard.filter(platform => ['reddit', 'youtube'].includes(platform))
   const noTitle = standard.filter(platform => ['twitter', 'facebook', 'weibo', 'instagram'].includes(platform))
   const wechat = scopes == null || scopes.some(scope => scope.platforms?.includes('social')
@@ -30,7 +42,7 @@ export function strategySearchGuide(scopes = null) {
   return `<section class="doc-page" data-doc-page="strategy-search"><h1>策略搜索</h1>
     <p>面向监测策略的关键词搜索、账号内容与账号资料。调用方使用已授权的业务接口，不传 provider 或路由控制参数。产品可见不等于已开通全部接口，查看本文或保存管理配置不会新增权限；实际授权、额度、费用与可用性以当前 Key 为准。</p>
     ${rows ? `<h2>业务接口</h2><p>以下平台按当前授权范围列出。每类接口支持的平台不同；账号资料是查询已知账号，不是按关键词搜索账号。</p>
-    <table><thead><tr><th>用途</th><th>接口</th><th>核心参数</th><th>返回重点</th><th>平台</th></tr></thead><tbody>${rows}</tbody></table>` : ''}
+    <table><thead><tr><th>用途</th><th>接口</th><th>核心参数</th><th>返回重点</th><th>平台</th></tr></thead><tbody>${rows}</tbody></table>${platforms('post-detail').includes('xiaohongshu') ? '<p>小红书详情使用 Hub-native <code>POST /api/v1/data/post</code>；表中的旧详情路径只保留历史兼容，不改变现有登录、联网或原生授权。</p>' : ''}${commentsPlatforms.length ? `<p>帖子评论接口是单帖评论采集合同；商品评论、搜索附带评论${commentsPlatforms.includes('youtube') ? '和 YouTube 频道评论' : ''}不能替代它。下一页只在返回的 <code>page.nextCursor</code> 有效时继续。</p>` : ''}` : ''}
     ${examplePlatform ? `<h2>标准内容搜索</h2><p><code>POST /api/v1/data/search</code> 返回 <code>data.items</code> 与 <code>data.pageInfo</code>。普通内容搜索使用 <code>platform、query、pageSize</code>，与兼容接口的 <code>raw_data</code> JSON 字符串格式不同，调用方需按实际接口解析。</p>
     <pre>${escape(JSON.stringify({ platform: examplePlatform, query: '示例关键词', pageSize: 20 }, null, 2))}</pre>
     <p>标准内容平台：${standard.map(escape).join('、')}。不要只替换 URL 而保留另一接口的请求体或解析逻辑。响应中的 <code>metrics</code> 按合同区分已取得的 0 与未提供的 null，历史或上游默认 0 本身不能证明实测零值；<code>media.coverUrl/images/videos</code> 分别表示封面、图片和视频引用。${noTitle.length ? `${noTitle.map(escape).join('、')} 普通帖子不从正文生成标题，标准 title 为 null；` : ''}其他内容的原生视频或文章标题按对应平台合同保留。</p>` : ''}
@@ -62,7 +74,7 @@ export function strategySearchGuide(scopes = null) {
     </tbody></table>
     ${accounts.some(row => row.operation === 'crawl') ? `<p>账号内容默认 <code>activityTypes: ["posts"]</code>。多个账号与活动组合受总工作量上限约束。产品展示提供单账号 posts，接口调试可编辑批量请求。</p><table><thead><tr><th>平台</th><th>可用 activityTypes</th></tr></thead><tbody>${accounts.find(row => row.operation === 'crawl').platforms.map(platform => `<tr><td>${escape(platform)}</td><td><code>${(HUB_SOCIAL_COMPAT_ACTIVITIES[platform] || []).map(escape).join('、')}</code></td></tr>`).join('')}</tbody></table>` : ''}
     ${accounts.map(({ operation, platforms }) => `<h3>${operation === 'crawl' ? '账号内容' : '账号资料'}示例</h3><p><code>POST /api/v1/data/social/${operation}</code>；以下为参数示例，不代表账号存在或服务实时可用。</p><pre>${escape(JSON.stringify({ platform: platforms[0], username: 'example', ...(operation === 'crawl' ? { page_size: 20, activityTypes: ['posts'] } : {}) }, null, 2))}</pre>`).join('')}
-    ${accounts.some(row => row.platforms.includes('twitter')) ? '<p>Twitter / X 账号自动识别，username/usernames/userId/userIds/user_id/uid 及 params 中对应账号别名使用相同规则：裸纯数字字符串按 1–19 位平台 ID 查询，含字母或下划线按 1–15 位用户名查询；纯数字用户名须加 @，或通过 url/urls 字段提交主页 URL。数字 ID 请作为字符串传输。产品展示无需选择账号字段；历史精确回执保持原响应，不自动重新采集。内部任务编号如 ui_batch_019 不证明存在同名平台账号；不存在或无法确认身份时返回明确错误，不能伪装成一条内容或分页耗尽。</p>' : ''}
+    ${accounts.some(row => row.platforms.includes('twitter')) ? '<p>Twitter / X 账号自动识别，username/usernames/userId/userIds/user_id/uid 及 params 中对应账号别名使用相同规则：1–19 位裸纯数字字符串先按平台 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和含字母或下划线的值按用户名查询，Hub 不按长度拒绝；只查数字用户名请加 @，或通过 url/urls 字段提交主页 URL。数字 ID 请作为字符串传输。产品展示无需选择账号字段；历史精确回执保持原响应，不自动重新采集。内部任务编号如 ui_batch_019 不证明存在同名平台账号；不存在或无法确认身份时返回明确错误，不能伪装成一条内容或分页耗尽。</p>' : ''}
     <h3>返回字段与续页</h3><p><code>data.items</code> 为已投影数组；<code>data.raw_info</code> 和 <code>data.raw_data</code> 保持 JSON 字符串。账号内容默认分别表示账号资料与内容，账号资料以 raw_info 为主。followers/following 的 items/raw_data 为关系账号，使用 objectType=user 和 user_id，不生成 content_id；raw_info 只包含目标账号与本页交付的关系账号。先判断实际类型再解析，不能对 items 再执行 JSON.parse，也不能把整个 raw_data 字符串当作一条内容。统一指标区分真实 0 和未提供的 null，完整业务字段保留在对应投影中。</p>
     <p><code>data.pageInfo</code> 与兼容 <code>data.page</code> 使用同一 hasMore/nextCursor。Hub 优先消费已有余量并去重，再按资源和准入限制继续获取。最多 15 个公开页、游标 24 小时有效；pageSize 是上限。短页、空页或 partial 都应检查游标和 warnings。没有可用游标时停止自动续页；若出现 pagination_completeness_unknown，即使 hasMore=false、nextCursor=null 也只是无法继续，不表示确认耗尽。下一页保持平台、账号、活动、过滤条件与页大小，原样回传游标并使用新 Idempotency-Key。</p>
     <p>遇到 400 invalid_cursor 或需明确重启的错误时，由调用方决定是否从第一页重新查询。429 不等于分页耗尽；超时或未知结果也不是空结果，先按原请求标识只读核对，不自动换键重发。分页不会切换到旧转发入口或跨供应链继续。</p>` : ''}

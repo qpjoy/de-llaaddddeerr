@@ -15,7 +15,38 @@ const uncertain = requestId => new AppError(409, 'request_outcome_unknown',
   'The v2 delivery outcome is unresolved; retain the original request and key',
   { ...(requestId ? { requestId } : {}), automaticRetryAllowed: false })
 
-export async function executeDataSearchV2({ store, context, body, idempotencyKey, pepper, execute, retryOfRequestId = null, retryStore = null }) {
+// A new page held back only by an equal search still in flight was never
+// dispatched. Hub waits for that search itself and then admits this one, so a
+// caller normally never sees its refusal. 40 seconds outlasts a blocker that
+// runs into the 30-second supplier deadline, and still leaves this page's own
+// run inside Delta's 90-second client timeout; a longer wait would let Delta
+// time out mid-purchase. Past it the original 409 is returned unchanged.
+export const SEARCH_ADMISSION_WAIT_MS = 40_000
+const SEARCH_ADMISSION_POLL_MS = 1_000
+const waitsForInFlight = error => error?.code === 'search_admission_blocked'
+  && error.details?.dispatchState === 'not_started' && error.details.automaticRetryAllowed === true
+  && error.details.retrySameRequest === true
+const pause = (ms, signal) => new Promise(resolve => {
+  const timer = setTimeout(done, ms)
+  function done() { clearTimeout(timer); signal?.removeEventListener?.('abort', done); resolve() }
+  signal?.addEventListener?.('abort', done, { once: true })
+})
+
+export async function executeDataSearchV2({ admissionWaitMs = 0, signal = null, sleep = pause, now = Date.now, ...options }) {
+  const deadline = now() + admissionWaitMs
+  for (;;) {
+    try { return await attemptDataSearchV2(options) }
+    catch (error) {
+      // An explicit retry acknowledgement is claimed once; it never waits here.
+      const remaining = deadline - now()
+      if (!waitsForInFlight(error) || options.retryOfRequestId != null || remaining <= 0 || signal?.aborted) throw error
+      await sleep(Math.min(SEARCH_ADMISSION_POLL_MS, remaining), signal)
+      if (signal?.aborted) throw error
+    }
+  }
+}
+
+async function attemptDataSearchV2({ store, context, body, idempotencyKey, pepper, execute, retryOfRequestId = null, retryStore = null }) {
   const protocol = new SearchProtocolStore(store)
   const lease = await protocol.begin(context, { version: 2, body, idempotencyKey, retryOfRequestId, retryStore, apiKeyPepper:pepper })
   if (lease.kind === 'replay') return { ...lease.result, replay: true, sourceMode: 'idempotent_replay', originSourceMode: lease.result.sourceMode }

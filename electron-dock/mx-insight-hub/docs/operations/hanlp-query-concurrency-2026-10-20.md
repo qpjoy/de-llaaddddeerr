@@ -129,3 +129,52 @@ flowchart LR
 ### 待定
 
 - 内存 request 仍是 1Gi，常驻内存却会变成约 N 份模型。节点内存紧张时，这个 Pod 会被优先驱逐，Hub 随之退回 jieba。要更稳可以调高 request，但要先确认节点可分配内存，否则 Pod 可能调度不上。
+
+## 第三轮（2026-10-31）：worker 内存回收
+
+状态：已实现、未部署。需要一次 `deploy hanlp`（用户已同意）。
+
+### 证据
+
+- 10-28 的 a3131617 把内存上限从 8Gi 提到 32Gi，并用 `MAX_CONCURRENT_INFERENCES=5` 保持 5 个 worker。
+- 10-30 采样：运行中的 Pod 已运行 2 天 21 小时，容器重启次数 0，cgroup `oom_kill=35`，`/health` 的 `replacedWorkers=35`。Pod 年龄与 10-28 的部署吻合，所以这 35 次都发生在 32Gi 下、约 69 小时内。
+- 设计预算是每个 worker 1.5 GiB，实测一个被杀的 worker 有 5.57 GiB。加内存没有止住 OOM，说明单个 worker 的内存没有上限，不是总量不够。
+- 采样时等待队列为 0、5/5 存活；Delta 调试文档的告警样本里没有分词错误。HanLP 不在 Delta 调 Hub 的同步链路上（先落盘后返回），所以这是**稳定性**问题，不是并发瓶颈。
+- 每次 OOM：被杀 worker 手上的那批请求返回 500，projector 整批退回并退避（入库到可检索变慢）；交互查询 2 秒后降级 jieba；补 worker 期间少一个 worker。
+
+### 改动（`mx-common/deploy/hanlp/server.py`、`50-hanlp.yaml`）
+
+1. **空闲时回收。** worker 每次回复时带上自己的常驻内存（`/proc/self/statm`）。超过（内存上限 − 512 MiB 前端预留）÷ worker 数 × 60%（32Gi、5 个 worker 时约 3870 MiB；不低于 1.5 GiB 预算）时，等它做完当前请求后由池子替换。
+   - 同一时间最多替换一个；有替换（含崩溃补位）在加载时，超限 worker 继续服务，下一次释放再判断。
+   - 不回收最后一个存活的 worker；没有内存上限时不回收。
+   - 计入 `recycledWorkers`；`replacedWorkers` 只统计意外退出（OOM、崩溃）。
+2. **每次前向不超过 20,000 字符。** 一次请求按顺序切成多段调用模型，再按位置拼回。对外仍接受 256 条、每条截到 20,000 字符，回复格式不变。
+3. **分配器。** worker 继承 `MALLOC_ARENA_MAX=2`（代码内置默认，部署里显式设置的值优先）；常驻内存超过 1.5 GiB 预算时，在回复前调用一次 glibc `malloc_trim(0)`。小请求不付这个开销。
+4. **`/health` 的 `pool` 新增** `recycledWorkers`、`recycleAboveBytes`、`maxPassCharacters`、`residentBytes`（按 worker 编号）。原有字段不变，部署脚本的 worker 数校验不受影响。
+5. **memory request 1Gi → 8Gi**（5 × 1.5 GiB + 前端）。limit 仍是 32Gi，作为突发余量。
+
+Hub、projector、检索代码都不需要改。
+
+### 部署与验证
+
+0. 先确认节点可分配内存够 8Gi request（只读）：
+
+   ```bash
+   kubectl describe node mx-internal-server | sed -n '/Allocated resources/,/Events/p'
+   ```
+
+1. 在服务器的 `electron-dock/mx-common` 下执行 `PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp`。Deployment 是 Recreate，5 个模型串行加载期间 HanLP 不可用：projector 退避，查询 2 秒后降级 jieba。选流量低的时段。
+2. 启动日志第一行应带 `recycle above: 3870 MiB`。
+3. 有写入流量后看 `/health`（或 `hanlp-memory.py`）：`residentBytes` 应是数字。如果一直是 null，说明读不到 `/proc`，回收没有生效。
+4. 观察 24 小时：新容器的 `memory.oom_control` 里 `oom_kill` 应保持 0，`replacedWorkers` 保持 0。`recycledWorkers` 会增长；如果每小时好几次，说明阈值偏低或每批都在膨胀，需要带上 `residentBytes` 再定。
+5. 历史 `ContainerStatusUnknown` Pod（`mx-common-hanlp-6db4799d44-cn9mn`）只是残留记录，确认后可删除：`kubectl -n mx-common delete pod mx-common-hanlp-6db4799d44-cn9mn`。
+
+### 回退
+
+还原 `server.py`、`50-hanlp.yaml`，再执行一次 `deploy hanlp`。回收没有单独的环境变量开关（按“少配置 env”的约定）；即使阈值不合适，后果是少一个 worker 加反复加载模型，不会整体不可用。
+
+### 验证（本地）
+
+- `hanlp_server_test.py` 73 项通过（原 60 项 + 13 项）：回收阈值、只在空闲时回收、一次只回收一个、崩溃补位时推迟、不回收最后一个、无上限不回收、分段顺序与边界、单条扁平结果、超预算才 trim 并回报 trim 后内存、失败回复也带内存、worker 继承 `MALLOC_ARENA_MAX`、`/health` 新字段。
+- mx-common `npm test`：183 通过、0 失败、1 跳过（原有）。“HanLP deploy re-import” 用例偶发 broken pipe，与本次无关。
+- macOS 上没有 `/proc` 和 glibc，Linux 上的读内存与 `malloc_trim` 要靠部署后第 3 步确认。

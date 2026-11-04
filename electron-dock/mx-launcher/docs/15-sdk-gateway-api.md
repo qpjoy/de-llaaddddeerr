@@ -1,5 +1,7 @@
 # SDK Gateway API
 
+> 下游用户接入的当前详细契约见 [57 · 用户、身份与 SDK 接入](57-downstream-user-integration.md)、[58 · Oversea 用户订阅](58-oversea-user-subscription-api.md)、[59 · 浏览器账号接口](59-browser-account-api.md)（2026-10-27，文档 v1）。下文及自动 OpenAPI 保留历史设计/示例；用户管理实际鉴权、SDK 可写字段、token 时效等差异已在 57/58 明确列出，接入时以对应源码行为为准。
+
 SDK Gateway 是 Internal 对外部系统开放的稳定集成面。外部系统不要直接复制
 User Center、Permission Center 或 Config Center 的内部表结构；优先调用
 `/internal/v1/sdk/*`。

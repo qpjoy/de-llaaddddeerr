@@ -1,12 +1,16 @@
 import { nativeForwardingByPath } from './native-forwarding.mjs'
 import { hubSocialByPath } from './hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from './youtube-comments.mjs'
+import { POST_COMMENTS_PATH, POST_COMMENTS_RECIPES, POST_COMMENTS_CAPABILITY } from './post-comments.mjs'
 import { QIXIN_CATALOG } from './enterprise.mjs'
 import { customerRequestPrice } from '../billing/contracts.mjs'
 import { XIAOHONGSHU_ANALYTICS_METERS } from '../../shared/product-catalog.mjs'
 import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
 const enterprises = new Set(QIXIN_CATALOG.apis.map(api => api.api_id))
 export function servicePriceDefinition(path) {
+  if ([POST_COMMENTS_PATH, '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'].includes(path)) return {
+    platforms: Object.keys(POST_COMMENTS_RECIPES), capabilities: [POST_COMMENTS_CAPABILITY], meterKey: POST_COMMENTS_CAPABILITY,
+  }
   if (Object.values(YOUTUBE_COMMENT_PATHS).includes(path)) return { platform: 'youtube', capabilities: [YOUTUBE_COMMENTS_CAPABILITY], meterKey: YOUTUBE_COMMENTS_CAPABILITY }
   const analytics = XIAOHONGSHU_ANALYTICS_METERS.find(entry => entry.path === path)
   if (analytics) return { platform: 'xiaohongshu', capabilities: ['social.posts.analytics'], meterKey: analytics.key }

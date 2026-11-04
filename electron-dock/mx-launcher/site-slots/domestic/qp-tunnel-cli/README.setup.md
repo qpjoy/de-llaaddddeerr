@@ -169,3 +169,24 @@ qp-tunnel-cli update-subscription --instance subscriptions
 # k8s 代理位置
 /etc/systemd/system/kubelet.service.d/proxy.conf
 ```
+
+# V2 订阅
+### 新增7789端口代理
+```bash
+# 添加订阅
+qp-tunnel-cli install \
+  --instance xjp01 --mixed-port 7789 \
+  --node mx-oversea-xjp01-hysteria2 \
+  --url '<系统聚合订阅URL>' --no-auth
+
+QP_TUNNEL_MIXED_PORT=7789 qp-tunnel-cli curl -I https://www.google.com
+
+# 更新订阅
+qp-tunnel-cli update-subscription \
+  --instance xjp01 \
+  --node mx-oversea-xjp01-hysteria2
+
+# 启动
+qp-tunnel-cli start --instance xjp01
+qp-tunnel-cli status --instance xjp01
+```

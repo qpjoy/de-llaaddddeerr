@@ -89,6 +89,8 @@ COPY --from=build /workspace/mx-insight-hub/public ./public
 # Agent Market intentionally uses Node's native TypeScript type stripping.
 # Import the full entrypoint while building the image so a missing source tree,
 # unsupported TypeScript construct or stale Node base fails before deployment.
+# Fail the image build if the checkout/context omits RSS migration entrypoints.
+RUN node --input-type=module -e "import { accessSync } from 'node:fs'; ['server/ops/reconcile-rss-file-lineage.mjs','server/ops/reconcile-rss-intent.mjs','server/ingest/external/rss-file-lineage.mjs','server/ingest/external/rss-snapshot.mjs','server/ops/rss-file-coverage.mjs','server/ops/diagnose-rss-intent-migration.mjs','migrations/174_rss_subscription_snapshots.sql','migrations/175_rss_file_lineage.sql'].forEach(path => accessSync(path))"
 RUN node -e "import('./server/index.mjs')"
 # Use the numeric UID/GID of the base image's `node` user (1000:1000).
 # Kubernetes `runAsNonRoot` cannot verify a non-numeric username, so a numeric

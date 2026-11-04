@@ -1,3 +1,5 @@
+import { effectiveBusinessPageLimit, isLcySupplierPriority } from './core/internal-traffic-policy.mjs'
+import { StrategySearchRoutingStore, assertFacebookAccountEnabled } from './external-platforms/strategy-search-routing.mjs'
 import { requestMaintenance } from './core/request-maintenance.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { validateSearchOrder } from './web-search/contract.mjs'
@@ -5,7 +7,7 @@ import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-lim
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
 import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, DATA_SEARCH_V2_PLATFORMS, normalizeDataSearchV2 } from './contracts/data-search-v2.mjs'
-import { executeDataSearchV2, guardDataSearchV1, publicSearchProtocolStatus } from './data/search-protocol.mjs'
+import { SEARCH_ADMISSION_WAIT_MS, executeDataSearchV2, guardDataSearchV1, publicSearchProtocolStatus } from './data/search-protocol.mjs'
 import { SearchProtocolStore } from './data/search-protocol-store.mjs'
 import { servicePriceDefinition, customerServiceQuote } from './contracts/service-pricing.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
@@ -30,6 +32,14 @@ import {
   NIGHT_ALL_LEGACY_OPERATIONS,
 } from './contracts/night-all-legacy.mjs'
 import { XIAOHONGSHU_POST_OPERATION } from './contracts/tikhub-xiaohongshu.mjs'
+import {
+  NIGHT_ALL_POST_DETAIL_OPERATION,
+  NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS,
+} from './contracts/night-all-post-detail.mjs'
+import {
+  NIGHT_ALL_POST_COMMENTS_OPERATION,
+  NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS,
+} from './contracts/night-all-post-comments.mjs'
 import {
   normalizeBillingProfile,
   normalizeCreditAdjustment,
@@ -598,14 +608,17 @@ export class HubService {
     externalPlatformCapabilities = null,
     externalPostCapabilities = null,
     externalFacebookCapabilities = null,
+    strategySearchRoutingStore = new StrategySearchRoutingStore(store.pool),
     externalTwitterCapabilities = null,
     externalContentSearchCapabilities = null,
     externalNativeCapabilities = null,
     externalSocialSearch = null,
     externalWechatSearch = null,
     externalRawSearch = null,
+    externalPostComments = null,
     externalDataSearch = null,
     twitterRetryStore = null,
+    searchAdmissionWaitMs = SEARCH_ADMISSION_WAIT_MS,
     externalSocialSearchEnabled = false,
     externalSocialSearchCanaryConsumerIds = [],
     externalSocialUserActivity = null,
@@ -633,14 +646,17 @@ export class HubService {
     this.externalPlatformCapabilities = externalPlatformCapabilities
     this.externalPostCapabilities = externalPostCapabilities
     this.externalFacebookCapabilities = externalFacebookCapabilities
+    this.strategySearchRoutingStore = strategySearchRoutingStore
     this.externalTwitterCapabilities = externalTwitterCapabilities
     this.externalContentSearchCapabilities = externalContentSearchCapabilities
     this.externalNativeCapabilities = externalNativeCapabilities
     this.externalSocialSearch = externalSocialSearch
     this.externalWechatSearch = externalWechatSearch
     this.externalRawSearch = externalRawSearch
+    this.externalPostComments = externalPostComments
     this.externalDataSearch = externalDataSearch
     this.twitterRetryStore = twitterRetryStore
+    this.searchAdmissionWaitMs = searchAdmissionWaitMs
     this.externalSocialSearchEnabled = typeof externalSocialSearchEnabled === 'function'
       ? externalSocialSearchEnabled : externalSocialSearchEnabled === true
     this.externalSocialSearchCanaryConsumerIds = new Set(
@@ -897,9 +913,11 @@ export class HubService {
       this.#effectivePlatformGrants(context), this.#effectiveCapabilityGrants(context),
       this.store.listGrants(selected.consumerId), this.store.listCapabilityGrants(selected.consumerId),
     ])
-    const overview = await this.getApiKeyOverview(selected.id)
+    // Issuing a signed key reference must not depend on historical usage or
+    // billing aggregates. Actual calls still enforce the original key's limits.
+    const availability = await this.#operationAvailability(selected.consumerId)
     // Only product-level availability, never provider configuration/cost evidence.
-    const operations = Object.fromEntries(Object.entries(overview.operations || {}).map(([key, value]) =>
+    const operations = Object.fromEntries(Object.entries(availability).map(([key, value]) =>
       [key, { ready: value.ready, effectiveState: value.effectiveState }]))
     const adminExecution = !scope && selected.id === await this.store.getAdminExecutionKeyId?.()
     return { choices, keyId: selected.id, consumerId: selected.consumerId, name: selected.name, adminExecution,
@@ -1351,19 +1369,7 @@ export class HubService {
     // Which of this key's granted operations can actually dispatch right now.
     // A key can be perfectly scoped and still fail because the provider
     // operation behind it is blocked, and that is invisible from the key alone.
-    const operations = {}
-    for (const source of [this.externalPlatformCapabilities, this.externalPostCapabilities]) {
-      if (typeof source !== 'function') continue
-      try {
-        const capability = await source({ consumerId: apiKey.consumerId })
-        for (const [operationKey, state] of Object.entries(capability?.operations || {})) {
-          operations[operationKey] = state
-        }
-      } catch {
-        // Provider readiness is diagnostic here. A provider that cannot answer
-        // must not stop the rest of the key overview from rendering.
-      }
-    }
+    const operations = await this.#operationAvailability(apiKey.consumerId)
     const grantedCapabilities = new Set(capabilityEntitlements.map((entry) => entry.capability))
     const blockedOperations = Object.entries(operations)
       .filter(([operationKey, state]) => grantedCapabilities.has(operationKey) && state?.ready === false)
@@ -1382,6 +1388,23 @@ export class HubService {
       operations,
       blockedOperations,
     }
+  }
+
+  async #operationAvailability(consumerId) {
+    const operations = {}
+    for (const source of [this.externalPlatformCapabilities, this.externalPostCapabilities]) {
+      if (typeof source !== 'function') continue
+      try {
+        const capability = await source({ consumerId })
+        for (const [operationKey, state] of Object.entries(capability?.operations || {})) {
+          operations[operationKey] = state
+        }
+      } catch {
+        // Readiness is diagnostic, not authorization. Dispatch rechecks it;
+        // an unavailable provider must not prevent key references being issued.
+      }
+    }
+    return operations
   }
 
   async #effectivePlatformGrants(context) {
@@ -1422,13 +1445,8 @@ export class HubService {
       : null
     return {
       ...consumerPolicy,
-      maxPageSize: entitlement
-        ? Math.min(
-            consumerPolicy.maxPageSize,
-            entitlement.maxPageSize,
-            plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY,
-          )
-        : Math.min(consumerPolicy.maxPageSize, plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY),
+      maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize,
+        entitlement?.maxPageSize ?? consumerPolicy.maxPageSize, plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY),
     }
   }
 
@@ -3553,7 +3571,8 @@ export class HubService {
     const definition = servicePriceDefinition(path)
     assert(definition, 404, 'service_price_not_found', 'No pricing contract for this Hub endpoint')
     const [platforms, capabilities] = await Promise.all([this.#effectivePlatformGrants(context), this.#effectiveCapabilityGrants(context)])
-    assert(platforms.includes(definition.platform) && definition.capabilities.every(value => capabilities.includes(value)), 403, 'service_not_authorized', 'The selected Key is not authorized for this service')
+    assert((definition.platforms || [definition.platform]).some(value => platforms.includes(value))
+      && definition.capabilities.every(value => capabilities.includes(value)), 403, 'service_not_authorized', 'The selected Key is not authorized for this service')
     const [plan, billing] = await Promise.all([this.store.getConsumerPlan(context.consumer.id), this.store.getTenantBilling(context.tenant.id, { ledgerLimit:1 })])
     return customerServiceQuote(path, definition, plan, billing.profile)
   }
@@ -3656,9 +3675,8 @@ export class HubService {
       const consumerPolicy = { ...this.defaultPolicy, ...(policiesByPlatform.get(platform) || {}) }
       const entitlement = entitlementsByPlatform.get(platform)
       const planPageSize = plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY
-      return { ...consumerPolicy, maxPageSize: entitlement
-        ? Math.min(consumerPolicy.maxPageSize, entitlement.maxPageSize, planPageSize)
-        : Math.min(consumerPolicy.maxPageSize, planPageSize) }
+      return { ...consumerPolicy, maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize,
+        entitlement?.maxPageSize ?? consumerPolicy.maxPageSize, planPageSize) }
     })
     const keyEntitlements = readsKeyEntitlements ? grants.map(platform => entitlementsByPlatform.get(platform)) : policies
     // A unified read needs one stable, conservative quota policy. Its separate
@@ -4378,12 +4396,25 @@ export class HubService {
     // raw contract/charge/continuation identity inside its own format branch;
     // calling the public data endpoint over HTTP would reserve and bill twice.
     if (input.operation === 'raw') return this.search(context, { ...input, responseFormat: 'raw' })
+    if (input.operation === NIGHT_ALL_POST_COMMENTS_OPERATION) return this.postComments(context, input)
     return this.#nightAllCompatibilitySearch(context, input)
   }
 
-  async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path, signal }) {
+  async postComments(context, input) {
+    const saved = input.idempotencyKey && await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, input.idempotencyKey)
+    if (saved?.acquisitionRequest?.path === '/api/v1/night-all/search/post-comments') {
+      return this.#nightAllCompatibilitySearch(context, { ...input, operation: NIGHT_ALL_POST_COMMENTS_OPERATION,
+        path: '/api/v1/night-all/search/post-comments', historicalReceiptOnly: true })
+    }
+    assert(this.externalPostComments, 503, 'post_comments_unavailable', 'Hub post comments are unavailable')
+    return this.externalPostComments(context, input)
+  }
+
+  async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path, signal, historicalReceiptOnly = false }) {
     assertWechatSearchNotRetired(operation, body)
-    assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
+    assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation)
+      || [NIGHT_ALL_POST_DETAIL_OPERATION, NIGHT_ALL_POST_COMMENTS_OPERATION].includes(operation),
+      404, 'not_found', 'Route not found')
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
@@ -4398,7 +4429,7 @@ export class HubService {
     const grants = await this.#effectivePlatformGrants(context)
     const matchingGrant = grants.find((grant) => canonicalPlatform(grant) === requestedPlatform)
     assert(matchingGrant, 403, 'platform_not_granted', 'Platform is not granted')
-    if (requestedPlatform === 'xiaohongshu') {
+    if (requestedPlatform === 'xiaohongshu' && NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]) {
       const requiredCapability = NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
       const capabilityGrants = await this.#effectiveCapabilityGrants(context)
       assert(
@@ -4418,7 +4449,7 @@ export class HubService {
     const policy = {
       ...this.defaultPolicy,
       ...(storedPolicy || {}),
-      maxPageSize: Math.min(
+      maxPageSize: effectiveBusinessPageLimit(context,
         storedPolicy?.maxPageSize || this.defaultPolicy.maxPageSize,
         keyEntitlement?.maxPageSize || Number.POSITIVE_INFINITY,
       ),
@@ -4427,7 +4458,7 @@ export class HubService {
       businessId: context.consumer.businessId,
       canonicalizePlatform: canonicalPlatform,
       maxPageSize: policy.maxPageSize,
-      maxCrawlWork: storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100),
+      maxCrawlWork: isLcySupplierPriority(context) ? MAX_CRAWL_WORK : (storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100)),
     })
     if (operation === 'raw' && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, normalized.platform)
       && TIKHUB_CONTENT_SEARCH_RECIPES[normalized.platform].rawCompatibility !== false) {
@@ -4503,6 +4534,23 @@ export class HubService {
       path,
       body: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...traversal.upstreamBody },
     })
+    if (historicalReceiptOnly) {
+      const saved = await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, idempotencyKey)
+      assert(saved && saved.apiKeyId === context.apiKey.id && saved.fingerprint === fingerprint,
+        409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+      const details = { requestId: saved.id }
+      if (saved.status === 'unknown') throw new AppError(409, 'request_outcome_unknown', 'Previous request outcome is unknown', details)
+      if (saved.status === 'reserved') throw new AppError(409, 'request_in_progress', 'The historical request remains reserved', details)
+      if (saved.responseBody != null && Number.isInteger(saved.responseStatus)
+        && (saved.status === 'committed' || saved.status === 'released' && saved.responseStatus >= 400)) {
+        return { status: saved.responseStatus, body: structuredClone(saved.responseBody), requestId: saved.id,
+          replay: true, sourceMode: saved.deliverySourceMode || 'live', capturedAt: saved.capturedAt || null }
+      }
+      throw new AppError(409, 'comments_restart_required', 'This historical request has no replayable response; restart explicitly with a new Idempotency-Key', details)
+    }
+    const xiaohongshuCapability = normalized.platform === 'xiaohongshu'
+      ? NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
+      : null
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     const reservationInput = {
@@ -4513,16 +4561,18 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform: normalized.platform,
-      meterKey: normalized.platform === 'xiaohongshu'
-        ? NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
-        : operation,
+      // The three migrated Xiaohongshu operations keep their existing
+      // capability meters. Post-detail is a historical compatibility route,
+      // so it deliberately uses the operation meter and platform scope; the
+      // Hub-native /data/post contract owns social.posts.resolve separately.
+      meterKey: xiaohongshuCapability || operation,
       acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
-      ...(normalized.platform === 'xiaohongshu' ? {
+      ...(xiaohongshuCapability ? {
         requiredAuthorizationScopes: [
           { type: 'platform', key: normalized.platform },
           {
             type: 'capability',
-            key: NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation],
+            key: xiaohongshuCapability,
           },
         ],
       } : {}),
@@ -4545,9 +4595,12 @@ export class HubService {
     if (compatibilityIdempotencyStateIsDecisive(existing, fingerprint)) {
       reservation = await this.store.reserve(reservationInput)
     } else {
-      const pinnedCapability = buildNightAllLegacySearchCapabilities([normalized.platform])
-        .operations[operation]
-      if (!pinnedCapability.supportedPlatforms.includes(normalized.platform)) {
+      const pinnedCapability = operation === NIGHT_ALL_POST_DETAIL_OPERATION
+        ? { supportedPlatforms: NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS }
+        : operation === NIGHT_ALL_POST_COMMENTS_OPERATION
+          ? { supportedPlatforms: NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS }
+          : buildNightAllLegacySearchCapabilities([normalized.platform]).operations[operation]
+      if (!pinnedCapability?.supportedPlatforms.includes(normalized.platform)) {
         throw new AppError(
           400,
           'platform_operation_unsupported',
@@ -4590,6 +4643,7 @@ export class HubService {
     const activeRequestId = reservation.request.id
     let call
     try {
+      await assertFacebookAccountEnabled(this.strategySearchRoutingStore, operation, normalized.platform)
       call = await this.store.beginConnectorCall({
         consumerId: context.consumer.id,
         requestId: activeRequestId,
@@ -4599,7 +4653,7 @@ export class HubService {
         sourceMode: 'live',
       })
     } catch (error) {
-      await this.store.releaseRequest(activeRequestId, 'connector_call_evidence_failed').catch(() => {})
+      await this.store.releaseRequest(activeRequestId, error.code || 'connector_call_evidence_failed').catch(() => {})
       throw error
     }
 
@@ -4830,6 +4884,7 @@ export class HubService {
         400, 'page_size_exceeded', 'pageSize exceeds current entitlement')
       return executeDataSearchV2({ store: this.store, context, body, idempotencyKey, pepper: this.apiKeyPepper,
         retryOfRequestId:input.retryOfRequestId,retryStore:this.twitterRetryStore,
+        admissionWaitMs: this.searchAdmissionWaitMs, signal: input.signal,
         execute: (upstream, retry) => this.#searchLegacy(context, { ...input, ...retry, body: upstream, idempotencyKey, path: DATA_SEARCH_V1_PATH }) })
     }
     const platform = typeof input.body?.platform === 'string' ? canonicalPlatform(input.body.platform) : null

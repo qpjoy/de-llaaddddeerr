@@ -1,5 +1,7 @@
 import { WEB_SEARCH_PROVIDERS, WEB_SEARCH_PATH } from '../../shared/web-search.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
+import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
+import { POST_COMMENTS_RECIPES, POST_COMMENTS_PATH, POST_COMMENTS_CAPABILITY } from '../contracts/post-comments.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from '../contracts/youtube-comments.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../contracts/tikhub-content-search.mjs'
@@ -105,6 +107,22 @@ export function implementedRoutes(sources = []) {
       evidence: 'server/contracts/night-all-legacy.mjs',
     }))
   }
+  for (const platform of NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS) rows.push(route(`legacy-${platform}-post-detail`, {
+    platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: 'night-all',
+    product: '社交内容与账号', operation: 'post-detail', mode: 'compatibility',
+    path: '/api/v1/search/post-detail', keywordSearch: false,
+    defaultRule: platform === 'xiaohongshu'
+      ? '小红书详情优先使用 Hub /api/v1/data/post；此历史入口仅保留兼容调用。'
+      : '现行历史帖子详情兼容入口；平台支持取自 Hub 固定合同，实时可用性待请求验证。',
+    evidence: 'server/contracts/night-all-post-detail.mjs',
+  }))
+  for (const [platform, recipe] of Object.entries(POST_COMMENTS_RECIPES)) rows.push(route(`hub-${platform}-post-comments`, {
+    platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: recipe.provider,
+    product: '社交内容与账号', operation: POST_COMMENTS_CAPABILITY, path: POST_COMMENTS_PATH,
+    datasets: ['social.comments.v1'], procurementOperation: false, keywordSearch: false,
+    defaultRule: 'Hub 单帖评论；旧两个 search/post-comments 是别名。固定供应商合同，完整归档、规范化入库和缓冲续页，无 Night-All 回退；就绪仍须审核授权、凭据、价格及操作开关。',
+    evidence: 'server/contracts/post-comments.mjs',
+  }))
   for (const provider of ['rapidapi', 'justone']) for (const [kind, path] of [
     ['raw', '/api/v1/night-all/search/raw'], ['data', '/api/v1/data/search'],
   ]) rows.push(route(`facebook-${provider}-${kind}`, {

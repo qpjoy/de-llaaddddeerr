@@ -26,6 +26,7 @@ import { strategySearchDataStatisticsResponse } from './data/strategy-search-dat
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
+import { POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { retryAfterSeconds } from './self-hosted/wechat-contract.mjs'
@@ -42,6 +43,9 @@ import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
 import { DataAdmission, dataAdmissionLane } from './core/data-admission.mjs'
+import { ResourceAdmission } from './core/resource-admission.mjs'
+import { ResourcePolicy } from './core/resource-policy.mjs'
+import { resourceCatalog } from './core/resource-catalog.mjs'
 import { quotedMinor } from './billing/contracts.mjs'
 import { consumptionQuery } from './billing/consumption.mjs'
 import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson, bodyReadTimeoutMs } from './core/http.mjs'
@@ -826,7 +830,10 @@ export function createApp({
   tikHubGateway = null,
   acquisitionHistory = null,
   admissionRecovery = null,
+  searchAdmissionDisposition = null,
   dataAdmission = new DataAdmission(),
+  resourcePolicy = null,
+  resourceAdmission = null,
   databasePressure = () => ({}),
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
@@ -913,8 +920,17 @@ export function createApp({
     return principal
   }
 
+  const resources = resourceCatalog(PUBLIC_OPENAPI_DOCUMENT)
+  resourcePolicy ||= new ResourcePolicy({ pool: store.pool, catalog: resources.catalog })
+  resourceAdmission ||= new ResourceAdmission({ policy: resourcePolicy, classify: resources.classify })
+  const resourceRelease = Symbol('resource-release')
   async function requirePublic(request) {
-    return service.authenticate(publicApiKey(request))
+    const context = await service.authenticate(publicApiKey(request))
+    if (resources.classify(request.method, new URL(request.url, 'http://localhost').pathname) && !resourcePolicy.ready) await resourcePolicy.refresh()
+    if (!request[resourceRelease]) request[resourceRelease] = resourceAdmission.acquire({
+      method: request.method, pathname: new URL(request.url, 'http://localhost').pathname, keyId: context.apiKey.id,
+    })
+    return context
   }
 
   function requireWechatSelfHosted() {
@@ -1541,7 +1557,7 @@ export function createApp({
         response.setHeader('access-control-allow-origin', '*')
         response.setHeader(
           'access-control-expose-headers',
-          'idempotent-replay, x-mx-insight-request-id, x-mx-insight-source-mode, x-mx-insight-reason, x-mx-insight-captured-at, age, warning',
+          'retry-after, idempotent-replay, x-mx-insight-request-id, x-mx-insight-source-mode, x-mx-insight-reason, x-mx-insight-captured-at, age, warning',
         )
       }
 
@@ -1913,6 +1929,8 @@ export function createApp({
         sendJson(response, 200, {
           data: {
             admission: dataAdmission.snapshot(),
+            resources: resourceAdmission.snapshot(),
+            processId: process.pid,
             databases: databasePressure(),
             // This process's query-time HanLP queue: counters only, no query text.
             tokenizer: search?.querySegmenter?.stats?.() ?? null,
@@ -1950,6 +1968,19 @@ export function createApp({
         sendJson(response, 200, {
           data: await acquisitionHistory.getAdminDiagnostics(params.identifier), requestId,
         }, { 'cache-control': 'private, no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/search-admission-disposition')
+      if (['GET', 'POST'].includes(request.method) && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'search admission disposition')
+        if (!searchAdmissionDisposition) {
+          throw new AppError(503, 'search_admission_disposition_unavailable', '后续采集恢复需要 PostgreSQL 历史证据')
+        }
+        const data = request.method === 'GET'
+          ? await searchAdmissionDisposition.prepare(params.requestId)
+          : await searchAdmissionDisposition.resolve(params.requestId, await readJson(request, 4096), { actor: principal.kind, requestId })
+        sendJson(response, 200, { data, requestId }, { 'cache-control': 'private, no-store' })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/twitter-retry')
@@ -3180,12 +3211,14 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search') {
         requireSourceAdmin(principal)
         requireNoQuery(searchParams, 'strategy search inventory')
-        const [instagramPolicy, twitterPolicy, facebookPolicies] = await Promise.all([
+        const [instagramPolicy, twitterPolicy, facebookPolicies, facebookCrawlPolicy, facebookProfilePolicy] = await Promise.all([
           strategySearchRoutingStore?.get('search', 'instagram') ?? null,
           strategySearchRoutingStore?.get('search', 'twitter') ?? null,
           platformSearchPolicyStore?.list() ?? [],
+          strategySearchRoutingStore?.get('crawl', 'facebook') ?? null,
+          strategySearchRoutingStore?.get('user-info', 'facebook') ?? null,
         ])
-        sendJson(response, 200, { data: strategySearchCatalog({ instagramPolicy, twitterPolicy,
+        sendJson(response, 200, { data: strategySearchCatalog({ instagramPolicy, twitterPolicy, facebookCrawlPolicy, facebookProfilePolicy,
           facebookPolicy: facebookPolicies.find(row => row.platform === 'facebook') || null }), requestId })
         return
       }
@@ -3204,6 +3237,13 @@ export function createApp({
         sendJson(response, 200, { data: { items: await platformSearchPolicyStore?.list() || [] }, requestId })
         return
       }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/platform-search-policies/facebook/quota-check') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'Facebook quota check')
+        if (!platformSearchPolicyStore) throw new AppError(503, 'platform_search_policy_unavailable', 'Search strategy is unavailable')
+        sendJson(response, 200, { data: await platformSearchPolicyStore.requestRapidCheck(await readJson(request, 4096)), requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/platform-search-policies/:platform')
       if (params && request.method === 'PUT') {
         requireSourceAdmin(principal)
@@ -3211,6 +3251,14 @@ export function createApp({
         if (!platformSearchPolicyStore) throw new AppError(503, 'platform_search_policy_unavailable', 'Search strategy is unavailable')
         sendJson(response, 200, { data: await platformSearchPolicyStore.update(params.platform, await readJson(request, 4096)), requestId })
         return
+      }
+      if (pathname === '/internal/v1/admin/data-products/resource-limits' && ['GET', 'PUT'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'resource limits')
+        response.setHeader('Cache-Control', 'no-store')
+        const data = request.method === 'GET' ? await resourcePolicy.read()
+          : await resourcePolicy.save(await readJson(request, 128 * 1024), { actor: 'admin-token', requestId })
+        sendJson(response, 200, { data, requestId }); return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/data-products/management') {
         requireSourceAdmin(principal)
@@ -6129,6 +6177,19 @@ export function createApp({
         sendJson(response,result.status,result.body,{'idempotent-replay':String(result.replay),'x-mx-insight-request-id':result.requestId,'x-mx-insight-source-mode':result.sourceMode})
         return
       }
+      if (request.method === 'POST' && pathname === POST_COMMENTS_PATH) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'Post comments')
+        const result = await withAdmissionSignal(response, async signal => service.postComments(context, {
+          signal, body: await readJson(request, 64 * 1024), path: POST_COMMENTS_PATH,
+          idempotencyKey: request.headers['idempotency-key'],
+        }))
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
+        return
+      }
       const youtubeCommentsKind = request.method === 'POST'
         ? Object.keys(YOUTUBE_COMMENT_PATHS).find(kind => YOUTUBE_COMMENT_PATHS[kind] === pathname) : null
       if (youtubeCommentsKind) {
@@ -6895,6 +6956,7 @@ export function createApp({
     } finally {
       // Disconnecting an active HTTP request does not cancel a paid dispatch or
       // its settlement. Hold this slot until the original handler really ends.
+      request[resourceRelease]?.()
       releaseDataSlot?.()
     }
   }
