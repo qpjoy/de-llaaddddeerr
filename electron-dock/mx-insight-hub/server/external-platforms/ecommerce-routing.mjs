@@ -1,5 +1,5 @@
 import {
-  JUSTONE_ENDPOINTS, ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION, RAPIDAPI_TAOBAO_TMALL_HOST,
+  JUSTONE_ENDPOINTS, ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION, rapidApiProductSearchHost,
   justOneProductAdapterId, productAdapterId, productAdapterProvider, productSearchProviders,
 } from '../contracts/justone.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
@@ -7,7 +7,9 @@ import { AppError } from '../core/errors.mjs'
 
 const labels = { taobao: '淘宝', tmall: '天猫', jd: '京东', xianyu: '闲鱼', xiaohongshu_ec: '小红书电商',
   douyin_ec: '抖音电商', kuaishou_ec: '快手电商', tiktok_shop: 'TikTok Shop', pinduoduo: '拼多多' }
-const channels = { justone: 'JustOne 直连 · api.justoneapi.com', rapidapi: `RapidAPI · ${RAPIDAPI_TAOBAO_TMALL_HOST}` }
+// Each marketplace's RapidAPI listing has its own host; show the one it uses.
+const channel = (provider, key) => provider === 'rapidapi' ? `RapidAPI · ${rapidApiProductSearchHost(key)}`
+  : provider === 'justone' ? 'JustOne 直连 · api.justoneapi.com' : null
 export const ECOMMERCE_ROUTE_MODES = Object.freeze(['fixed', 'priority'])
 const marketplace = platform => platform.replaceAll('-', '_')
 
@@ -22,7 +24,7 @@ function validPolicy(key, row) {
   return Boolean(fallback) && fallback !== primary
 }
 
-const candidate = (provider, key) => ({ id: productAdapterId(provider, key), provider, channel: channels[provider],
+const candidate = (provider, key) => ({ id: productAdapterId(provider, key), provider, channel: channel(provider, key),
   upstreamPath: JUSTONE_ENDPOINTS[key].path })
 
 // Internal inventory only. Native contracts are not interchangeable product
@@ -39,7 +41,7 @@ export function ecommerceRoutingCatalog(policies = []) {
     const fallback = valid && policy.mode === 'priority' ? productAdapterProvider(policy.fallback_adapter_id, key) : null
     const endpoints = native.filter(row => marketplace(row.platform) === (key === 'tmall' ? 'taobao' : key))
     return { marketplace: key, label: labels[key] || endpoints[0]?.platformLabel || key,
-      defaultRoute: adapter ? { id: policy?.adapter_id ?? candidates[0].id, provider: primary, channel: channels[primary],
+      defaultRoute: adapter ? { id: policy?.adapter_id ?? candidates[0].id, provider: primary, channel: channel(primary, key),
         adapter: adapter.endpointKey, upstreamPath: adapter.path, adapterVersion: adapter.contractVersion,
         contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
         hubPath: '/api/v1/data/ecommerce/products/search' } : null,

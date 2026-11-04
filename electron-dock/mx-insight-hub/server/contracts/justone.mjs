@@ -219,15 +219,29 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
 
 export const JUSTONE_SUPPORTED_MARKETPLACES = Object.freeze(Object.keys(JUSTONE_ENDPOINTS))
 
-// The same JustOne backend is also sold through RapidAPI for Taobao/Tmall:
-// identical path, parameters and response; only authentication and billing
+// The same JustOne backend is also sold through RapidAPI for Taobao/Tmall and
+// JD: identical path, parameters and response; only authentication and billing
 // differ (handoff document, 2026-10-01). Every supplier listed here serves the
 // marketplace's one reviewed endpoint contract, so the unified product shape,
 // sorting, filters and pagination are the same whichever one dispatches.
 export const RAPIDAPI_TAOBAO_TMALL_HOST = 'taobao-tmall-all-api1.p.rapidapi.com'
+// JD has its own listing from the same publisher (justoneapi, 2026-11-04):
+// `GET /api/jd/search-item-list/v1?keyword=&page=` -- the JustOne path and
+// query unchanged, header authentication, hard monthly request limits.
+export const RAPIDAPI_JD_HOST = 'jd-com-api.p.rapidapi.com'
+// Each marketplace's RapidAPI listing host. A listing sells only its own
+// marketplace's endpoints, so the host is chosen per request, never shared.
+export const RAPIDAPI_PRODUCT_SEARCH_HOSTS = Object.freeze({
+  taobao: RAPIDAPI_TAOBAO_TMALL_HOST,
+  tmall: RAPIDAPI_TAOBAO_TMALL_HOST,
+  jd: RAPIDAPI_JD_HOST,
+})
+export const rapidApiProductSearchHost = marketplace => Object.hasOwn(RAPIDAPI_PRODUCT_SEARCH_HOSTS, marketplace)
+  ? RAPIDAPI_PRODUCT_SEARCH_HOSTS[marketplace] : null
 const PRODUCT_SEARCH_SUPPLIERS = Object.freeze({
   taobao: Object.freeze(['justone', 'rapidapi']),
   tmall: Object.freeze(['justone', 'rapidapi']),
+  jd: Object.freeze(['justone', 'rapidapi']),
 })
 export const productSearchProviders = marketplace => Object.hasOwn(JUSTONE_ENDPOINTS, marketplace)
   ? PRODUCT_SEARCH_SUPPLIERS[marketplace] ?? Object.freeze(['justone']) : Object.freeze([])

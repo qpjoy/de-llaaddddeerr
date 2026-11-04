@@ -7,7 +7,7 @@ import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
 import {
   assertBoundedJson,
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
-  RAPIDAPI_TAOBAO_TMALL_HOST,
+  rapidApiProductSearchHost,
   classifyJustOneBusinessCode,
   createJustOneCallArchiveObject,
   inspectJustOneEnvelope,
@@ -420,9 +420,10 @@ export class JustOneAdapter {
     // Reports bounded transport evidence and unaccepted response shapes.
     // Optional so every existing construction keeps working unchanged.
     logger = null,
-    // `{ provider: 'rapidapi', host }` reaches the same backend through its
-    // RapidAPI listing: header authentication and only the endpoints that
-    // listing sells. Omitted means JustOne directly with a query token.
+    // `{ provider: 'rapidapi' }` reaches the same backend through its RapidAPI
+    // listings: header authentication, product search only, and each
+    // marketplace on its own reviewed listing host. Omitted means JustOne
+    // directly with a query token.
     transport = null,
   } = {}) {
     const fallbackToken = normalizedCredential(token)
@@ -433,10 +434,10 @@ export class JustOneAdapter {
       throw new TypeError('token or credentialResolver is required')
     }
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
-    if (transport != null && (transport.provider !== 'rapidapi' || transport.host !== RAPIDAPI_TAOBAO_TMALL_HOST)) {
-      throw new TypeError('transport must name the reviewed RapidAPI listing')
+    if (transport != null && (transport.provider !== 'rapidapi' || Object.keys(transport).some(key => key !== 'provider'))) {
+      throw new TypeError('transport must name the reviewed RapidAPI listings')
     }
-    this.transport = transport ? Object.freeze({ provider: 'rapidapi', host: transport.host }) : null
+    this.transport = transport ? Object.freeze({ provider: 'rapidapi' }) : null
     this.providerKey = this.transport ? 'rapidapi' : 'justone'
     this.#fallbackToken = fallbackToken
     this.#credentialResolver = credentialResolver
@@ -632,18 +633,20 @@ export class JustOneAdapter {
 
   async #dispatch({ request, credential, capturedAt, normalize }) {
     const rapid = this.transport?.provider === 'rapidapi'
-    // The RapidAPI listing sells product search only. Never send another
-    // endpoint (or the query token) to that host.
-    if (rapid && request.contractVersion !== ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION) {
-      throw new TypeError('The RapidAPI listing only serves product search')
+    // The RapidAPI listings sell product search only, one listing per
+    // marketplace. Never send another endpoint, another marketplace (or the
+    // query token) to a listing host.
+    const rapidHost = rapid ? rapidApiProductSearchHost(request.marketplace) : null
+    if (rapid && (request.contractVersion !== ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION || !rapidHost)) {
+      throw new TypeError('The RapidAPI listings only serve product search for their own marketplaces')
     }
-    const url = new URL(request.endpointPath, rapid ? `https://${this.transport.host}` : JUSTONE_BASE_URL)
+    const url = new URL(request.endpointPath, rapid ? `https://${rapidHost}` : JUSTONE_BASE_URL)
     if (!rapid) url.searchParams.set('token', credential)
     for (const [key, value] of Object.entries(request.upstreamQuery)) {
       url.searchParams.set(key, value)
     }
     const headers = { accept: 'application/json', 'user-agent': HUB_USER_AGENT,
-      ...(rapid ? { 'x-rapidapi-key': credential, 'x-rapidapi-host': this.transport.host } : {}) }
+      ...(rapid ? { 'x-rapidapi-key': credential, 'x-rapidapi-host': rapidHost } : {}) }
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)

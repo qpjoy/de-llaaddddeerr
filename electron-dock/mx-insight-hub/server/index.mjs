@@ -35,7 +35,6 @@ import { deploymentAdmissionLimits } from './external-platforms/admission-runtim
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { IpSearchAdminService } from './external-platforms/ipsearch-admin.mjs'
 import { JustOneAdapter } from './adapters/justone.mjs'
-import { RAPIDAPI_TAOBAO_TMALL_HOST } from './contracts/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { NightAllAFacebookAdapter, NIGHT_ALL_A_FACEBOOK_BUDGET_MS } from './adapters/night-all-a-facebook.mjs'
@@ -409,16 +408,16 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: externalPlatformCredentialStore,
   })
-  // Taobao/Tmall product search through the RapidAPI listing of the same
-  // backend: the Twitter/Facebook RapidAPI key and System Proxy, but its own
-  // per-marketplace breaker so neither side can pause the other. The saved
+  // Taobao/Tmall and JD product search through the RapidAPI listings of the
+  // same backend: the Twitter/Facebook RapidAPI key and System Proxy, but its
+  // own per-marketplace breaker so neither side can pause the other. The saved
   // ecommerce route decides whether it is primary, backup or unused.
   const ecommerceRapidApiAdapter = rapidApiAdapter ? new JustOneAdapter({
     credentialResolver: async () => (await rapidApiCredentialStore.readCredentialSnapshot('rapidapi')).source === 'database'
       ? await rapidApiCredentialStore.readCredential('rapidapi') : rapidConfig.apiKey,
     fetchImpl: createRapidApiProxyFetch(rapidApiProxyStore),
     timeoutMs: config.justOne.timeoutMs, connectTimeoutMs: config.justOne.connectTimeoutMs,
-    transport: { provider: 'rapidapi', host: RAPIDAPI_TAOBAO_TMALL_HOST }, logger: console,
+    transport: { provider: 'rapidapi' }, logger: console,
   }) : null
   const ecommerceRapidApiGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
     ecommerceRoutingStore, usageStore: store,

@@ -4,7 +4,7 @@ import { fetch as proxyFetch, ProxyAgent } from 'undici'
 import { AppError } from '../core/errors.mjs'
 import { resolveProviderProxyRoute } from '../agent/control-store.mjs'
 import { relayRequestUrl } from './egress-relay.mjs'
-import { RAPIDAPI_TAOBAO_TMALL_HOST } from '../contracts/justone.mjs'
+import { RAPIDAPI_PRODUCT_SEARCH_HOSTS } from '../contracts/justone.mjs'
 
 // Probe policy defaults. A probe only has to prove that the egress reaches the
 // target origin, so its deadline must accommodate a healthy but high-latency
@@ -27,10 +27,10 @@ export const DEFAULT_PROXY_PROBE_POLICY = Object.freeze({
 // rate limiting.
 const ROUTE_FAILURE_STATUSES = new Set([407, 502, 503, 504])
 
-const RAPIDAPI_LISTING_ORIGINS = Object.freeze([
+const RAPIDAPI_LISTING_ORIGINS = Object.freeze([...new Set([
   'https://facebook-scraper3.p.rapidapi.com',
-  `https://${RAPIDAPI_TAOBAO_TMALL_HOST}`,
-])
+  ...Object.values(RAPIDAPI_PRODUCT_SEARCH_HOSTS).map(host => `https://${host}`),
+])])
 
 const PROVIDER_ROUTES = Object.freeze({
   ...Object.fromEntries(SEARCH_UPSTREAMS.map(p=>[p.key,{origin:new URL(p.url).origin,probeUrl:new URL('/',p.url).href}])),

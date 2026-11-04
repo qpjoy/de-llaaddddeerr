@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | TikHub | 多平台内容搜索、账号资料/内容、小红书详情/评论/分析、YouTube 评论、微信专项、native 社交及电商合同 | Hub 直连；固定 origin `api.tikhub.io` / `api.tikhub.dev`，见 [native 合同](../../server/contracts/native-forwarding.mjs)与[内容搜索 recipe](../../server/contracts/tikhub-content-search.mjs) |
 | JustOne | 六平台商品搜索、淘宝资源、小红书/抖音关键词搜账号、小红书热搜、Facebook 账号、新搜索策略中的 Facebook/Instagram、native 合同 | Hub 直连 `api.justoneapi.com`；见 [商品](../../server/contracts/justone.mjs)、[账号](../../server/contracts/hub-social-compat.mjs) |
-| RapidAPI | Twitter AIO；Facebook Scraper；淘宝/天猫商品搜索候选渠道 | `twitter-aio.p.rapidapi.com`、`facebook-scraper3.p.rapidapi.com`、`taobao-tmall-all-api1.p.rapidapi.com`；淘宝渠道为同一 JustOne 后端的另一个采购入口，不是独立数据生产源 |
+| RapidAPI | Twitter AIO；Facebook Scraper；淘宝/天猫、京东商品搜索候选渠道 | `twitter-aio.p.rapidapi.com`、`facebook-scraper3.p.rapidapi.com`、`taobao-tmall-all-api1.p.rapidapi.com`、`jd-com-api.p.rapidapi.com`；电商两条 listing 为同一 JustOne 后端的另一个采购入口（发布者 justoneapi），不是独立数据生产源 |
 | 启信慧眼/启信宝 Qixin | 工商、司法、经营、知识产权、证券、关联关系、集团等 18 个分类 / 274 个合同 | Hub → `api.qixin.com`；[企业合同](../../server/contracts/enterprise.mjs)、[完整分类及接口明细](interfaces.md) |
 | ipsearch / IP 数据云 | legacy-v1 IPv4 风险画像 | Hub → `POST https://api.ipdatacloud.com/v2/query`；[适配器](../../server/adapters/ipsearch.mjs) |
 | 百度 IP 风险 | baidu-v2 IP 风险画像 | Hub → `cloud.baidu.com/api/afd-ip-threat/act/v1/ipage` 的 `base/{ip}` 与 `overall/{ip}`；[适配器](../../server/adapters/baidu-ip-risk.mjs)，与百度 Web Search 是不同服务 |

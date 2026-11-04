@@ -2004,11 +2004,24 @@ export class ExternalPlatformGateway {
         }
       }
 
-      const costControl = providerCostControl(
-        operationControl?.billing ? { billing: operationControl.billing } : this.config,
-        normalized.endpointKey,
-        plan.allowZeroCost === true,
-      )
+      let costControl
+      try {
+        costControl = providerCostControl(
+          operationControl?.billing ? { billing: operationControl.billing } : this.config,
+          normalized.endpointKey,
+          plan.allowZeroCost === true,
+        )
+      } catch (error) {
+        // An endpoint this supplier has no reviewed price for yet (an optional
+        // marketplace newly added to an operation) refuses before any call or
+        // procurement hold, so a priority route may still use its backup.
+        if (plan.unavailable && error instanceof AppError && error.code === 'external_platform_cost_control_unavailable') {
+          if (entered) { this.#leave(context.consumer.id, entered); entered = false }
+          const routed = await plan.unavailable(reservation, { safeToFallback: true, dispatchLeaseHeld: ownsLease, dispatchLease })
+          if (routed) { ownsLease = false; ownsReservation = false; return routed.result }
+        }
+        throw error
+      }
       if (typeof this.platformStore.reserveProviderCostWorkflow !== 'function') {
         throw new AppError(
           503,

@@ -1,43 +1,36 @@
 import { useCallback, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, PageHeading, useRemoteData } from './components.jsx'
-const providers = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI' }
-const MODES = { fixed: '固定供应商', priority: '主用 + 备用（自动切换）' }
+import { ROUTE_PROVIDER_NAMES as providers, currentRouteStrategy, routeStrategies, routeStrategyLabel } from './ecommerce-route-strategies.js'
 const candidateLabel = candidate => `${providers[candidate.provider] || candidate.provider} · ${candidate.channel || candidate.upstreamPath}`
 
 export function DefaultRouteForm({ token, row, onSaved }) {
-  const valid = row.configurationValid
-  const [mode, setMode] = useState(valid ? row.mode : 'fixed')
-  const [adapterId, setAdapterId] = useState(valid ? row.defaultRoute.id : row.candidates[0]?.id || '')
-  const [fallbackAdapterId, setFallbackAdapterId] = useState(valid && row.fallbackRoute ? row.fallbackRoute.id
-    : row.candidates.find(candidate => candidate.id !== adapterId)?.id || '')
+  const strategies = routeStrategies(row.candidates)
+  const [choice, setChoice] = useState((currentRouteStrategy(row) ?? strategies[0])?.value || '')
   const [reason, setReason] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(null)
-  const backups = row.candidates.filter(candidate => candidate.id !== adapterId)
-  const fallback = mode === 'priority' ? (backups.some(candidate => candidate.id === fallbackAdapterId) ? fallbackAdapterId : backups[0]?.id) : null
+  const strategy = strategies.find(item => item.value === choice) || null
+  const mode = strategy?.mode || 'fixed'
+  const candidateFor = id => row.candidates.find(candidate => candidate.id === id)
   async function save(event) {
     event.preventDefault()
-    if (busy) return
+    if (busy || !strategy) return
     setBusy(true); setError(null)
     try {
-      await adminApi.updateEcommerceRoute(token, row.marketplace, { mode, adapterId, fallbackAdapterId: fallback ?? null,
-        expectedRevision: row.revision, reason })
+      await adminApi.updateEcommerceRoute(token, row.marketplace, { mode: strategy.mode, adapterId: strategy.adapterId,
+        fallbackAdapterId: strategy.fallbackAdapterId, expectedRevision: row.revision, reason })
       onSaved()
     } catch (failure) { setError(failure) } finally { setBusy(false) }
   }
   return <form onSubmit={save}>
-    {row.switchable ? <DropdownField label="路由方式" value={mode} onChange={setMode} disabled={busy}
-      options={Object.entries(MODES).map(([value, label]) => ({ value, label }))} /> : null}
-    <DropdownField label={mode === 'priority' ? '主用供应商' : '固定供应商'} value={adapterId} onChange={setAdapterId} disabled={busy}
-      options={row.candidates.map(candidate => ({ value: candidate.id, label: candidateLabel(candidate) }))} />
-    {mode === 'priority' ? <DropdownField label="备用供应商" value={fallback || ''} onChange={setFallbackAdapterId} disabled={busy}
-      options={backups.map(candidate => ({ value: candidate.id, label: candidateLabel(candidate) }))} /> : null}
-    <p>{mode === 'priority'
-      ? '主用不可用（熔断、未配置凭据、操作未启用、限流）或明确拒绝且未计费（余额不足、鉴权失败、配额用尽等）时，同一请求自动改由备用供应商执行一次。已计费、结果未知或响应无法解析时不切换，避免重复付费。'
-      : '只使用所选供应商；它不可用时直接返回带上游错误码的失败，不调用其他供应商。'}</p>
-    <Field label="变更原因"><input className="qp-input" required maxLength={1000} disabled={busy} value={reason} onChange={event => setReason(event.target.value)} placeholder="例如：JustOne 余额不足，淘宝改由 RapidAPI 主用" /></Field>
+    <DropdownField label={row.switchable ? '路由策略' : '固定供应商'} value={choice} onChange={setChoice} disabled={busy}
+      options={strategies.map(item => ({ value: item.value, label: item.label }))} />
+    {strategy ? <p>{mode === 'priority'
+      ? <>先由 <strong>{candidateLabel(candidateFor(strategy.adapterId))}</strong> 执行；它不可用（熔断、未配置凭据、操作未启用、未审核采购价、限流）或明确拒绝且未计费（余额不足、鉴权失败、未订阅、配额用尽等）时，同一请求自动改由 <strong>{candidateLabel(candidateFor(strategy.fallbackAdapterId))}</strong> 执行一次。已计费、结果未知或响应无法解析时不切换，避免重复付费。</>
+      : <>只使用 <strong>{candidateLabel(candidateFor(strategy.adapterId))}</strong>；它不可用时直接返回失败，不调用其他供应商。</>}</p> : null}
+    <Field label="变更原因"><input className="qp-input" required maxLength={1000} disabled={busy} value={reason} onChange={event => setReason(event.target.value)} placeholder="例如：JustOne 余额不足，改为优先 RapidAPI、失败切 JustOne" /></Field>
     <p>配置版本 {row.revision} · {row.reason || '初始路由'}。新配置只影响新的采集；已有游标可由任一兼容供应商续页，原幂等请求继续原样重放。下游合同与返回结构不变，调用方看不到供应商。</p>
     {error ? <ErrorState error={error} /> : null}
-    <button className="qp-button qp-button--primary" disabled={busy || !reason.trim() || !row.revision || (mode === 'priority' && !fallback)}>{busy ? '保存中…' : '保存路由'}</button>
+    <button className="qp-button qp-button--primary" disabled={busy || !reason.trim() || !row.revision || !strategy}>{busy ? '保存中…' : '保存路由'}</button>
     {!row.revision ? <p>需先安装路由配置迁移。</p> : null}
   </form>
 }
@@ -59,13 +52,13 @@ export function EcommerceRoutingPage({ token, query, setQuery, onUnauthorized })
         <h3>统一商品搜索 · 供应商路由</h3>
         {row.defaultRoute ? <>
           {!row.configurationValid && row.revision ? <p role="alert">已保存的路由不可用；新采集已阻止。请选择兼容供应商并保存修复。</p> : null}
-          <p>当前方式：<strong>{MODES[row.mode] || row.mode}</strong></p>
+          <p>当前方式：<strong>{routeStrategyLabel(row)}</strong></p>
           <p>{row.mode === 'priority' ? '主用' : '供应商'}：<strong>{providers[row.defaultRoute.provider] || row.defaultRoute.provider}</strong> · {row.defaultRoute.channel}</p>
           {row.fallbackRoute ? <p>备用：<strong>{providers[row.fallbackRoute.provider]}</strong> · {row.fallbackRoute.channel}</p> : null}
           <p>上游接口：<code>{row.defaultRoute.upstreamPath}</code> · 适配器 <code>{row.defaultRoute.adapter}</code> · <code>{row.defaultRoute.adapterVersion}</code></p>
           <p>下游合同：<code>{row.defaultRoute.contractVersion}</code>（各供应商返回同一商品结构、排序、筛选与分页）</p>
           {!row.switchable ? <p>目前只有一个兼容供应商，只能固定使用。其他供应商需先完成同一商品结构、筛选与分页适配，才会出现在这里。</p>
-            : <p>可选供应商 {row.candidates.length} 个。备用供应商需在「上游供应商」中配置凭据、采购价格并启用对应操作，否则切换时同样返回失败。</p>}
+            : <p>可选供应商 {row.candidates.length} 个，可固定其一，或设置优先顺序（任一方向）。RapidAPI 通道需先用 Hub 的 RapidAPI Key 订阅对应 listing，并在「上游供应商 → RapidAPI」审核该平台的采购价、启用操作；未就绪时作为主用会把请求交给备用（不计费），作为备用则切换时同样返回失败。</p>}
           <DefaultRouteForm key={`${row.marketplace}:${row.revision}`} token={token} row={row} onSaved={remote.refresh} />
         </> : <p>尚无统一商品搜索适配器。{row.endpoints.length ? '下列接口按各自合同调用。' : '尚无可调用的电商接口合同。'}</p>}
         <h3>平台专用接口 · {row.endpoints.length} 项</h3>

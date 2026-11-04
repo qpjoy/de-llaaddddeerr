@@ -86,14 +86,18 @@ function justoneResourceOperationEntries() {
 export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
   ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.key,[{operationKey:'web.search',label:'Web Search',legacyGate:'contractVerified',contractVersion:WEB_SEARCH_VERSION,endpointKeys:[p.endpointKey]}]])),
   rapidapi: Object.freeze([...HUB_SOCIAL_OPERATIONS, FACEBOOK_OPERATION,
-    // Taobao/Tmall through the RapidAPI listing of the JustOne backend. Its own
-    // price and state; routing decides whether it is primary or backup.
+    // Taobao/Tmall and JD through the RapidAPI listings of the JustOne backend.
+    // Its own price and state; routing decides whether it is primary or backup.
+    // JD (2026-11-04) is optional: an installed Taobao-only price book stays
+    // valid, and JD dispatch stays unpriced (pre-dispatch refusal, so a
+    // priority route hands over) until its own price is reviewed.
     Object.freeze({
       operationKey: JUSTONE_OPERATION,
-      label: '电商商品搜索 · 淘宝/天猫（JustOne 后端）',
+      label: '电商商品搜索 · 淘宝/天猫/京东（JustOne 后端）',
       legacyGate: 'contractVerified',
       contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
       endpointKeys: Object.freeze([JUSTONE_ENDPOINTS.taobao.endpointKey]),
+      optionalEndpointKeys: Object.freeze([JUSTONE_ENDPOINTS.jd.endpointKey]),
     }),
   ]),
   qixin: Object.freeze(QIXIN_OPERATIONS),
