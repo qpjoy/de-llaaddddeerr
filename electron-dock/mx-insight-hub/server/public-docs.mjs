@@ -2,6 +2,7 @@ import { ipRiskProductPaths, ipRiskProductGuide } from './contracts/ip-risk-prod
 import { DATA_SEARCH_V2_OPENAPI, DATA_SEARCH_RECOVERY_OPENAPI, TWITTER_SEARCH_PARAMETERS_SCHEMA } from './contracts/data-search-v2-docs.mjs'
 import { DATA_SEARCH_V2_PLATFORMS } from './contracts/data-search-v2.mjs'
 import { ipRiskV2Paths, ipRiskV2Guide, ipRiskSubscriptionPaths } from './contracts/ip-risk-v2-docs.mjs'
+import { twitterUserEmailOpenApiPaths, twitterUserEmailDocumentationHtml } from './contracts/twitter-user-email-docs.mjs'
 import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
 import { wechatSelfHostedPaths, wechatSelfHostedGuide } from './self-hosted/docs.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
@@ -1301,6 +1302,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     { name: 'Source Catalog', description: 'Reconstruct the active governed source catalog, filters, taxonomy, owners and status summary.' },
     { name: 'Mobile Commerce', description: 'Read stored mobile-collector commerce captures and their governed source-catalog classification.' },
     { name: 'Virtual Supermarket', description: 'Reconstruct the on-shelf Hub storefront using semantic department, aisle, shelf and position data.' },
+    { name: 'Twitter User Email', description: 'Look up Twitter usernames and e-mail addresses in the published PostgreSQL dictionary.' },
     { name: 'External Data', description: 'Call governed external data platforms through provider-neutral Hub contracts.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary legacy routes with transparent Hub-native routing where contracted, durable Hub evidence and exact last-good fallback.' },
@@ -1336,6 +1338,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...enterpriseOpenApiPaths(),
     ...ipRiskHistoryPaths,
     ...ipRiskV2Paths, ...ipRiskProductPaths, ...ipRiskSubscriptionPaths,
+    ...twitterUserEmailOpenApiPaths,
     '/data/ip/risk': {
       post: {
         tags: ['IP 风险画像'], summary: '查询 IPv4 风险画像', operationId: 'queryIpRisk',
@@ -5552,6 +5555,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key: 'xiaohongshu-note', path: '/docs/xiaohongshu-note', label: '小红书笔记', section: '数据产品' },
   ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '数据产品' })),
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
+  { key: 'twitter-user-email', path: '/docs/twitter-user-email', label: 'Twitter 用户邮箱', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
   { key: 'saved-record-categories', path: '/docs/saved-record-categories', label: '数据类别目录', section: '数据目录' },
@@ -5824,6 +5828,7 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     </section>
 
     ${ipRiskDocumentationHtml()}
+    ${twitterUserEmailDocumentationHtml()}
     <section class="doc-page" data-doc-page="ecommerce-treasure-box">
     <h2 id="ecommerce-treasure-box">电商数据</h2>
     <h3>下游接入从这里开始</h3>
@@ -6775,6 +6780,7 @@ const TENANT_PRODUCT_PATHS = {
   'telegram': ['/data/telegram/messages'], 'public-opinion': ['/data/public-opinion/regions'],
   'saved-record-categories': ['/data/platforms', '/data/saved-records/categories'],
   'virtual-supermarket': ['/data/virtual-supermarket/products'], 'topic-reports': ['/data/platforms', '/data/topic-reports', '/data/topic-reports/{id}'],
+  'twitter-user-email': Object.keys(twitterUserEmailOpenApiPaths),
   'news-discovery': Object.keys(newsOpenApiPaths),
   'taobao-tmall': ['/data/ecommerce/taobao/product-detail', '/data/ecommerce/taobao/product-reviews', '/data/ecommerce/taobao/product-questions', '/data/ecommerce/taobao/shop-products'],
   'jd-native': [], 'xianyu-native': [], 'xiaohongshu-ec-native': [],
@@ -6852,6 +6858,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === 'ip-risk-subscription') return ipRiskProductGuide
   if (route.key === 'ip-risk-v2') return ipRiskV2Guide
   if (route.key === 'ip-risk') return ipRiskDocumentationHtml()
+  if (route.key === 'twitter-user-email') return twitterUserEmailDocumentationHtml()
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
   const resolve = value => value?.$ref ? value.$ref.slice(2).split('/').reduce((node, key) => node?.[key], PUBLIC_OPENAPI_DOCUMENT) : value
   const copy = value => String(value || '').split(/(?<=[。.!])\s*/).filter(sentence => !/upstream|provider|supplier|procurement|供应|上游|采购|成本|Night-All|TikHub|JustOne/i.test(sentence)).join(' ')

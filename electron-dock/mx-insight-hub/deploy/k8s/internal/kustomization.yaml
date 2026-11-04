@@ -9,4 +9,5 @@ resources:
   - 32-projector.yaml
   - 33-ingest.yaml
   - 34-classifier.yaml
+  - 36-dictionary.yaml
   - 40-network-policy.yaml

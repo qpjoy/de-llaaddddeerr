@@ -248,6 +248,8 @@ export const publicDataApi = {
     return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, retryOfRequestId })
   },
   productRequest: (key, input, idempotencyKey) => publicDataRequest(key, input.path, { method: input.method, body: input.body, idempotencyKey }),
+  twitterUserEmailSearch: (key, body) => publicDataRequest(key, '/api/v1/data/twitter-user-email/search', { method: 'POST', body }),
+  twitterUserEmailMetadata: key => publicDataRequest(key, '/api/v1/data/twitter-user-email/metadata'),
   servicePricing: (key, path) => publicDataRequest(key, `/api/v1/data/services/pricing?path=${encodeURIComponent(path)}`),
   wechatSelfHostedSubmit: (key, body, idempotencyKey) => publicDataRequest(key, `${WECHAT_SELF_HOSTED.apiPrefix}/jobs`, { method: 'POST', body, idempotencyKey }),
   wechatSelfHostedJobs: (key, limit = 20) => publicDataRequest(key, `${WECHAT_SELF_HOSTED.apiPrefix}/jobs?limit=${limit}`),
@@ -1028,6 +1030,23 @@ export const adminApi = {
   resetNightAllSavedRecordsPipelineCheckpoints: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/night-all-saved-records/checkpoints/reset`, { method: 'POST', body },
   ),
+  // Twitter user-email dictionary (PostgreSQL only; the dictionary worker runs it).
+  twitterUserEmailPipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/twitter-user-email`),
+  configureTwitterUserEmailPipeline: (token, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/twitter-user-email`, { method: 'PUT', body },
+  ),
+  twitterUserEmailPipelineProgress: (token) => request(token, `${ADMIN_ROOT}/pipelines/twitter-user-email/progress`),
+  twitterUserEmailPipelineAction: (token, action, versionId) => request(
+    token, `${ADMIN_ROOT}/pipelines/twitter-user-email/status`,
+    { method: 'POST', body: { action, ...(versionId ? { versionId } : {}) } },
+  ),
+  publishTwitterUserEmail: (token, versionId) => request(
+    token, `${ADMIN_ROOT}/pipelines/twitter-user-email/publish`, { method: 'POST', body: { versionId } },
+  ),
+  rollbackTwitterUserEmail: (token) => request(
+    token, `${ADMIN_ROOT}/pipelines/twitter-user-email/rollback`, { method: 'POST', body: {} },
+  ),
+  twitterUserEmailAccess: (token) => request(token, `${ADMIN_ROOT}/pipelines/twitter-user-email/access`),
   mobileCommercePipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/mobile-commerce`),
   updateMobileCommercePipeline: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/mobile-commerce`, { method: 'PUT', body },

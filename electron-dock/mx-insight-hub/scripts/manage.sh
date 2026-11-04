@@ -2510,7 +2510,7 @@ restore_worker_replicas() {
   local namespace=mx-insight-hub worker_manifest
   # Recovery/down deliberately scales workers to zero. Restore the versioned
   # replica counts even when apply has no replica diff against last-applied.
-  for worker_manifest in 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 35-retrieval.yaml; do
+  for worker_manifest in 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 35-retrieval.yaml 36-dictionary.yaml; do
     local worker_name worker_replicas
     worker_name="$(awk '/^  name: / {print $2; exit}' "${K8S_DIR}/${worker_manifest}")"
     worker_replicas="$(awk '/^  replicas: / {print $2; exit}' "${K8S_DIR}/${worker_manifest}")"
@@ -2635,6 +2635,7 @@ apply_k8s() {
   render_file "${K8S_DIR}/33-ingest.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/34-classifier.yaml" | kubectl apply -f -
   render_file "${K8S_DIR}/35-retrieval.yaml" | kubectl apply -f -
+  render_file "${K8S_DIR}/36-dictionary.yaml" | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/40-network-policy.yaml"
 
   restore_worker_replicas
@@ -2676,6 +2677,14 @@ apply_k8s() {
   kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-retrieval
   if ! kubectl -n "$namespace" rollout status deployment/mx-insight-hub-retrieval --timeout=180s; then
     say "WARNING: retrieval worker is not ready; durable vector jobs remain queued. Public API stays available." >&2
+  fi
+  # The dictionary worker resumes the Twitter user-email cleaning task from its
+  # last committed batch. It is PostgreSQL-only and never gates API, login or
+  # network readiness, so a failure here is a warning, not a deploy failure.
+  kubectl -n "$namespace" rollout restart deployment/mx-insight-hub-dictionary
+  if ! kubectl -n "$namespace" rollout status deployment/mx-insight-hub-dictionary --timeout=180s; then
+    kubectl -n "$namespace" logs deployment/mx-insight-hub-dictionary --tail=60 >&2 || true
+    say "WARNING: dictionary worker is not ready; the cleaning task stays at its last checkpoint." >&2
   fi
   local incomplete=0 worker
   for worker in admin public ingest projector classifier retrieval; do
@@ -3450,7 +3459,7 @@ ops_action() {
       require_control_plane_ready
       ;;
     plan)
-      for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 35-retrieval.yaml 40-network-policy.yaml; do
+      for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 35-retrieval.yaml 36-dictionary.yaml 40-network-policy.yaml; do
         render_file "${K8S_DIR}/${file}"
       done
       ;;
@@ -3545,7 +3554,7 @@ stop_hub_workloads() {
       *) die "unexpected workload in Hub namespace: $name; shutdown stopped" ;;
     esac
   done
-  selector='app.kubernetes.io/name in (mx-insight-hub-admin,mx-insight-hub-public,mx-insight-hub-ingest,mx-insight-hub-projector,mx-insight-hub-classifier,mx-insight-hub-retrieval)'
+  selector='app.kubernetes.io/name in (mx-insight-hub-admin,mx-insight-hub-public,mx-insight-hub-ingest,mx-insight-hub-projector,mx-insight-hub-classifier,mx-insight-hub-retrieval,mx-insight-hub-dictionary)'
   remaining="$(kubectl -n mx-insight-hub get pods -l "$selector" -o name)" || return 1
   if [ -n "$remaining" ]; then
     if ! kubectl -n mx-insight-hub wait --for=delete pods -l "$selector" --timeout=180s; then

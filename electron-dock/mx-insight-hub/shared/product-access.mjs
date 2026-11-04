@@ -25,6 +25,7 @@ export const PRODUCT_ACCESS = {
   '/data-products/xiaohongshu-inspiration': { platform: 'xiaohongshu', any: ['social.inspiration.list'], docs: 'xiaohongshu-inspiration' },
   '/data-products/enterprise': { platform: 'enterprise', any: ['enterprise.query'], docs: 'enterprise' },
   '/data-products/ip-risk': { platform: 'ip_risk', any: ['ip.risk.query', 'ip.risk.query.v2', 'ip.risk.subscription.query'], docs: 'ip-risk' },
+  '/data-products/twitter-user-email': { platform: 'twitter_user_email', any: ['twitter.user_email.search'], docs: 'twitter-user-email' },
   '/source-catalog': { platform: 'source_catalog', docs: 'source-catalog' },
   '/data-products/telegram': { platform: 'telegram', docs: 'telegram' },
   '/data-products/ecommerce-treasure-box': { platform: 'ecommerce', any: ['ecommerce.products.search', ...nativeServiceCapabilities.ecommerce], docs: 'ecommerce-treasure-box' },

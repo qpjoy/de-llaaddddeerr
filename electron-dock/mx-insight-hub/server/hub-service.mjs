@@ -77,6 +77,8 @@ import {
   normalizeStoredSearchQuery,
   storedSearchResponse,
 } from './data/stored-search.mjs'
+import * as TWITTER_USER_EMAIL from './data/twitter-user-email/contract.mjs'
+import { normalizeSearchRequest as normalizeTwitterUserEmailRequest } from './data/twitter-user-email/contract.mjs'
 import { listCrawlerSpecs } from './ingest/crawler/source-contract.mjs'
 import {
   canonicalContextCapability,
@@ -627,6 +629,7 @@ export class HubService {
     externalMediaPolicy = DEFAULT_EXTERNAL_MEDIA_POLICY,
     topicReports = null,
     newsDiscovery = null,
+    twitterUserEmail = null,
     logger = console,
   }) {
     const mediaPolicy = externalMediaPolicy || DEFAULT_EXTERNAL_MEDIA_POLICY
@@ -668,6 +671,8 @@ export class HubService {
     this.externalImageLoader = externalImageLoader
     this.topicReports = topicReports
     this.newsDiscovery = newsDiscovery
+    // PostgreSQL-only username/e-mail dictionary (no canonical/ES projection).
+    this.twitterUserEmail = twitterUserEmail
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
       windowMs: Math.max(1_000, Math.floor(Number(mediaPolicy.windowMs) || DEFAULT_EXTERNAL_MEDIA_POLICY.windowMs)),
@@ -2848,6 +2853,40 @@ export class HubService {
       }
     }
     return { storefrontRevision: before, value }
+  }
+
+  async #twitterUserEmailAccess(context) {
+    // Legacy dynamic Keys silently inherit every new consumer grant. This
+    // personal-data product requires a Key whose scopes were chosen explicitly.
+    assert(context.apiKey?.scopeMode !== 'legacy_dynamic', 403, 'snapshot_key_required',
+      'Twitter 用户邮箱只接受显式授权范围的 Key；请在 API Keys 中调整 Key 权限后重试')
+    const policy = await this.#storedPlatformPolicy(context, TWITTER_USER_EMAIL.PLATFORM, 'Twitter user email')
+    const capabilities = await this.#effectiveCapabilityGrants(context)
+    assert(capabilities.includes(TWITTER_USER_EMAIL.SEARCH_CAPABILITY), 403, 'capability_not_granted', 'Twitter user-email search is not granted')
+    assert(this.twitterUserEmail, 503, 'twitter_user_email_unavailable', 'Twitter user-email dictionary is unavailable')
+    return { policy, capabilities }
+  }
+
+  async twitterUserEmailMetadata(context) {
+    const { policy } = await this.#twitterUserEmailAccess(context)
+    return this.#meterStoredRead(context, TWITTER_USER_EMAIL.PLATFORM, policy, {
+      path: TWITTER_USER_EMAIL.METADATA_PATH,
+      fingerprintBody: {},
+      operation: () => this.twitterUserEmail.metadata(),
+    })
+  }
+
+  async twitterUserEmailSearch(context, body) {
+    const { policy, capabilities } = await this.#twitterUserEmailAccess(context)
+    const request = normalizeTwitterUserEmailRequest(body)
+    assert(!request.reveal || capabilities.includes(TWITTER_USER_EMAIL.REVEAL_CAPABILITY), 403, 'capability_not_granted',
+      'Viewing complete e-mail addresses is not granted')
+    return this.#meterStoredRead(context, TWITTER_USER_EMAIL.PLATFORM, policy, {
+      path: TWITTER_USER_EMAIL.SEARCH_PATH,
+      // HMAC only: neither usage evidence nor request snapshots keep the query.
+      fingerprintBody: this.twitterUserEmail.fingerprint(request),
+      operation: () => this.twitterUserEmail.search(context, request),
+    })
   }
 
   async virtualSupermarketMetadata(context) {
