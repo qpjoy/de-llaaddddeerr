@@ -90,6 +90,8 @@ Content-Type: application/json
 
 要核对历史失败的具体字段，在 Internal 使用 Hub 的[微博账号归档诊断脚本](../../server/ops/diagnose-weibo-account.mjs)及对应 Hub request ID。脚本从数据库只读提取该请求自己的归档，在本地校验长度与 SHA-256，并用 Hub 解析器回放；输出结构计数和失败类别。可以按脚本首部的命令在当前 Pod 中运行，无需发布或重新采集。
 
+例如，dev Run #626000 目标为 50 条，第一页的 `data.data.list` 有 19 条，归档回放也解析出 19 条。第二页返回 HTTP 200，回放结果为 `unrecognized_collection`。这表示解析器找不到帖子数组；如果供应商返回了可识别的空数组，诊断会显示该数组的 `count: 0`。这次回放不能证明该账号只有 19 条帖子。
+
 首页省略 `cursor`，`page` 为 1。后续原样传回 `data.pageInfo.nextCursor` 或相同的 `data.page.nextCursor`，保持账号、平台、活动、过滤条件和页大小，并使用新的 `Idempotency-Key`。Hub 游标将完整采购页余量、已交付身份和后续工作关联到同一遍历；最多 15 个公开页，有效 24 小时，仍受上游页数、期限、归档大小和准入限制。资料批量遇到中断也可通过返回的游标继续。
 
 短页、空页或 `partial` 不代表耗尽；检查 `hasMore/nextCursor/warnings`。没有可用游标时停止自动续页；若同时出现 `pagination_completeness_unknown`，即使 `hasMore=false`、`nextCursor=null` 也只表示当前无法继续，不能确认数据耗尽。遇到服务限流或未知请求，保存原请求标识并先只读核对，不自动新建请求绕过保护。已有旧 Twitter `mxec2` 游标与精确旧幂等请求由原合同继续处理；新账号游标不与旧 Night-All、`data/search` 或其他操作互换。切换旧转发调用方时从第一页明确开始。

@@ -499,9 +499,11 @@ function weiboPageFixture(validPosts) {
 }
 
 test('Weibo keeps verified posts when its continuation cannot be projected, with exact failure evidence and no repurchase', async t => {
+  // Match the verified archive's shape and count without copying any provider values.
+  const posts = Array.from({ length: 19 }, (_, index) => ({ id: String(index + 1), text: 'Verified' }))
   const badPage = { unexpected_rows: [{ id: 'private-provider-value' }] }
   const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call => {
-    if (call.params.page === '1') return { list: [{ id: 'abc', text: 'Verified' }], since_id: 'next', has_more: true }
+    if (call.params.page === '1') return { data: { list: posts, since_id: 'next', has_more: true } }
     assert.deepEqual([call.params.page, call.params.since_id], ['2', 'next'])
     return badPage
   }) })
@@ -513,7 +515,8 @@ test('Weibo keeps verified posts when its continuation cannot be projected, with
   const result = await h.invoke(body, key)
   assert.equal(result.status, 200)
   const { data } = result.body
-  assert.deepEqual(data.items.map(row => row.content_id), ['abc'])
+  assert.deepEqual(data.items.map(row => row.content_id), posts.map(post => post.id))
+  assert.equal(data.page.returnedCount, 19)
   assert.equal(data.status, 'partial')
   assert.ok(data.warnings.some(warning => warning.code === 'weibo_posts_page_unusable'))
   assert.deepEqual([data.page.hasMore, data.page.nextCursor], [false, null])
