@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadAccountForm } from '../apps/web/api.ts';
 
 const require = createRequire(import.meta.url), environment = {};
 globalThis.__dataportLoginDialogTest = environment;
@@ -27,11 +28,11 @@ const { AccountDialog } = await import(`data:text/javascript;base64,${Buffer.fro
 const nodes = tree => !tree || typeof tree !== 'object' ? [] : [tree, ...(Array.isArray(tree.props?.children) ? tree.props.children.flat(Infinity) : [tree.props?.children]).flatMap(nodes)];
 const options = { csrf: 'synthetic-csrf', formId: 'synthetic-form', loginHint: 'fixture-owner' };
 
-function fixture(t) {
+function fixture(t, { search = '' } = {}) {
   const hooks=[],effects=[],loads=[],redirects=[],changes=[],requests=[];
   let index=0;
   const previous=globalThis.location;
-  globalThis.location={search:'',replace:value=>redirects.push(value)};
+  globalThis.location={search,replace:value=>redirects.push(value)};
   t.after(()=>{hooks.forEach(h=>h?.cleanup?.());if(previous===undefined)delete globalThis.location;else globalThis.location=previous});
   environment.useState=initial=>{
     const i=index++;hooks[i] ||= {value:initial};
@@ -93,4 +94,36 @@ test('MX connection failure and retry keep the same dialog open',async t=>{
   assert.equal(f.render(false).props.open,true);f.render();
   assert.equal(f.loads.length,2);f.loads[1].resolve({options});
   assert.equal((await f.settle()).props.open,true);assert.deepEqual(f.changes,[]);
+});
+
+for (const code of ['account_flow_expired','account_request_failed']) {
+  test(`explicit MX selection recovers ${code} with an old account callback marker but automatic callbacks never loop`,async t=>{
+    const f=fixture(t,{search:'?account=1'});
+    let starts=0,reads=0;
+    environment.load=guards=>loadAccountForm({...guards,
+      read:async()=>{reads++;throw Object.assign(Error('Synthetic expired flow'),{status:410,code})},
+      start:async()=>{starts++;return {redirect:'https://auth.example.test/fresh-oidc-flow'}},
+    });
+    f.render();const callback=await f.settle();
+    assert.equal(callback.props.open,true);assert.equal(starts,0,'failed automatic callback must not restart itself');
+    assert.equal(reads,1);
+    f.mode(true);f.render();assert.equal(f.form().key,'dataport-employee-login');
+    f.mode(false);assert.equal(f.render(false).props.open,true);f.render();
+    await f.settle();
+    assert.equal(starts,1,'the explicit switch allows exactly one new OIDC flow');
+    assert.deepEqual(f.redirects,['https://auth.example.test/fresh-oidc-flow']);
+    assert.equal(f.requests.length,0,'reconnecting never resubmits credentials');
+    await f.settle();assert.equal(starts,1);
+  });
+}
+
+test('an explicit MX selection reuses an unexpired form instead of starting another flow',async t=>{
+  const f=fixture(t,{search:'?account=1'});
+  let reads=0;
+  environment.load=guards=>loadAccountForm({...guards,read:async()=>{reads++;return options},start:()=>assert.fail('valid form must not restart')});
+  f.render();await f.settle();f.mode(true);f.render();f.mode(false);f.render();
+  const ready=await f.settle();
+  assert.equal(reads,2);assert.equal(ready.props.open,true);
+  assert.equal(nodes(ready).find(n=>n.props?.className==='auth-submit').props.disabled,false);
+  assert.deepEqual(f.redirects,[]);
 });

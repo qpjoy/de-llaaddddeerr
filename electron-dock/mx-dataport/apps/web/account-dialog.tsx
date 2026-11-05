@@ -53,6 +53,7 @@ function AccountDialogSession({
     [employee, setEmployee] = useState(!new URLSearchParams(location.search).has("account")),
     [error, setError] = useState(""),
     [unavailable, setUnavailable] = useState(false),
+    [mxSelected, setMxSelected] = useState(false),
     [retry, setRetry] = useState(0),
     [checking, setChecking] = useState(!preview),
     [busy, setBusy] = useState(false),
@@ -60,6 +61,7 @@ function AccountDialogSession({
   function changeMode(nextEmployee: boolean) {
     if (busy || nextEmployee === employee) return;
     setEmployee(nextEmployee);
+    if (!nextEmployee) setMxSelected(true);
     setOptions(null);
     setChecking(!nextEmployee && !preview);
     setUnavailable(false);
@@ -76,7 +78,7 @@ function AccountDialogSession({
     setError("");
     loadAccountForm({
       canRestart:
-        !new URLSearchParams(location.search).has("account") || retry > 0,
+        !new URLSearchParams(location.search).has("account") || mxSelected || retry > 0,
       current: () => active,
     })
       .then((value) => {
@@ -107,7 +109,7 @@ function AccountDialogSession({
     return () => {
       active = false;
     };
-  }, [open, preview, retry, employee]);
+  }, [open, preview, retry, employee, mxSelected]);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || checking) return;
