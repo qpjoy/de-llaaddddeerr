@@ -45,9 +45,14 @@ test('PostgreSQL managed grants preserve identities/siblings and synchronize new
     catch (error) { await db.query('ROLLBACK'); throw error }
   }
   assert.equal((await sync()).changed, 1)
-  assert.deepEqual(await store.listEffectiveCapabilityGrants(consumer, key), scopes.capabilities)
+  // PostgreSQL collation may differ from JS for punctuation; authorization
+  // depends on membership, not the order of scope names.
+  assert.deepEqual((await store.listEffectiveCapabilityGrants(consumer, key)).sort(),
+    [...scopes.capabilities, 'twitter.user_email.search', 'twitter.user_email.reveal'].sort())
   assert.deepEqual(await store.listEffectiveCapabilityGrants(consumer, sibling), [])
-  assert.deepEqual(await store.listEffectiveGrants(consumer, key), scopes.platforms)
+  assert.deepEqual((await store.listEffectiveGrants(consumer, key)).sort(),
+    [...scopes.platforms, 'twitter_user_email'].sort())
+  assert.deepEqual(await store.listEffectiveGrants(consumer, sibling), [])
   assert.deepEqual((await db.query('SELECT id,key_digest,status,expires_at FROM api_keys ORDER BY id')).rows, beforeKeys)
   assert.equal((await sync()).changed, 0)
   const next = { ...scopes, capabilities: [...scopes.capabilities, 'future.example.query'] }
@@ -60,4 +65,10 @@ test('PostgreSQL managed grants preserve identities/siblings and synchronize new
   await db.query("UPDATE api_keys SET status='revoked' WHERE id=$1", [key])
   assert.equal((await sync({ ...next, capabilities: [...next.capabilities, 'future.revoked.query'] })).changed, 0)
   assert.equal((await db.query('SELECT 1 FROM api_key_capability_entitlements WHERE capability=$1', ['future.revoked.query'])).rowCount, 0)
+  // Even another live managed Key with identical name, tenant and consumer
+  // must not inherit LCY-delta's explicit access to the dictionary.
+  await db.query("UPDATE api_keys SET access_profile='managed_full' WHERE id=$1", [sibling])
+  assert.equal((await sync()).changed, 1)
+  assert.deepEqual((await store.listEffectiveCapabilityGrants(consumer, sibling)).sort(), scopes.capabilities)
+  assert.deepEqual((await store.listEffectiveGrants(consumer, sibling)).sort(), scopes.platforms)
 })

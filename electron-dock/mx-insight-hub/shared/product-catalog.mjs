@@ -1,5 +1,6 @@
 import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
 import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
+import { TWITTER_USER_EMAIL_SCOPES } from './access-limits.mjs'
 // Public business metadata. Supplier coordinates never belong in this module.
 import { XHS_DISCOVERY_PRODUCTS } from './xiaohongshu-discovery.mjs'
 // Separate customer meters, one existing authorization capability. Do not add
@@ -39,8 +40,8 @@ export const PRODUCT_BUNDLES = Object.freeze([
   ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, version: 1, name: product.label, platforms: ['xiaohongshu'],
     capabilities: [product.operation], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
     href: `/data-products/${product.key}`, catalogKeys: ['source-catalog-0004'] })),
-  { key: 'twitter-user-email', version: 1, name: 'Twitter 用户邮箱', platforms: ['twitter_user_email'],
-    capabilities: ['twitter.user_email.search'], optionalCapabilities: ['twitter.user_email.reveal'], featureKey: null,
+  { key: 'twitter-user-email', version: 1, name: 'Twitter 用户邮箱', platforms: [TWITTER_USER_EMAIL_SCOPES.platform],
+    capabilities: [TWITTER_USER_EMAIL_SCOPES.search], optionalCapabilities: [], featureKey: null,
     pricingMode: 'tenant_contract', href: '/data-products/twitter-user-email', catalogKeys: [] },
   {key:'web-search',version:1,name:'Web Search',platforms:['web_search'],capabilities:['web.search'],optionalCapabilities:[],featureKey:null,pricingMode:'tenant_contract',href:'/data-products/web-search',catalogKeys:['source-catalog-0135']},
 

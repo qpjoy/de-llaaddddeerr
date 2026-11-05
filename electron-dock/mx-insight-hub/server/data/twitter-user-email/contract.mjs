@@ -3,14 +3,15 @@
 // Stored in PostgreSQL only (schema account_dictionary). Nothing here writes
 // canonical records, the outbox, Elasticsearch, HanLP or embeddings.
 import { AppError } from '../../core/errors.mjs'
+import { TWITTER_USER_EMAIL_SCOPES } from '../../../shared/access-limits.mjs'
 
 export const DATASET_KEY = 'twitter-user-email'
 export const PIPELINE_KEY = 'twitter-user-email'
 export const PRODUCT_LABEL = 'Twitter 用户邮箱'
 export const PIPELINE_LABEL = 'Twitter 用户清洗计划'
-export const PLATFORM = 'twitter_user_email'
-export const SEARCH_CAPABILITY = 'twitter.user_email.search'
-export const REVEAL_CAPABILITY = 'twitter.user_email.reveal'
+export const PLATFORM = TWITTER_USER_EMAIL_SCOPES.platform
+export const SEARCH_CAPABILITY = TWITTER_USER_EMAIL_SCOPES.search
+export const REVEAL_CAPABILITY = TWITTER_USER_EMAIL_SCOPES.reveal
 export const SEARCH_PATH = '/api/v1/data/twitter-user-email/search'
 export const METADATA_PATH = '/api/v1/data/twitter-user-email/metadata'
 export const PRODUCT_PATH = '/data-products/twitter-user-email'
@@ -155,7 +156,7 @@ export function normalizeSearchRequest(body) {
   }
   if (body.reveal !== undefined && typeof body.reveal !== 'boolean') throw invalid('reveal must be a boolean')
   const chars = [...query].length
-  const normalized = { mode, field: mode === 'username' || mode === 'email' ? null : field, query, domain, limit, reveal: body.reveal === true }
+  const normalized = { mode, field: mode === 'username' || mode === 'email' ? null : field, query, domain, limit, reveal: body.reveal !== false }
   if (mode === 'email') {
     const at = query.lastIndexOf('@')
     const local = at > 0 ? query.slice(0, at) : ''

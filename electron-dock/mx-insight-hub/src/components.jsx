@@ -1118,6 +1118,7 @@ export function platformLabel(platform) {
     bilibili: '哔哩哔哩',
     kuaishou: '快手',
     twitter: 'X / Twitter',
+    twitter_user_email: 'Twitter 用户邮箱',
     facebook: 'Facebook',
     wechat_mp: '微信公众号',
     telegram: 'Telegram',

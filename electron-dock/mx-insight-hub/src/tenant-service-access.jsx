@@ -48,7 +48,7 @@ export function TenantServiceAccess({token,tenants,platforms,capabilities,initia
   }
   const entries = form ? [
     ...[...new Set([...platforms,...form.platforms])].map(scope=>({scope,field:'platforms',label:scope==='web_search'?'Web Search':platformLabel(scope),group:'platforms'})),
-    ...[...new Set([...Object.keys(capabilities),...form.capabilities])].map(scope=>({scope,field:'capabilities',label:capabilities[scope]?.label||scope,group:capabilities[scope]?.group==='compatibility'?'compatibility':'operations'})),
+    ...[...new Set([...Object.keys(capabilities).filter(scope=>!capabilities[scope].existingOnly||baseline?.capabilities?.includes(scope)),...form.capabilities])].map(scope=>({scope,field:'capabilities',label:capabilities[scope]?.label||scope,group:capabilities[scope]?.group==='compatibility'?'compatibility':'operations'})),
   ] : []
   const matches = entries.filter(row=>(group==='all'||row.group===group) && matchesAccessSearch(filter,row.label,row.scope) && (selection==='all'||form[row.field].includes(row.scope)===(selection==='selected')))
   const pages = Math.max(1,Math.ceil(matches.length/8)), current = Math.min(page,pages)

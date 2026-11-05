@@ -4,6 +4,7 @@ import { matchesAccessSearch, normalizeAccessSearch } from './access-search.js'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { PagedItems } from './paged-items.jsx'
 import { withProductScopes, XIAOHONGSHU_ANALYTICS_METERS } from '../shared/product-catalog.mjs'
+import { isExplicitOnlyKeyScope } from '../shared/access-limits.mjs'
 import { ConsumptionPanel } from './consumption-panel.jsx'
 import { ProductSetup } from './product-setup.jsx'
 import { QixinPricingAdjustment } from './qixin-pricing.jsx'
@@ -105,7 +106,7 @@ const PLATFORM_GROUPS = [
     key: 'hub',
     label: 'Hub 自有数据域',
     hint: '通过 Hub API 查询已存数据',
-    members: ['public_opinion', 'source_catalog', 'ip_risk', 'enterprise'],
+    members: ['public_opinion', 'source_catalog', 'ip_risk', 'enterprise', 'twitter_user_email'],
   },
   {
     key: 'saved_records',
@@ -127,6 +128,7 @@ const PLATFORM_CATALOG = [
   'web_search',
   'enterprise',
   'ip_risk',
+  'twitter_user_email',
   'xiaohongshu',
   'weibo',
   'douyin',
@@ -178,6 +180,8 @@ const CAPABILITY_CATALOG = {
   'social.profile.get': { label: 'Hub 账号资料', endpoint: 'POST /api/v1/data/social/user-info', description: 'Twitter 基础资料；不补充 about', usageHint: '需 twitter 平台与本能力授权；保持旧资料接口不变' },
   'enterprise.query': { label: '企业数据查询', endpoint: 'POST /api/v1/data/enterprise/{apiId}/query', description: '查询已开通的企业数据接口并留存结果', usageHint: '还需开通 enterprise 数据域' },
   'ip.risk.query': { label: 'IP 风险查询能力', endpoint: 'POST /api/v1/data/ip/risk', description: '查询 IPv4 风险画像；当前仅记录次数，不扣费', usageHint: '还需开通 ip_risk 数据域' },
+  'twitter.user_email.search': { label: 'Twitter 用户邮箱查询', endpoint: 'POST /api/v1/data/twitter-user-email/search', description: '按用户名或邮箱查询已发布的字典，默认返回完整邮箱。', usageHint: '还需开通 Twitter 用户邮箱数据域，并为所选 Key 勾选查询权限。' },
+  'twitter.user_email.reveal': { label: 'Twitter 用户邮箱明文查看（历史授权）', group: 'compatibility', existingOnly: true, endpoint: 'POST /api/v1/data/twitter-user-email/search', description: '旧版明文查看授权，可撤销。', usageHint: '当前由 Twitter 用户邮箱查询权限控制邮箱访问。' },
   'public_opinion.diagnostics.read': { label: '舆情诊断读取' },
   'ecommerce.products.detail': { label: '电商商品详情' },
   'ecommerce.products.reviews': { label: '电商商品评价' },
@@ -239,6 +243,12 @@ const CAPABILITY_CATALOG = {
 }
 
 const PROVIDER_NEUTRAL_PLATFORM_AUTHORIZATION = {
+  twitter_user_email: {
+    kind: 'Hub 数据域',
+    operation: 'twitter.user_email.search',
+    route: 'POST /api/v1/data/twitter-user-email/search',
+    policyNote: '获查询授权的 Key 默认返回完整邮箱，可在请求中指定脱敏。',
+  },
   web_search: {
     kind: 'Hub 数据服务',
     operation: 'web.search',
@@ -1430,8 +1440,10 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const writableConsumers = consumers.filter((consumer) => tenantAllows(session, consumer.tenantId, 'apikey.write'))
   const canIssueKey = writableConsumers.length > 0
   const consumerNames = new Map(consumers.map((consumer) => [consumer.id, consumer.name]))
+  const originalKey = scopeTarget || rotationSource
   const compatibilityScopeOptions = scopeOptions.capabilities.filter((capability) => (
     CAPABILITY_CATALOG[capability]?.group === 'compatibility'
+    && (!CAPABILITY_CATALOG[capability].existingOnly || originalKey?.capabilities?.includes(capability))
   ))
   const operationScopeOptions = scopeOptions.capabilities.filter((capability) => (
     CAPABILITY_CATALOG[capability]?.group !== 'compatibility'
@@ -1455,12 +1467,13 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         capabilities: [...(configuration?.capabilityGrants || [])].sort(),
       }
       setScopeOptions(scopes)
-      const selectedScopes = requestedScopes === 'legacy_all' ? scopes : requestedScopes ? {
-        platforms: scopes.platforms.filter((value) => requestedScopes.platforms?.includes(value)),
-        capabilities: scopes.capabilities.filter((value) => requestedScopes.capabilities?.includes(value)),
-      } : { platforms: [], capabilities: [] }
+      const inherited = requestedScopes === 'legacy_all' || requestedScopes?.scopeMode === 'legacy_dynamic'
+      const selectedScopes = (field) => scopes[field].filter(value => {
+        if (inherited && isExplicitOnlyKeyScope(value)) return false
+        return requestedScopes === 'legacy_all' || requestedScopes?.[field]?.includes(value)
+      })
       setForm((current) => current.consumerId === targetConsumerId
-        ? { ...current, platforms: selectedScopes.platforms, capabilities: selectedScopes.capabilities, webSearchOrder: requestedScopes?.webSearchOrder || [] }
+        ? { ...current, platforms: selectedScopes('platforms'), capabilities: selectedScopes('capabilities'), webSearchOrder: requestedScopes?.webSearchOrder || [] }
         : current)
     } catch (error) {
       if (scopeRequestRef.current !== generation) return

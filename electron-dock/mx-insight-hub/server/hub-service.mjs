@@ -3,7 +3,7 @@ import { StrategySearchRoutingStore, assertFacebookAccountEnabled } from './exte
 import { requestMaintenance } from './core/request-maintenance.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { validateSearchOrder } from './web-search/contract.mjs'
-import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
+import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES, isExplicitOnlyKeyScope } from '../shared/access-limits.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
 import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, DATA_SEARCH_V2_PLATFORMS, normalizeDataSearchV2 } from './contracts/data-search-v2.mjs'
@@ -284,7 +284,9 @@ function replayWindowFor(resultType) {
 }
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
+const TWITTER_USER_EMAIL_CAPABILITIES = [TWITTER_USER_EMAIL.SEARCH_CAPABILITY, TWITTER_USER_EMAIL.REVEAL_CAPABILITY]
 const PUBLIC_CAPABILITIES = new Set([
+  ...TWITTER_USER_EMAIL_CAPABILITIES,
   'web.search', ...WEB_SEARCH_PROVIDERS.map(row => row.capability),
   ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation),
   ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.operation),
@@ -308,6 +310,10 @@ const PUBLIC_CAPABILITIES = new Set([
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])
+// Personal-data access is explicitly selected for each Key. Keep it out of
+// the automatic execution and managed-full profiles.
+const AUTOMATIC_BUSINESS_CAPABILITIES = [...PUBLIC_CAPABILITIES]
+  .filter(value => !value.includes('ingest') && !isExplicitOnlyKeyScope(value)).sort()
 // Shared by explicit Admin credentials and the deployment-managed full-access
 // profile. This contains business API scopes, never control-plane privileges.
 export function businessApiScopes(crawlerPlatforms = []) {
@@ -315,8 +321,8 @@ export function businessApiScopes(crawlerPlatforms = []) {
     platforms: [...new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), ...WECHAT_LEGACY_SEARCH_PLATFORMS,
       ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.platform),
       'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk', 'web_search',
-      ...crawlerPlatforms].filter(Boolean))].sort(),
-    capabilities: [...PUBLIC_CAPABILITIES].filter(value => !value.includes('ingest')).sort(),
+      ...crawlerPlatforms].filter(platform => platform && !isExplicitOnlyKeyScope(platform)))].sort(),
+    capabilities: [...AUTOMATIC_BUSINESS_CAPABILITIES],
   }
 }
 const NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES = Object.freeze({
@@ -789,7 +795,10 @@ export class HubService {
       ? await this.store.listCapabilityGrants(consumerId)
       : []
     const scopePreset = apiKeyScopePreset(body.scopePreset)
-    const requestedPlatforms = requestedScopes(body.platforms, 'platforms', canonicalPlatform)
+    // Older snapshots may hold separate entitlements for an alias and its
+    // canonical name. Preserve a selected existing alias and its own limits.
+    const requestedPlatforms = requestedScopes(body.platforms, 'platforms', value =>
+      PLATFORM_ALIASES.has(value) && scopeUpdate?.expected.platforms.includes(value) ? value : canonicalPlatform(value))
     const requestedCapabilities = requestedScopes(body.capabilities, 'capabilities', canonicalCapability)
     assert(
       scopePreset !== 'legacy_all' || (requestedPlatforms == null && requestedCapabilities == null),
@@ -797,8 +806,10 @@ export class HubService {
       'invalid_request',
       'legacy_all cannot be combined with explicit platforms or capabilities',
     )
-    const platforms = requestedPlatforms ?? (scopePreset === 'legacy_all' ? [...consumerPlatforms] : [])
-    const capabilities = requestedCapabilities ?? (scopePreset === 'legacy_all' ? [...consumerCapabilities] : [])
+    const platforms = requestedPlatforms ?? (scopePreset === 'legacy_all'
+      ? consumerPlatforms.filter(platform => !isExplicitOnlyKeyScope(platform)) : [])
+    const capabilities = requestedCapabilities ?? (scopePreset === 'legacy_all'
+      ? consumerCapabilities.filter(capability => !isExplicitOnlyKeyScope(capability)) : [])
     const webSearchOrder = validateSearchOrder(body.webSearchOrder ?? [], capabilities)
     const consumerPlatformSet = new Set(consumerPlatforms)
     const consumerCapabilitySet = new Set(consumerCapabilities)
@@ -937,10 +948,10 @@ export class HubService {
     // No wildcard, inherited grants, plan changes or reusable secret exposure.
     const platforms = [...new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), ...WECHAT_LEGACY_SEARCH_PLATFORMS,
       'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk', 'web_search',
-      ...(await listCrawlerSpecs(this.store)).map(spec => spec.platform)])].sort()
+      ...(await listCrawlerSpecs(this.store)).map(spec => spec.platform)].filter(platform => !isExplicitOnlyKeyScope(platform)))].sort()
     let keyId
     try { keyId = await this.store.ensureAdminExecutionKey({ id: issued.id, digest: issued.digest, prefix: issued.prefix,
-      lastFour: issued.lastFour, platforms, capabilities: [...PUBLIC_CAPABILITIES].filter(value => !value.includes('ingest')).sort(),
+      lastFour: issued.lastFour, platforms, capabilities: [...AUTOMATIC_BUSINESS_CAPABILITIES],
       expiresAt: new Date(Date.now() + 180 * 86_400_000).toISOString() }) }
     catch (error) { if (error.code === '42P01') throw new AppError(503, 'admin_identity_unavailable', 'Admin identity requires migration 111'); throw error }
     return this.createDemoCredential({ keyId })
@@ -1412,6 +1423,15 @@ export class HubService {
     return operations
   }
 
+  async #twitterUserEmailReady() {
+    try {
+      return (await this.twitterUserEmail?.metadata())?.published === true
+    } catch {
+      this.logger?.warn?.('[twitter-user-email] Published dictionary status is unavailable')
+      return false
+    }
+  }
+
   async #effectivePlatformGrants(context) {
     if (typeof this.store.listEffectiveGrants === 'function') {
       return this.store.listEffectiveGrants(context.consumer.id, context.apiKey.id)
@@ -1480,17 +1500,26 @@ export class HubService {
     const ecommerceSearch = this.externalPlatformCapabilities
       ? await this.externalPlatformCapabilities({ consumerId: normalizedConsumerId })
       : null
+    const dictionaryReady = await this.#twitterUserEmailReady()
+    const capabilityGrants = normalizedConsumerId && typeof this.store.listCapabilityGrants === 'function'
+      ? await this.store.listCapabilityGrants(normalizedConsumerId) : []
+    // Historical reveal grants can still be inspected and removed.
+    const dictionaryOperations = TWITTER_USER_EMAIL_CAPABILITIES.filter(capability =>
+      capability === TWITTER_USER_EMAIL.SEARCH_CAPABILITY || capabilityGrants.includes(capability))
+    const operationReadiness = Object.fromEntries(Object.entries({ ...ecommerceSearch?.operations, ...xiaohongshuAcquisition?.operations }).map(([operation,state]) => [operation,{ready:state?.ready === true,effectiveState:state?.effectiveState || 'unknown'}]))
+    for (const capability of dictionaryOperations) {
+      operationReadiness[capability] = { ready: dictionaryReady, effectiveState: dictionaryReady ? 'active' : 'blocked' }
+    }
     return {
-      operationReadiness: Object.fromEntries(Object.entries({ ...ecommerceSearch?.operations, ...xiaohongshuAcquisition?.operations }).map(([operation,state]) => [operation,{ready:state?.ready === true,effectiveState:state?.effectiveState || 'unknown'}])),
+      operationReadiness,
       grants: normalizedConsumerId ? await this.store.listGrants(normalizedConsumerId) : [],
       policies: normalizedConsumerId ? await this.store.listPolicies(normalizedConsumerId) : [],
-      capabilityGrants: normalizedConsumerId && typeof this.store.listCapabilityGrants === 'function'
-        ? await this.store.listCapabilityGrants(normalizedConsumerId)
-        : [],
+      capabilityGrants,
       capabilityPolicies: normalizedConsumerId && typeof this.store.listCapabilityPolicies === 'function'
         ? await this.store.listCapabilityPolicies(normalizedConsumerId)
         : [],
       availableCapabilities: [
+        ...dictionaryOperations.map(capability => ({ capability, ready: dictionaryReady })),
         ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => ({ capability: row.operation, ready: providerOperationReady(ecommerceSearch, row.operation) })),
         ...XHS_DISCOVERY_OPERATIONS.map(capability => ({ capability, ready: providerOperationReady(capability === 'social.posts.hot_search' ? ecommerceSearch : xiaohongshuAcquisition, capability) })),
         { capability: 'ip.risk.subscription.query', ready: providerOperationReady(ecommerceSearch, 'ip.risk.subscription.query') },
@@ -1898,6 +1927,15 @@ export class HubService {
       }
     }
     const capabilityGrants = await this.#effectiveCapabilityGrants(context)
+    const dictionaryGranted = context.apiKey?.scopeMode === 'snapshot'
+      && canonicalGrants.includes(TWITTER_USER_EMAIL.PLATFORM) && capabilityGrants.includes(TWITTER_USER_EMAIL.SEARCH_CAPABILITY)
+    const dictionaryReady = dictionaryGranted && await this.#twitterUserEmailReady()
+    if (dictionaryGranted) {
+      payload.data.platforms.push({
+        platform: TWITTER_USER_EMAIL.PLATFORM, ready: dictionaryReady, source: 'hub', servingMode: 'stored',
+        capabilities: TWITTER_USER_EMAIL_CAPABILITIES.filter(capability => capabilityGrants.includes(capability)),
+      })
+    }
     let externalPostCapability = null
     let hotNotesCapability = null
     if (canonicalGrants.includes('xiaohongshu') && capabilityGrants.includes('social.posts.hot_search') && this.externalPlatformCapabilities) {
@@ -1993,10 +2031,12 @@ export class HubService {
       data: {
         ...(payload?.data || {}),
         capabilities: capabilityGrants
-          .filter((capability) => PUBLIC_CAPABILITIES.has(capability))
+          .filter((capability) => PUBLIC_CAPABILITIES.has(capability)
+            && (dictionaryGranted || !TWITTER_USER_EMAIL_CAPABILITIES.includes(capability)))
           .map((capability) => ({
             capability,
-            ready: capability.startsWith('native.') || Object.values(HUB_SOCIAL_ENDPOINTS).some(row => row.operation === capability) ? nativeReady[capability] === true : capability === TOKENIZE_CAPABILITY
+            ready: TWITTER_USER_EMAIL_CAPABILITIES.includes(capability) ? dictionaryReady
+              : capability.startsWith('native.') || Object.values(HUB_SOCIAL_ENDPOINTS).some(row => row.operation === capability) ? nativeReady[capability] === true : capability === TOKENIZE_CAPABILITY
               ? typeof this.segmenter?.segmentWithMeta === 'function'
               : capability === PUBLIC_OPINION_ALL_INGESTED_CAPABILITY
                 ? allIngestedReady
@@ -2858,17 +2898,18 @@ export class HubService {
   async #twitterUserEmailAccess(context) {
     // Legacy dynamic Keys silently inherit every new consumer grant. This
     // personal-data product requires a Key whose scopes were chosen explicitly.
-    assert(context.apiKey?.scopeMode !== 'legacy_dynamic', 403, 'snapshot_key_required',
+    assert(context.apiKey?.scopeMode === 'snapshot', 403, 'snapshot_key_required',
       'Twitter 用户邮箱只接受显式授权范围的 Key；请在 API Keys 中调整 Key 权限后重试')
     const policy = await this.#storedPlatformPolicy(context, TWITTER_USER_EMAIL.PLATFORM, 'Twitter user email')
     const capabilities = await this.#effectiveCapabilityGrants(context)
-    assert(capabilities.includes(TWITTER_USER_EMAIL.SEARCH_CAPABILITY), 403, 'capability_not_granted', 'Twitter user-email search is not granted')
+    assert(capabilities.includes(TWITTER_USER_EMAIL.SEARCH_CAPABILITY), 403, 'capability_not_granted',
+      'Twitter user-email search is not granted', { capability: TWITTER_USER_EMAIL.SEARCH_CAPABILITY })
     assert(this.twitterUserEmail, 503, 'twitter_user_email_unavailable', 'Twitter user-email dictionary is unavailable')
-    return { policy, capabilities }
+    return policy
   }
 
   async twitterUserEmailMetadata(context) {
-    const { policy } = await this.#twitterUserEmailAccess(context)
+    const policy = await this.#twitterUserEmailAccess(context)
     return this.#meterStoredRead(context, TWITTER_USER_EMAIL.PLATFORM, policy, {
       path: TWITTER_USER_EMAIL.METADATA_PATH,
       fingerprintBody: {},
@@ -2877,10 +2918,8 @@ export class HubService {
   }
 
   async twitterUserEmailSearch(context, body) {
-    const { policy, capabilities } = await this.#twitterUserEmailAccess(context)
+    const policy = await this.#twitterUserEmailAccess(context)
     const request = normalizeTwitterUserEmailRequest(body)
-    assert(!request.reveal || capabilities.includes(TWITTER_USER_EMAIL.REVEAL_CAPABILITY), 403, 'capability_not_granted',
-      'Viewing complete e-mail addresses is not granted')
     return this.#meterStoredRead(context, TWITTER_USER_EMAIL.PLATFORM, policy, {
       path: TWITTER_USER_EMAIL.SEARCH_PATH,
       // HMAC only: neither usage evidence nor request snapshots keep the query.

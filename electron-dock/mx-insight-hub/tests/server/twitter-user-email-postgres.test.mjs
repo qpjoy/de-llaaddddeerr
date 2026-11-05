@@ -109,8 +109,13 @@ test('imports, deduplicates, publishes and searches the dictionary', { skip: !co
 
   const exact = await run({ query: 'JohnSmith' })
   assert.deepEqual(exact.items.map(item => [item.username, item.email, item.matchType]),
-    [['JohnSmith', 'jo***@gmail.com', 'exact'], ['johnsmith', 'js***@yahoo.com', 'case_insensitive']])
+    [['JohnSmith', 'john.smith@gmail.com', 'exact'], ['johnsmith', 'jsmith@yahoo.com', 'case_insensitive']])
+  assert.ok(exact.meta.revealed && exact.items.every(item => !item.emailMasked))
   assert.equal(exact.items[0].sourceRecords, 2)
+  const masked = await run({ query: 'JohnSmith', reveal: false })
+  assert.equal(masked.meta.revealed, false)
+  assert.deepEqual(masked.items.map(item => item.email), ['jo***@gmail.com', 'js***@yahoo.com'])
+  assert.ok(masked.items.every(item => item.emailMasked))
 
   const reverse = await run({ mode: 'email', query: 'SHARED@X.IO', reveal: true })
   assert.deepEqual(reverse.items.map(item => item.username).sort(), ['Other', 'Shared'])
