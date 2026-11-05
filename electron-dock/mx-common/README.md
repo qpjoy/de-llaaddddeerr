@@ -212,6 +212,42 @@ await withTransaction(pool, async (client) => {
 
 Hub 的 `deploy` 会自动调用它，不需要手动执行。
 
+### 本机开发连接 PostgreSQL
+
+在运行 PostgreSQL 的 Internal 节点，mx-common 的 `deploy` 会同时部署一个只监听
+`127.0.0.1:2345` 的 TCP 代理。**已有共享 PG 时**，在 `electron-dock/mx-common`
+目录执行下面两条命令即可。第一条只部署代理并验证 PG 握手，第二条读取已有的 Hub 产品 Secret。
+
+```bash
+bash scripts/manage.sh deploy pg-local
+bash scripts/manage.sh pg-credentials mx-insight-hub
+```
+
+把 JSON 中的 `host`、`port`、`database`、`username`、`password` 填入数据库客户端。
+这些是 Hub 产品角色的凭据，具有该业务库的读写权限。只在自己的终端查看密码。
+需要连接字符串的程序可读取 `bash scripts/manage.sh pg-credentials mx-insight-hub --dsn`
+的标准输出。下面的 psql 命令会提示输入密码。
+
+```bash
+psql -X -h 127.0.0.1 -p 2345 -U mx_insight_hub -d mx_insight_hub -W
+```
+
+如果程序运行在**另一台开发机**，请使用指向 Internal 集群的 kubeconfig，在开发机单独打开一个终端运行
+`bash scripts/manage.sh pg-forward`，保持终端打开，再从本机连接同一地址。端口转发退出后可重新运行。
+也可以使用已配置的 SSH 连接，将命令中的用户名和主机名替换为 Internal 的登录地址。
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:2345:127.0.0.1:2345 USER@INTERNAL_HOST
+```
+
+代理与 PG 同节点运行，最多并发 32 个开发连接。每个连接都通过 PG Service 新建 TCP 连接并由 PG 验证密码。
+代理不挂载数据卷或数据库凭据。离线部署可以先运行 `bash scripts/manage.sh preload pg-local`
+或通过 `MX_COMMON_PG_LOOPBACK_IMAGE` 指定兼容镜像。产品部署调用的 `ensure` 只恢复已经安装过的代理；
+mx-common 的 `down` 会同时停止它。
+
+Night-All-A 的 `tender` 清洗结果在 Hub 库的 `core.canonical_records`。
+读取 50 条、分页及导出 CSV 的 SQL 见[从本机查询 tender 清洗结果](../mx-insight-hub/docs/operations/night-all-saved-records-ingestion.md#从本机查询-tender-清洗结果)。
+
 ## hostPath 与 fsGroup
 
 无默认 StorageClass 时 `ensure` 会建 Retain 的 hostPath PV，并**按各 Pod 的 `runAsUser` 修正目录属主**（PG `999:999 0700`、ES `1000:0 0775`）。这一步不能省：**`fsGroup` 对 hostPath 卷不生效**，kubelet 只对支持所有权管理的卷类型做 chown。root 建的目录是 `root:root`，PG 会在 `mkdir PGDATA` 时失败、ES 会在创建 `node.lock` 时失败，两者的报错都只说 Permission denied，不会指向真正的原因。

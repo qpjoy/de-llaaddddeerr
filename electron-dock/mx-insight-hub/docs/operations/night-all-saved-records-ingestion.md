@@ -5,6 +5,53 @@ Migration `066_night_all_saved_records_sources.sql` registers the fixed inputs;
 it does not connect to the source database, read a row, approve a mapping,
 activate a task or grant a Public API platform.
 
+## 从本机查询 tender 清洗结果
+
+清洗计划显示的 `public.saved_records_tender` 是 **Night-All-A 源库**
+（`agent_data_crawler_platform`）的输入表。要拿到 **Hub 清洗后的招投标记录**，
+连接 mx-common 上的 Hub 业务库（默认 `mx_insight_hub`），查询 `core.canonical_records`。
+
+在 [mx-common](../../../mx-common/README.md) 开启本机端口转发后，从其目录执行
+`bash scripts/manage.sh pg-credentials mx-insight-hub` 获取实际主机、端口、业务库名、
+用户名和密码。用下列命令连接默认的 Hub 产品库，在提示时输入密码。
+
+```sh
+psql -X -h 127.0.0.1 -p 2345 -U mx_insight_hub -d mx_insight_hub -W
+```
+
+以下查询读取前 50 条有效记录。
+
+```sql
+SELECT id AS hub_id, external_id AS record_key, title, url, body,
+       event_time AS published_at, collected_at AS source_first_seen_at,
+       stable_fields #>> '{crawler,identity,rowId}' AS source_row_id
+FROM core.canonical_records
+WHERE dataset_id = 'data-center.saved-records.tender.v1'
+  AND platform = 'data_center_saved_records_tender'
+  AND object_type = 'saved_record'
+  AND deleted_at IS NULL
+ORDER BY external_id
+LIMIT 50;
+```
+
+`hub_id` 是 Hub 的 UUID，`record_key` 是源记录的稳定标识，`source_row_id` 对应源叶表
+的 `id`。正文取自清洗后的 `body`，没有可靠发布时间的记录其 `published_at` 可为空。
+查询按标识分页。下一页在 `ORDER BY` 前增加
+`AND external_id > $1`，由程序将上一页最后一个 `record_key` 绑定为参数。固定的
+`dataset_id, platform, object_type` 加 `external_id` 可使用现有唯一索引。
+跨页要求数据严格一致时，在同一个只读
+`REPEATABLE READ` 事务中完成一次有界导出。
+
+要取得整份数据，在 mx-common 目录运行下面的命令。
+导出脚本使用同样的筛选条件，并保留结构化字段 `stable_fields` 和 `extensions`。
+PostgreSQL 将带表头的 CSV 流式传给客户端。[导出 SQL](../../scripts/export-night-all-tender.sql)
+导出成功后，当前目录的 `tender.csv` 就是这次查询看到的全部有效记录。
+
+```bash
+psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 2345 -U mx_insight_hub -d mx_insight_hub -W \
+  -f ../mx-insight-hub/scripts/export-night-all-tender.sql > tender.csv.part && mv tender.csv.part tender.csv
+```
+
 ## 2026-10-18：标准化字段新增兼容
 
 用户新截图显示14个类别已登记且映射已批准，但源表核对报

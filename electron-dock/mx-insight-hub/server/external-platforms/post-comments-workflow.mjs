@@ -16,7 +16,7 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
   const recipe = POST_COMMENTS_RECIPES[request.platform]
   // These platforms changed suppliers. Old signed cursors must not resume a
   // JustOne traversal through TikHub; historical receipt fingerprints stay put.
-  const migratedProvider = ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform)
+  const migratedProvider = ['twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu'].includes(request.platform)
   const scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
     ...(migratedProvider ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
   const legacyScopeHash = migratedProvider ? hash({ version: POST_COMMENTS_VERSION, ...identity }) : null
@@ -38,7 +38,9 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
     || request.cursor && !importedContinuation || request.page !== 1 && !importedContinuation) throw invalidCursor()
   return { ...request, jobs: request.jobs.map(job => ({ ...job, id: scopeHash })), scopeHash, page, expiresAt,
     previousDeliveryId, importedContinuation, legacyProviderCursor, deliveryMode: 'live_only',
-    manualProviderPagination: migratedProvider && recipe.provider === 'tikhub',
+    // TikHub pages without a trusted end flag buy one page per request. Zhihu
+    // still relays Zhihu's own is_end, so it keeps filling count as before.
+    manualProviderPagination: ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform) && recipe.provider === 'tikhub',
     fingerprintBody: { ...identity, initialParams: request.initialParams ?? null, cursor: request.cursor ?? null },
     encodeNext: deliveryId => codec.encode({ version: POST_COMMENTS_VERSION, scopeHash,
       page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }

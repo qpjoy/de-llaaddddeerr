@@ -15,7 +15,7 @@ const definitions = [
   ['weibo', 'tikhub', '/api/v1/weibo/web_v2/fetch_post_comments', 'id', ['max_id'], []],
   ['douyin', 'justone', '/api/douyin/get-video-comment/v1', 'awemeId', ['page'], []],
   ['tiktok', 'justone', '/api/tiktok/get-post-comment/v1', 'awemeId', ['cursor'], []],
-  ['zhihu', 'justone', '/api/zhihu/get-answer-comments/v1', 'answerId', ['offset'], ['orderBy']],
+  ['zhihu', 'tikhub', '/api/v1/zhihu/web/fetch_comment_v5', 'answer_id', ['offset'], ['order_by']],
   ['linkedin', 'justone', '/api/linkedin/get-post-comments/v1', 'postId', ['paginationToken', 'page', 'shareUrn'], ['sortOrder']],
   ['bilibili', 'justone', '/api/bilibili/get-video-comment/v2', 'aid', ['cursor'], []],
   ['facebook', 'justone', '/api/facebook/get-post-comments/v1', 'postId', ['cursor'], []],
@@ -176,6 +176,9 @@ export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 1
   }
   const validationRecipe = legacyRedditCursor ? legacyRedditRecipe : legacyKuaishouCursor ? legacyKuaishouRecipe : recipe
   const { options, initialParams } = paramsFor(validationRecipe, suppliedParams, signedCursor ? null : cursor)
+  // TikHub documents only Zhihu's two sort orders and declares no enum, so the
+  // fixed recipe keeps the same closed set JustOne's orderBy enforced.
+  if (platform === 'zhihu' && options.order_by != null && !['score', 'ts'].includes(options.order_by)) invalid('Zhihu order_by must be score or ts')
   if (signedCursor && Object.keys(initialParams).length) invalid('Do not combine a Hub cursor with provider continuation parameters')
   const identity = { platform, postId: ids[0], count, includeRaw: body.includeRaw === true, options }
   const request = { ...identity, cursor, page, initialParams, operation: 'comments', path: POST_COMMENTS_PATH,

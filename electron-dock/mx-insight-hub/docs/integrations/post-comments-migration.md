@@ -39,10 +39,10 @@ postId、contentId、平台专用 ID、规范 URL 至少一项；多项能解析
 | Twitter | TikHub `t.api_3cd88a6621a01120` |
 | Reddit | TikHub `t.api_c7f50cf300d63960`（统一入口验收通过） |
 | 快手 | TikHub `t.api_bc64c9d98dbf724c`（统一入口验收通过） |
-| 微博 | JustOne `j.api_19390f4ea0fef847` |
+| 微博 | TikHub `t.api_631f7f6fd007cba9`（2026-11-03 起） |
 | 抖音 | JustOne `j.api_cfe7c89d64177567` |
 | TikTok | JustOne `j.api_9302e45524da8400` |
-| 知乎 | JustOne `j.api_b221354f6d520f65` |
+| 知乎 | TikHub `t.api_6a6b1264eaeadebe`（`fetch_comment_v5`，2026-11-05 起；原 JustOne `j.api_b221354f6d520f65`） |
 | LinkedIn | JustOne `j.api_c8002ed17df8381a` |
 | Bilibili | JustOne `j.api_f5a166f0a03822f8` |
 | Facebook | JustOne `j.api_471d1e0392427a79` |
@@ -57,6 +57,21 @@ Twitter 当前使用已验证字节归档 `f33e6d06-97f0-46c2-a049-c69ccfabf41d`
 JustOne 曾有余额不足记录；保留现有控制，不隐式充值、改价、启用或换渠道。小红书新统一入口采购操作为 native.t.api_327bbf0cae41de55，与旧 research 的采购身份不同，旧价格/开关不自动覆盖；客户计费仍统一为 social.comments.list。
 
 标识边界：Instagram 数字媒体 ID 无损转换 shortcode（依据 [Instaloader 原始接口说明](https://instaloader.github.io/module/structures.html)），也接受 shortcode/URL；Bilibili 使用数字 AID/av URL，BV-only 暂不解析；知乎为回答；LinkedIn 为 activity ID/URN/URL，share/ugcPost URN 暂不解析。微博 base62 URL-only 暂不解析。有明确 ID 时，可接受固定平台域名的原始分享链接，不访问短链、不以其替换 ID。
+
+### 知乎改为 TikHub（2026-11-05）
+
+- 配方：`GET /api/v1/zhihu/web/fetch_comment_v5`，`answer_id` = 回答 ID，续页 `offset`，排序 `order_by` 只接受 `score`、`ts`。原 JustOne 名称 `answerId`、`orderBy` 不再接受（400）。每页用 TikHub 默认 20 条，与原来一致。
+- 依据：两家都转的是知乎自己的 `comment_v5/answers/{id}/root_comment` 页。TikHub 文档里 offset 示例 `1739257701_11108372663_0` 就是知乎原格式；字段沿用 11-02 按 JustOne 官方样例校准的投影（id、content、created_time、author、like_count、child_comment_count、dislike_count，`paging.is_end`/`paging.next`）。TikHub 文档只有通用 ResponseModel，**没有响应示例，尚无付费样本核对**。
+- 只接受两种外壳：`data` 直接是知乎页，或多一层 `data.data`（与 TikHub 知乎搜索相同）。请求回显 `params.answer_id` 与请求不一致、`paging.next` 不是本回答的知乎 root_comment 地址、条目不是对象时一律 502 `invalid_upstream_contract`，不猜字段。
+- 切换前签发的 Hub 游标（JustOne 配方）不能在 TikHub 上续页，返回 `invalid_cursor`，需显式从第一页重来。原始 `offset` 本身是知乎值，仍可导入为新遍历起点。
+- 分页：知乎有可信的 `is_end`，所以知乎**不**改成 Twitter/Reddit/快手/微博那样每次请求只买一页，count 大于 20 时照旧自动补页（最多 15 个供应商页）。
+- 启用前提：TikHub 操作 `native.t.api_6a6b1264eaeadebe` 需在「上游供应商 → TikHub」为启用状态并有采购价（部署补价只补缺失价、按 0.01 USD 暂估；TikHub 官方价 0.001 USD/次）。第一次生产调用后只读核对归档结构（不发 HTTP、不写库；没有知乎专用的 `--verify-*` 模式，看通用结构输出）：
+
+  ```bash
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+    node --input-type=module - --request-id <usage UUID> \
+    < server/ops/inspect-post-comment-contract.mjs
+  ```
 
 ## 分页、计费和存储
 

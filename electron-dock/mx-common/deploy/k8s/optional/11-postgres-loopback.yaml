@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-common-postgres-loopback
+  namespace: mx-common
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-common-postgres-loopback
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-common-postgres-loopback
+        app.kubernetes.io/part-of: mx-common
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: mx-common-postgres
+              topologyKey: kubernetes.io/hostname
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: alpine/socat:1.8.1.3
+          imagePullPolicy: IfNotPresent
+          args:
+            - TCP4-LISTEN:2345,bind=127.0.0.1,reuseaddr,fork,max-children=32
+            - TCP4:mx-common-postgres.mx-common.svc.cluster.local:5432,connect-timeout=5
+          ports:
+            - name: postgres
+              containerPort: 2345
+              hostPort: 2345
+              hostIP: 127.0.0.1
+              protocol: TCP
+          # Check the listener without creating a PostgreSQL connection on every probe.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  netstat -lnt | awk '$4 == "127.0.0.1:2345" && $6 == "LISTEN" { found = 1 } END { exit !found }'
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 500m
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

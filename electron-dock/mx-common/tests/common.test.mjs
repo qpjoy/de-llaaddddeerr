@@ -645,7 +645,7 @@ test('password generation cannot be killed by SIGPIPE under pipefail', async () 
   assert.equal(new Set(passwords).size, 8, 'passwords must not repeat')
 })
 
-test('deploy parses the hanlp target and rejects ignored arguments', async () => {
+test('full deploy includes local PG access and targeted deploys leave other services alone', async () => {
   const { execFile } = await import('node:child_process')
   const { promisify } = await import('node:util')
   const { fileURLToPath } = await import('node:url')
@@ -655,11 +655,11 @@ test('deploy parses the hanlp target and rejects ignored arguments', async () =>
 
   const { stdout } = await run('bash', [
     '-c',
-    'source "$1"; cmd_ensure() { echo core; }; cmd_deploy_hanlp() { echo hanlp; }; main deploy; main deploy hanlp',
+    'source "$1"; cmd_ensure() { echo core; }; cmd_deploy_pg_local() { echo loopback; }; cmd_deploy_hanlp() { echo hanlp; }; main deploy; main deploy pg-local; main deploy hanlp',
     '_',
     script,
   ])
-  assert.deepEqual(stdout.trim().split('\n'), ['core', 'hanlp'])
+  assert.deepEqual(stdout.trim().split('\n'), ['core', 'loopback', 'loopback', 'hanlp'])
 
   await assert.rejects(
     run('bash', ['-c', 'source "$1"; main deploy unknown', '_', script]),
@@ -667,7 +667,7 @@ test('deploy parses the hanlp target and rejects ignored arguments', async () =>
   )
   await assert.rejects(
     run('bash', ['-c', 'source "$1"; main deploy hanlp extra', '_', script]),
-    /usage: manage\.sh deploy \[hanlp\]/,
+    /usage: manage\.sh deploy \[pg-local\|hanlp\]/,
   )
   await assert.rejects(
     run('bash', [

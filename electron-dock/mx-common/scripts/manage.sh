@@ -29,6 +29,7 @@ HANLP_WAIT_TIMEOUT="${MX_COMMON_HANLP_WAIT_TIMEOUT:-3300}"
 # the single most likely reason `ensure` appears to hang.
 ELASTICSEARCH_IMAGE="${MX_COMMON_ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.4.2}"
 POSTGRES_IMAGE="${MX_COMMON_POSTGRES_IMAGE:-pgvector/pgvector:pg16}"
+PG_LOOPBACK_IMAGE="${MX_COMMON_PG_LOOPBACK_IMAGE:-alpine/socat:1.8.1.3}"
 REDIS_IMAGE="${MX_COMMON_REDIS_IMAGE:-redis:7.4-alpine}"
 HANLP_IMAGE="${MX_COMMON_HANLP_IMAGE:-mx-common-hanlp:local}"
 HANLP_SERVICE_URL="http://mx-common-hanlp.mx-common.svc.cluster.local:8000"
@@ -79,16 +80,20 @@ Usage: bash scripts/manage.sh <command>
                   Safe to call on every product deploy; a healthy stack is a no-op.
                   Reconcile/verify live ES disk watermarks (requires host Node.js).
                   Missing images are preloaded through Docker automatically.
-  deploy          Alias for `ensure`.
+  deploy          Ensure shared services, then expose PG on the PG node's 127.0.0.1:2345.
+  deploy pg-local Install or update only that loopback listener for an existing PG.
+  pg-forward      Forward this workstation's 127.0.0.1:2345 to the deployed listener.
+                  Runs in the foreground using the current kubectl context.
   deploy hanlp    Build and import the model-preloaded HanLP image, deploy only
                   the HanLP service and its dependencies, and verify the live
                   worker pool and tokenization after model warm-up.
   status          Show workloads, PVCs and Elasticsearch cluster health.
   health          Probe only. Exit 0 healthy, 1 degraded/down. Prints JSON.
-  plan            Print the manifests that `ensure` would apply.
+  plan            Print the manifests for a full mx-common deploy.
   preload         Pull the shared images through Docker and import them into
                   containerd. Use when the node cannot reach the registries
                   directly, or to avoid a slow pull during `ensure`.
+  preload pg-local  Preload just the local PG relay image.
   down            Scale shared workloads to zero. Data, PVCs and indices are kept.
 
   migrate-storage <new-root> [--confirm]
@@ -100,7 +105,7 @@ Usage: bash scripts/manage.sh <command>
   relocate [<new-root>] [--confirm]
                   migrate-storage followed by a full redeploy on the new volume.
                   Defaults to /data/k8s/mx-runtime/mx-common/k8s.
-  logs [service]  Tail logs (elasticsearch | redis | hanlp | postgres).
+  logs [service]  Tail logs (elasticsearch | redis | hanlp | postgres | pg-local).
 
   snapshot status|run|list|apply
                   Elasticsearch backups. `status` reports whether a snapshot has
@@ -109,6 +114,9 @@ Usage: bash scripts/manage.sh <command>
   provision <productId>
                   Create (idempotently) the per-product PostgreSQL role, database
                   and extensions, and print the connection string on stdout.
+  pg-credentials <productId> [--dsn]
+                  Read the existing product Secret. Print local connection details
+                  including the password as JSON, or a PostgreSQL URI with --dsn.
 
 Optional components (off by default):
   deploy hanlp                   Preferred HanLP build/import/deploy workflow.
@@ -125,6 +133,7 @@ Environment:
   MX_COMMON_SNAPSHOT_STALE_HOURS Snapshot status freshness threshold (default 36)
   MX_COMMON_ELASTICSEARCH_IMAGE Mirror override (default docker.elastic.co/...:9.4.2)
   MX_COMMON_POSTGRES_IMAGE      Mirror override (default pgvector/pgvector:pg16)
+  MX_COMMON_PG_LOOPBACK_IMAGE   Mirror override for the local PG relay (default alpine/socat:1.8.1.3)
   MX_COMMON_REDIS_IMAGE         Mirror override (default redis:7.4-alpine)
   MX_COMMON_HANLP_IMAGE         HanLP image tag (default mx-common-hanlp:local)
   MX_COMMON_HANLP_WAIT_TIMEOUT  HanLP init/start wait in seconds (default 3300)
@@ -349,6 +358,7 @@ cmd_migrate_storage() {
   fi
 
   say "1/6 stopping shared workloads (HanLP keeps running; its cache is not moved)"
+  scale_existing_pg_loopback 0
   kubectl -n "$NAMESPACE" scale statefulset mx-common-postgres --replicas=0 >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" scale statefulset mx-common-elasticsearch --replicas=0 >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" scale deployment mx-common-redis --replicas=0 >/dev/null 2>&1 || true
@@ -412,6 +422,7 @@ EOF
 
   say "6/6 restarting shared workloads"
   kubectl -n "$NAMESPACE" scale statefulset mx-common-postgres --replicas=1 >/dev/null
+  scale_existing_pg_loopback 1
   kubectl -n "$NAMESPACE" scale statefulset mx-common-elasticsearch --replicas=1 >/dev/null
   kubectl -n "$NAMESPACE" scale deployment mx-common-redis --replicas=1 >/dev/null 2>&1 || true
 
@@ -661,6 +672,7 @@ render_manifest() {
   [ "${1##*/}" != 20-elasticsearch.yaml ] || validate_elasticsearch_heap
   sed -e "s#docker.elastic.co/elasticsearch/elasticsearch:9.4.2#${ELASTICSEARCH_IMAGE}#g" \
       -e "s#pgvector/pgvector:pg16#${POSTGRES_IMAGE}#g" \
+      -e "s#alpine/socat:1.8.1.3#${PG_LOOPBACK_IMAGE}#g" \
       -e "s#redis:7.4-alpine#${REDIS_IMAGE}#g" \
       -e "s#mx-common-hanlp:local#${HANLP_IMAGE}#g" \
       -e "s#MX_COMMON_HANLP_IMAGE_ID_PLACEHOLDER#${hanlp_image_id}#g" \
@@ -1029,6 +1041,7 @@ cmd_ensure() {
   ensure_storage
   apply_manifests
   kubectl -n "$NAMESPACE" scale statefulset/mx-common-postgres statefulset/mx-common-elasticsearch deployment/mx-common-redis --replicas=1 >/dev/null
+  scale_existing_pg_loopback 1 || warn "could not restore the optional PG loopback listener"
 
   for namespace in $target_namespaces; do
     allow_client_namespace "$namespace"
@@ -1361,6 +1374,7 @@ cmd_reset_storage() {
     say "  the PVCs, the PVs and ${HOST_DATA_ROOT}" >&2
     die "Re-run with MX_COMMON_CONFIRM_DESTROY=mx-common to proceed"
   fi
+  scale_existing_pg_loopback 0
   kubectl -n "$NAMESPACE" delete statefulset mx-common-elasticsearch mx-common-postgres --ignore-not-found
   kubectl -n "$NAMESPACE" delete deployment mx-common-redis --ignore-not-found
   kubectl -n "$NAMESPACE" delete pvc --all --ignore-not-found
@@ -1401,6 +1415,8 @@ cmd_plan() {
     printf '\n===== %s =====\n' "${file#"${ROOT_DIR}/"}"
     render_manifest "$file"
   done < <(manifest_list)
+  printf '\n===== deploy/k8s/optional/11-postgres-loopback.yaml (deploy) =====\n'
+  render_manifest "${K8S_DIR}/optional/11-postgres-loopback.yaml"
 }
 
 # ---------------------------------------------------------------------------
@@ -1408,7 +1424,10 @@ cmd_plan() {
 # ---------------------------------------------------------------------------
 
 images_in_use() {
-  printf '%s\n' "$POSTGRES_IMAGE" "$ELASTICSEARCH_IMAGE" "$REDIS_IMAGE"
+  case "${1:-core}" in
+    core) printf '%s\n' "$POSTGRES_IMAGE" "$ELASTICSEARCH_IMAGE" "$REDIS_IMAGE" ;;
+    pg-local) printf '%s\n' "$PG_LOOPBACK_IMAGE" ;;
+  esac
 }
 
 common_managed_runtime_value() {
@@ -1479,18 +1498,17 @@ report_image_readiness() {
       say "image NOT cached, will be pulled: ${image}"
       missing=$((missing + 1))
     fi
-  done < <(images_in_use)
+  done < <(images_in_use "${1:-core}")
   if [ "$missing" -gt 0 ]; then
-    say "${missing} image(s) not cached; Elasticsearch alone is ~1.3GB."
+    say "${missing} image(s) not cached."
     # Preloading through Docker beats letting the kubelet pull: the pull happens
     # here, with visible progress and a real error if it fails, instead of
     # inside a pod that just sits in ContainerCreating.
     if [ "${MX_COMMON_AUTO_PRELOAD:-1}" = "1" ] && command -v docker >/dev/null 2>&1; then
       say "preloading images through Docker (set MX_COMMON_AUTO_PRELOAD=0 to skip)"
-      cmd_preload || warn "preload did not complete; the kubelet will try to pull directly"
+      cmd_preload "${1:-core}" || warn "preload did not complete; the kubelet will try to pull directly"
     else
-      say "  Set a mirror:  MX_COMMON_ELASTICSEARCH_IMAGE=<mirror>/elasticsearch:9.4.2"
-      say "  Or preload:    bash scripts/manage.sh preload"
+      say "  A mirror image can be configured via the corresponding MX_COMMON_*_IMAGE."
     fi
   fi
 }
@@ -1498,6 +1516,9 @@ report_image_readiness() {
 # Pull through Docker and import into containerd, matching how mx-insight-hub
 # already gets its own image onto this node.
 cmd_preload() {
+  [ "$#" -le 1 ] || die "usage: manage.sh preload [pg-local]"
+  local target="${1:-core}"
+  case "$target" in core|pg-local) ;; *) die "usage: manage.sh preload [pg-local]" ;; esac
   need docker
   local image failed=0
   if [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; then
@@ -1528,7 +1549,7 @@ cmd_preload() {
       failed=1; continue
     fi
     say "imported ${image}"
-  done < <(images_in_use)
+  done < <(images_in_use "$target")
   [ "$failed" -eq 0 ] || return 1
   say "all shared data-plane images are present on this node"
 }
@@ -1996,10 +2017,41 @@ cmd_deploy_hanlp() {
   say "Redeploy mx-insight-hub to auto-discover this ready endpoint."
 }
 
+# Product deploys using ensure can revive a previously installed listener after
+# down. First installation is an explicit mx-common deploy.
+scale_existing_pg_loopback() {
+  local current
+  current="$(kubectl -n "$NAMESPACE" get deployment mx-common-postgres-loopback --ignore-not-found -o jsonpath='{.spec.replicas}')" || return 1
+  if [ -n "$current" ] && [ "$current" != "$1" ]; then
+    kubectl -n "$NAMESPACE" scale deployment/mx-common-postgres-loopback --replicas="$1" >/dev/null
+  fi
+}
+
+cmd_deploy_pg_local() {
+  need kubectl
+  kubectl -n "$NAMESPACE" get service mx-common-postgres >/dev/null || die "mx-common PostgreSQL must be deployed first"
+  report_image_readiness pg-local
+  render_manifest "${K8S_DIR}/optional/11-postgres-loopback.yaml" | kubectl apply -f -
+  kubectl -n "$NAMESPACE" rollout status deployment/mx-common-postgres-loopback --timeout=180s
+  # A PostgreSQL SSLRequest gets a one-byte S or N without supplying credentials.
+  kubectl -n "$NAMESPACE" exec deployment/mx-common-postgres-loopback -c relay -- sh -ec '
+    reply=$(printf "\000\000\000\010\004\322\026\057" | socat -t 3 -T 5 - TCP4:127.0.0.1:2345,connect-timeout=3)
+    [ "$reply" = S ] || [ "$reply" = N ]
+  ' || die "PG did not answer through 127.0.0.1:2345; inspect the relay logs and mx-common hostNetwork policy"
+  say "PostgreSQL is available on the database node at 127.0.0.1:2345"
+}
+
+cmd_pg_forward() {
+  need kubectl
+  [ "$#" -eq 0 ] || die "usage: manage.sh pg-forward"
+  exec kubectl -n "$NAMESPACE" port-forward --address=127.0.0.1 deployment/mx-common-postgres-loopback 2345:2345
+}
+
 cmd_deploy() {
-  [ "$#" -le 1 ] || die "usage: manage.sh deploy [hanlp]"
+  [ "$#" -le 1 ] || die "usage: manage.sh deploy [pg-local|hanlp]"
   case "${1:-}" in
-    "") cmd_ensure ;;
+    "") cmd_ensure; cmd_deploy_pg_local ;;
+    pg-local) cmd_deploy_pg_local ;;
     hanlp) cmd_deploy_hanlp ;;
     *) die "unknown deploy target: $1" ;;
   esac
@@ -2045,14 +2097,14 @@ report_capacity() {
 cmd_down() {
   need kubectl
   local resource existing remaining
-  for resource in statefulset/mx-common-elasticsearch deployment/mx-common-redis deployment/mx-common-hanlp statefulset/mx-common-postgres; do
+  for resource in deployment/mx-common-postgres-loopback statefulset/mx-common-elasticsearch deployment/mx-common-redis deployment/mx-common-hanlp statefulset/mx-common-postgres; do
     existing="$(kubectl -n "$NAMESPACE" get "$resource" --ignore-not-found -o name)" \
       || die "cannot inspect $resource; shared shutdown is incomplete"
     [ -n "$existing" ] || continue
     kubectl -n "$NAMESPACE" scale "$resource" --replicas=0 >/dev/null \
       || die "cannot stop $resource; shared shutdown is incomplete"
   done
-  local selector='app.kubernetes.io/name in (mx-common-postgres,mx-common-elasticsearch,mx-common-redis,mx-common-hanlp)'
+  local selector='app.kubernetes.io/name in (mx-common-postgres-loopback,mx-common-postgres,mx-common-elasticsearch,mx-common-redis,mx-common-hanlp)'
   remaining="$(kubectl -n "$NAMESPACE" get pods -l "$selector" -o name)" \
     || die "cannot confirm shared Pods stopped"
   if [ -n "$remaining" ]; then
@@ -2069,6 +2121,7 @@ cmd_logs() {
     redis) kubectl -n "$NAMESPACE" logs deployment/mx-common-redis --tail=200 ;;
     hanlp) kubectl -n "$NAMESPACE" logs deployment/mx-common-hanlp --tail=200 ;;
     postgres) kubectl -n "$NAMESPACE" logs statefulset/mx-common-postgres --tail=200 ;;
+    pg-local) kubectl -n "$NAMESPACE" logs deployment/mx-common-postgres-loopback -c relay --tail=200 ;;
     *) die "unknown service: $1" ;;
   esac
 }
@@ -2077,11 +2130,13 @@ main() {
   case "${1:-}" in
     ensure) cmd_ensure ;;
     provision) shift; cmd_provision "${1:-}" "${2:-}" ;;
-    preload) cmd_preload ;;
+    pg-credentials) shift; node "${ROOT_DIR}/scripts/pg-credentials.mjs" "$NAMESPACE" "$@" ;;
+    preload) shift; cmd_preload "$@" ;;
     reset-storage) cmd_reset_storage ;;
     migrate-storage) shift; cmd_migrate_storage "$@" ;;
     relocate) shift; cmd_relocate "$@" ;;
     deploy) shift; cmd_deploy "$@" ;;
+    pg-forward) shift; cmd_pg_forward "$@" ;;
     snapshot) shift; cmd_snapshot "${1:-status}" ;;
     status) cmd_status ;;
     health) cmd_health ;;

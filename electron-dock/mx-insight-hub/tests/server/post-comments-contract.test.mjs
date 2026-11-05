@@ -142,3 +142,23 @@ test('canonical URLs use platform hosts without automatic short-link or arbitrar
     assert.throws(() => normalizePostCommentsRequest({ platform: 'twitter', url }), { code: 'invalid_post_comments_request' })
   }
 })
+
+test('Zhihu dispatch pins TikHub fetch_comment_v5 with the closed sort set and Zhihu offset import', () => {
+  assert.equal(POST_COMMENTS_RECIPES.zhihu.provider, 'tikhub')
+  assert.equal(POST_COMMENTS_RECIPES.zhihu.key, 't.api_6a6b1264eaeadebe')
+  const url = `https://www.zhihu.com/question/123/answer/${fixtures.zhihu}`
+  const request = normalizePostCommentsRequest({ platform: '知乎', url, params: { order_by: 'ts', offset: '1739257701_11108372663_0' } })
+  const dispatch = buildPostCommentsDispatch(request)
+  assert.equal(dispatch.provider, 'tikhub')
+  assert.equal(dispatch.endpointPath, '/api/v1/zhihu/web/fetch_comment_v5')
+  assert.equal(dispatch.upstreamQuery.answer_id, fixtures.zhihu)
+  assert.equal(dispatch.upstreamQuery.order_by, 'ts')
+  assert.equal(dispatch.upstreamQuery.offset, '1739257701_11108372663_0')
+  assert.equal(dispatch.upstreamQuery.answerId, undefined)
+  assert.equal(dispatch.upstreamQuery.limit, '20', 'TikHub fills its documented default, the same 20 Zhihu pages had before')
+  assert.equal(normalizePostCommentsRequest({ platform: 'zhihu', postId: fixtures.zhihu, params: { order_by: 'score' } }).options.order_by, 'score')
+  for (const params of [{ order_by: 'hot' }, { order_by: 1 }, { orderBy: 'ts' }, { answerId: fixtures.zhihu }, { limit: '20' }]) {
+    assert.throws(() => normalizePostCommentsRequest({ platform: 'zhihu', postId: fixtures.zhihu, params }),
+      { code: 'invalid_post_comments_request' }, JSON.stringify(params))
+  }
+})

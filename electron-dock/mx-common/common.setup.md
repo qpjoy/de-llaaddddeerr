@@ -1,3 +1,16 @@
+## 从本机访问共享 PG
+
+在 Internal 节点的 `electron-dock/mx-common` 目录运行以下命令。
+
+```bash
+bash scripts/manage.sh deploy pg-local
+bash scripts/manage.sh pg-credentials mx-insight-hub
+```
+
+数据库客户端连接 `127.0.0.1:2345`，库名、用户名和密码取自第二条命令的输出。若在自己的 Mac 上运行客户端，先在 Mac 上使用 Internal 的 kubeconfig 运行 `bash scripts/manage.sh pg-forward`，或通过 SSH 转发。[连接示例及 tender 查询](README.md#本机开发连接-postgresql)
+
+## HanLP 与存储维护
+
 ```bash
 # 在 mx-common 目录部署 HanLP：32Gi 上限 / cap=5，逐个加载、5 worker 并发服务
 # 首次修改会 Recreate HanLP；同镜像 ID、同模板再次部署不额外重启。

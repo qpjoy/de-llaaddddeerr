@@ -103,6 +103,7 @@ Twitter 标准搜索默认 RapidAPI 优先，策略可以固定/优先/暂停。
 | 小红书创作灵感 | `POST /api/v1/data/xiaohongshu/creator-inspirations` | TikHub `get_creator_hot_inspiration_feed` |
 | YouTube 视频评论 | `POST /api/v1/data/youtube/comments` | TikHub `web_v2/get_video_comments`；一级评论，不自动展开回复 |
 | YouTube 频道评论 | `POST /api/v1/data/youtube/channel-comments` | TikHub 频道解析 → 有界视频窗口 → 评论，可能产生多次采购 |
+| 单帖评论 | `POST /api/v1/data/social/post-comments`（及两个旧 post-comments 别名） | TikHub：Twitter、Reddit、快手、Instagram、微博、知乎、小红书、YouTube；JustOne：抖音、TikTok、LinkedIn、Bilibili、Facebook |
 | 微信专项 | 注册表中的 `/api/v1/data/wechat/...` 固定 POST 路径 | TikHub 公众号、综合搜索、视频号；包含在 1,083 个 native 合同内，不能重复计数 |
 | 微信自建引擎 | `/api/v1/data/wechat/self-hosted/jobs`、`batches`、状态/结果/取消接口 | Hub 队列 → Night-All `/api/v1/search/raw`，固定 `wechat_mp + provider=sogou`；提交与读取分开，独立能力 `wechat.selfhosted.search` |
 

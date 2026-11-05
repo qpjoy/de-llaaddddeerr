@@ -144,14 +144,19 @@ const justoneShapes = {
 }
 const expectedNext = { weibo: { max_id: '5277493566112993' }, douyin: { page: 2 }, tiktok: { cursor: '20' }, zhihu: { offset: 'opaque-next' },
   linkedin: { page: 2, paginationToken: 'next' }, bilibili: { cursor: 'next' }, facebook: { cursor: 'next' } }
+// Weibo (2026-11-03) and Zhihu (2026-11-05) moved to TikHub, which relays the
+// same platform page inside its ResponseModel envelope and request echo.
+const tikHubSwitched = {
+  weibo: data => ({ code: 200, params: { id: '123' }, data: { ok: 1,
+    data: data.data.map(row => ({ ...row, rootidstr: row.rootidstr ?? '123', rootid: row.rootid ?? 123 })), max_id: data.max_id } }),
+  zhihu: data => ({ code: 200, router: '/api/v1/zhihu/web/fetch_comment_v5', params: { answer_id: '123', order_by: 'score', limit: '20', offset: '' }, data }),
+}
+const supplierOf = platform => tikHubSwitched[platform] ? 'tikhub' : 'justone'
+const supplierPayload = (platform, data) => tikHubSwitched[platform] ? tikHubSwitched[platform](data) : { code: 0, data }
 function justoneProject(platform, data = justoneShapes[platform], options = {}) {
   const dispatch = step(platform, '123', options)
-  dispatch.provider = platform === 'weibo' ? 'tikhub' : 'justone'
-  const payload = platform === 'weibo'
-    ? { code: 200, params: { id: '123' }, data: { ok: 1,
-      data: data.data.map(row => ({ ...row, rootidstr: row.rootidstr ?? '123', rootid: row.rootid ?? 123 })), max_id: data.max_id } }
-    : { code: 0, data }
-  return projectPostCommentPage(payload, dispatch, { capturedAt })
+  dispatch.provider = supplierOf(platform)
+  return projectPostCommentPage(supplierPayload(platform, data), dispatch, { capturedAt })
 }
 for (const platform of Object.keys(justoneShapes)) {
   test(`${platform} official sample shape produces stable comment fields and provider-specific continuation`, () => {
@@ -165,7 +170,7 @@ for (const platform of Object.keys(justoneShapes)) {
     assert.equal(row.full_text.includes('完整评论'), true)
     assert.ok(row.publishedAt)
     assert.equal(record.objectType, 'comment')
-    assert.equal(record.stableFields.connectorId, `external-platform:${platform === 'weibo' ? 'tikhub' : 'justone'}`)
+    assert.equal(record.stableFields.connectorId, `external-platform:${supplierOf(platform)}`)
     assert.equal(record.stableFields.attributes.rootExternalId, '123')
     assert.deepEqual(result.projected.providerPage.nextParams, expectedNext[platform])
   })
@@ -206,7 +211,12 @@ test('supplier-returned descendant keeps its real parent while contentId remains
   assert.equal(project(reddit, step('reddit', 't3_123')).projected.acquiredItems[0].parentCommentId, null)
 })
 
-test('Twitter, Reddit and Kuaishou reject old JustOne projections after switching to fixed TikHub recipes', () => {
+test('Twitter, Reddit, Kuaishou and Zhihu reject old JustOne projections after switching to fixed TikHub recipes', () => {
+  const zhihuStep = step('zhihu', '123')
+  assert.throws(() => projectPostCommentPage({ code: 0, data: justoneShapes.zhihu }, zhihuStep, { capturedAt }),
+    { code: 'invalid_upstream_contract' }, 'a JustOne envelope is not a TikHub page')
+  assert.throws(() => projectPostCommentPage({ code: 0, data: justoneShapes.zhihu }, { ...zhihuStep, provider: 'justone' }, { capturedAt }),
+    { code: 'invalid_upstream_contract' }, 'a JustOne dispatch cannot settle a TikHub-routed platform')
   assert.throws(() => justoneProject('kuaishou', kuaishouShape), { code: 'invalid_upstream_contract' })
   assert.throws(() => justoneProject('reddit', redditShape), { code: 'invalid_upstream_contract' })
   assert.throws(() => justoneProject('twitter', { status: 'ok', timeline: [], next_cursor: null }),
@@ -248,13 +258,9 @@ for (const platform of Object.keys(justoneShapes)) {
   test(`${platform} projected continuation rebuilds the fixed native request`, () => {
     const request = normalizePostCommentsRequest({ platform, postId: '123' })
     const first = buildPostCommentsDispatch(request)
-    const result = platform === 'weibo'
-      ? projectPostCommentPage({ code: 200, params: { id: '123' }, data: { ok: 1,
-        data: justoneShapes.weibo.data.map(row => ({ ...row, rootidstr: row.rootidstr ?? '123', rootid: row.rootid ?? 123 })),
-        max_id: justoneShapes.weibo.max_id } }, first, { capturedAt })
-      : projectPostCommentPage({ code: 0, data: justoneShapes[platform] }, first, { capturedAt })
+    const result = projectPostCommentPage(supplierPayload(platform, justoneShapes[platform]), first, { capturedAt })
     const next = buildPostCommentsDispatch(request, { providerCursor: result.projected.providerPage.nextParams })
-    assert.equal(next.provider, platform === 'weibo' ? 'tikhub' : 'justone')
+    assert.equal(next.provider, supplierOf(platform))
     assert.equal(next.endpointPath, first.endpointPath)
     for (const [field, value] of Object.entries(expectedNext[platform])) assert.equal(String(next.upstreamQuery[field]), String(value))
   })
@@ -364,4 +370,92 @@ test('Kuaishou App projected continuation rebuilds its fixed TikHub native reque
   assert.equal(next.endpointPath, '/api/v1/kuaishou/app/fetch_video_comment')
   assert.equal(next.upstreamQuery.photo_id, kuaishouPostId)
   assert.equal(next.upstreamQuery.pcursor, kuaishouShape.pcursor)
+})
+
+// Zhihu comment_v5 root_comment page relayed by TikHub fetch_comment_v5.
+// The layout is the one calibrated from JustOne's official sample of the same
+// Zhihu page; only the TikHub envelope is new.
+const zhihuAnswer = '89226347214'
+const zhihuPage = (overrides = {}) => ({
+  data: [
+    { id: '11108372663', type: 'comment', resource_type: 'answer', content: '<p>完整知乎评论</p>', created_time: 1739257701,
+      like_count: 12, dislike_count: 1, child_comment_count: 3, url: 'https://www.zhihu.com/answer/x/comment/11108372663',
+      author: { id: 'a1b2c3', url_token: 'fixture-user', name: '知乎作者', avatar_url: 'https://example.invalid/a.jpg' },
+      child_comments: [{ id: '11108372700', content: '回复预览' }] },
+    { id: 11108372664, type: 'comment', content: '第二条', created_time: 1739257702, like_count: 0,
+      child_comment_count: 0, author: { id: 'd4e5f6', name: '第二作者' } },
+  ],
+  paging: { is_end: false, is_start: true, totals: 40,
+    next: `https://www.zhihu.com/api/v4/comment_v5/answers/${zhihuAnswer}/root_comment?order_by=score&limit=20&offset=1739257701_11108372663_0` },
+  counts: { total_counts: 40 }, ...overrides })
+const zhihuProject = (data = zhihuPage(), options = {}, envelope = {}) => projectPostCommentPage(
+  { code: 200, params: { answer_id: zhihuAnswer, order_by: 'score', limit: '20', offset: '' }, data, ...envelope },
+  step('zhihu', zhihuAnswer, options), { capturedAt })
+
+test('Zhihu TikHub comment_v5 projects root comments with Zhihu offset continuation and TikHub lineage', () => {
+  const original = zhihuPage()
+  const result = zhihuProject(original, { request: { includeRaw: true } })
+  assert.equal(result.projected.acquiredItems.length, 2)
+  const [first, second] = result.projected.acquiredItems
+  assert.equal(first.commentId, '11108372663')
+  assert.equal(second.commentId, '11108372664', 'safe numeric IDs become strings')
+  assert.equal(first.postId, zhihuAnswer)
+  assert.equal(first.text, '<p>完整知乎评论</p>')
+  assert.equal(first.author.id, 'a1b2c3')
+  assert.equal(first.author.name, '知乎作者')
+  assert.equal(first.publishedAt, new Date(1739257701000).toISOString())
+  assert.equal(first.like_count, 12)
+  assert.equal(first.reply_count, 3, 'child_comment_count, not the preview length')
+  assert.equal(first.metrics.dislikes, 1)
+  assert.equal(second.metrics.dislikes, null)
+  assert.equal(result.projected.acquiredItems.some(row => row.commentId === '11108372700'), false, 'reply previews are not roots')
+  assert.deepEqual(first.raw, original.data[0])
+  assert.equal(result.records[0].stableFields.connectorId, 'external-platform:tikhub')
+  assert.equal(result.records[0].stableFields.attributes.rootExternalId, zhihuAnswer)
+  assert.deepEqual(result.projected.providerPage, { hasMore: true, nextParams: { offset: '1739257701_11108372663_0' }, nextPage: null })
+})
+
+test('Zhihu TikHub page accepts the extra data wrapper seen on Zhihu search and nothing looser', () => {
+  const direct = zhihuProject()
+  const wrapped = zhihuProject({ code: 0, data: zhihuPage() })
+  assert.deepEqual(wrapped.projected, direct.projected)
+  for (const data of [null, [], { items: [] }, { data: { items: [] } }, { data: 'not-a-list' }]) {
+    assert.throws(() => zhihuProject(data), { code: 'invalid_upstream_contract' })
+  }
+  const badRow = zhihuPage()
+  badRow.data.push(null)
+  assert.throws(() => zhihuProject(badRow), { code: 'invalid_upstream_contract' })
+  assert.throws(() => zhihuProject(zhihuPage({ paging: 'end' })), { code: 'invalid_upstream_contract' })
+})
+
+test('Zhihu TikHub request echo and continuation destination must match the requested answer', () => {
+  assert.throws(() => zhihuProject(zhihuPage(), {}, { params: { answer_id: '1' } }), { code: 'invalid_upstream_contract' })
+  assert.equal(zhihuProject(zhihuPage(), {}, { params: undefined }).projected.acquiredItems.length, 2, 'a missing echo is not a mismatch')
+  for (const next of [`https://www.zhihu.com/api/v4/comment_v5/answers/1/root_comment?offset=x`,
+    `https://zhihu.attacker.invalid/api/v4/comment_v5/answers/${zhihuAnswer}/root_comment?offset=x`, 'not a url']) {
+    assert.throws(() => zhihuProject(zhihuPage({ paging: { is_end: false, next } })), { code: 'invalid_upstream_contract' })
+  }
+})
+
+test('Zhihu TikHub is_end ends the traversal; missing or repeated offsets stay unknown', () => {
+  assert.deepEqual(zhihuProject(zhihuPage({ paging: { is_end: true, next: 'https://www.zhihu.com/ignored' } })).projected.providerPage,
+    { hasMore: false, nextParams: null, nextPage: null })
+  assert.deepEqual(zhihuProject(zhihuPage({ paging: { is_end: false } })).projected.providerPage,
+    { hasMore: false, nextParams: null, nextPage: null, stopReason: 'continuation_unproven' })
+  assert.equal(zhihuProject(zhihuPage({ paging: undefined })).projected.providerPage.stopReason, 'continuation_unproven')
+  assert.equal(zhihuProject(zhihuPage(), { continuation: { offset: '1739257701_11108372663_0' } }).projected.providerPage.nextParams, null)
+})
+
+test('Zhihu projected continuation rebuilds the fixed TikHub fetch_comment_v5 request', () => {
+  const request = normalizePostCommentsRequest({ platform: 'zhihu', contentId: zhihuAnswer, params: { order_by: 'ts' } })
+  const first = buildPostCommentsDispatch(request)
+  assert.equal(first.provider, 'tikhub')
+  assert.equal(first.endpointPath, '/api/v1/zhihu/web/fetch_comment_v5')
+  assert.equal(first.upstreamQuery.answer_id, zhihuAnswer)
+  assert.equal(first.upstreamQuery.order_by, 'ts')
+  const result = projectPostCommentPage({ code: 200, params: { answer_id: zhihuAnswer }, data: zhihuPage() }, first, { capturedAt })
+  const next = buildPostCommentsDispatch(request, { providerCursor: result.projected.providerPage.nextParams })
+  assert.equal(next.endpointPath, first.endpointPath)
+  assert.equal(next.upstreamQuery.offset, '1739257701_11108372663_0')
+  assert.equal(next.upstreamQuery.order_by, 'ts', 'the sort order is part of the fixed request identity')
 })

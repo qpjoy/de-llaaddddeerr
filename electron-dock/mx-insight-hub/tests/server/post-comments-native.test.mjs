@@ -854,3 +854,45 @@ test('real runtime routes and aliases replay old Kuaishou raw pcursors without i
   assert.equal(gateway.platformStore.calls.size, 0)
   assert.equal(gateway.platformStore.ingestJobs.length, 0)
 })
+
+const ZHIHU_ANSWER = '89226347214'
+const zhihuComments = (start, size, nextOffset = null) => ({ code: 200, router: '/api/v1/zhihu/web/fetch_comment_v5',
+  params: { answer_id: ZHIHU_ANSWER }, data: {
+    data: Array.from({ length: size }, (_, index) => ({ id: String(11108372600 + start + index), type: 'comment',
+      content: `<p>知乎评论 ${start + index}</p>`, created_time: 1739257701 + index, like_count: index, dislike_count: 0,
+      child_comment_count: 0, author: { id: `author${start + index}`, name: `作者 ${start + index}` } })),
+    paging: nextOffset ? { is_end: false, next: `https://www.zhihu.com/api/v4/comment_v5/answers/${ZHIHU_ANSWER}/root_comment?offset=${nextOffset}` }
+      : { is_end: true } } })
+
+test('Zhihu comments run through TikHub fetch_comment_v5 and still fill count across Zhihu pages', async () => {
+  const h = await harness({ platform: 'zhihu', payload: (call, n) => n === 1
+    ? zhihuComments(0, 20, '1739257701_11108372619_0') : zhihuComments(20, 20) })
+  assert.equal(h.endpoint.provider, 'tikhub')
+  const result = await h.invoke({ platform: 'zhihu', postId: ZHIHU_ANSWER, count: 40 }, 'zhihu-tikhub-fill')
+  assert.equal(result.status, 200)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[0].path, '/api/v1/zhihu/web/fetch_comment_v5')
+  assert.equal(h.calls[0].params.answer_id, ZHIHU_ANSWER)
+  assert.equal(h.calls[0].params.answerId, undefined)
+  assert.equal(h.calls[1].params.offset, '1739257701_11108372619_0')
+  assert.equal(result.body.data.items.length, 40)
+  assert.equal(result.body.data.items[0].commentId, '11108372600')
+  assert.equal(result.body.data.page.paginationStatus, 'exhausted')
+  assert.equal(result.body.data.page.hasMore, false)
+  assert.equal(Object.hasOwn(result.body.data.page, 'continuationAvailable'), false, 'Zhihu keeps automatic fill, not one-page manual paging')
+  assert.equal(result.body.data.meta.providerCalls, 2)
+})
+
+test('a cursor signed under the JustOne Zhihu recipe cannot resume through TikHub', async () => {
+  const h = await harness({ platform: 'zhihu', payload: () => { throw new Error('historical cursor must not dispatch') } })
+  const request = normalizePostCommentsRequest({ platform: 'zhihu', postId: ZHIHU_ANSWER, count: 20 })
+  const { initialParams: _initialParams, cursor: _cursor, page: _page, ...identity } = request.fingerprintBody
+  const legacyScopeHash = createHash('sha256').update(JSON.stringify({ version: POST_COMMENTS_VERSION, ...identity })).digest('hex')
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}:post-comments`)
+  const cursor = codec.encode({ version: POST_COMMENTS_VERSION, scopeHash: legacyScopeHash,
+    previousDeliveryId: '906701b6-8201-4e2a-a622-403c78d11048', page: 2, expiresAt: Date.now() + 60000 })
+  await assert.rejects(h.invoke({ platform: 'zhihu', postId: ZHIHU_ANSWER, count: 20, cursor }, 'zhihu-justone-cursor'),
+    { code: 'invalid_cursor' })
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+})

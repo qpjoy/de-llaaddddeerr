@@ -14,7 +14,7 @@ import { parseTikHubWeiboCommentPage } from './weibo-comment-page.mjs'
 // A documented request endpoint alone does not verify a response projection.
 export const POST_COMMENT_PROJECTION_PLATFORMS = Object.freeze(['xiaohongshu', 'instagram', 'youtube',
   'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'])
-const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit', 'kuaishou', 'weibo'])
+const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu'])
 const VERSION = 'mx-insight-hub.post-comments.v1'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const unusable = () => { throw new AppError(502, 'invalid_upstream_contract', 'Comment response does not match the released contract') }
@@ -131,6 +131,43 @@ function weiboTikHub(payload, step, capturedAt) {
   return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
     records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, 'tikhub')) }
 }
+// TikHub relays Zhihu's own comment_v5 root_comment page, the same page JustOne
+// relayed before 2026-11-05: its documented offset example
+// (1739257701_11108372663_0) is Zhihu's format and the field layout below was
+// calibrated from JustOne's official sample of that page. Only the envelope
+// differs (ResponseModel code 200, request echo in params). Like this
+// supplier's Zhihu search, the Zhihu body may arrive under one extra data
+// wrapper. Anything else fails closed until a saved page shows otherwise.
+function zhihuTikHub(payload, step, capturedAt) {
+  const { request, continuation = null } = step.postComments
+  if (object(payload.params) && payload.params.answer_id != null && scalar(payload.params.answer_id) !== request.postId) unusable()
+  let data = payload.data
+  if (object(data) && !Array.isArray(data.data) && object(data.data) && Array.isArray(data.data.data)) data = data.data
+  if (!object(data) || !Array.isArray(data.data)) unusable()
+  const rows = [], raws = []
+  for (const raw of list(data.data)) {
+    if (!object(raw)) unusable()
+    rows.push(item(request, { commentId: raw.id, text: raw.content,
+      publishedAt: timestamp(raw.created_time), author: author(raw.author?.id, raw.author?.name, raw.author?.avatar_url),
+      likes: raw.like_count, replies: raw.child_comment_count, url: typeof raw.url === 'string' ? raw.url : null,
+      metrics: { dislikes: count(raw.dislike_count) } }, raw, capturedAt))
+    raws.push(raw)
+  }
+  if (data.paging != null && !object(data.paging)) unusable()
+  const ended = flag(data.paging?.is_end)
+  let offset = null
+  if (ended !== true && data.paging?.next) {
+    try {
+      const next = new URL(data.paging.next)
+      if (next.hostname !== 'www.zhihu.com' || next.pathname !== `/api/v4/comment_v5/answers/${request.postId}/root_comment`) unusable()
+      offset = next.searchParams.get('offset')
+    } catch { unusable() }
+  }
+  const providerPage = cursorPage(offset ? { offset } : {}, 'offset', 'offset', continuation,
+    ended === true ? false : ended === false ? true : null)
+  return { projected: { acquiredItems: rows, profiles: [], providerPage },
+    records: rows.map((row, index) => canonical(row, raws[index], capturedAt, 'tikhub')) }
+}
 function linkedCommentId(permalink) {
   try {
     const parsed = new URL(permalink)
@@ -169,23 +206,6 @@ function justOne(payload, step, capturedAt) {
         ? page({ page: Number(continuation?.page || 1) + 1 }, false) : page(null, flag(data.has_more) === false)
       else providerPage = cursorPage(data, 'cursor', 'cursor', continuation, flag(data.has_more))
       break
-    case 'zhihu': {
-      for (const raw of list(data.data)) append(raw, { commentId: raw.id, text: raw.content,
-        publishedAt: timestamp(raw.created_time), author: author(raw.author?.id, raw.author?.name, raw.author?.avatar_url),
-        likes: raw.like_count, replies: raw.child_comment_count, url: typeof raw.url === 'string' ? raw.url : null,
-        metrics: { dislikes: count(raw.dislike_count) } })
-      const ended = flag(data.paging?.is_end)
-      let offset = null
-      if (ended !== true && data.paging?.next) {
-        try {
-          const next = new URL(data.paging.next)
-          if (next.hostname !== 'www.zhihu.com' || next.pathname !== `/api/v4/comment_v5/answers/${request.postId}/root_comment`) unusable()
-          offset = next.searchParams.get('offset')
-        } catch { unusable() }
-      }
-      providerPage = cursorPage(offset ? { offset } : {}, 'offset', 'offset', continuation, ended === true ? false : ended === false ? true : null)
-      break
-    }
     case 'linkedin':
       for (const raw of list(data.data)) append(raw, { commentId: linkedCommentId(raw.permalink), text: raw.text,
         publishedAt: timestamp(raw.created_at), author: author(raw.commenter?.urn, raw.commenter?.name, raw.commenter?.image_url),
@@ -241,6 +261,7 @@ export function projectPostCommentPage(payload, step, { capturedAt }) {
   if (request.platform === 'reddit') return redditTikHub(payload, step, capturedAt)
   if (request.platform === 'kuaishou') return kuaishouTikHub(payload, step, capturedAt)
   if (request.platform === 'weibo') return weiboTikHub(payload, step, capturedAt)
+  if (request.platform === 'zhihu') return zhihuTikHub(payload, step, capturedAt)
   const rows = [], rawRows = []
   let providerPage
   if (request.platform === 'instagram') {
