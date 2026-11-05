@@ -46,11 +46,13 @@ function tiktokItem(value, capturedAt) {
   const author = object(value.author) ? value.author : {}, stats = object(value.stats) ? value.stats : object(value.statistics) ? value.statistics : {}
   const video = object(value.video) ? value.video : {}, handle = text(author.uniqueId, author.unique_id)
   const images = urls(array(value.imagePost?.images).flatMap(image => urlList(image?.imageURL)),
+    array(value.image_post_info?.images).flatMap(image => urlList(image?.display_image)),
     array(value.images).flatMap(image => [...urlList(image), ...urlList(image?.display_image), image?.url]))
   const videos = urls(video.playAddr, video.downloadAddr, urlList(video.play_addr), urlList(video.download_addr),
     array(video.bit_rate).flatMap(entry => urlList(entry?.play_addr)), value.video_url)
   return { id: `tiktok:${externalId}`, externalId, platform: 'tiktok', contentType: images.length ? 'image' : 'video',
-    url: text(value.share_url, value.url) || `https://www.tiktok.com/@${encodeURIComponent(handle || 'i')}/video/${externalId}`,
+    // App share links carry the sharing account's tracking query (u_code, _d ...).
+    url: text(value.share_url, value.url).split('?')[0] || `https://www.tiktok.com/@${encodeURIComponent(handle || 'i')}/video/${externalId}`,
     title: text(value.title) || null, text: text(value.desc, value.description, value.text, value.title) || null,
     publishedAt: timestamp(value.createTime ?? value.create_time), collectedAt: capturedAt,
     author: { id: id(author.id, author.uid, author.secUid, author.sec_uid), name: text(author.nickname, handle) || null,
@@ -62,9 +64,13 @@ function tiktokItem(value, capturedAt) {
     source: { provider: null, endpointId: null } }
 }
 function tiktokPage(result, data, request, capturedAt) {
+  const envelope = data
   if (!Array.isArray(data.data) && object(data.data)) data = data.data
   if (data.status_code != null && ![0, '0'].includes(data.status_code)) throw new Error('content_search_business_rejected')
-  const entries = [data.data, data.item_list, data.itemList, data.items].find(Array.isArray)
+  // App V3 video search lists search_item_list[].aweme_info beside an empty
+  // aweme_list. Its empty page nulls both lists and explains it in search_nil_info.
+  const appEmpty = data.search_item_list === null && data.aweme_list == null && object(data.search_nil_info)
+  const entries = appEmpty ? [] : [data.data, data.item_list, data.itemList, data.items, data.search_item_list, data.aweme_list].find(Array.isArray)
   if (!entries || entries.length > 10000) throw new Error('invalid_content_search_shape')
   const rows = new Map(); let nonPostCount = 0, duplicateCount = 0
   for (const entry of entries) {
@@ -74,21 +80,22 @@ function tiktokPage(result, data, request, capturedAt) {
     const row = rowFor(tiktokItem(value, capturedAt))
     if (rows.has(row.content_id)) duplicateCount++; else rows.set(row.content_id, row)
   }
-  const more = data.has_more ?? data.hasMore
+  const more = data.has_more ?? data.hasMore ?? envelope.has_more ?? envelope.hasMore
   const hasMore = more == null ? null : [true, 1, '1', 'true'].includes(more) ? true
     : [false, 0, '0', 'false'].includes(more) ? false : (() => { throw new Error('invalid_content_search_pagination') })()
-  const next = data.cursor ?? data.offset ?? data.next_offset
+  const next = data.cursor ?? data.offset ?? data.next_offset ?? envelope.cursor ?? envelope.offset ?? envelope.next_offset
   let nextParams = null
   if (hasMore !== false && next != null) {
-    if (!Number.isSafeInteger(Number(next)) || Number(next) <= Number(request.upstreamQuery.offset)) throw new Error('invalid_content_search_continuation')
-    const searchId = id(data.search_id, data.searchId, data.extra?.logid, request.upstreamQuery.search_id)
-    nextParams = { offset: Number(next), ...(searchId ? { search_id: searchId } : {}) }
+    // The App V3 search takes only the advancing offset; it has no search session.
+    const offset = typeof next === 'string' && /^\d+$/u.test(next) ? Number(next) : next
+    if (!Number.isSafeInteger(offset) || offset <= Number(request.upstreamQuery.offset)) throw new Error('invalid_content_search_continuation')
+    nextParams = { offset }
   }
   if (hasMore === true && !nextParams) throw new Error('missing_content_search_continuation')
   const items = [...rows.values()]
   return { ...result, items, acquiredItems: items, nonPostCount, duplicateCount,
     providerPage: { hasMore: hasMore ?? (nextParams ? true : null), nextParams, nextPage: nextParams ? request.page + 1 : null,
-      paginationMode: 'compound', sourceCount: entries.length } }
+      paginationMode: 'offset', sourceCount: entries.length } }
 }
 function xiaohongshuPage(result, data, request, capturedAt) {
   // The provider's search page is independent of the requested delivery size.

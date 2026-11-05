@@ -28,8 +28,11 @@ export const TIKHUB_CONTENT_SEARCH_RECIPES = Object.freeze(Object.fromEntries([
     ['query', 'search_type', 'sort', 'time_range', 'safe_search', 'allow_nsfw', 'after', 'need_format'], true, false],
   ['youtube', 'youtube_web_v2_get_general_search_v2', 'GET', '/api/v1/youtube/web_v2/get_general_search_v2', 'cursor',
     { sort_by: 'upload_date', continuation_token: '' }, ['keyword', 'continuation_token', 'upload_date', 'type', 'duration', 'features', 'sort_by'], true, false],
-  ['tiktok', 'tiktok_web_fetch_general_search', 'GET', '/api/v1/tiktok/web/fetch_general_search', 'compound',
-    { offset: 0, search_id: '' }, ['keyword', 'offset', 'search_id'], true, false],
+  // 2026-11-05: TikHub's web general search answered 400 even for its own docs
+  // example, while the App V3 video search returned pages (offset/cursor only,
+  // no search session). The released official key replaces it for TikTok.
+  ['tiktok', 'api_e806cdfabc136655', 'GET', '/api/v1/tiktok/app/v3/fetch_video_search_result', 'offset',
+    { offset: 0, count: 20, sort_type: 0, publish_time: 0, region: 'US' }, ['keyword', 'offset', 'count', 'sort_type', 'publish_time', 'region'], true, false],
   ['weibo', 'weibo_web_v2_fetch_realtime_search', 'GET', '/api/v1/weibo/web_v2/fetch_realtime_search', 'page',
     {}, ['query', 'page'], false, false],
   ['xiaohongshu', 'xiaohongshu_app_v2_search_notes', 'GET', '/api/v1/xiaohongshu/app_v2/search_notes', 'compound',
@@ -90,9 +93,15 @@ export function normalizeTikHubContentSearchRequest({ platform, query, pageSize 
   if (!recipe) throw new AppError(400, 'invalid_platform', 'Unsupported content-search platform')
   if (platform === 'twitter' && (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100)) throw new AppError(400, 'page_size_exceeded', 'Twitter pageSize must be between 1 and 100')
   if (typeof query !== 'string' || !query.trim() || query.length > maxQueryLength || query.includes('\u0000')) throw new AppError(400, 'invalid_query', 'A bounded keyword is required')
+  if (platform === 'tiktok' && object(params)) {
+    // Raw callers of the retired web search could echo its first-page defaults
+    // (the workflow already rejects any other value). They select nothing here.
+    params = Object.fromEntries(Object.entries(params).filter(([name, value]) =>
+      !(name === 'search_id' && value === '' || name === 'offset' && String(value) === '0')))
+  }
   if (!object(params) || Object.keys(params).some(name => !recipe.parameterNames.includes(name))) throw new AppError(400, 'unsupported_fields', 'Unsupported content-search parameter')
   if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > maxPageSize) throw new AppError(400, 'invalid_page_size', 'Invalid content-search page or page size')
-  const nextNames = { twitter: ['cursor'], bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'], reddit: ['after'], youtube: ['continuation_token'], tiktok: ['offset', 'search_id'], weibo: ['page'], xiaohongshu: ['page', 'search_id', 'search_session_id'] }[platform]
+  const nextNames = { twitter: ['cursor'], bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'], reddit: ['after'], youtube: ['continuation_token'], tiktok: ['offset'], weibo: ['page'], xiaohongshu: ['page', 'search_id', 'search_session_id'] }[platform]
   if (providerCursor != null && (!object(providerCursor) || Object.keys(providerCursor).some(name => !nextNames.includes(name)))) throw new AppError(400, 'invalid_cursor', 'Invalid platform continuation')
   const upstream = { ...recipe.defaults, ...params, [['reddit', 'weibo'].includes(platform) ? 'query' : 'keyword']: query.trim(), ...(providerCursor || {}) }
   if (platform === 'twitter') {

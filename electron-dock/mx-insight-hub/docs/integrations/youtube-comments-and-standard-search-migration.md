@@ -19,10 +19,10 @@
 
 Delta 的 TikTok 冷启动走 `POST /api/v1/night-all/search/raw`（`operation=raw`，请求体 `{platform, keyword, page, count}`）。按 10-17 的边界它仍转发 Night-All `POST /api/v1/search/raw`，而 Night-All 对它返回非 JSON 的 HTTP 404（Hub 记为 `night_all_rejected` / `invalid_upstream_content_type`），整条 raw 链路近 7 天 1452 次失败、2 次成功。
 
-现在 TikTok、Reddit、YouTube 配方都是 `rawCompatibility: true`（`server/contracts/tikhub-content-search.mjs`），两个 raw 入口与 B站、抖音、快手、知乎一样由 Hub 调固定 TikHub 端点（TikTok `/api/v1/tiktok/web/fetch_general_search`、Reddit `/api/v1/reddit/app/fetch_dynamic_search`、YouTube `/api/v1/youtube/web_v2/get_general_search_v2`），不回退 Night-All：
+现在 TikTok、Reddit、YouTube 配方都是 `rawCompatibility: true`（`server/contracts/tikhub-content-search.mjs`），两个 raw 入口与 B站、抖音、快手、知乎一样由 Hub 调固定 TikHub 端点（TikTok 现为 `/api/v1/tiktok/app/v3/fetch_video_search_result`，见下文 11-05；Reddit `/api/v1/reddit/app/fetch_dynamic_search`、YouTube `/api/v1/youtube/web_v2/get_general_search_v2`），不回退 Night-All：
 
 - 响应仍是 raw 信封：`contractVersion=mx-insight-hub.raw-search.v1`，`raw_data` / `raw_info` 为 JSON 字符串，`page` 给出 Hub 签发的续页游标。一页不够时在本次请求内继续向 TikHub 取（每请求最多 3 次实际调用）。
-- `params` 只接受各端点声明的字段（如 TikTok 的 `keyword`、`offset`、`search_id`），其余字段在采购前返回 400；详情／评论附采参数同样在采购前拒绝。`publicParams` 仍为 false，标准搜索不开放 params。
+- `params` 只接受各端点声明的字段（如 TikTok 的 `offset`、`count`、`sort_type`、`publish_time`、`region`），其余字段在采购前返回 400；详情／评论附采参数同样在采购前拒绝。`publicParams` 仍为 false，标准搜索不开放 params。
 - Night-All 签发的旧 `mxnc1` 游标返回 `409 search_restart_required`，需带新幂等键从第 1 页重开；标准搜索的游标不能续 raw。
 - 计量、授权与 B站等 raw 直连一致；同幂等键在两个 raw 别名之间重放同一交付。
 
@@ -31,6 +31,33 @@ Reddit raw 使用与标准搜索相同的严格解析：响应里出现无法识
 仍可能转发 Night-All 的 raw 只剩微博、Twitter、小红书的非简单请求（多关键词、附采参数、非 Hub 游标等）。
 
 微信旧 `/api/v1/night-all/search/raw` 仍返回410；迁到 `/api/v1/data/search` 可避开退役入口，但也必须按新参数、授权、响应和游标切换，不能只改 URL。
+
+### 2026-11-05 TikTok 改用 App V3 视频搜索
+
+生产请求 `87c45dbc-06fb-4a1f-8f36-5391438bac6d` 在首页失败：TikHub `GET /api/v1/tiktok/web/fetch_general_search` 返回 HTTP 400、业务码 400，上游请求 ID `9dfe3fab-b904-4400-9e7a-74212cfbdce2`。回显关键词与 Hub 一致，`offset=0`，`search_id=""`，供应商只给通用失败文案（400 不计费）。
+
+同日用本地 Night-All 配置的 TikHub 凭据直连对照（每次成功调用约 0.001 USD）：
+
+| 端点 | 请求 | 结果 | TikHub 请求 ID |
+|---|---|---|---|
+| `web/fetch_general_search` | 官方示例 `TikTok`，`offset=0`，显式空 `search_id` | 400 | `967cd4cd-64eb-4ef3-b672-d79c53a66260` |
+| `web/fetch_general_search` | 同上，省略 `search_id` | 400 | `902cf724-b80e-41d8-bc7d-1ca8908712ef` |
+| `web/fetch_general_search` | 同上，稍后复测 | 400 | `82f4c88f-1e94-4a00-bcd4-44c69b7a8989` |
+| `web/fetch_search_video` | `TikTok`，`count=20`，`offset=0` | 400 | `965eaf09-59b5-4737-af16-e909c7a0f0a0` |
+| `app/v3/fetch_video_search_result` | `cat`，`offset=0`，`count=20` | 200，20 条，`cursor=20`，`has_more=1` | `6b9e8263-633a-4972-92f6-ea38ff80f34c` |
+| `app/v3/fetch_video_search_result` | `cat`，`offset=20` | 200，空页（`search_nil_info.search_nil_item=federation_empty`），`has_more=0` | `59739712-b671-4676-94f2-b0fd6d09f41a` |
+| `app/v3/fetch_video_search_result` | `城市`，`offset=0`，`count=30` | 200，30 条，`cursor=30`，`has_more=1` | `3f8e4153-8a70-4805-b3e6-42fe0a17275e` |
+| `app/v3/fetch_video_search_result` | `城市`，`offset=30` | 200，30 条（与首页重复 7 条），`cursor=60`，`has_more=1` | `9803a398-b585-4e27-9a9f-6ecfc6262e0c` |
+| `app/v3/fetch_video_search_result` | `TikTok`，`offset=0` | 200，2 条，`has_more=0` | `2eae8534-53af-40b9-a578-cfe996d2b94d` |
+
+web 搜索连官方示例都失败，问题在供应商侧，改参数无效。TikTok 标准搜索和两个 raw 入口改用已发布的官方键 `t.api_e806cdfabc136655`（`native.t.api_e806cdfabc136655`，迁移 114 已 released，官方价 0.001 USD，与旧端点相同）：
+
+- 请求：`keyword`、`offset`（首页 0）、`count=20`、`sort_type=0`（相关度）、`publish_time=0`（不限）、`region=US`，按官方合约做整数/字符串类型校验。
+- 响应：作品在 `search_item_list[].aweme_info`（旁边的 `aweme_list` 为空数组）。空页把两个列表都置为 `null` 并附 `search_nil_info`，只有这种组合按空页结束；其余缺列表的情况仍按结构异常处理。分享链接去掉 `u_code`、`_d` 等分享者追踪参数；图文作品读取 `image_post_info.images[].display_image`。
+- 翻页：该接口没有 `search_id`，下一页只用响应的 `cursor` 作为 `offset`，必须递增；按 `has_more` 决定是否续页。部分关键词第二页即为空页，属正常结束。跨页重复由 Hub 去重。
+- 旧游标：Hub 游标里带配方键，旧 web 配方签发的 TikTok 游标统一返回 `400 invalid_cursor`，需从第 1 页重新开始。上一版为 web 接口加的 `search_id` 续页守卫与 `tiktok_search_id_unavailable` 提示已删除。
+- raw 调用方若在 `params` 里带旧接口的首页默认值（`offset=0`、`search_id=""`）照常接受；非空 `search_id` 返回 400。
+- 上线前提：`native.t.api_e806cdfabc136655` 需为 active 且有价。部署脚本的 `seed_default_price_books` 会为缺价的已发布操作补 0.01 USD 预估价并激活（需 `MX_INSIGHT_ADMIN_TOKEN`）；若运营手动暂停过该操作，需要在管理端恢复。旧键 `native.t.tiktok_web_fetch_general_search` 的原生转发保持不变。
 
 ## YouTube 请求与响应
 

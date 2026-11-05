@@ -15,7 +15,7 @@ import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../../server/contracts/tikhub-con
 import { RAW_SEARCH_VERSION } from '../../server/contracts/raw-search.mjs'
 import { requestFingerprint } from '../../server/core/crypto.mjs'
 import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
-import { createNightAllCompatibilityCursorCodec } from '../../server/external-platforms/cursor.mjs'
+import { createDataSearchCursorCodec, createNightAllCompatibilityCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { capNightAllDataSearchTraversal, prepareNightAllCompatibilityTraversal } from '../../server/data/night-all-pagination.mjs'
 
 const fixtures = JSON.parse(await readFile(new URL('../fixtures/tikhub-content-search.json', import.meta.url), 'utf8'))
@@ -1176,10 +1176,14 @@ test('turning LCY exemption off between acquired pages restores capacity before 
   assert.equal([...f.store.requests.values()][0].status, 'committed')
 })
 
-const tiktokPage = (ids, next = null) => ({ data: ids.map(id => ({ type: 1, item: {
-  id, desc: '完整文本'.repeat(200), author: { id: '7111111111111111111', uniqueId: 'fixture', nickname: '作者' },
-  stats: { diggCount: 0, commentCount: 3 }, video: { playAddr: 'https://example.test/video.mp4?sig=a%2Fb', cover: 'https://example.test/cover.jpg' },
-} })), has_more: next != null ? 1 : 0, cursor: next ?? 0, search_id: 'fixture-session' })
+// TikHub App V3 video-search layout (real 2026-11-05 page); values are synthetic.
+const tiktokPage = (ids, next = null) => ({ status_code: 0, aweme_list: [], search_item_list: ids.map(id => ({ aweme_info: {
+  aweme_id: id, desc: '完整文本'.repeat(200), author: { uid: '7111111111111111111', unique_id: 'fixture', nickname: '作者' },
+  statistics: { digg_count: 0, comment_count: 3 }, video: { play_addr: { url_list: ['https://example.test/video.mp4?sig=a%2Fb'] },
+    cover: { url_list: ['https://example.test/cover.jpg'] } },
+}, search_aweme_info: {} })), has_more: next != null ? 1 : 0, cursor: next ?? 0, log_pb: { impr_id: 'fixture-log' } })
+const tiktokEmptyPage = cursor => ({ status_code: 0, aweme_list: null, search_item_list: null, has_more: 0, cursor,
+  search_nil_info: { is_load_more: 'is_load_more', search_nil_item: 'federation_empty', text_type: 10 } })
 const xhsPage = (ids, page = 1, hasMore = false) => ({ page, next_page: hasMore ? page + 1 : null, data: {
   items: ids.map(id => ({ model_type: 'note', note: { id, title: `标题${id}`, desc: '真实完整正文',
     user: { user_id: 'fixture-author', nickname: '作者' }, interact_info: { liked_count: 0, comment_count: 4 } } })),
@@ -1226,13 +1230,40 @@ test('TikTok fills advancing source pages and keeps video covers out of image me
   const h = await harness({ platform: 'tiktok', payload: (_call, n) => tiktokPage([`711111111111111111${n}`], n < 3 ? n * 10 : null) })
   const result = await h.invokeData({ platform: 'tiktok', query: '城市', pageSize: 3 })
   assert.equal(result.body.data.items.length, 3)
+  assert.ok(h.calls.every(call => call.url.pathname === '/api/v1/tiktok/app/v3/fetch_video_search_result'))
   assert.deepEqual(h.calls.map(call => call.params.offset), ['0', '10', '20'])
-  assert.equal(h.calls[1].params.search_id, 'fixture-session')
+  assert.deepEqual(h.calls[0].params, { keyword: '城市', offset: '0', count: '20', sort_type: '0', publish_time: '0', region: 'US' })
+  assert.ok(h.calls.every(call => !Object.hasOwn(call.params, 'search_id')))
   assert.equal(result.body.data.items[0].text.length, 800)
   assert.deepEqual(result.body.data.items[0].media.images, [])
   assert.equal(result.body.data.items[0].media.coverUrl, 'https://example.test/cover.jpg')
   assert.equal(result.body.data.items[0].metrics.views, null)
   assert.equal([...h.store.requests.values()].length, 1)
+})
+
+test('TikTok continues an explicit cursor with the offset and ends cleanly at the App V3 empty page', async () => {
+  const h = await harness({ platform: 'tiktok', payload: (_call, n) => n === 1 ? tiktokPage(['101', '102'], 20) : tiktokEmptyPage(40) })
+  const body = { platform: 'tiktok', query: '城市', pageSize: 2 }
+  const first = await h.invokeData(body)
+  assert.deepEqual(first.body.data.items.map(item => item.externalId), ['101', '102'])
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.equal(h.calls.length, 1)
+  const next = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'tiktok-empty-next')
+  assert.equal(h.calls[1].params.offset, '20')
+  assert.deepEqual([next.body.data.items, next.body.data.status, next.body.data.pageInfo.hasMore, next.body.data.pageInfo.nextCursor], [[], 'ok', false, null])
+  assert.equal(h.calls.length, 2)
+})
+
+test('A TikTok cursor issued for the retired web search must restart before any dispatch', async () => {
+  const h = await harness({ platform: 'tiktok', payload: tiktokPage(['101', '102'], 20) })
+  const body = { platform: 'tiktok', query: '城市', pageSize: 1 }
+  const first = await h.invokeData(body)
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+  const state = codec.decode(first.body.data.pageInfo.nextCursor)
+  assert.equal(state.recipe, 't.api_e806cdfabc136655')
+  const retired = codec.encode({ ...state, recipe: 't.tiktok_web_fetch_general_search' })
+  await assert.rejects(h.invokeData({ ...body, cursor: retired }, 'tiktok-retired-recipe'), { code: 'invalid_cursor' })
+  assert.equal(h.calls.length, 1)
 })
 
 test('Xiaohongshu non20 pages cannot bypass paused existing search operation or require native grant', async () => {
@@ -1365,6 +1396,7 @@ test('TikTok malformed content and unproven advancing continuation preserve paid
     { data: [{ unrecognized: { secret: 'synthetic-field' } }], has_more: false },
     { data: [{ item: { id: '7111111111111111111', desc: '正文' } }], has_more: true },
     { data: [], status_code: 10000, has_more: false },
+    { status_code: 0, search_item_list: null, aweme_list: null, has_more: 0, cursor: 20 },
   ]) {
     const h = await harness({ platform: 'tiktok', payload })
     await assert.rejects(h.invokeData(), error => error.code === 'external_platform_response_unusable')

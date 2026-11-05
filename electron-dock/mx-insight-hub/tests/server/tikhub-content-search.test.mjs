@@ -636,3 +636,60 @@ test('direct acquired rows map reply/bookmark metrics and full body into the exi
     })
   }
 })
+
+// Field layout of a real 2026-11-05 App V3 video-search page; all values are synthetic.
+const tiktokAppPage = ({ cursor = 20, hasMore = 1, items } = {}) => ({ status_code: 0, aweme_list: [], cursor, has_more: hasMore,
+  extra: { logid: 'synthetic-log' }, log_pb: { impr_id: 'synthetic-log' }, feedback_type: 'video', version: 'v2',
+  search_item_list: items ?? [{ aweme_info: { aweme_id: '7111111111111111111', aweme_type: 0, desc: '完整正文', create_time: 1793801058,
+    share_url: 'https://www.tiktok.com/@fixture/video/7111111111111111111?_r=1&u_code=sharer&_d=device&share_item_id=7111111111111111111',
+    author: { uid: '7111111111111111110', sec_uid: 'MS4w-synthetic', unique_id: 'fixture', nickname: '作者',
+      avatar_thumb: { url_list: ['https://example.test/avatar.jpg'] } },
+    statistics: { digg_count: 0, comment_count: 3, share_count: 2, play_count: 9, collect_count: 1 },
+    video: { play_addr: { url_list: ['https://example.test/play.mp4'] }, download_addr: { url_list: ['https://example.test/download.mp4'] },
+      cover: { url_list: ['https://example.test/cover.jpg'] } } }, search_aweme_info: {} }] })
+
+test('TikTok App V3 video search maps aweme_info, strips share tracking and continues with the offset alone', () => {
+  const first = request('tiktok')
+  assert.equal(first.key, 't.api_e806cdfabc136655')
+  assert.equal(first.endpointPath, '/api/v1/tiktok/app/v3/fetch_video_search_result')
+  assert.deepEqual(first.upstreamQuery, { keyword: '城市', offset: 0, count: 20, sort_type: 0, publish_time: 0, region: 'US' })
+  const page = project('tiktok', tiktokAppPage())
+  const [row] = page.items
+  assert.equal(row.content_id, '7111111111111111111')
+  assert.equal(row.url, 'https://www.tiktok.com/@fixture/video/7111111111111111111')
+  assert.equal(row.full_text, '完整正文')
+  assert.equal(row.created_at, '2026-11-04T14:04:18.000Z')
+  assert.deepEqual([row.author_id, row.author_name, row.author_avatar_url], ['7111111111111111110', '作者', 'https://example.test/avatar.jpg'])
+  assert.deepEqual([row.like_count, row.reply_count, row.forward_count, row.view_count, row.bookmark_count], [0, 3, 2, 9, 1])
+  assert.deepEqual([row.content_type, row.cover_url, JSON.parse(row.video_urls)], ['video', 'https://example.test/cover.jpg',
+    ['https://example.test/play.mp4', 'https://example.test/download.mp4']])
+  assert.deepEqual(page.providerPage, { hasMore: true, nextParams: { offset: 20 }, nextPage: 2, paginationMode: 'offset', sourceCount: 1 })
+  const second = request('tiktok', { page: 2, providerCursor: page.providerPage.nextParams })
+  assert.equal(second.upstreamQuery.offset, 20)
+  assert.equal(second.upstreamQuery.search_id, undefined)
+  assert.throws(() => request('tiktok', { page: 2, providerCursor: { offset: 20, search_id: 'web-session' } }), { code: 'invalid_cursor' })
+
+  const photo = tiktokAppPage({ hasMore: 0 })
+  photo.search_item_list[0].aweme_info.image_post_info = { images: [{ display_image: { url_list: ['https://example.test/photo-1.jpg'] } }] }
+  assert.deepEqual(JSON.parse(project('tiktok', photo).items[0].image_urls), ['https://example.test/photo-1.jpg'])
+  assert.equal(project('tiktok', photo).items[0].content_type, 'image')
+
+  // The real exhausted page nulls both lists and explains it in search_nil_info.
+  const empty = { ...tiktokAppPage({ cursor: 40, hasMore: 0 }), search_item_list: null, aweme_list: null,
+    search_nil_info: { is_load_more: 'is_load_more', search_nil_item: 'federation_empty', text_type: 10 } }
+  const exhausted = project('tiktok', empty, { page: 2, providerCursor: { offset: 20 } })
+  assert.deepEqual([exhausted.items.length, exhausted.providerPage.hasMore, exhausted.providerPage.nextParams], [0, false, null])
+  const { search_nil_info: _explained, ...unexplained } = empty
+  assert.throws(() => project('tiktok', unexplained), /invalid_content_search_shape/)
+  assert.throws(() => project('tiktok', { ...tiktokAppPage(), status_code: 2483 }), /content_search_business_rejected/)
+  for (const cursor of [0, true, ['20']]) assert.throws(() => project('tiktok', tiktokAppPage({ cursor })), /invalid_content_search_continuation/)
+  assert.throws(() => project('tiktok', { ...tiktokAppPage(), cursor: undefined }), /missing_content_search_continuation/)
+})
+
+test('TikTok accepts the retired web search defaults from raw callers but no other session or field', () => {
+  assert.deepEqual(request('tiktok', { params: { offset: 0, search_id: '' } }).upstreamQuery, request('tiktok').upstreamQuery)
+  assert.equal(request('tiktok', { params: { offset: '0', sort_type: 1, publish_time: 7, region: 'JP' } }).upstreamQuery.region, 'JP')
+  assert.throws(() => request('tiktok', { params: { search_id: 'web-session' } }), { code: 'unsupported_fields' })
+  assert.throws(() => request('tiktok', { params: { cookie: 'secret' } }), { code: 'unsupported_fields' })
+  assert.throws(() => request('tiktok', { params: { sort_type: '1' } }), { code: 'invalid_parameter' })
+})

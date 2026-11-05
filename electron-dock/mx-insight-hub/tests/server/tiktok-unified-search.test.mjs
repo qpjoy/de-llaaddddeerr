@@ -55,7 +55,7 @@ async function harness(t, { grant = true, unknown = false } = {}) {
     return Response.json(path === DATA_PATH ? standardPage(body) : legacyPage())
   } })
   const service = new HubService({ store, adapter, apiKeyPepper: 'tiktok-unified-test-fixture-pepper-long-enough' })
-  const endpoint = nativeForwardingEndpoint('t.tiktok_web_fetch_general_search')
+  const endpoint = nativeForwardingEndpoint('t.api_e806cdfabc136655')
   const config = { configured: true, contractVerified: true, dispatchEnabled: true, timeoutMs: 100,
     freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 100, billing: {} }
   const controls = new MemoryExternalPlatformControlStore()
@@ -68,10 +68,13 @@ async function harness(t, { grant = true, unknown = false } = {}) {
     calls.push({ path: parsed.pathname, body })
     if (unknown) throw new TypeError('Synthetic transport outcome unknown')
     const first = body.offset === '0'
-    return Response.json({ code: 200, data: { data: [{ item: { id: first ? '9223372036854775807' : '9223372036854775808', desc: TEXT,
-      author: { id: '9223372036854775806', nickname: 'author', uniqueId: 'author' },
-      stats: { diggCount: 0, shareCount: 3, playCount: 0 }, video: { playAddr: 'https://example.test/video.mp4', cover: 'https://example.test/cover.jpg' } } }],
-      has_more: first, cursor: 10, search_id: 'tiktok-native-standard-continuation' } })
+    // TikHub App V3 video-search layout; the log ID is not a continuation input.
+    return Response.json({ code: 200, data: { status_code: 0, aweme_list: [], search_item_list: [{ aweme_info: {
+      aweme_id: first ? '9223372036854775807' : '9223372036854775808', desc: TEXT,
+      author: { uid: '9223372036854775806', nickname: 'author', unique_id: 'author' },
+      statistics: { digg_count: 0, share_count: 3, play_count: 0 },
+      video: { play_addr: { url_list: ['https://example.test/video.mp4'] }, cover: { url_list: ['https://example.test/cover.jpg'] } } } }],
+      has_more: first ? 1 : 0, cursor: first ? 10 : 20, log_pb: { impr_id: 'tiktok-native-standard-continuation' } } })
   } })
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'tikhub', authorizationPlatform: 'tiktok' })
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter: directAdapter, config,
@@ -113,7 +116,7 @@ test('TikTok unified search preserves the standard contract and charges once per
   assert.equal(first.body.data.raw_data, undefined)
   assert.doesNotMatch(JSON.stringify(first.body), /private-upstream-operation|tiktok-native-standard-continuation/)
   assert.match(first.body.data.pageInfo.nextCursor, /^mxds1\./)
-  assert.equal(h.calls[0].path, '/api/v1/tiktok/web/fetch_general_search')
+  assert.equal(h.calls[0].path, '/api/v1/tiktok/app/v3/fetch_video_search_result')
   assert.equal(h.calls[0].body.keyword, QUERY)
   const replay = await h.request(DATA_PATH, input, 'tiktok-standard-first')
   assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
@@ -130,7 +133,7 @@ test('TikTok unified search preserves the standard contract and charges once per
   assert.equal(next.response.status, 200)
   assert.equal(next.body.data.pageInfo.pageIndex, 2)
   assert.equal(next.body.data.pageInfo.hasMore, false)
-  assert.equal(h.calls[1].body.search_id, 'tiktok-native-standard-continuation')
+  assert.equal(h.calls[1].body.search_id, undefined)
   assert.equal(h.calls[1].body.offset, '10')
   assert.equal(h.calls.length, 2)
   assert.equal(h.store.customerCharges.size, 2)
@@ -150,8 +153,8 @@ test('TikTok raw aliases run the fixed TikHub search in Hub, never Night-All, an
   assert.equal(JSON.parse(first.body.data.raw_info)[0].user_id, '9223372036854775806')
   assert.deepEqual([first.body.data.page.hasMore, first.body.data.page.nextCursor], [false, null])
   assert.deepEqual(h.calls.map(call => [call.path, call.body.offset, call.body.search_id]), [
-    ['/api/v1/tiktok/web/fetch_general_search', '0', ''],
-    ['/api/v1/tiktok/web/fetch_general_search', '10', 'tiktok-native-standard-continuation'],
+    ['/api/v1/tiktok/app/v3/fetch_video_search_result', '0', undefined],
+    ['/api/v1/tiktok/app/v3/fetch_video_search_result', '10', undefined],
   ])
   // The other alias replays the same delivery without another purchase.
   const replay = await h.request('/api/v1/search/raw', legacy, 'tiktok-raw-first')
@@ -166,7 +169,7 @@ test('TikTok raw aliases run the fixed TikHub search in Hub, never Night-All, an
   const badCursor = await h.request(RAW_PATH, { ...legacy, cursor: standard.body.data.pageInfo.nextCursor }, 'tiktok-mixed-invalid')
   assert.equal(badCursor.response.status, 400)
   assert.equal(badCursor.body.error.code, 'invalid_cursor')
-  assert.ok(h.calls.every(call => call.path === '/api/v1/tiktok/web/fetch_general_search'), 'Night-All is never called')
+  assert.ok(h.calls.every(call => call.path === '/api/v1/tiktok/app/v3/fetch_video_search_result'), 'Night-All is never called')
 })
 
 test('TikTok unified entry retains platform authorization and never retries an unknown acquisition', async t => {
