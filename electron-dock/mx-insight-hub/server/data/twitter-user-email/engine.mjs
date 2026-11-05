@@ -38,9 +38,29 @@ export class WorkerFailure extends Error {
   }
 }
 
-function publicFailure(error) {
+// The shared PostgreSQL runs out of these when someone else bursts (Hub usage
+// aggregation already exhausted /dev/shm once). Every stage resumes from its
+// committed checkpoint, so the worker waits and retries before an operator is
+// needed. A full data disk is not transient and fails at once.
+export const RESOURCE_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000, 300_000, 600_000, 900_000])
+
+// Class 53 messages name a shared-memory segment or a file, never row values,
+// so they may be classified; everything else is reduced to its SQLSTATE.
+function resourceFailure(error) {
+  if (error.code === '53100' && /shared memory/i.test(String(error.message || ''))) {
+    return { code: 'database_shared_memory_full', message: 'PostgreSQL shared memory (/dev/shm) is exhausted (SQLSTATE 53100)', transient: true }
+  }
+  if (error.code === '53100') return { code: 'database_disk_full', message: 'The PostgreSQL data disk is full (SQLSTATE 53100)' }
+  if (error.code === '53200') return { code: 'database_out_of_memory', message: 'PostgreSQL is out of memory (SQLSTATE 53200)', transient: true }
+  if (error.code === '53300') return { code: 'database_busy', message: 'PostgreSQL has no free connection slots (SQLSTATE 53300)', transient: true }
+  return null
+}
+
+export function publicFailure(error) {
   if (error instanceof WorkerFailure) return { code: error.code, message: error.message }
   if (error instanceof JsonPairsError) return { code: 'malformed_source_json', message: error.message }
+  const resource = error?.code ? resourceFailure(error) : null
+  if (resource) return resource
   if (error?.code && /^[0-9A-Z]{5}$/.test(error.code)) {
     // PostgreSQL detail text can quote row values; keep only the SQLSTATE.
     return { code: 'database_error', message: `PostgreSQL error ${error.code}` }
@@ -74,9 +94,13 @@ export class TwitterUserEmailEngine {
     sleep = (ms, signal) => delay(ms, undefined, { signal }).catch(() => {}),
     // Test hook: awaited after every committed import batch.
     afterBatch = null,
+    retryDelaysMs = RESOURCE_RETRY_DELAYS_MS,
   }) {
-    Object.assign(this, { pool, store, fileReader, logger, workerId, batchPairs, chunkBytes, targetRowsPerSecond, shaBytesPerSecond, sleep, afterBatch })
+    Object.assign(this, { pool, store, fileReader, logger, workerId, batchPairs, chunkBytes, targetRowsPerSecond, shaBytesPerSecond, sleep, afterBatch, retryDelaysMs })
     this.domainCache = new Map()
+    // Bumped by every committed batch or partition step; a retry budget only
+    // covers failures with no progress in between.
+    this.progressTicks = 0
   }
 
   /** Process the open version until it pauses, fails or becomes ready. */
@@ -100,33 +124,69 @@ export class TwitterUserEmailEngine {
          started_at = coalesce(started_at, now()), updated_at = now() WHERE id = $1`,
       [version.id, this.workerId],
     )
-    try {
-      let current = version
-      while (true) {
-        if (signal?.aborted) throw new StopSignal('shutdown')
-        if (current.stage === 'pending') current = await this.#advance(current.id, 'verifying')
-        else if (current.stage === 'verifying') current = await this.#verify(current, signal)
-        else if (current.stage === 'importing') current = await this.#import(current, signal)
-        else if (current.stage === 'building') current = await this.#build(current, signal)
-        else if (current.stage === 'validating') current = await this.#validate(current)
-        else break
+    let retries = 0
+    let retryWaitMs = 0
+    let ticksAtFailure = null
+    while (true) {
+      try {
+        let current = version
+        if (retryWaitMs) {
+          await this.#waitBeforeRetry(version.id, retryWaitMs, signal)
+          retryWaitMs = 0
+          // Every stage resumes from what PostgreSQL committed.
+          current = await this.store.version(version.id)
+        }
+        while (true) {
+          if (signal?.aborted) throw new StopSignal('shutdown')
+          if (current.stage === 'pending') current = await this.#advance(current.id, 'verifying')
+          else if (current.stage === 'verifying') current = await this.#verify(current, signal)
+          else if (current.stage === 'importing') current = await this.#import(current, signal)
+          else if (current.stage === 'building') current = await this.#build(current, signal)
+          else if (current.stage === 'validating') current = await this.#validate(current)
+          else break
+        }
+        this.logger.log?.(`[dictionary] version ${version.id} is ${current.stage}`)
+        return current.stage
+      } catch (error) {
+        if (error instanceof StopSignal) {
+          if (error.reason === 'discard') return this.runOpenVersion(signal)
+          // Shutdown leaves the version runnable; pause is acknowledged.
+          await this.#setRunState(version.id, error.reason === 'paused' ? 'paused' : 'waiting').catch(() => {})
+          return error.reason
+        }
+        const failure = publicFailure(error)
+        if (ticksAtFailure !== this.progressTicks) retries = 0
+        ticksAtFailure = this.progressTicks
+        if (failure.transient && retries < this.retryDelaysMs.length) {
+          retryWaitMs = this.retryDelaysMs[retries]
+          retries += 1
+          this.logger.error?.(`[dictionary] version ${version.id} hit ${failure.code}; retry ${retries}/${this.retryDelaysMs.length} in ${Math.round(retryWaitMs / 1000)}s`, error)
+          // Still running: the notice stays until the next committed step clears it.
+          await this.pool.query(
+            `UPDATE ${SCHEMA}.versions SET error_code = $2, error_message = $3, heartbeat_at = now(), updated_at = now() WHERE id = $1`,
+            [version.id, failure.code, `${failure.message}; automatic retry ${retries}/${this.retryDelaysMs.length} in ${Math.round(retryWaitMs / 1000)}s`],
+          ).catch(() => {})
+          continue
+        }
+        this.logger.error?.(`[dictionary] version ${version.id} failed: ${failure.code}`, error)
+        await this.pool.query(
+          `UPDATE ${SCHEMA}.versions SET run_state = 'failed', error_code = $2, error_message = $3, updated_at = now() WHERE id = $1`,
+          [version.id, failure.code, failure.message],
+        ).catch(() => {})
+        return 'failed'
       }
-      this.logger.log?.(`[dictionary] version ${version.id} is ${current.stage}`)
-      return current.stage
-    } catch (error) {
-      if (error instanceof StopSignal) {
-        if (error.reason === 'discard') return this.runOpenVersion(signal)
-        // Shutdown leaves the version runnable; pause is acknowledged.
-        await this.#setRunState(version.id, error.reason === 'paused' ? 'paused' : 'waiting').catch(() => {})
-        return error.reason
-      }
-      const failure = publicFailure(error)
-      this.logger.error?.(`[dictionary] version ${version.id} failed: ${failure.code}`, error)
-      await this.pool.query(
-        `UPDATE ${SCHEMA}.versions SET run_state = 'failed', error_code = $2, error_message = $3, updated_at = now() WHERE id = $1`,
-        [version.id, failure.code, failure.message],
-      ).catch(() => {})
-      return 'failed'
+    }
+  }
+
+  // Keeps the heartbeat and honours pause, discard and shutdown while waiting.
+  async #waitBeforeRetry(id, waitMs, signal) {
+    let left = waitMs
+    while (true) {
+      await this.#control(id, signal, { clearError: false })
+      if (left <= 0) return
+      const slice = Math.min(left, 15_000)
+      await this.sleep(slice, signal)
+      left -= slice
     }
   }
 
@@ -157,10 +217,14 @@ export class TwitterUserEmailEngine {
   }
 
   // Throws StopSignal when the operator paused or discarded the version.
-  async #control(id, signal) {
+  // Called after each committed batch or step, which also ends a retry notice.
+  async #control(id, signal, { clearError = true } = {}) {
     if (signal?.aborted) throw new StopSignal('shutdown')
+    if (clearError) this.progressTicks += 1
     const { rows } = await this.pool.query(
-      `UPDATE ${SCHEMA}.versions SET heartbeat_at = now() WHERE id = $1 RETURNING desired_state, stage`,
+      `UPDATE ${SCHEMA}.versions SET heartbeat_at = now()
+         ${clearError ? ', error_code = NULL, error_message = NULL' : ''}
+       WHERE id = $1 RETURNING desired_state, stage`,
       [id],
     )
     const state = rows[0]?.desired_state
@@ -254,12 +318,16 @@ export class TwitterUserEmailEngine {
       let ordinal = Number(version.pairs_read)
       let offset = Number(version.byte_offset)
       let batch = this.#emptyBatch()
-      let lastCommitAt = Date.now()
+      // Throughput from one commit to the next: parsing + commit + pacing.
+      // The first batch after a (re)start has no full cycle and the last one
+      // is a remainder; both keep the stored figure (null -> coalesce).
+      let lastCommitAt = null
       const commit = async (state) => {
-        const seconds = Math.max(0.001, (Date.now() - lastCommitAt) / 1000)
-        const next = await this.#commitBatch(version, tables, batch, offset, state, Math.round((batch.pairs / seconds) * 10) / 10)
-        lastCommitAt = Date.now()
-        return next
+        const now = Date.now()
+        const rate = lastCommitAt === null || batch.pairs < this.batchPairs ? null
+          : Math.round((batch.pairs / Math.max(0.001, (now - lastCommitAt) / 1000)) * 10) / 10
+        lastCommitAt = now
+        return this.#commitBatch(version, tables, batch, offset, state, rate)
       }
       const windows = readPairWindows({
         read: (position, length) => readExact(file.fileHandle, position, length),
@@ -356,7 +424,7 @@ export class TwitterUserEmailEngine {
                GROUP BY key
              ) merged
            ),
-           recent_rows_per_second = $8, heartbeat_at = now(), updated_at = now()
+           recent_rows_per_second = coalesce($8, recent_rows_per_second), heartbeat_at = now(), updated_at = now()
          WHERE id = $1 AND stage = 'importing' AND byte_offset = $9`,
         [version.id, batch.endOffset ?? expectedOffset, parserState, batch.pairs, batch.rows.ordinals.length,
           batch.quarantine.ordinals.length, JSON.stringify(batch.reasonCounts), rowsPerSecond, expectedOffset],
@@ -438,8 +506,12 @@ export class TwitterUserEmailEngine {
       await client.query(`CREATE INDEX IF NOT EXISTS ${name}_user_trgm ON ${leaf} USING gin (lower(username) gin_trgm_ops)`)
       await client.query(`CREATE INDEX IF NOT EXISTS ${name}_local_trgm ON ${leaf} USING gin (lower(email_local) gin_trgm_ops)`)
       // Read-only after this point: freeze now so no anti-wraparound vacuum
-      // ever has to rescan the dictionary later.
-      await client.query(`VACUUM (FREEZE, ANALYZE) ${leaf}`)
+      // ever has to rescan the dictionary later. PARALLEL 0: with 4 indexes
+      // PostgreSQL 16 otherwise goes parallel and preallocates its dead-TID
+      // array in /dev/shm (~21% of the heap, ~200 MiB per 12.5M-row leaf),
+      // which the shared instance caps at 1 GiB for everyone. A fresh leaf
+      // has no dead rows, so the parallel workers had nothing to do anyway.
+      await client.query(`VACUUM (FREEZE, ANALYZE, PARALLEL 0) ${leaf}`)
       await client.query('BEGIN')
       const uniqueRows = Number((await client.query(
         `SELECT unique_rows FROM ${SCHEMA}.version_partitions WHERE version_id = $1 AND partition_no = $2`, [version.id, k],

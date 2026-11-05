@@ -217,3 +217,116 @@ test('discard, changed source and SHA mismatch stop safely', { skip: !connection
   assert.equal((await ctx.pool.query(`SELECT to_regclass('${tables.stage}') AS t`)).rows[0].t, null)
   assert.equal(Number((await ctx.pool.query('SELECT count(*) FROM account_dictionary.quarantine WHERE version_id = $1', [created.id])).rows[0].count), 0)
 })
+
+const pgError = (code, message) => Object.assign(new Error(message), { code })
+const SHM_FULL = () => pgError('53100', 'could not resize shared memory segment "/PostgreSQL.1" to 209715200 bytes: No space left on device')
+
+test('shared-memory exhaustion is retried from the checkpoint without double counting', { skip: !connectionString }, async t => {
+  const ctx = await setup(t)
+  const { text, sourcePairs } = fixture()
+  await writeFile(join(ctx.root, 'users.json'), text)
+  const created = await startVersion(ctx, 'users.json', null)
+  let commits = 0
+  const waits = []
+  const seen = []
+  const engine = engineFor(ctx, {
+    retryDelaysMs: [30, 60],
+    sleep: async ms => { waits.push(ms) },
+    // Two failures in a row with no progress between them use the budget of 2.
+    afterBatch: async () => {
+      commits += 1
+      if (commits === 2 || commits === 3) {
+        seen.push((await ctx.store.version(created.id)).error_code)
+        throw SHM_FULL()
+      }
+    },
+  })
+  assert.equal(await engine.runOpenVersion(), 'ready')
+  assert.deepEqual(seen, [null, 'database_shared_memory_full'])
+  assert.deepEqual(waits.filter(ms => ms >= 30), [30, 60])
+  const ready = await ctx.store.version(created.id)
+  assert.equal(ready.run_state, 'done')
+  assert.equal(ready.error_code, null)
+  // The failed batches were already committed: resuming must not re-read them.
+  assert.equal(Number(ready.pairs_read), sourcePairs)
+  assert.equal(Number(ready.unique_mappings), sourcePairs - 5)
+})
+
+test('a full disk fails at once and an exhausted retry budget asks for the operator', { skip: !connectionString }, async t => {
+  const ctx = await setup(t)
+  const { text } = fixture()
+  await writeFile(join(ctx.root, 'users.json'), text)
+
+  const disk = await startVersion(ctx, 'users.json', null)
+  let waits = 0
+  const diskEngine = engineFor(ctx, {
+    retryDelaysMs: [30],
+    sleep: async ms => { if (ms >= 30) waits += 1 },
+    afterBatch: async () => { throw pgError('53100', 'could not extend file "base/1/2": No space left on device') },
+  })
+  assert.equal(await diskEngine.runOpenVersion(), 'failed')
+  assert.equal(waits, 0)
+  const failed = await ctx.store.version(disk.id)
+  assert.equal(failed.error_code, 'database_disk_full')
+  assert.doesNotMatch(failed.error_message, /base\/1\/2/)
+  await ctx.store.requestDiscard(disk.id)
+
+  const shm = await startVersion(ctx, 'users.json', null)
+  const shmEngine = engineFor(ctx, { retryDelaysMs: [30, 60], afterBatch: async () => { throw SHM_FULL() } })
+  // Every retry commits one more batch, but the hook throws before the step
+  // is acknowledged, so there is no progress and the budget runs out.
+  assert.equal(await shmEngine.runOpenVersion(), 'failed')
+  const exhausted = await ctx.store.version(shm.id)
+  assert.equal(exhausted.run_state, 'failed')
+  assert.equal(exhausted.error_code, 'database_shared_memory_full')
+  assert.doesNotMatch(exhausted.error_message, /retry/)
+  // 继续 clears the error and the next pass completes.
+  await ctx.store.requestResume(shm.id)
+  assert.equal(await engineFor(ctx).runOpenVersion(), 'ready')
+})
+
+// Clients from this pool reject the first statement matching `predicate`.
+function poolFailingOnce(pool, predicate, error) {
+  let armed = true
+  const bind = (target, prop) => (typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop])
+  return new Proxy(pool, {
+    get(target, prop) {
+      if (prop !== 'connect') return bind(target, prop)
+      return async () => {
+        const client = await target.connect()
+        return new Proxy(client, {
+          get(inner, name) {
+            if (name !== 'query') return bind(inner, name)
+            return (sql, ...rest) => {
+              if (armed && typeof sql === 'string' && predicate(sql)) { armed = false; return Promise.reject(error) }
+              return inner.query(sql, ...rest)
+            }
+          },
+        })
+      }
+    },
+  })
+}
+
+test('a VACUUM that hits /dev/shm during the build resumes at the same partition step', { skip: !connectionString }, async t => {
+  const ctx = await setup(t)
+  const { text, sourcePairs } = fixture()
+  await writeFile(join(ctx.root, 'users.json'), text)
+  const created = await startVersion(ctx, 'users.json', null)
+  const waits = []
+  const engine = engineFor(ctx, {
+    pool: poolFailingOnce(ctx.pool, sql => sql.startsWith('VACUUM'), SHM_FULL()),
+    retryDelaysMs: [30],
+    sleep: async ms => { waits.push(ms) },
+  })
+  assert.equal(await engine.runOpenVersion(), 'ready')
+  assert.deepEqual(waits, [30])
+  const ready = await ctx.store.version(created.id)
+  assert.equal(ready.error_code, null)
+  assert.equal(Number(ready.unique_mappings), sourcePairs - 5)
+  const tables = versionTables(created.id, PARTITIONS)
+  for (let k = 0; k < PARTITIONS; k += 1) {
+    const { rows } = await ctx.pool.query(`SELECT count(*)::int AS n FROM pg_indexes WHERE schemaname = 'account_dictionary' AND tablename = $1`, [tables.leafName(k)])
+    assert.equal(rows[0].n, 4, `partition ${k} keeps exactly its four indexes`)
+  }
+})

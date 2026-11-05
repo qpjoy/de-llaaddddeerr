@@ -36,13 +36,24 @@ export function pipelineStatus(pipeline) {
     if (open.stage === 'ready') return { status: 'warning', label: '待发布' }
     if (open.desiredState === 'paused') return { status: 'disabled', label: open.runState === 'paused' ? '已暂停' : '正在暂停' }
     if (open.runState === 'waiting') return { status: 'warning', label: '等待 worker' }
+    if (open.error) return { status: 'warning', label: '自动重试中' }
     return { status: 'warning', label: `正在${open.stageLabel}` }
   }
   if (pipeline?.active) return { status: 'active', label: `已发布 v${pipeline.active.id}` }
   return { status: 'disabled', label: pipeline?.dataset?.source ? '未开始' : '待配置' }
 }
 
-const sourceLabel = source => source ? `${source.rootId}:${source.relativePath}` : '尚未指定'
+// What the operator does before pressing 继续; the worker already retried
+// the transient ones on its own.
+const FAILURE_HINTS = {
+  server_file_unreadable: '确认 dictionary worker 的 Pod 有宿主机 group 10，且文件对该组可读（chmod 644）。',
+  database_disk_full: 'mx-common PostgreSQL 所在的根盘已满：先腾出空间再点继续。',
+  database_shared_memory_full: '自动重试已用完：PostgreSQL 的 /dev/shm 长时间被占满，等 Hub 高峰过去后点继续。',
+  database_out_of_memory: '自动重试已用完：PostgreSQL 内存不足，等负载下降后点继续。',
+  database_busy: '自动重试已用完：PostgreSQL 连接数已满，等负载下降后点继续。',
+}
+
+const sourceLabel = source =>source ? `${source.rootId}:${source.relativePath}` : '尚未指定'
 // Exact counts in the task control; the card uses compact numbers.
 const exact = value => new Intl.NumberFormat('zh-CN').format(Number(value || 0))
 const shortSha = sha => sha ? `${sha.slice(0, 8)}…${sha.slice(-5)}` : '不校验'
@@ -119,13 +130,16 @@ function OpenVersionProgress({ version, reasonLabels }) {
     </p>
     {progress.workerStale ? <p className="mih-tue-notice mih-tue-warning"><Warning size={16} aria-hidden="true" />超过 2 分钟没有心跳。若正在建索引属正常现象；否则检查 mx-insight-hub-dictionary 是否在运行。</p> : null}
     {version.runState === 'failed' && version.error ? (
-      <p className="mih-tue-notice mih-tue-danger"><Warning size={16} aria-hidden="true" /><span><strong>{version.error.code}</strong> · {version.error.message}</span></p>
+      <p className="mih-tue-notice mih-tue-danger"><Warning size={16} aria-hidden="true" /><span><strong>{version.error.code}</strong> · {version.error.message}{FAILURE_HINTS[version.error.code] ? <><br />{FAILURE_HINTS[version.error.code]}</> : null}</span></p>
+    ) : null}
+    {version.runState !== 'failed' && version.error ? (
+      <p className="mih-tue-notice mih-tue-warning"><Warning size={16} aria-hidden="true" /><span>数据库资源暂时不足，worker 会自动重试，无需操作。<br /><strong>{version.error.code}</strong> · {version.error.message}</span></p>
     ) : null}
     <dl className="mih-tue-metrics">
       <div><dt>已读取</dt><dd>{exact(version.pairsRead || 0)}<small>{progress.estimatedTotalPairs ? ` / 约 ${exact(progress.estimatedTotalPairs)}` : ''} 组</small></dd></div>
       <div><dt>已入库</dt><dd>{exact(version.pairsLoaded || 0)}</dd></div>
       <div><dt>已隔离</dt><dd>{exact(version.pairsQuarantined || 0)}</dd></div>
-      <div><dt>速度</dt><dd>{version.rowsPerSecond ? exact(Math.round(version.rowsPerSecond)) : '—'}<small> 组/秒</small></dd></div>
+      <div><dt>速度</dt><dd>{version.stage === 'importing' && version.rowsPerSecond ? exact(Math.round(version.rowsPerSecond)) : '—'}<small> 组/秒</small></dd></div>
       <div><dt>预计剩余</dt><dd>{version.stage === 'importing' ? formatDuration(progress.etaSeconds) : '—'}</dd></div>
       {version.uniqueMappings !== null ? <div><dt>唯一映射</dt><dd>{exact(version.uniqueMappings)}<small> · 重复 {exact(version.duplicatePairs || 0)}</small></dd></div> : null}
     </dl>

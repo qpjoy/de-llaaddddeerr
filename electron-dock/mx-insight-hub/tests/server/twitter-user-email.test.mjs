@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readPairWindows, scanPairs, JsonPairsError } from '../../server/data/twitter-user-email/json-pairs.mjs'
+import { publicFailure } from '../../server/data/twitter-user-email/engine.mjs'
 import {
   FLAG_DOMAIN_CASE, FLAG_VALUE_TRIMMED, classifyPair, escapeLike, maskEmail, normalizeSearchRequest,
 } from '../../server/data/twitter-user-email/contract.mjs'
@@ -115,4 +116,18 @@ test('normalizes search requests and enforces minimum lengths', () => {
   ]
   for (const body of rejects) assert.throws(() => normalizeSearchRequest(body), error => error.status === 400, JSON.stringify(body))
   assert.throws(() => normalizeSearchRequest({ query: 'bob', sql: 'x' }), error => error.code === 'unsupported_fields')
+})
+
+test('classifies PostgreSQL resource errors without leaking their detail', () => {
+  const failure = (code, message) => publicFailure(Object.assign(new Error(message), { code }))
+  assert.deepEqual(
+    failure('53100', 'could not resize shared memory segment "/PostgreSQL.42" to 1 bytes: No space left on device'),
+    { code: 'database_shared_memory_full', message: 'PostgreSQL shared memory (/dev/shm) is exhausted (SQLSTATE 53100)', transient: true },
+  )
+  assert.equal(failure('53100', 'could not write to file "base/pgsql_tmp/x": No space left on device').code, 'database_disk_full')
+  assert.equal(failure('53100', 'could not write to file').transient, undefined)
+  assert.equal(failure('53200', 'out of memory').transient, true)
+  assert.equal(failure('53300', 'sorry, too many clients already').code, 'database_busy')
+  // Anything else keeps only the SQLSTATE: details can quote row values.
+  assert.deepEqual(failure('23505', 'Key (username)=(alice) already exists'), { code: 'database_error', message: 'PostgreSQL error 23505' })
 })

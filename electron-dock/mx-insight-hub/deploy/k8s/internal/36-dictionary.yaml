@@ -50,6 +50,11 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
+        # Same as the Admin plane: the Internal landing directory is
+        # operator-owned by host group 10 (`wheel`). Without this group the
+        # worker gets EACCES (server_file_unreadable) on files Admin can read.
+        supplementalGroups: [10]
         seccompProfile:
           type: RuntimeDefault
       containers:
