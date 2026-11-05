@@ -38,7 +38,7 @@ function fixture({ admitted = false, closed = false, appId = 'mx-harbor' } = {})
       user.appAccess.allowedAppIds.push('mx-harbor'); return { userId: user.userId };
     },
   };
-  const handler = createAppAccount({ Interaction: { find: async () => ({ params: { client_id: clientId, mx_surface: 'application' } }) } } as any,
+  const handler = createAppAccount({ Interaction: { find: async () => ({ params: { client_id: clientId, mx_surface: 'application', state: 'q'.repeat(43) } }) } } as any,
     { issuer: 'https://auth.example.test/identity', origin: 'https://auth.example.test', applications: [
       { clientId, clientSecret: secret, appId, origin: 'https://dataport.example.test', audience: appId },
     ] } as any, accounts, registration);
@@ -97,4 +97,39 @@ test('invited superadmin registration validates confirmation and forwards the de
   assert.equal((await f.call('register', { ...login, passwordConfirm: login.password, inviteCode: 'synthetic-dataport-invite', policyVersion: 3 })).status, 200);
   assert.equal(f.calls.at(-1).input.source.appId, 'mx-harbor'); assert.equal(f.calls.at(-1).input.inviteCode, 'synthetic-dataport-invite');
   assert.equal(f.calls.at(-1).input.enterpriseInvitation, undefined);
+});
+
+const passwordState = 'q'.repeat(43);
+test('credentials-first login verifies MX and admission before issuing a state-bound proof, without storing passwords', async () => {
+  const f = fixture();
+  assert.equal((await f.call('password-prepare', { ...login, state: passwordState, password: 'wrong' })).status, 401);
+  assert.equal(f.calls.length, 0);
+  assert.equal((await f.call('password-prepare', { ...login, state: passwordState })).status, 400);
+  const prepared = await f.call('password-prepare', { ...login, state: passwordState, inviteCode: 'synthetic-dataport-invite' });
+  assert.equal(prepared.status, 200);assert.match(prepared.payload.proof, /^[A-Za-z0-9_-]{43}$/);
+  assert.ok(!JSON.stringify([...f.rows]).includes(login.password));
+  const proof = prepared.payload.proof;
+  assert.equal((await f.call('password-complete', { proof })).status, 200);
+  assert.equal(f.rows.get(`app-result:${f.flow}`).userId, f.user.userId);
+  assert.equal((await f.call('password-complete', { proof })).status, 410);
+});
+
+test('prepared proofs reject mismatched OIDC state, clients, stale flows, expiry and revoked admission', async () => {
+  for (const scenario of ['state', 'client', 'expired', 'revoked', 'flow']) {
+    const f = fixture({ admitted: true });
+    const prepared = await f.call('password-prepare', { ...login, state: passwordState });
+    const proof = prepared.payload.proof, stored = f.rows.get(`app-password:${proof}`);
+    if (scenario === 'state') stored.state = 'x'.repeat(43);
+    if (scenario === 'client') stored.clientId = 'another-client';
+    if (scenario === 'expired') stored.expiresAt = Date.now() - 1;
+    if (scenario === 'revoked') f.user.appAccess.allowedAppIds = [];
+    const result = await f.call('password-complete', { proof, ...(scenario === 'flow' ? { flow: 'z'.repeat(43) } : {}) });
+    assert.ok([403,410].includes(result.status), scenario);
+    assert.ok(!f.rows.has(`app-result:${f.flow}`));
+  }
+  const other = fixture({ appId: 'mx-insight-hub' });
+  assert.equal((await other.call('password-prepare', { ...login, state: passwordState })).status, 403);
+  const f = fixture();
+  assert.equal((await f.call('password-prepare', { ...login, state: passwordState }, { origin: 'https://untrusted.example.test' })).status, 403);
+  assert.equal((await f.call('password-prepare', { ...login, state: passwordState }, { authorization: 'Basic invalid' })).status, 401);
 });

@@ -32,7 +32,7 @@ import {
   InputGroupButton,
 } from "@/components/ui/input-group";
 import { Spinner } from "@/components/ui/spinner";
-import { request, loadAccountForm, startAccountSession, navigateAfterLogin, type AccountOptions } from "./api";
+import { request, loadAccountForm, navigateAfterLogin, type AccountOptions } from "./api";
 type AccountDialogProps = {
   open: boolean;
   onOpenChange: (value: boolean) => void;
@@ -53,22 +53,19 @@ function AccountDialogSession({
     [employee, setEmployee] = useState(!new URLSearchParams(location.search).has("account")),
     [error, setError] = useState(""),
     [unavailable, setUnavailable] = useState(false),
-    [needsMxStart, setNeedsMxStart] = useState(false),
     [retry, setRetry] = useState(0),
     [checking, setChecking] = useState(!preview),
     [busy, setBusy] = useState(false),
     [show, setShow] = useState(false);
   const mounted = useRef(true);
-  const startingMx = useRef(false);
+  const submitting = useRef(false);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  const mxEntry = !employee && !preview && !options;
   function changeMode(nextEmployee: boolean) {
-    if (busy || nextEmployee === employee) return;
+    if (busy || submitting.current || nextEmployee === employee) return;
     setEmployee(nextEmployee);
-    setNeedsMxStart(false);
     setOptions(null);
     setChecking(!nextEmployee && !preview);
     setUnavailable(false);
@@ -81,7 +78,6 @@ function AccountDialogSession({
     let active = true;
     setChecking(true);
     setOptions(null);
-    setNeedsMxStart(false);
     setUnavailable(false);
     setError("");
     loadAccountForm({
@@ -92,30 +88,24 @@ function AccountDialogSession({
       .then((value) => {
         if (active) {
           if ("redirect" in value) {
-            setNeedsMxStart(true);
+            setUnavailable(true);
+            setError("账号服务需要更新，请联系管理员。");
             return;
           }
           setOptions(value.options);
+          setError(value.options.loginError || "");
           setUnavailable(false);
         }
       })
       .catch((error) => {
         if (!active) return;
-        if (error.status === 410) {
-          setNeedsMxStart(true);
-          setUnavailable(false);
-          setError("");
-          return;
-        }
-        if (active) {
-          setOptions(null);
-          setUnavailable(true);
-          setError(
-            error.name === "TimeoutError"
-              ? "连接超时，请重试。"
-              : error.message || "账号服务暂不可用，请稍后重试。",
-          );
-        }
+        setOptions(null);
+        setUnavailable(true);
+        setError(
+          error.name === "TimeoutError"
+            ? "连接超时，请重试。"
+            : error.message || "账号服务暂不可用，请稍后重试。",
+        );
       })
       .finally(() => {
         if (active) setChecking(false);
@@ -124,24 +114,9 @@ function AccountDialogSession({
       active = false;
     };
   }, [open, preview, retry, employee]);
-  async function continueMx() {
-    if (employee || busy || checking || !needsMxStart || startingMx.current) return;
-    startingMx.current = true;
-    setBusy(true);
-    setError("");
-    try {
-      const result = await startAccountSession();
-      if (mounted.current) location.replace(result.redirect);
-    } catch (error) {
-      startingMx.current = false;
-      if (!mounted.current) return;
-      setError((error as Error).name === "TimeoutError" ? "连接超时，请重试。" : (error as Error).message);
-      setBusy(false);
-    }
-  }
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || checking) return;
+    if (busy || checking || submitting.current) return;
     if (unavailable) {
       setRetry((value) => value + 1);
       return;
@@ -152,6 +127,7 @@ function AccountDialogSession({
     }
     if (!employee && !options) return;
     const data = new FormData(event.currentTarget);
+    submitting.current = true;
     setBusy(true);
     setError("");
     try {
@@ -160,10 +136,10 @@ function AccountDialogSession({
           method:"POST",signal:AbortSignal.timeout(15000),
           body:JSON.stringify({account:data.get("employeeAccount"),password:data.get("employeePassword")}),
         });
-        navigateAfterLogin(result.redirect, location, history, onAuthenticated);
+        if (mounted.current) navigateAfterLogin(result.redirect, location, history, onAuthenticated);
         return;
       }
-      const result = await request<{ redirect: string }>("/auth/sso/form", {
+      const result = await request<{ redirect: string }>(options!.passwordFirst ? "/auth/sso/password" : "/auth/sso/form", {
         method: "POST",
         signal: AbortSignal.timeout(15000),
         headers: { "x-mx-csrf": options!.csrf },
@@ -173,8 +149,10 @@ function AccountDialogSession({
           ...Object.fromEntries(data),
         }),
       });
-      navigateAfterLogin(result.redirect);
+      if (mounted.current) navigateAfterLogin(result.redirect);
     } catch (e) {
+      submitting.current = false;
+      if (!mounted.current) return;
       setError(
         (e as Error).name === "TimeoutError"
           ? "提交结果尚未确认，请先核对登录状态，勿重复提交。"
@@ -182,8 +160,7 @@ function AccountDialogSession({
       );
       if ([409, 410].includes((e as { status?: number }).status ?? 0)) {
         setOptions(null);
-        setNeedsMxStart((e as { status?: number }).status === 410);
-        setUnavailable((e as { status?: number }).status !== 410);
+        setUnavailable(true);
       }
       setBusy(false);
     }
@@ -192,7 +169,7 @@ function AccountDialogSession({
     <Dialog
       open={open}
       onOpenChange={(value) => {
-        if (!busy) {
+        if (!busy && !submitting.current) {
           onOpenChange(value);
           setError("");
           setShow(false);
@@ -243,22 +220,6 @@ function AccountDialogSession({
             aria-busy={busy || checking}
           >
             <FieldGroup>
-              {mxEntry ? <>
-                <FieldDescription>
-                  {checking ? "正在连接 MX 账号服务…" : needsMxStart ? "点击继续，进入 MX 登录。" : "账号服务暂不可用，请重试连接。"}
-                </FieldDescription>
-                {error && <FieldError role="alert">{error}</FieldError>}
-                <Button
-                  type="button"
-                  className="auth-submit"
-                  disabled={busy || checking}
-                  onClick={needsMxStart ? continueMx : () => setRetry(value => value + 1)}
-                >
-                  {busy || checking ? <Spinner /> : null}
-                  {checking || busy ? "连接中" : needsMxStart ? "继续 MX 登录" : "重试连接"}
-                  <ArrowRight />
-                </Button>
-              </> : <>
               <Field>
                 <FieldLabel htmlFor={employee ? "employee-login" : "auth-login"}>{employee ? "数港子账号 / 员工邮箱" : "MX 账号"}</FieldLabel>
                 <InputGroup>
@@ -340,7 +301,6 @@ function AccountDialogSession({
                     : "登录"}
                 <ArrowRight />
               </Button>
-              </>}
             </FieldGroup>
           </form>
           <p className="managed-account-note">
