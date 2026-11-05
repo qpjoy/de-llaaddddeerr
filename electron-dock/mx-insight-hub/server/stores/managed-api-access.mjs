@@ -1,5 +1,7 @@
 import { businessApiScopes } from '../hub-service.mjs'
+import { isLcyHubLimitIdentity } from '../core/internal-traffic-policy.mjs'
 import { listCrawlerSpecs } from '../ingest/crawler/source-contract.mjs'
+import { TWITTER_USER_EMAIL_SCOPES } from '../../shared/access-limits.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../../shared/web-search.mjs'
 
 // Caller owns the migration transaction/lock. Grants stay materialized and
@@ -14,8 +16,15 @@ export async function syncManagedApiAccess(client, scopes) {
   }
   let changed = 0
   for (const identity of managed.rows) {
+    // Only the original LCY-delta identity was granted this dictionary. Other
+    // managed profiles keep the ordinary catalog, even under the same consumer.
+    const keyScopes = isLcyHubLimitIdentity({ apiKey: { id: identity.id },
+      tenant: { id: identity.tenant_id }, consumer: { id: identity.consumer_id } }) ? {
+      platforms: [...new Set([...scopes.platforms, TWITTER_USER_EMAIL_SCOPES.platform])],
+      capabilities: [...new Set([...scopes.capabilities, TWITTER_USER_EMAIL_SCOPES.search, TWITTER_USER_EMAIL_SCOPES.reveal])],
+    } : scopes
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${identity.tenant_id}`])
-    for (const [kind, names] of [['platform', scopes.platforms], ['capability', scopes.capabilities]]) {
+    for (const [kind, names] of [['platform', keyScopes.platforms], ['capability', keyScopes.capabilities]]) {
       for (const name of [...names].sort()) await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${identity.consumer_id}:authorization:${kind}:${name}`])
     }
     const siblings = await client.query('SELECT * FROM api_keys WHERE consumer_id=$1 ORDER BY id FOR UPDATE', [identity.consumer_id])
@@ -35,8 +44,8 @@ export async function syncManagedApiAccess(client, scopes) {
     const before = await snapshot()
     let grants = 0
     for (const [column, names, grantTable, policyTable, entitlementTable] of [
-      ['platform', scopes.platforms, 'platform_grants', 'consumer_platform_policies', 'api_key_platform_entitlements'],
-      ['capability', scopes.capabilities, 'capability_grants', 'consumer_capability_policies', 'api_key_capability_entitlements'],
+      ['platform', keyScopes.platforms, 'platform_grants', 'consumer_platform_policies', 'api_key_platform_entitlements'],
+      ['capability', keyScopes.capabilities, 'capability_grants', 'consumer_capability_policies', 'api_key_capability_entitlements'],
     ]) {
       grants += (await client.query(`INSERT INTO ${grantTable}(consumer_id,${column}) SELECT $1,unnest($2::text[]) ON CONFLICT DO NOTHING`, [key.consumer_id, names])).rowCount
       const pageColumn = column === 'platform' ? ',max_page_size' : ''

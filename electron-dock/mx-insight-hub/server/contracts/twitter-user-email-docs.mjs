@@ -1,7 +1,7 @@
 // Public documentation for the Twitter user-email dictionary product.
 // Visibility follows x-mx-required-platform / x-mx-required-capabilities.
 import {
-  CONTRACT_VERSION, METADATA_PATH, PLATFORM, QUERY_LIMITS, REVEAL_CAPABILITY, SEARCH_CAPABILITY, SEARCH_PATH,
+  CONTRACT_VERSION, METADATA_PATH, PLATFORM, QUERY_LIMITS, SEARCH_CAPABILITY, SEARCH_PATH,
 } from '../data/twitter-user-email/contract.mjs'
 
 const errorCodes = {
@@ -18,7 +18,7 @@ const itemSchema = {
   required: ['username', 'email', 'emailMasked', 'domain', 'matchType', 'matchedField', 'sourceRecords'],
   properties: {
     username: { type: 'string', description: 'Username exactly as recorded in the source file.' },
-    email: { type: 'string', description: 'Masked e-mail such as jo***@gmail.com, or the complete address when reveal=true is granted.' },
+    email: { type: 'string', description: 'Complete address by default. Set reveal=false for a masked address.' },
     emailMasked: { type: 'boolean' },
     domain: { type: 'string', description: 'Lower-cased e-mail domain.' },
     matchType: { type: 'string', enum: ['exact', 'case_insensitive', 'prefix', 'contains', 'similar'] },
@@ -34,7 +34,7 @@ export const twitterUserEmailOpenApiPaths = {
       tags: ['Twitter User Email'],
       operationId: 'searchTwitterUserEmail',
       summary: 'Look up Twitter usernames and e-mail addresses',
-      description: `Requires the ${PLATFORM} platform, the ${SEARCH_CAPABILITY} capability and a Key with explicit scopes (legacy dynamic Keys return snapshot_key_required). Searches only the published PostgreSQL dictionary; nothing is fetched live. username and email modes are exact (original-case matches first). prefix needs ${QUERY_LIMITS.prefixMinChars}+ characters; contains and fuzzy need ${QUERY_LIMITS.containsMinChars}+ and run in a bounded lane: a too-broad query returns 422 query_too_broad instead of scanning. E-mails are masked unless reveal=true and ${REVEAL_CAPABILITY} is granted. Results are associations recorded in the source file; fuzzy matches are candidates, not verified ownership. The query text is not stored in usage evidence or audit.`,
+      description: `Requires the ${PLATFORM} platform, the ${SEARCH_CAPABILITY} capability and a Key with explicit scopes (legacy dynamic Keys return snapshot_key_required). Searches only the published PostgreSQL dictionary; nothing is fetched live. username and email modes are exact (original-case matches first). prefix needs ${QUERY_LIMITS.prefixMinChars}+ characters; contains and fuzzy need ${QUERY_LIMITS.containsMinChars}+ and run in a bounded lane: a too-broad query returns 422 query_too_broad instead of scanning. Authorized searches return complete addresses by default. Set reveal=false to mask addresses. Results are associations recorded in the source file; fuzzy matches are candidates, not verified ownership. The query text is not stored in usage evidence or audit.`,
       'x-mx-required-platform': PLATFORM,
       'x-mx-required-capabilities': [SEARCH_CAPABILITY],
       'x-mx-error-codes': errorCodes,
@@ -52,7 +52,7 @@ export const twitterUserEmailOpenApiPaths = {
                 field: { type: 'string', enum: ['username', 'email_local'], default: 'username', description: 'For prefix, contains and fuzzy: match the username or the part before @.' },
                 domain: { type: 'string', description: 'Optional e-mail domain filter, e.g. gmail.com. Not accepted in email mode. A domain alone is never a query.' },
                 limit: { type: 'integer', minimum: 1, maximum: QUERY_LIMITS.maxLimit, default: QUERY_LIMITS.defaultLimit },
-                reveal: { type: 'boolean', default: false, description: `Return complete e-mail addresses; requires ${REVEAL_CAPABILITY} and is audited.` },
+                reveal: { type: 'boolean', default: true, description: 'Omit or send true to return complete addresses. Set false to mask addresses. Complete address access is audited.' },
               },
             },
             example: { mode: 'username', query: 'JohnSmith', limit: 20 },
@@ -97,13 +97,13 @@ export const twitterUserEmailOpenApiPaths = {
       tags: ['Twitter User Email'],
       operationId: 'getTwitterUserEmailMetadata',
       summary: 'Read the published dictionary version and query limits',
-      description: `Requires the ${PLATFORM} platform and ${SEARCH_CAPABILITY}. Returns the current published version, mapping count and query limits. Metered like other stored reads.`,
+      description: `Requires the ${PLATFORM} platform and ${SEARCH_CAPABILITY}. Returns the current published version, mapping count, query limits and defaultReveal for this Key. Metered like other stored reads.`,
       'x-mx-required-platform': PLATFORM,
       'x-mx-required-capabilities': [SEARCH_CAPABILITY],
       'x-mx-allowed-query-fields': [],
       'x-mx-error-codes': { 400: ['unsupported_fields'], 401: errorCodes[401], 403: errorCodes[403], 429: errorCodes[429], 503: ['twitter_user_email_unavailable'] },
       parameters: [],
-      responses: { 200: { description: 'Dictionary metadata.' } },
+      responses: { 200: { description: 'Dictionary metadata. data.defaultReveal is true for authorized searches.' } },
     },
   },
 }
@@ -113,7 +113,7 @@ export function twitterUserEmailDocumentationHtml() {
   <h2 id="twitter-user-email">Twitter 用户邮箱</h2>
   <p>按用户名查邮箱、按邮箱反查用户名，或用片段、近似拼写找候选。数据来自已发布的字典版本，只存于 PostgreSQL，查询不触发任何实时采集。</p>
   <h3>授权</h3>
-  <p>需要数据域 <code>${PLATFORM}</code> 与业务操作 <code>${SEARCH_CAPABILITY}</code>；返回完整邮箱另需 <code>${REVEAL_CAPABILITY}</code>。只接受显式选择权限范围的 Key，历史动态范围 Key 返回 <code>403 snapshot_key_required</code>，在 API Keys 中“调整 Key 权限”后即可使用。</p>
+  <p>调用者和 Key 同时具备数据域 <code>${PLATFORM}</code> 和业务操作 <code>${SEARCH_CAPABILITY}</code> 时，查询默认返回完整邮箱。历史动态范围 Key 返回 <code>403 snapshot_key_required</code>，可在 API Keys 中调整为显式权限范围。</p>
   <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">${SEARCH_PATH}</code></div><p>一次查询，默认返回 ${QUERY_LIMITS.defaultLimit} 条，最多 ${QUERY_LIMITS.maxLimit} 条。</p></div>
   <table><thead><tr><th>mode</th><th>用途</th><th>要求</th></tr></thead><tbody>
     <tr><td><code>username</code></td><td>用户名 → 邮箱</td><td>原样相等排第一，其次忽略大小写相等</td></tr>
@@ -128,7 +128,7 @@ export function twitterUserEmailDocumentationHtml() {
   <h3>稳定性与限制</h3>
   <p>精确与前缀查询走 B-tree 索引，毫秒级。片段与近似查询先按抽样统计估算候选量，范围太宽直接返回 <code>422 query_too_broad</code>（补充字符、加域名或改用前缀）；全 Hub 同时只运行少量此类查询，排队超时返回 <code>503 twitter_user_email_busy</code>，按 <code>retryAfterMs</code> 稍后重试。</p>
   <h3>隐私与计量</h3>
-  <p>邮箱默认脱敏（如 <code>jo***@gmail.com</code>）。查询文本不写入用量证据或审计，只保留不可逆摘要；明文查看次数单独审计。每次调用按已收录数据读取计量。结果是来源文件记录的关联，近似命中不代表已验证的账号归属。</p>
-  <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">${METADATA_PATH}</code></div><p>当前发布版本、映射数量与查询限制。</p></div>
+  <p>省略 <code>reveal</code> 或传 <code>true</code> 时返回完整邮箱。传 <code>reveal: false</code> 返回脱敏邮箱，例如 <code>jo***@gmail.com</code>。查询内容仅保留不可逆摘要，返回完整邮箱的条数记入审计。每次调用按已收录数据读取计量。近似命中表示来源文件中的候选关联。</p>
+  <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">${METADATA_PATH}</code></div><p>返回当前发布版本、映射数量、查询限制和当前 Key 的 <code>defaultReveal</code>。</p></div>
   </section>`
 }

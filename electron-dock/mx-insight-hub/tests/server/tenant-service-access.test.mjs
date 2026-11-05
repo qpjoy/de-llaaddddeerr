@@ -3,6 +3,7 @@ import test from 'node:test'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { writeTenantAccess } from '../../server/stores/tenant-service-access.mjs'
+import { TWITTER_USER_EMAIL_SCOPES } from '../../shared/access-limits.mjs'
 
 test('tenant grants synchronize, inherit, synchronize snapshots, preserve separate admin grants and reject stale saves', async () => {
   const store = new MemoryStore()
@@ -161,6 +162,31 @@ test('legacy Key becomes a usable explicit snapshot without losing separate gran
  assert.equal(store.apiKeys.get(a.id).scopeMode,'snapshot')
  assert.deepEqual((await store.listApiKeyCapabilityEntitlements(a.id)).find(r=>r.capability==='nlp.tokenize'),old[0])
  assert.ok((await store.listEffectiveCapabilityGrants(consumer.id,a.id)).includes('web.search.provider.baidu'))
+})
+
+test('unrelated tenant synchronization preserves explicit dictionary access without opening a dynamic sibling Key', async () => {
+  const { store, service, tenant, consumer, a, input } = await fixture()
+  const { platform, search, reveal } = TWITTER_USER_EMAIL_SCOPES
+  const scope = { consumerId: consumer.id, tenantId: tenant.id }
+  await service.putPlatformConfiguration(platform, scope)
+  for (const capability of [search, reveal]) await service.putCapabilityConfiguration(capability, scope)
+  const optedIn = await service.createApiKey({ consumerId: consumer.id, name: 'Explicit dictionary reader', platforms: [platform], capabilities: [search] })
+  store.apiKeys.get(a.id).scopeMode = 'legacy_dynamic'
+  const preview = await service.previewTenantServiceAccess(tenant.id, input)
+  const next = preview.keys.find(key => key.id === a.id).next
+  assert.equal(next.scopeMode, 'snapshot')
+  assert.ok(!next.platforms.includes(platform) && !next.capabilities.includes(search) && !next.capabilities.includes(reveal))
+  await service.putTenantServiceAccess(tenant.id, { ...input, previewToken: preview.previewToken }, 'operator')
+  assert.ok((await store.listEffectiveCapabilityGrants(consumer.id, optedIn.id)).includes(search))
+  assert.ok((await store.listEffectiveGrants(consumer.id, optedIn.id)).includes(platform))
+  assert.ok(!(await store.listEffectiveCapabilityGrants(consumer.id, optedIn.id)).includes(reveal))
+  assert.ok(!(await store.listEffectiveGrants(consumer.id, a.id)).includes(platform))
+  const converted = (await store.listApiKeys()).find(key => key.id === a.id)
+  await service.updateApiKeyScopes(converted.id, {
+    platforms: [...converted.platforms, platform], capabilities: [...converted.capabilities, search], expected: converted,
+  }, 'operator')
+  const allowed = await store.listEffectiveCapabilityGrants(consumer.id, a.id)
+  assert.ok(allowed.includes(search) && !allowed.includes(reveal))
 })
 
 test('Postgres Key audit failure rolls back the entire tenant synchronization',async()=>{

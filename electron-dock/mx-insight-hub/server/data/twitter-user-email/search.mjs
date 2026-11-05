@@ -66,7 +66,8 @@ export class TwitterUserEmailSearch {
         fuzzyMinChars: this.limits.fuzzyMinChars,
         fuzzyMaxChars: this.limits.fuzzyMaxChars,
       },
-      masking: '默认返回脱敏邮箱；查看完整邮箱需要单独授权，并留审计记录。',
+      defaultReveal: true,
+      masking: '查询默认返回完整邮箱，传入 reveal:false 可返回脱敏邮箱。完整邮箱查看次数计入审计。',
     }
   }
 

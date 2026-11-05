@@ -102,7 +102,8 @@ test('masks the e-mail local part and escapes LIKE patterns', () => {
 })
 
 test('normalizes search requests and enforces minimum lengths', () => {
-  assert.deepEqual(normalizeSearchRequest({ query: ' Bob ' }), { mode: 'username', field: null, query: 'Bob', domain: null, limit: 20, reveal: false })
+  assert.deepEqual(normalizeSearchRequest({ query: ' Bob ' }), { mode: 'username', field: null, query: 'Bob', domain: null, limit: 20, reveal: true })
+  assert.equal(normalizeSearchRequest({ query: 'Bob', reveal: false }).reveal, false)
   const email = normalizeSearchRequest({ mode: 'email', query: 'Bob.Smith@GMAIL.com', limit: 5, reveal: true })
   assert.equal(email.local, 'Bob.Smith')
   assert.equal(email.domain, 'gmail.com')

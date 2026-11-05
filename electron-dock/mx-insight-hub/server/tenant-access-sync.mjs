@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { AppError } from './core/errors.mjs'
+import { isExplicitOnlyKeyScope } from '../shared/access-limits.mjs'
 
 const fields = ['platforms', 'capabilities']
 const sorted = values => [...new Set(values || [])].sort()
@@ -13,7 +14,14 @@ export function tenantAccessPreview(tenantId, before, input, keys, consumerCount
   const added = Object.fromEntries(fields.map(field => [field, difference(input[field], before[field])]))
   const changes = [...keys].sort((a, b) => a.id.localeCompare(b.id)).map(key => {
     const previous = { scopeMode: key.scopeMode, webSearchOrder: key.webSearchOrder || [], ...Object.fromEntries(fields.map(field => [field, sorted(key[field])])) }
-    const next = { scopeMode: 'snapshot', ...Object.fromEntries(fields.map(field => [field, sorted([...key[field].filter(scope => !removed[field].includes(scope)), ...input[field]])])) }
+    const next = { scopeMode: 'snapshot' }
+    for (const field of fields) {
+      // A dynamic Key could never query the dictionary. Only carry those scopes
+      // into its first snapshot if the operator selected them in this change.
+      const retained = key[field].filter(scope => !removed[field].includes(scope)
+        && (key.scopeMode !== 'legacy_dynamic' || !isExplicitOnlyKeyScope(scope)))
+      next[field] = sorted([...retained, ...input[field]])
+    }
     next.webSearchOrder = previous.webSearchOrder.filter(provider => next.capabilities.includes(`web.search.provider.${provider}`))
     const additions = Object.fromEntries(fields.map(field => [field, difference(next[field], previous[field])]))
     const removals = Object.fromEntries(fields.map(field => [field, difference(previous[field], next[field])]))

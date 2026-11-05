@@ -233,12 +233,7 @@ export function implementedRoutes(sources = []) {
   rows.push(route('twitter-user-email', {
     platform: 'twitter_user_email', provider: null, product: 'Twitter 用户邮箱', mode: 'stored',
     operation: 'twitter.user_email.search', path: '/api/v1/data/twitter-user-email/search',
-    defaultRule: '只查询已发布的 PostgreSQL 字典版本，不采集、不进入 canonical 或 Elasticsearch；默认脱敏，要求显式范围 Key。',
-    evidence: 'server/data/twitter-user-email/contract.mjs',
-  }), route('twitter-user-email-reveal', {
-    platform: 'twitter_user_email', provider: null, product: 'Twitter 用户邮箱 · 完整邮箱', mode: 'stored',
-    operation: 'twitter.user_email.reveal', path: '/api/v1/data/twitter-user-email/search',
-    defaultRule: '在查询请求中设置 reveal=true 时返回完整邮箱；单独授权并审计。',
+    defaultRule: '已获查询授权的 Key 默认从发布版本读取完整邮箱，reveal=false 可获取脱敏结果。完整邮箱返回条数计入审计。',
     evidence: 'server/data/twitter-user-email/contract.mjs',
   }))
   rows.push(route('virtual-supermarket', {

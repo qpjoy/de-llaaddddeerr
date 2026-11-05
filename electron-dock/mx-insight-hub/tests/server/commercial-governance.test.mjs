@@ -53,6 +53,9 @@ test('catalog sync only changes generated metadata and is idempotent; scopes are
   const form = { platforms: ['weibo'], capabilities: ['old.scope'] }
   const next = withProductScopes(form, 'xiaohongshu', { platforms: ['xiaohongshu'], capabilities: ['social.comments.list'] })
   assert.deepEqual(next.capabilities, ['old.scope', 'social.comments.list'])
+  const dictionary = withProductScopes(form, 'twitter-user-email')
+  assert.deepEqual(dictionary.platforms, ['weibo', 'twitter_user_email'])
+  assert.deepEqual(dictionary.capabilities, ['old.scope', 'twitter.user_email.search'])
   assert.deepEqual(form, { platforms: ['weibo'], capabilities: ['old.scope'] })
   assert.equal(PRODUCT_BUNDLES[0].capabilities.length, 6)
   const pending = await syncCapabilityCatalog({ query: async () => { throw Object.assign(new Error('missing inventory'), { code: '42P01' }) } }, { sources: [] })
