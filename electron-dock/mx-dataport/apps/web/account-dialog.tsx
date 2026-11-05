@@ -40,8 +40,7 @@ type AccountDialogProps = {
   preview?: boolean;
 };
 export function AccountDialog(props: AccountDialogProps) {
-  // Each opening obtains a fresh form before mounting the dialog. A cold SSO
-  // redirect must not briefly display a form that will immediately disappear.
+  // Each opening owns a fresh login session; switching modes keeps its dialog mounted.
   return props.open ? <AccountDialogSession {...props} /> : null;
 }
 function AccountDialogSession({
@@ -58,6 +57,15 @@ function AccountDialogSession({
     [checking, setChecking] = useState(!preview),
     [busy, setBusy] = useState(false),
     [show, setShow] = useState(false);
+  function changeMode(nextEmployee: boolean) {
+    if (busy || nextEmployee === employee) return;
+    setEmployee(nextEmployee);
+    setOptions(null);
+    setChecking(!nextEmployee && !preview);
+    setUnavailable(false);
+    setError("");
+    setShow(false);
+  }
   useEffect(() => {
     if (!open || preview) return;
     if (employee) { setOptions(null); setChecking(false); setUnavailable(false); setError(""); return; }
@@ -102,7 +110,7 @@ function AccountDialogSession({
   }, [open, preview, retry, employee]);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (checking) return;
+    if (busy || checking) return;
     if (unavailable) {
       setRetry((value) => value + 1);
       return;
@@ -150,7 +158,7 @@ function AccountDialogSession({
   }
   return (
     <Dialog
-      open={open && (employee || preview || !!options || unavailable || checking)}
+      open={open}
       onOpenChange={(value) => {
         if (!busy) {
           onOpenChange(value);
@@ -191,8 +199,8 @@ function AccountDialogSession({
             <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号，首次开通需填写 DataPort 专用邀请码。"}</DialogDescription>
           </DialogHeader>
           <div className="auth-login-modes" role="group" aria-label="登录方式">
-            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");setShow(false);}}>企业超管 · MX 登录</Button>
-            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setError("");setShow(false);}}>子账号登录</Button>
+            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => changeMode(false)}>企业超管 · MX 登录</Button>
+            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => changeMode(true)}>子账号登录</Button>
           </div>
           {/* Remount on mode changes so MX credentials cannot carry into the
               employee form. Separate field identities also discourage autofill. */}
