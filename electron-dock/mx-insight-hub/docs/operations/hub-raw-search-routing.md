@@ -2,6 +2,12 @@
 
 2026-10-08。沿用 `POST /api/v1/search/raw`，保留 `POST /api/v1/night-all/search/raw` 为同一入口。没有新增 `/api/v1/data/search/raw`。Delta 无需修改 URL；以后可只把 URL 改为 `/api/v1/search/raw`，请求体、Key 和同次请求的幂等键不变。
 
+## 2026-11-05 抖音关键词搜索的标题与文案
+
+Hub 请求 `6adc9acc-dcc3-4903-b170-5a9d297b73a2` 的 TikHub 原始归档中，作品 `7697630310482449145` 的 `preview_title` 是 35 字的标题，`desc` 和 `caption` 都是带 5 个话题标签的 76 字发布文案。旧映射把 `desc` 同时填入了标题和正文。
+
+部署修复后，标准搜索、兼容 raw 接口和新入库记录分别选取标题和正文。标题依次取 `title`、`item_title`、`preview_title`，正文依次取 `desc`、`caption`、`text`，各选第一个非空字符串。某一侧缺失时，标准搜索该字段为 `null`，兼容 raw 接口为 `""`。旧请求按原响应重放，更新前已缓存的供应商页按原映射续读。
+
 ## 2026-10-16：新帖 7697057660088752010 的封面反馈
 
 用户提供帖子 ID `7697057660088752010`，截图作者 ID 为 `1347360125364624`，正文包含“iPhoneduo溢价肯定很猛”。截图的 `image_urls` / `video_urls` 使用 `http://10.88.88.88:59202/media/data_hub_raw...`，而 `cover_url` 仍是抖音 CDN 地址。反馈“封面应放封面字段，不作为图片附件”的语义正确；当前 Hub raw 字段是单数 `cover_url`，现代字段是 `media.coverUrl`，没有 `cover_urls` 契约。仅凭截图不能认定 Hub 本次原始交付已经包含该重复图片。

@@ -115,7 +115,8 @@ test('all four platforms use fixed TikHub keyword endpoints for standard and bot
     const first = await h.invokeData()
     assert.equal(first.body.data.contractVersion, 'night-all.data-search.v1')
     assert.ok(first.body.data.items.length)
-    assert.ok(first.body.data.items[0].title)
+    if (platform === 'douyin') assert.equal(first.body.data.items[0].title, null) // Fixture contains only desc.
+    else assert.ok(first.body.data.items[0].title)
     assert.equal(first.body.data.items[0].metrics.comments, platform === 'bilibili' ? 4 : platform === 'kuaishou' ? 3 : 2)
     assert.equal(h.calls.length, 1)
     assert.equal(h.calls[0].url.pathname, h.recipe.path)
@@ -258,6 +259,64 @@ test('Douyin data.awemeId inside a type-6 wrapper remains a real video on standa
     assert.equal(replay.replay, true)
     assert.deepEqual(replay.body, first.body)
     assert.equal(h.calls.length, 1)
+  }
+})
+
+test('Douyin delivers preview_title and the full desc to standard, raw and canonical records', async () => {
+  const title = '观察周报 第四期', body = `${title}\n本期视频的完整说明\n#观察 #周报`
+  const payload = { has_more: false, business_data: [{ data: { aweme_info: {
+    aweme_id: '123', item_title: '', preview_title: title, desc: body, caption: body,
+  } } }] }
+  for (const standard of [true, false]) {
+    const h = await harness({ platform: 'douyin', payload })
+    const invoke = standard ? h.invokeData : h.invoke
+    const result = await invoke()
+    const items = standard ? result.body.data.items : JSON.parse(result.body.data.raw_data)
+    assert.deepEqual(items.map(row => [row.title, row.text]), [[title, body]])
+    if (!standard) assert.deepEqual([items[0].content, items[0].full_text], [body, body])
+    assert.deepEqual(h.platformStore.ingestJobs[0].payload.records.map(row => [row.title, row.body]), [[title, body]])
+    const archive = [...h.platformStore.restrictedResponseArchives.values()][0]
+    assert.deepEqual(JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data, payload)
+    assert.deepEqual((await invoke()).body, result.body)
+    assert.equal(h.calls.length, 1)
+  }
+})
+
+test('Douyin buffered continuations verify the field projection purchased on the original page', async () => {
+  for (const mode of ['current', 'legacy', 'corrupted-fields', 'corrupted-legacy']) {
+    const payload = { has_more: false, data: [
+      { aweme_info: { aweme_id: '1', title: '首条标题', desc: '首条正文' } },
+      { aweme_info: { aweme_id: '2', preview_title: '短标题', desc: '第二条正文' } },
+      { aweme_info: { aweme_id: '3', preview_title: '另一标题', desc: '第三条正文' } },
+    ] }
+    const h = await harness({ platform: 'douyin', payload })
+    const body = { platform: 'douyin', query: '城市', pageSize: 1 }
+    const first = await h.invokeData(body)
+    const buffer = h.store.requests.get(first.requestId).acquisitionRequest.contentSearch.state.jobs[0].buffer
+    const rows = h.platformStore.ingestJobs[0].payload.records.map(record => record.rawItem)
+    const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+    assert.equal(buffer.hash, digest(rows.map((row, index) => ({ ...row, title: index ? row.text : row.title }))))
+    assert.equal(buffer.douyinFieldsHash, digest(rows))
+    // A purchase made before the field change only attested the old projection.
+    if (mode === 'legacy' || mode === 'corrupted-legacy') delete buffer.douyinFieldsHash
+    if (mode === 'corrupted-fields') buffer.douyinFieldsHash = '0'.repeat(64)
+    if (mode === 'corrupted-legacy') buffer.hash = '0'.repeat(64)
+
+    let cursor = first.body.data.pageInfo.nextCursor
+    if (mode.startsWith('corrupted-')) {
+      await assert.rejects(h.invokeData({ ...body, cursor }, 'tampered-buffer'), { code: 'search_page_unavailable' })
+    } else {
+      for (const { aweme_info: post } of payload.data.slice(1)) {
+        const pageBody = { ...body, cursor }, key = `buffered-${post.aweme_id}`
+        const page = await h.invokeData(pageBody, key)
+        const { title, text } = page.body.data.items[0]
+        assert.deepEqual([title, text], [mode === 'legacy' ? post.desc : post.preview_title, post.desc])
+        assert.deepEqual((await h.invokeData(pageBody, key)).body, page.body)
+        cursor = page.body.data.pageInfo.nextCursor
+      }
+    }
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
   }
 })
 

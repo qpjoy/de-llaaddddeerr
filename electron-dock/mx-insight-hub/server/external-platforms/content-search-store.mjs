@@ -21,6 +21,7 @@ const jobValid = job => job && typeof job === 'object' && !Array.isArray(job)
   && (job.providerCursor == null || typeof job.providerCursor === 'object' && !Array.isArray(job.providerCursor))
   && (job.buffer == null || typeof job.buffer === 'object' && !Array.isArray(job.buffer)
     && uuid(job.buffer.callId) && sha(job.buffer.hash) && Number.isSafeInteger(job.buffer.offset) && job.buffer.offset >= 0
+    && (!Object.hasOwn(job.buffer, 'douyinFieldsHash') || sha(job.buffer.douyinFieldsHash))
     && Number.isInteger(job.buffer.providerPage) && job.buffer.providerPage >= 1 && job.buffer.providerPage <= 15
     && (job.buffer.providerCursor == null || typeof job.buffer.providerCursor === 'object' && !Array.isArray(job.buffer.providerCursor)))
 const scopeMatches = (row, input, platform) => row && row.platform === platform && row.tenantId === input.tenantId

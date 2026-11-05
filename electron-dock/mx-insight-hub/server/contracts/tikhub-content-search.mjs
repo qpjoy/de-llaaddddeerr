@@ -174,7 +174,8 @@ function douyinRow(value, capturedAt) {
     array(video.bit_rate).flatMap(entry => urlLists(entry?.play_addr)), value.video_url)
   const cover = urls(urlLists(video.cover), urlLists(video.origin_cover), value.cover_url)[0]
   const images = array(value.images).flatMap(image => [...array(image?.url_list), ...urlLists(image?.display_image), image?.url].filter(Boolean))
-  return baseRow('douyin', id, capturedAt, { title: first(value.title, value.desc), text: first(value.desc, value.text, value.title),
+  return baseRow('douyin', id, capturedAt, { title: first(value.title, value.item_title, value.preview_title),
+    text: first(value.desc, value.caption, value.text),
     kind: images.length ? 'image' : 'video', url: first(value.share_url, value.url) || `https://www.douyin.com/video/${id}`,
     authorId: author.id ?? author.uid ?? author.sec_uid, authorName: first(author.nickname, author.unique_id), avatar: [...urlLists(author.avatar_thumb), ...urlLists(author.avatar_medium)][0],
     publishedAt: value.create_time ?? value.created_at, likes: count(value.like_count, stats.digg_count, stats.like_count), comments: count(value.comment_count, stats.comment_count),
@@ -693,6 +694,7 @@ export function projectTikHubContentSearch(result, request) {
   })
   if (entries.length > 10000) throw new Error('content_search_page_too_large')
   const sourceCount = entries.length, rows = new Map()
+  const legacyDouyinRows = request.platform === 'douyin' ? [] : null
   let duplicateCount = 0
   for (let entry of entries) {
     if (!object(entry)) throw new Error('invalid_content_search_entry')
@@ -706,10 +708,18 @@ export function projectTikHubContentSearch(result, request) {
     }
     const row = ({ bilibili: bilibiliRow, douyin: douyinRow, kuaishou: kuaishouRow, zhihu: zhihuRow })[request.platform](entry, capturedAt)
     if (rows.has(row.content_id)) duplicateCount++
-    else rows.set(row.content_id, row)
+    else {
+      rows.set(row.content_id, row)
+      if (legacyDouyinRows) {
+        // Existing page cursors fingerprinted these exact fields, including their cross-fallbacks.
+        const title = html(first(entry.title, entry.desc)), text = html(first(entry.desc, entry.text, entry.title))
+        legacyDouyinRows.push({ ...row, title, text, full_text: text, content: text })
+      }
+    }
   }
   const items = [...rows.values()]
-  return { ...result, items, acquiredItems: items, providerPage: pagination(data, request, sourceCount), nonPostCount, duplicateCount }
+  return { ...result, items, acquiredItems: items, ...(legacyDouyinRows ? { legacyDouyinRows } : {}),
+    providerPage: pagination(data, request, sourceCount), nonPostCount, duplicateCount }
 }
 
 // Legacy flat defaults are deliberately separate from truthful modern metrics.

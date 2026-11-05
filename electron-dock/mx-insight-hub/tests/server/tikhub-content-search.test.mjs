@@ -211,6 +211,26 @@ test('Douyin business_data wrapper and extra.logid preserve actual image posts a
   assert.deepEqual(projected.providerPage.nextParams, { cursor: '20', search_id: 'real-session' })
 })
 
+test('Douyin search selects a native title independently of the full video caption', () => {
+  const heading = '【城市观察】第四十一期｜夜班公交', caption = `${heading}\n#城市观察\n#公交`
+  const cases = [
+    [{ preview_title: heading, item_title: '', desc: caption, caption }, heading, caption],
+    [{ title: '原标题', item_title: '作品标题', preview_title: heading, desc: caption }, '原标题', caption],
+    [{ title: ' ', item_title: '作品标题', preview_title: heading, caption }, '作品标题', caption],
+    [{ desc: caption }, null, caption],
+    [{ title: heading }, heading, null],
+    [{ preview_title: heading, desc: ' ', caption: {}, text: '完整文案' }, heading, '完整文案'],
+    [{ title: heading, desc: heading }, heading, heading],
+  ]
+  for (const [fields, title, text] of cases) {
+    const payload = { business_data: [{ data: { aweme_info: { aweme_id: '7697630310482449145', ...fields } } }], has_more: false }
+    const [row] = project('douyin', payload).items
+    const modern = contentSearchDataItem(row), legacy = contentSearchLegacyRow(row)
+    assert.deepEqual([modern.title, modern.text], [title, text])
+    assert.deepEqual([legacy.title, legacy.text, legacy.full_text, legacy.content], [title ?? '', text ?? '', text ?? '', text ?? ''])
+  }
+})
+
 test('Douyin fixed direct/data/aweme_info wrappers preserve snake and camel native IDs regardless of numeric card type', () => {
   const wrappers = [value => value, value => ({ data: value }), value => ({ aweme_info: value }), value => ({ data: { aweme_info: value } })]
   for (const wrap of wrappers) for (const alias of ['aweme_id', 'awemeId']) for (const type of [1, 6]) {

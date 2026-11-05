@@ -114,9 +114,17 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       retainLease = true
     }
   }
-  const consume = (projected, source, job, index, offset = 0, expectedHash = null) => {
-    const rows = projected.acquiredItems, rowsHash = hash(rows)
-    if (expectedHash && expectedHash !== rowsHash || !Number.isSafeInteger(offset) || offset < 0 || offset > rows.length) throw unavailable()
+  const consume = (projected, source, job, index, buffer = null) => {
+    // Pre-fix Douyin buffers only authenticated the old fields. Serve those fields until
+    // that page is exhausted. New buffers also authenticate the new fields and keep the
+    // original checksum readable by older pods during a rolling update.
+    const legacyRows = projected.legacyDouyinRows
+    const useLegacyFields = legacyRows && buffer && !Object.hasOwn(buffer, 'douyinFieldsHash')
+    const rows = useLegacyFields ? legacyRows : projected.acquiredItems, rowsHash = hash(rows)
+    const bufferHash = legacyRows && !useLegacyFields ? hash(legacyRows) : rowsHash
+    const offset = buffer?.offset ?? 0
+    if (buffer && (buffer.hash !== bufferHash || Object.hasOwn(buffer, 'douyinFieldsHash') && buffer.douyinFieldsHash !== rowsHash)
+      || !Number.isSafeInteger(offset) || offset < 0 || offset > rows.length) throw unavailable()
     sources.push({ callId: source.callId, bodySize: source.bodySize, bodySha256: source.bodySha256,
       capturedAt: source.capturedAt, rowsHash, own: source.own === true })
     capturedAt = source.capturedAt
@@ -133,7 +141,8 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     if (rows.some(row => ['provider_preview', 'title_only'].includes(row.body_completeness))) {
       warn('body_completeness_unknown', 'Some returned content is a provider preview; full text was not independently acquired.')
     }
-    if (position < rows.length) job.buffer = { callId: source.callId, offset: position, hash: rowsHash,
+    if (position < rows.length) job.buffer = { callId: source.callId, offset: position, hash: bufferHash,
+      ...(legacyRows && !useLegacyFields ? { douyinFieldsHash: rowsHash } : {}),
       // The manifest must be a JSON tree. Reusing this object under both job
       // and buffer makes the strict persistence guard reject a paid overflow.
       providerCursor: job.providerCursor == null ? null : { ...job.providerCursor }, providerPage: job.providerPage }
@@ -178,7 +187,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           pageSize: request.pageSize, params: request.params, page: job.buffer.providerPage,
           providerCursor: job.buffer.providerCursor, maxQueryLength: request.standard ? 500 : 2048 })
         const { projected } = projectContentPage({ publicBody: { data: page.payload.data, meta: { capturedAt: page.capturedAt } } }, acquiredRequest)
-        consume(projected, { ...page, callId: job.buffer.callId }, job, index, job.buffer.offset, job.buffer.hash)
+        consume(projected, { ...page, callId: job.buffer.callId }, job, index, job.buffer)
       }
       const tokens = new Set()
       while (rowsByJob[index].length < request.pageSize && !job.buffer && !job.done && !job.manualContinuation) {
