@@ -348,7 +348,8 @@ function App() {
   );
   const [queryRevision, setQueryRevision] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [auth, setAuth] = useState(false),
+  // The MX callback must render its dialog on the first paint, before effects.
+  const [auth, setAuth] = useState(new URLSearchParams(location.search).has("account")),
     [boot, setBoot] = useState(emptySession),
     [checking, setChecking] = useState(true),
     [retry, setRetry] = useState(0),
@@ -374,7 +375,6 @@ function App() {
       sessionStorage.setItem("dataport:join-token", joinToken!);
     const listener = () => setPage(location.hash.slice(2) || "intelligence");
     addEventListener("hashchange", listener);
-    if (new URLSearchParams(location.search).has("account")) setAuth(true);
     if (new URLSearchParams(location.search).get("signedOut") === "1") {
       history.replaceState(null, "", "/");
       setAuth(true);
