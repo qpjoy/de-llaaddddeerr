@@ -259,6 +259,76 @@ export class ServerFileReader {
   }
 
   async readLocator({ rootId, relativePath } = {}) {
+    const { root, candidatePath } = this.#resolveLocator({ rootId, relativePath })
+    return this.#read(root, candidatePath, relative(root.path, candidatePath))
+  }
+
+  /**
+   * Describe a large file for a streaming job (no size limit, nothing is
+   * buffered). Same allowlist, no-symlink and regular-file rules as readLocator.
+   */
+  async inspectLargeLocator(locator, { extensions = ['.json'] } = {}) {
+    const opened = await this.openLargeLocator(locator, { extensions })
+    await opened.fileHandle.close().catch(() => {})
+    const { fileHandle: _closed, ...description } = opened
+    return description
+  }
+
+  /**
+   * Open a large file for streaming. The caller owns and must close
+   * `fileHandle`. `identity` (dev:ino) and `mtimeNs` let a resumed job refuse a
+   * replaced or modified file.
+   */
+  async openLargeLocator(locator, { extensions = ['.json'] } = {}) {
+    const { root, candidatePath } = this.#resolveLocator(locator)
+    const relativePath = relative(root.path, candidatePath)
+    if (!extensions.includes(extname(candidatePath).toLowerCase())) {
+      throw new AppError(400, 'unsupported_file_type', `Server file must use ${extensions.join(', ')}`)
+    }
+    let fileHandle = null
+    try {
+      const canonicalPath = await realpath(candidatePath)
+      if (canonicalPath !== candidatePath || !isWithin(root.path, canonicalPath)) {
+        throw new AppError(400, 'server_file_symlink_rejected', 'Symbolic links cannot be imported')
+      }
+      const beforeOpen = await lstat(canonicalPath, { bigint: true })
+      assertReadableFile(beforeOpen, Number.MAX_SAFE_INTEGER)
+      fileHandle = await open(canonicalPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+      const opened = await fileHandle.stat({ bigint: true })
+      if (!snapshotMatches(beforeOpen, opened)) throw changedError()
+      if (await realpath(candidatePath) !== canonicalPath) throw changedError()
+      const result = {
+        fileHandle,
+        rootId: root.rootId,
+        relativePath,
+        filename: basename(canonicalPath),
+        bytes: Number(opened.size),
+        identity: `${opened.dev}:${opened.ino}`,
+        mtimeNs: String(opened.mtimeNs),
+        mtime: new Date(Number(opened.mtimeMs)).toISOString(),
+      }
+      fileHandle = null
+      return result
+    } catch (error) {
+      throw sanitizeFileSystemError(error)
+    } finally {
+      await fileHandle?.close().catch(() => {})
+    }
+  }
+
+  /** Map an operator-pasted absolute path to a stable { rootId, relativePath }. */
+  locatorForPath(serverPath) {
+    this.#assertEnabled()
+    assertSafePathSyntax(serverPath, { absolute: true })
+    const candidatePath = resolve(serverPath)
+    const root = this.#roots.find((entry) => isWithin(entry.path, candidatePath))
+    if (!root) {
+      throw new AppError(403, 'server_file_path_not_allowed', 'Server file path is outside the configured import roots')
+    }
+    return { rootId: root.rootId, relativePath: relative(root.path, candidatePath) }
+  }
+
+  #resolveLocator({ rootId, relativePath } = {}) {
     this.#assertEnabled()
     const root = this.#roots.find((entry) => entry.rootId === rootId)
     if (!root) {
@@ -269,7 +339,7 @@ export class ServerFileReader {
     if (!isWithin(root.path, candidatePath)) {
       throw new AppError(403, 'server_file_path_not_allowed', 'Server file path is outside the configured import roots')
     }
-    return this.#read(root, candidatePath, relative(root.path, candidatePath))
+    return { root, candidatePath }
   }
 
   #assertEnabled() {

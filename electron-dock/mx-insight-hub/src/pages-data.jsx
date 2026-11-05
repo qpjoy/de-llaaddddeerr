@@ -17,6 +17,7 @@ import {
   Warning,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { TwitterUserEmailPipelineCard } from './twitter-user-email-pipeline.jsx'
 import { crawlerCheckFeedback, crawlerRecoveryFeedback, isCrawlerPipelineSnapshot } from './crawler-feedback.mjs'
 import {
   DropdownField,
@@ -374,11 +375,13 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         onRetry={nightAllSavedRecordsPipeline.refresh}
       />
 
+      <TwitterUserEmailPipelineCard token={token} onUnauthorized={onUnauthorized} notify={notify} />
+
       {genericSources.length === 0 ? (
         <EmptyState
           icon={Database}
           title="还没有注册通用数据源"
-          description="Telegram monitor、SQLite API、全国省份舆情、手机电商与 Night-All-A saved records 已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
+          description="Telegram monitor、SQLite API、全国省份舆情、手机电商、Night-All-A saved records 与 Twitter 用户清洗计划已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
         <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">

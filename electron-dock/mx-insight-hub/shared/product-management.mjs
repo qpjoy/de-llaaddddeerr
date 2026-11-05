@@ -4,6 +4,12 @@ export const isProductAdmin = session => session?.kind === 'admin-token' && sess
 
 export function productManagementLinks(path) {
   const links = []
+  // PostgreSQL-only dictionary: its data is not in the data center.
+  if (path.endsWith('/twitter-user-email')) {
+    return [['Twitter 用户清洗计划', '#/sources', '指定服务器文件，开启、暂停、继续清洗，查看进度与发布版本。'],
+      ['服务授权', '#/platforms', '为调用者和 Key 明确授予查询与完整邮箱权限。'],
+      ['使用记录', '#/usage', '核对请求状态与计量；查询内容不留存明文。']].map(([label, href, description]) => ({ label, href, description }))
+  }
   if (['/data-products/search', '/data-products/social-content'].includes(path)) links.push(['搜索策略与迁移状态', '#/data-products/strategy-search?view=routing', '按业务接口和平台查看当前路由与迁移进度。'])
   // The self-hosted engine is configured on its own management tab, not TikHub.
   if (path === WECHAT_SELF_HOSTED.path) links.push(['TikHub 微信服务配置（另一通道）', '#/external-platforms?provider=tikhub', '自建引擎不使用 TikHub；这里仅供对照 TikHub 微信产品。'])

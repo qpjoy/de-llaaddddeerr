@@ -1,0 +1,102 @@
+# Twitter user-email dictionary worker ("Twitter 用户清洗计划").
+#
+# Streams an operator-selected file under /shared_dir into PostgreSQL schema
+# account_dictionary: paced batches, per-partition deduplication and index
+# builds. PostgreSQL only -- no Elasticsearch, HanLP, embeddings, Launcher,
+# DNS, WireGuard or user-session path, so MX-H2I login and networking never
+# depend on it. Pause/resume/discard come from the Admin cleaning-task page via
+# PostgreSQL; a restart resumes from the last committed batch.
+#
+# It is the only worker with the read-only server-file mount, and only because
+# it is the one that reads large operator files. No Service, no ingress.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-insight-hub-dictionary
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-insight-hub-dictionary
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-insight-hub-dictionary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-insight-hub-dictionary
+        app.kubernetes.io/part-of: mx-insight-hub
+        mx-insight-hub.io/plane: worker
+    spec:
+      # Same host PostgreSQL path as the other Hub workers.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: mx-insight-hub
+      automountServiceAccountToken: false
+      # Enough to commit the batch in flight; an index build in progress is
+      # simply rebuilt on the next start.
+      terminationGracePeriodSeconds: 60
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # Same as the Admin plane: the Internal landing directory is
+        # operator-owned by host group 10 (`wheel`). Without this group the
+        # worker gets EACCES (server_file_unreadable) on files Admin can read.
+        supplementalGroups: [10]
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dictionary
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          command: ["node", "server/workers/dictionary.mjs"]
+          envFrom:
+            - configMapRef:
+                name: mx-insight-hub-config
+          env:
+            # Public mode only relaxes the Admin HTTP token; no listener here.
+            - name: MX_INSIGHT_LISTENER_MODE
+              value: public
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: DATABASE_URL
+            - name: MX_INSIGHT_API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-insight-hub-secrets
+                  key: MX_INSIGHT_API_KEY_PEPPER
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1536Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: server-files
+              mountPath: /shared_dir
+              readOnly: true
+      volumes:
+        - name: server-files
+          hostPath:
+            path: /shared_dir
+            type: Directory

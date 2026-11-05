@@ -230,6 +230,17 @@ export function implementedRoutes(sources = []) {
     defaultRule: '有效订阅按 IP × 渠道逐项扣量；网页参考渠道，共享限流，无自动回退。',
     evidence: 'server/contracts/ip-risk-v2-docs.mjs',
   }))
+  rows.push(route('twitter-user-email', {
+    platform: 'twitter_user_email', provider: null, product: 'Twitter 用户邮箱', mode: 'stored',
+    operation: 'twitter.user_email.search', path: '/api/v1/data/twitter-user-email/search',
+    defaultRule: '只查询已发布的 PostgreSQL 字典版本，不采集、不进入 canonical 或 Elasticsearch；默认脱敏，要求显式范围 Key。',
+    evidence: 'server/data/twitter-user-email/contract.mjs',
+  }), route('twitter-user-email-reveal', {
+    platform: 'twitter_user_email', provider: null, product: 'Twitter 用户邮箱 · 完整邮箱', mode: 'stored',
+    operation: 'twitter.user_email.reveal', path: '/api/v1/data/twitter-user-email/search',
+    defaultRule: '在查询请求中设置 reveal=true 时返回完整邮箱；单独授权并审计。',
+    evidence: 'server/data/twitter-user-email/contract.mjs',
+  }))
   rows.push(route('virtual-supermarket', {
     platform: 'virtual_supermarket', provider: null, product: '虚拟超市',
     operation: 'storefront.search', path: '/api/v1/data/virtual-supermarket/search',

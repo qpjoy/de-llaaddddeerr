@@ -789,6 +789,7 @@ export function createApp({
   backfillPlatforms = [],
   importer = null,
   serverFileReader = null,
+  twitterUserEmailPipeline = null,
   databasePuller = null,
   sqliteApiPuller = null,
   telegramSourcePreparer = null,
@@ -3773,6 +3774,43 @@ export function createApp({
         return
       }
 
+      if (pathname.startsWith('/internal/v1/admin/pipelines/twitter-user-email')) {
+        // PostgreSQL-only dictionary cleaning task; the dedicated worker runs it.
+        requireSourceAdmin(principal)
+        if (!twitterUserEmailPipeline) throw new AppError(503, 'twitter_user_email_unavailable', 'Twitter user-email pipeline requires PostgreSQL')
+        const base = '/internal/v1/admin/pipelines/twitter-user-email'
+        const by = principal.memberId || 'admin-token'
+        if (pathname === base && request.method === 'GET') {
+          requireNoQuery(searchParams, 'Twitter user-email pipeline')
+          sendJson(response, 200, { data: await twitterUserEmailPipeline.get(), requestId }, { 'cache-control': 'no-store' })
+          return
+        }
+        if (pathname === base && request.method === 'PUT') {
+          sendJson(response, 200, { data: await twitterUserEmailPipeline.configure(await readJson(request), { updatedBy: by }), requestId })
+          return
+        }
+        if (pathname === `${base}/progress` && request.method === 'GET') {
+          sendJson(response, 200, { data: await twitterUserEmailPipeline.progress(), requestId }, { 'cache-control': 'no-store' })
+          return
+        }
+        if (pathname === `${base}/status` && request.method === 'POST') {
+          sendJson(response, 200, { data: await twitterUserEmailPipeline.action(await readJson(request), { by }), requestId })
+          return
+        }
+        if (pathname === `${base}/publish` && request.method === 'POST') {
+          sendJson(response, 200, { data: await twitterUserEmailPipeline.publish(await readJson(request), { by }), requestId })
+          return
+        }
+        if (pathname === `${base}/rollback` && request.method === 'POST') {
+          sendJson(response, 200, { data: await twitterUserEmailPipeline.rollback({ by }), requestId })
+          return
+        }
+        if (pathname === `${base}/access` && request.method === 'GET') {
+          sendJson(response, 200, { data: await twitterUserEmailPipeline.accessLog(), requestId }, { 'cache-control': 'no-store' })
+          return
+        }
+      }
+
       if (request.method === 'POST' && pathname === '/internal/v1/admin/pipelines/night-all-saved-records/discover') {
         requireSourceAdmin(principal)
         requireDatabasePuller()
@@ -6293,6 +6331,19 @@ export function createApp({
           ),
           requestId,
         })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/api/v1/data/twitter-user-email/search') {
+        requireNoQuery(searchParams, 'Twitter user-email search')
+        const context = await requirePublic(request)
+        sendJson(response, 200, { data: await service.twitterUserEmailSearch(context, await readJson(request, 8192)), requestId },
+          { 'cache-control': 'private, no-store' })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/twitter-user-email/metadata') {
+        requireNoQuery(searchParams, 'Twitter user-email metadata')
+        const context = await requirePublic(request)
+        sendJson(response, 200, { data: await service.twitterUserEmailMetadata(context), requestId }, { 'cache-control': 'private, no-store' })
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/virtual-supermarket/search') {
