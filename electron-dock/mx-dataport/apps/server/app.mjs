@@ -57,7 +57,7 @@ export function createHarborApp({
         store: new PostgresSsoStore(pool, integration.sso.sessionKey),
         applicationName: "数港",
         navigation: {
-          mounts: ["/"], applicationForm: true, deferredPassword: true, loginOnly: true,
+          mounts: ["/"], applicationForm: true, loginOnly: true,
           loginInvitations: true,
         },
       });

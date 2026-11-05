@@ -260,44 +260,6 @@ test('ordinary apps and DataPort share real Auth while first-login invitations, 
   assert.equal(withoutInvite.status,200,withoutInvite.text)
   await completeHarbor(withoutInvite)
   assert.equal(admissionCalls,admissionBefore,'an admitted account leaves the code blank without another redemption')
-  // New DataPort credentials-first path: no browser navigation before explicit login.
-  await harbor.store.remove('login', jar.get('__Host-mx-harbor_login'))
-  admitted = false // Exercise a fresh first admission through this path, too.
-  const directOptions = JSON.parse((await request(`${harbor.origin}/auth/sso/form`)).text)
-  assert.equal(directOptions.passwordFirst, true)
-  const directPost = (body = {}, headers = {}) => request(`${harbor.origin}/auth/sso/password`, {
-    method: 'POST', headers: { origin: harbor.origin, 'x-mx-csrf': directOptions.csrf, 'content-type': 'application/json', ...headers },
-    body: JSON.stringify({ formId: directOptions.formId, login: 'person', password: 'test-password', ...body }) })
-  const directBefore = logins
-  assert.equal((await directPost({}, { origin: b.origin })).status, 403)
-  assert.equal((await directPost({}, { 'x-mx-csrf': 'wrong' })).status, 409)
-  assert.equal(logins, directBefore)
-  assert.equal((await directPost({ password: 'wrong' })).status, 401)
-  assert.equal(JSON.parse((await request(`${harbor.origin}/auth/sso/form`)).text).formId, directOptions.formId, 'a rejected password keeps the same editable form')
-  assert.equal((await directPost()).status, 400, 'first admission still needs the dedicated invite')
-  assert.equal((await directPost({ inviteCode: 'invalid' })).status, 400)
-  const acceptedBefore = logins
-  const attempts = await Promise.all([directPost({ inviteCode: 'synthetic-dataport-invite' }), directPost({ inviteCode: 'synthetic-dataport-invite' })])
-  assert.deepEqual(attempts.map(r => r.status).sort(), [200,409], 'concurrent explicit submissions have only one winner')
-  const directAccepted = attempts.find(r => r.status === 200)
-  assert.equal(directAccepted.status, 200, directAccepted.text)
-  assert.equal(logins, acceptedBefore + 1)
-  const stored = await harbor.store.get('login', jar.get('__Host-mx-harbor_login'))
-  assert.ok(stored.passwordProof); assert.ok(!JSON.stringify(stored).includes('test-password'))
-  assert.ok(!directAccepted.text.includes('test-password')); assert.ok(!directAccepted.text.includes(stored.passwordProof))
-  assert.equal((await directPost()).status, 409, 'successful explicit submission cannot replay credentials')
-  let directStep = await request(JSON.parse(directAccepted.text).redirect), callbackSeen = false
-  for (let i = 0; i < 16 && directStep.location; i++) {
-    const next = new URL(directStep.location, issuer)
-    assert.ok(!next.searchParams.has('password'))
-    directStep = await request(next)
-    assert.notEqual(directStep.location, '/?account=1#/account', 'prepared login must not re-open the password form')
-    if (next.pathname === '/auth/sso/callback') { callbackSeen = true; break }
-  }
-  assert.equal(callbackSeen, true, directStep.text)
-  assert.equal(directStep.location, '/?sso=ready')
-  assert.equal(logins, acceptedBefore + 1, 'OIDC continuation never replays the password')
-  assert.equal(JSON.parse((await request(`${harbor.origin}/auth/sso/session`)).text).active, true)
   blocked=true
   assert.equal(JSON.parse((await request(`${b.origin}/auth/sso/session`)).text).active,false,'upstream application ban invalidates the session')
   assert.equal((await pool.query("SELECT to_regclass('iam.members') AS members,to_regclass('public.tenants') AS tenants")).rows[0].members,null)

@@ -38,8 +38,6 @@ export async function request<T = any>(
 }
 export type AccountOptions = {
   csrf: string;
-  passwordFirst?: boolean;
-  loginError?: string;
   formId: string;
   view?: string;
   policy?: { mode: string; version: number };

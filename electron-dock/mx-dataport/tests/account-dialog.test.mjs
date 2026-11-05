@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadAccountForm } from '../apps/web/api.ts';
@@ -33,7 +34,7 @@ function fixture(t, { search = '' } = {}) {
   let index=0;
   const previous=globalThis.location, previousFormData=globalThis.FormData;
   globalThis.FormData=class extends Map { constructor(form) { super(Object.entries(form?.values || {})); } };
-  globalThis.location={search,replace:value=>redirects.push(value)};
+  globalThis.location={search,hash:"",pathname:"/",replace:value=>redirects.push(value)};
   const unmount=()=>hooks.forEach(h=>h?.cleanup?.());
   t.after(()=>{unmount();globalThis.FormData=previousFormData;if(previous===undefined)delete globalThis.location;else globalThis.location=previous});
   environment.useState=initial=>{
@@ -115,25 +116,25 @@ test('an explicit MX selection reuses an unexpired form instead of starting anot
 const values={login:'fixture-owner',password:'SyntheticPassword123!',inviteCode:'fixture-invite'};
 const submit=f=>f.form().props.onSubmit({preventDefault(){},currentTarget:{values}});
 
-test('MX fields are immediately editable on switching, including while preparation is pending',async t=>{
+test('MX fields stay visible but disabled until the original initialization finishes',async t=>{
   const f=fixture(t);f.render();f.mode(false);
   for(const state of [f.render(false),f.render()]) {
     assert.equal(state.props.open,true);
-    for(const name of ['login','password','inviteCode'])assert.equal(nodes(state).find(n=>n.props?.name===name).props.disabled,false);
+    for(const name of ['login','password','inviteCode'])assert.equal(nodes(state).find(n=>n.props?.name===name).props.disabled,true);
     assert.equal(nodes(state).find(n=>n.props?.className==='auth-submit').props.type,'submit');
   }
   assert.deepEqual(f.redirects,[]);assert.equal(f.requests.length,0);
-  f.loads[0].resolve({options:{...options,passwordFirst:true}});await f.settle();
+  f.loads[0].resolve({options:options});await f.settle();
   assert.equal(f.form().key,'mx-owner-login','preparing authentication cannot remount and clear the fields');
 });
 
-test('one login click submits credentials once before OIDC; no separate continue action',async t=>{
+test('one login click submits credentials once through the original endpoint; no separate continue action',async t=>{
   const f=fixture(t);f.render();f.mode(false);f.render();
-  f.loads[0].resolve({options:{...options,passwordFirst:true}});await f.settle();
+  f.loads[0].resolve({options:options});await f.settle();
   environment.request=(...args)=>{f.requests.push(args);return Promise.resolve({redirect:'https://auth.example.test/authorize?state=fixture'})};
   await Promise.all([submit(f),submit(f)]);
   assert.equal(f.requests.length,1);
-  const [path,request]=f.requests[0];assert.equal(path,'/auth/sso/password');
+  const [path,request]=f.requests[0];assert.equal(path,'/auth/sso/form');
   assert.equal(request.headers['x-mx-csrf'],options.csrf);
   assert.deepEqual(JSON.parse(request.body),{action:'login',formId:options.formId,...values});
   assert.deepEqual(f.redirects,['https://auth.example.test/authorize?state=fixture']);
@@ -142,7 +143,7 @@ test('one login click submits credentials once before OIDC; no separate continue
 
 test('wrong credentials remain in the same form, and retry is explicit',async t=>{
   const f=fixture(t);f.render();f.mode(false);f.render();
-  f.loads[0].resolve({options:{...options,passwordFirst:true}});await f.settle();
+  f.loads[0].resolve({options:options});await f.settle();
   environment.request=(...args)=>{f.requests.push(args);return Promise.reject(Object.assign(Error('账号或密码不正确'),{status:401}))};
   await submit(f);const failed=await f.settle();
   assert.equal(failed.props.open,true);assert.equal(f.form().key,'mx-owner-login');
@@ -154,7 +155,7 @@ test('wrong credentials remain in the same form, and retry is explicit',async t=
 
 test('late login response after dialog unmount cannot navigate',async t=>{
   const f=fixture(t);let resolve;
-  f.render();f.mode(false);f.render();f.loads[0].resolve({options:{...options,passwordFirst:true}});await f.settle();
+  f.render();f.mode(false);f.render();f.loads[0].resolve({options:options});await f.settle();
   environment.request=()=>new Promise(done=>{resolve=done});
   const pending=submit(f);f.unmount();resolve({redirect:'https://auth.example.test/late'});await pending;
   assert.deepEqual(f.redirects,[]);
@@ -165,3 +166,73 @@ test('an existing browser MX form keeps its established credential submission en
   environment.request=(...args)=>{f.requests.push(args);return Promise.resolve({redirect:'https://auth.example.test/complete'})};
   await submit(f);assert.equal(f.requests[0][0],'/auth/sso/form');
 });
+
+for (const code of ['account_flow_expired','account_request_failed']) {
+  test(`MX initializes automatically from ${code} while the dialog and disabled form remain visible`,async t=>{
+    const f=fixture(t);let starts=0;
+    environment.load=guards=>loadAccountForm({...guards,
+      read:async()=>{throw Object.assign(Error('Expired'),{status:410,code})},
+      start:async()=>{starts++;return {redirect:'https://auth.example.test/original-oidc'}},
+    });
+    f.render();f.mode(false);f.render();const pending=await f.settle();
+    assert.equal(starts,1);assert.deepEqual(f.redirects,['https://auth.example.test/original-oidc']);
+    assert.equal(pending.props.open,true);assert.equal(f.form().key,'mx-owner-login');
+    assert.equal(nodes(pending).find(n=>n.props?.name==='password').props.disabled,true);
+    assert.equal(nodes(pending).find(n=>n.props?.className==='auth-submit').props.disabled,true);
+    assert.equal(f.requests.length,0,'initialization never sends credentials');
+  });
+}
+
+test('expired automatic callback never restarts itself in a navigation loop',async t=>{
+  const f=fixture(t,{search:'?account=1'});
+  environment.load=guards=>loadAccountForm({...guards,
+    read:async()=>{throw Object.assign(Error('Expired'),{status:410})},
+    start:()=>assert.fail('callback must not automatically restart'),
+  });
+  f.render();const failed=await f.settle();
+  assert.equal(failed.props.open,true);assert.deepEqual(f.redirects,[]);
+  assert.equal(nodes(failed).find(n=>n.props?.className==='auth-submit').props.children.includes('重试连接'),true);
+});
+
+// Exercise App's actual first render without flushing passive effects or
+// mounting feature pages. This catches the callback frame that hid the dialog.
+const mainSource = await readFile(new URL('../apps/web/main.tsx', import.meta.url), 'utf8');
+const mainExports = new Map();
+for (const match of mainSource.matchAll(/import\s+\{([^}]+)\}\s+from\s+["']([^"']+)["']/g)) {
+  mainExports.set(match[2], match[1].split(',').map(name => name.trim()).filter(Boolean));
+}
+const appBundle = await build({
+  stdin: { contents: mainSource+'\nexport { App };', loader:'tsx', resolveDir:fileURLToPath(new URL('../apps/web/',import.meta.url)) },
+  bundle:true,format:'esm',platform:'node',jsx:'automatic',write:false,
+  plugins:[{name:'first-paint',setup(builder){
+    builder.onResolve({filter:/^react\/jsx-runtime$/},args=>({path:pathToFileURL(require.resolve(args.path)).href,external:true}));
+    builder.onResolve({filter:/.*/},args=>({path:args.path,namespace:'app-fixture'}));
+    builder.onLoad({filter:/.*/,namespace:'app-fixture'},({path})=>{
+      if(path.endsWith('.css'))return {contents:'',loader:'js'};
+      if(path==='react')return {contents:'const e=globalThis.__dataportLoginDialogTest;export default {};export const useState=(...a)=>e.useState(...a),useEffect=(...a)=>e.useEffect(...a);',loader:'js'};
+      const special={
+        emptySession:'{active:null,customer:null,csrf:"",issue:null}',
+        AccessContext:'{Provider:()=>null}',
+        useMessageInbox:'()=>({})',
+        canOpenPage:'()=>false',
+      };
+      return {contents:(mainExports.get(path)||[]).map(name=>`export const ${name}=${special[name]||'()=>null'};`).join('\n'),loader:'js'};
+    });
+  }}],
+});
+const previousDocument=globalThis.document;
+globalThis.document={getElementById:()=>null};
+let App;
+try { ({App}=await import(`data:text/javascript;base64,${Buffer.from(appBundle.outputFiles[0].text+'\n//# sourceURL=dataport-app-firstpaint-fixture.js').toString('base64')}`)); }
+finally { if(previousDocument===undefined)delete globalThis.document;else globalThis.document=previousDocument; }
+for(const search of ['?account=1','?account=1&accountError=feishu','']) {
+  test(`App first paint ${search||'ordinary visit'} has the correct login visibility without waiting for effects`,t=>{
+    const f=fixture(t,{search}), previousStorage=globalThis.sessionStorage;
+    globalThis.sessionStorage={getItem:()=>null};
+    t.after(()=>{if(previousStorage===undefined)delete globalThis.sessionStorage;else globalThis.sessionStorage=previousStorage});
+    const tree=App();
+    const dialog=nodes(tree).find(n=>n.type?.name==='AccountDialog');
+    assert.equal(dialog.props.open,search.includes('account=1'));
+    assert.deepEqual(f.requests,[]);assert.deepEqual(f.redirects,[]);
+  });
+}

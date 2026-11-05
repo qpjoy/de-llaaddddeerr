@@ -53,6 +53,7 @@ function AccountDialogSession({
     [employee, setEmployee] = useState(!new URLSearchParams(location.search).has("account")),
     [error, setError] = useState(""),
     [unavailable, setUnavailable] = useState(false),
+    [mxSelected, setMxSelected] = useState(false),
     [retry, setRetry] = useState(0),
     [checking, setChecking] = useState(!preview),
     [busy, setBusy] = useState(false),
@@ -66,6 +67,7 @@ function AccountDialogSession({
   function changeMode(nextEmployee: boolean) {
     if (busy || submitting.current || nextEmployee === employee) return;
     setEmployee(nextEmployee);
+    if (!nextEmployee) setMxSelected(true);
     setOptions(null);
     setChecking(!nextEmployee && !preview);
     setUnavailable(false);
@@ -75,25 +77,25 @@ function AccountDialogSession({
   useEffect(() => {
     if (!open || preview) return;
     if (employee) { setOptions(null); setChecking(false); setUnavailable(false); setError(""); return; }
-    let active = true;
+    let active = true, navigating = false;
     setChecking(true);
     setOptions(null);
     setUnavailable(false);
     setError("");
     loadAccountForm({
-      // Reading or switching modes must never navigate the current document.
-      canRestart: false,
+      // Keep the existing browser OIDC initialization and its callback loop guard.
+      canRestart: !new URLSearchParams(location.search).has("account") || mxSelected || retry > 0,
       current: () => active,
     })
       .then((value) => {
         if (active) {
           if ("redirect" in value) {
-            setUnavailable(true);
-            setError("账号服务需要更新，请联系管理员。");
+            // Keep the frame and disabled fields visible while the browser leaves.
+            navigating = true;
+            location.replace(value.redirect);
             return;
           }
           setOptions(value.options);
-          setError(value.options.loginError || "");
           setUnavailable(false);
         }
       })
@@ -108,12 +110,12 @@ function AccountDialogSession({
         );
       })
       .finally(() => {
-        if (active) setChecking(false);
+        if (active && !navigating) setChecking(false);
       });
     return () => {
       active = false;
     };
-  }, [open, preview, retry, employee]);
+  }, [open, preview, retry, employee, mxSelected]);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || checking || submitting.current) return;
@@ -139,7 +141,7 @@ function AccountDialogSession({
         if (mounted.current) navigateAfterLogin(result.redirect, location, history, onAuthenticated);
         return;
       }
-      const result = await request<{ redirect: string }>(options!.passwordFirst ? "/auth/sso/password" : "/auth/sso/form", {
+      const result = await request<{ redirect: string }>("/auth/sso/form", {
         method: "POST",
         signal: AbortSignal.timeout(15000),
         headers: { "x-mx-csrf": options!.csrf },
@@ -179,6 +181,7 @@ function AccountDialogSession({
       <DialogContent
         className="auth-dialog risk-auth-dialog"
         showCloseButton={false}
+        overlayClassName="auth-dialog-overlay"
       >
         <aside className="auth-brand-panel">
           <div className="auth-wordmark">
@@ -231,7 +234,7 @@ function AccountDialogSession({
                     autoComplete={employee ? "off" : "username"}
                     defaultValue={employee ? "" : options?.loginHint || ""}
                     placeholder={employee ? "输入数港子账号或员工邮箱" : "输入你的 MX 账号"}
-                    disabled={busy}
+                    disabled={busy || (!employee && !preview && (checking || !options))}
                   />
                   <InputGroupAddon>
                     <Mail />
@@ -249,7 +252,7 @@ function AccountDialogSession({
                     maxLength={128}
                     autoComplete={employee ? "new-password" : "current-password"}
                     placeholder="输入密码"
-                    disabled={busy}
+                    disabled={busy || (!employee && !preview && (checking || !options))}
                   />
                   <InputGroupAddon>
                     <LockKeyhole />
@@ -275,7 +278,7 @@ function AccountDialogSession({
                       maxLength={128}
                       autoComplete="off"
                       placeholder="输入 DataPort 专用邀请码"
-                      disabled={busy}
+                      disabled={busy || (!preview && (checking || !options))}
                       aria-describedby="auth-invite-help"
                     />
                   </InputGroup>

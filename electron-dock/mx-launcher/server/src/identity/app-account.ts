@@ -51,29 +51,7 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
         const { action, input = {} } = JSON.parse(raw);
         if (typeof action !== 'string' || !input || typeof input !== 'object') fail(400, '请求无效。');
         // Authenticated BFF preflight: no user data, grants or registration changes.
-        if (action === 'capabilities') return json(200, { nativeForm: true, passwordFirst: app!.appId === 'mx-harbor', appId: app!.appId, origin: app!.origin, audience: app!.audience });
-        if (action === 'password-prepare') {
-          // Credentials-first DataPort UI. No password or browser session enters this store.
-          if (app!.appId !== 'mx-harbor') fail(403, '此应用未开放此登录方式。');
-          if (!/^[A-Za-z0-9_-]{43}$/.test(String(input.state))) fail(400, '登录请求无效。');
-          const login = typeof input.login === 'string' ? input.login.trim() : '';
-          const password = typeof input.password === 'string' ? input.password : '';
-          if (!login || login.length > 64 || !password || password.length > 128) fail(400, '请填写账号和密码。');
-          if (!await accounts.allowAttempt(`app:${clientId}:${String(input.clientIp ?? '').slice(0, 100)}`, login)) fail(429, '尝试过于频繁，请稍后重试。');
-          const authTime = Date.now() / 1000;
-          const user = await accounts.authenticate(login, password);
-          if (!user) fail(401, '账号或密码不正确，或账号不可用。');
-          if (!canAccessIdentityApplication(await accounts.account(user!.userId), app!.appId)) {
-            if (!registration?.redeemAdmission) fail(503, 'DataPort 邀请服务需要更新，请稍后重试。');
-            await registration!.redeemAdmission!({ userId: user!.userId,
-              source: { issuer: settings.issuer, clientId, appId: app!.appId, appOrigin: app!.origin },
-              inviteCode: typeof input.inviteCode === 'string' ? input.inviteCode : '' });
-          }
-          await allowed(user!.userId, app!.appId);
-          const proof = random();
-          await state!.put('app-password', proof, { clientId, state: input.state, userId: user!.userId, authTime, expiresAt: Date.now() + 120000 });
-          return json(200, { proof });
-        }
+        if (action === 'capabilities') return json(200, { nativeForm: true, appId: app!.appId, origin: app!.origin, audience: app!.audience });
         if (['account', 'profile', 'password', 'unlink-feishu', 'sessions', 'revoke'].includes(action)) {
           const token = typeof input.accessToken === 'string' ? await provider.AccessToken.find(input.accessToken) : undefined;
           if (!token || token.clientId !== clientId || !token.accountId) fail(401, '登录已过期，请重新登录。');
@@ -103,18 +81,6 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
         if (!flow || flow.clientId !== clientId || active?.handle !== input.flow) fail(410, '登录已超时，请重新开始。');
         const interaction = await provider.Interaction.find(String(flow!.uid));
         if (!interaction || interaction.params.client_id !== clientId || interaction.params.mx_surface !== 'application') fail(410, '登录已超时，请重新开始。');
-        if (action === 'password-complete') {
-          if (app!.appId !== 'mx-harbor' || !/^[A-Za-z0-9_-]{43}$/.test(String(input.proof))) fail(400, '登录请求无效。');
-          const valid = (proof: Record<string, unknown> | undefined) => proof && proof.clientId === clientId
-            && proof.state === interaction!.params.state && typeof proof.expiresAt === 'number' && proof.expiresAt > Date.now();
-          if (!valid(await state!.read('app-password', input.proof))) fail(410, '登录已超时，请重新登录。');
-          const proof = await state!.read('app-password', input.proof, true);
-          if (!valid(proof)) fail(410, '登录请求已完成或已失效。');
-          await allowed(String(proof!.userId), app!.appId);
-          if (!await state!.read('app-completion-lock', input.flow, true)) fail(409, '登录请求已提交，请重新开始。');
-          await state!.put('app-result', input.flow, { handle: input.flow, userId: proof!.userId, authTime: proof!.authTime });
-          return json(200, { redirect: `${settings.origin}/identity/interaction/${flow!.uid}?app_complete=${input.flow}` });
-        }
         const uid = String(flow!.uid), source = { issuer: settings.issuer, clientId, appId: app!.appId, appOrigin: app!.origin };
         const proof = await state!.read('proof', uid);
         const invitationHandle = typeof interaction!.params.mx_invitation === 'string' ? interaction!.params.mx_invitation : '';

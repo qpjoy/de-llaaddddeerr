@@ -21,9 +21,6 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
   if (!store || ['put','get','remove','update'].some(method => typeof store[method] !== 'function')) throw new Error('SSO session store required')
   const SID = cookieNames?.session ?? `__Host-${settings.appId}_sso`
   const TX = cookieNames?.login ?? `__Host-${settings.appId}_login`
-  // DataPort alone opts into credentials-first UI; issuer/browser OIDC binding is unchanged.
-  const deferredPassword = navigation.deferredPassword === true && navigation.applicationForm === true
-    && navigation.loginOnly === true && settings.appId === 'mx-harbor'
   if (SID === TX || ![SID,TX].every(name => /^__Host-[A-Za-z0-9._-]+$/.test(name))) throw new Error('Distinct host-only SSO cookies required')
   if (!/^[a-z0-9-]+$/.test(csrfHeader)) throw new Error('Invalid SSO CSRF header')
   const readJson = (request, limit) => readSsoJson(request, limit, AppError)
@@ -106,20 +103,6 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
   function checkOrigin(request) {
     if (request.headers.origin !== settings.origin || request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', `请从${applicationName}页面重新发起操作。`)
   }
-  async function passwordForm(request, response, transaction) {
-    if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', `请从${applicationName}发起登录。`)
-    let id = cookies(request)[TX]
-    if (!transaction?.passwordForm) {
-      if (id) await store.remove('login', id)
-      id = random()
-      transaction = { passwordForm: true, state: random(), nonce: random(), verifier: random(), formCsrf: random(),
-        view: 'login', uiPath: mounts[0], expiresAt: Date.now() + 300000 }
-      await store.put('login', id, transaction, 300)
-      response.setHeader('Set-Cookie', cookie(TX, id, 300))
-    }
-    return { csrf: transaction.formCsrf, formId: fingerprint(id), view: 'login', passwordFirst: true,
-      ...(transaction.passwordError ? { loginError: '登录未完成或已超时，请重新登录。' } : {}) }
-  }
   async function sessionFor(request) {
     return store.get('session', cookies(request)[SID])
   }
@@ -143,39 +126,6 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
       const path = url.pathname
       const redirect = location => { response.writeHead(303, { location }); response.end() }
       const json = value => { response.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(value)); return true }
-      if (deferredPassword && path === '/auth/sso/password' && request.method === 'POST') {
-        checkOrigin(request)
-        const body = await readJson(request, 8192), id = cookies(request)[TX]
-        const pending = await store.get('login', id)
-        if (!pending?.passwordForm || pending.flow || !equal(pending.formCsrf, request.headers[csrfHeader]) || !equal(fingerprint(id), body.formId))
-          throw new AppError(409, 'account_form_changed', '登录页面已变化，请重试连接。')
-        // Atomically claim this submission. Only a failed explicit attempt restores the form.
-        const transaction = await store.get('login', id, true)
-        if (!transaction) throw new AppError(409, 'account_form_changed', '登录请求正在处理，请勿重复提交。')
-        try {
-          const target = oidc.buildAuthorizationUrl(await configuration(), {
-            redirect_uri: `${settings.origin}/auth/sso/callback`, response_type: 'code', response_mode: 'query',
-            scope: settings.scope ?? 'openid mx:identity', state: transaction.state, nonce: transaction.nonce,
-            code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
-            mx_surface: 'application', prompt: 'login', max_age: '0',
-          })
-          const capabilities = await accountClient()('capabilities')
-          if (capabilities.passwordFirst !== true || capabilities.appId !== settings.appId || capabilities.origin !== settings.origin || capabilities.audience !== settings.audience)
-            throw new AppError(503, 'sso_application_unavailable', '账号服务需要更新或配置不一致，请联系管理员。')
-          const result = await accountClient()('password-prepare', { state: transaction.state, clientIp: clientIp(request),
-            login: body.login, password: body.password, ...(navigation.loginInvitations === true ? { inviteCode: body.inviteCode } : {}) })
-          if (!/^[A-Za-z0-9_-]{43}$/.test(result.proof ?? '')) throw new AppError(503, 'account_unavailable', '账号服务需要更新，请联系管理员。')
-          transaction.passwordProof = result.proof
-          delete transaction.passwordForm
-          // Only an opaque, short-lived issuer proof persists. Never store passwords.
-          await store.put('login', id, transaction, 120)
-          return json({ redirect: target.toString() })
-        } catch (error) {
-          const seconds = Math.floor((transaction.expiresAt - Date.now()) / 1000)
-          if (seconds > 0 && !transaction.passwordProof) await store.put('login', id, transaction, seconds)
-          throw error
-        }
-      }
       const nativeStart = navigation.applicationForm === true && path === '/auth/sso/start' && request.method === 'POST'
       if (nativeStart || (path === '/auth/sso/login' && request.method === 'GET')) {
         if (nativeStart) checkOrigin(request)
@@ -214,38 +164,15 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
         if (!transaction || !equal(transaction.state, url.searchParams.get('state')) || !/^[A-Za-z0-9_-]{43}$/.test(flow ?? ''))
           throw new AppError(400, 'account_flow_invalid', `登录页面已过期，请从${applicationName}重新登录。`)
         // Auth validates its own cookie; this separate state check binds the same browser to the application.
-        if (deferredPassword && transaction.passwordProof) {
-          const proof = transaction.passwordProof
-          delete transaction.passwordProof
-          try {
-            const result = await accountClient()('password-complete', { flow, proof })
-            if (!await store.update('login', id, transaction)) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
-            // Completion stays on the issuer, using the original browser interaction cookies.
-            const target = new URL(result.redirect)
-            if (target.origin !== new URL(settings.issuer).origin) throw new Error('Unexpected login completion origin')
-            redirect(target.href); return true
-          } catch {
-            transaction.passwordForm = true
-            transaction.passwordError = true
-            await store.update('login', id, transaction)
-            redirect(`${uiPath(transaction.uiPath)}?account=1#/account`); return true
-          }
-        }
         transaction.flow = flow
         if (!await store.update('login', id, transaction)) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
         redirect(`${uiPath(transaction.uiPath)}?account=1${url.searchParams.get('error') === 'feishu' ? '&accountError=feishu' : ''}#/account`); return true
       }
       if (path === '/auth/sso/form' && ['GET', 'POST'].includes(request.method)) {
         const transaction = await store.get('login', cookies(request)[TX])
-        if (deferredPassword && request.method === 'GET' && !transaction?.flow) return json(await passwordForm(request, response, transaction))
         if (!transaction?.flow) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
         if (request.method === 'GET') {
-          let result
-          try { result = await accountClient()('options', { flow: transaction.flow, clientIp: clientIp(request) }) }
-          catch (error) {
-            if (deferredPassword && error.status === 410) return json(await passwordForm(request, response, null))
-            throw error
-          }
+          const result = await accountClient()('options', { flow: transaction.flow, clientIp: clientIp(request) })
           return json({ ...result, csrf: transaction.formCsrf, formId: fingerprint(transaction.flow), view: transaction.view, ...(navigation.formContext?.(transaction) ?? {}), ...(navigation.loginOnly === true ? {view:'login'} : {}) })
         }
         checkOrigin(request)
