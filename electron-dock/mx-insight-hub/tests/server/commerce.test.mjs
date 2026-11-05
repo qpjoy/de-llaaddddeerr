@@ -109,6 +109,7 @@ async function fixture(t,{space=false,offers=false}={}){
   return {pool,service,tenant,consumer,keyId,source,payments,create,eventFor,reserve,
     async upgradeSpace(){await writeFile(join(migrationDir,'130_commerce_space_subscriptions.sql'),await readFile(new URL('130_commerce_space_subscriptions.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
     async upgradeOffers(){await writeFile(join(migrationDir,'146_dataport_offers_and_trial.sql'),await readFile(new URL('146_dataport_offers_and_trial.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
+    async upgradePricing(){await writeFile(join(migrationDir,'179_dataport_annual_pricing.sql'),await readFile(new URL('179_dataport_annual_pricing.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
@@ -683,3 +684,141 @@ test('trial publication and product validation stay authoritative; failed delive
   await f.pool.query('DROP TRIGGER reject_trial_audit ON hub_commerce.audit')
   assert.equal((await free.create(f.tenant,body,key,'owner')).status,'active')
 })
+
+
+test('DataPort annual repricing updates new sales and all existing tier entitlements, preserving payment and usage facts',database,async t=>{
+  const f=await fixture(t,{space:true,offers:true}),catalog=(await f.service.catalog(true)).items;
+  const bySku=Object.fromEntries(catalog.map(p=>[p.sku,p]));
+  const orders=[];
+  for(const sku of ['ip-risk-basic-annual','ip-risk-pro-annual','ip-risk-enterprise-annual']) {
+    const item=bySku[sku],key=randomUUID();
+    const order=await f.service.create(f.tenant,{sku,revision:item.revision,environment:'live'},key,'owner');
+    orders.push({order,key,body:{sku,revision:item.revision,environment:'live'}});
+    const paid=await f.eventFor(order);await f.service.commit(paid.source,paid.event,paid.payment);
+  }
+  const pendingSku=bySku['ip-risk-pro-annual'];
+  const pending=await f.service.create(f.tenant,{sku:pendingSku.sku,revision:pendingSku.revision,environment:'live'},randomUUID(),'owner');
+  const legacy=await f.create(),paidLegacy=await f.eventFor(legacy);
+  await f.service.commit(paidLegacy.source,paidLegacy.event,paidLegacy.payment);
+  const trial=bySku['ip-risk-trial-10'];
+  await f.service.create(f.tenant,{sku:trial.sku,revision:trial.revision,environment:'live'},randomUUID(),'owner');
+  // An edited description and visibility setting must survive the quota update.
+  const pro=bySku['ip-risk-pro-annual'];
+  await f.service.save(pro.sku,{revision:pro.revision,name:pro.name,description:'operator description',status:'published',
+    amountMinor:pro.amountMinor,months:12,quota:pro.quota,harborListed:false},'operator');
+  const beforeProducts=(await f.pool.query('SELECT * FROM hub_commerce.products ORDER BY sku')).rows;
+  const beforeOrders=(await f.pool.query('SELECT * FROM hub_commerce.orders ORDER BY id')).rows;
+  const beforeSubscriptions=(await f.pool.query('SELECT * FROM hub_commerce.subscriptions ORDER BY id')).rows;
+  const expected={
+    'ip-risk-basic-annual':{amount:499900,quota:20000,daily:10000},
+    'ip-risk-pro-annual':{amount:1699900,quota:100000,daily:20000},
+    'ip-risk-enterprise-annual':{amount:3699900,quota:500000,daily:null},
+  };
+  await f.upgradePricing();
+  const products=(await f.pool.query('SELECT * FROM hub_commerce.products ORDER BY sku')).rows;
+  for(const previous of beforeProducts) {
+    const current=products.find(p=>p.sku===previous.sku),terms=expected[previous.sku];
+    if(!terms){assert.deepEqual(current,previous);continue}
+    assert.deepEqual(current.document,{...previous.document,amountMinor:terms.amount,months:12,quota:terms.quota,dailyLimit:terms.daily});
+    assert.equal(current.revision,previous.revision+1);
+  }
+  const afterOrders=(await f.pool.query('SELECT * FROM hub_commerce.orders ORDER BY id')).rows;
+  for(const previous of beforeOrders) {
+    const current=afterOrders.find(o=>o.id===previous.id),terms=expected[previous.intent.product.sku];
+    assert.deepEqual(current,terms?{...previous,intent:{...previous.intent,product:{...previous.intent.product,quota:terms.quota,dailyLimit:terms.daily}}}:previous);
+  }
+  const afterSubscriptions=(await f.pool.query('SELECT * FROM hub_commerce.subscriptions ORDER BY id')).rows;
+  for(const previous of beforeSubscriptions) {
+    const current=afterSubscriptions.find(s=>s.id===previous.id),order=beforeOrders.find(o=>o.id===previous.order_id),terms=expected[order.intent.product.sku];
+    assert.deepEqual(current,{...previous,...(terms?{quota:terms.quota,daily_limit:terms.daily}:{}),repricing_usage_ceiling:0});
+  }
+  const publicCatalog=await f.service.publicCatalog();
+  assert.equal(publicCatalog.items.find(p=>p.sku==='ip-risk-basic-annual').amountMinor,499900);
+  assert.equal(publicCatalog.items.some(p=>p.sku===pro.sku),false,'operator visibility remains authoritative');
+  // An existing request keeps its identity and old price, with the new entitlements.
+  const replay=await f.service.create(f.tenant,orders[0].body,orders[0].key,'owner');
+  assert.equal(replay.id,orders[0].order.id);assert.equal(replay.product.amountMinor,orders[0].order.product.amountMinor);assert.equal(replay.product.quota,20000);
+  await assert.rejects(f.service.create(f.tenant,orders[0].body,randomUUID(),'owner'),{code:'commerce_product_changed'});
+  const newBasic=(await f.service.catalog(true)).items.find(p=>p.sku==='ip-risk-basic-annual');
+  const bought=await f.service.create(f.tenant,{sku:newBasic.sku,revision:newBasic.revision,environment:'live'},randomUUID(),'owner');
+  assert.equal(bought.product.amountMinor,499900);assert.equal(bought.product.quota,20000);assert.equal(bought.product.dailyLimit,10000);
+  await assert.rejects(f.pool.query('UPDATE hub_commerce.subscriptions SET ends_at=starts_at WHERE order_id=$1',[orders[0].order.id]),/check constraint/);
+  // A previously created pending order still settles at its original price.
+  const paidPending=await f.eventFor(pending);await f.service.commit(paidPending.source,paidPending.event,paidPending.payment);
+  const delivered=(await f.pool.query('SELECT * FROM hub_commerce.subscriptions WHERE order_id=$1',[pending.id])).rows[0];
+  assert.equal(delivered.quota,100000);assert.equal(delivered.daily_limit,20000);
+  const changedAudit=(await f.pool.query("SELECT action,document FROM hub_commerce.audit WHERE actor='migration:179' ORDER BY id")).rows;
+  assert.equal(changedAudit.filter(r=>r.action==='product.saved').length,3);
+  assert.equal(changedAudit.filter(r=>r.action==='order.entitlement.adjusted').length,4);
+  assert.equal(changedAudit.filter(r=>r.action==='subscription.entitlement.adjusted').length,3);
+  assert.equal((await f.pool.query("SELECT tgenabled FROM pg_trigger WHERE tgrelid='hub_commerce.orders'::regclass AND tgname='commerce_order_immutable'")).rows[0].tgenabled,'O');
+  await assert.rejects(f.pool.query("UPDATE hub_commerce.orders SET intent=jsonb_set(intent,'{product,amountMinor}','1') WHERE id=$1",[bought.id]),/commerce_order_immutable/);
+  const savedCatalog=await f.service.catalog(true);await f.rerunMigrations();assert.deepEqual(await f.service.catalog(true),savedCatalog);
+  assert.deepEqual((await f.pool.query("SELECT action,document FROM hub_commerce.audit WHERE actor='migration:179' ORDER BY id")).rows,changedAudit);
+});
+
+for(const settlement of ['committed','released'])test(`DataPort annual repricing preserves already-over-quota usage and ${settlement} in-flight settlement`,database,async t=>{
+  const f=await fixture(t,{space:true,offers:true});
+  const basic=(await f.service.catalog()).items.find(p=>p.sku==='ip-risk-basic-annual');
+  const order=await f.service.create(f.tenant,{sku:basic.sku,revision:basic.revision,environment:'live'},randomUUID(),'owner');
+  const paid=await f.eventFor(order);await f.service.commit(paid.source,paid.event,paid.payment);
+  const sub=(await f.pool.query('UPDATE hub_commerce.subscriptions SET used=24999 WHERE order_id=$1 RETURNING *',[order.id])).rows[0];
+  const held=await f.reserve();
+  await f.upgradePricing();
+  let current=(await f.pool.query('SELECT * FROM hub_commerce.subscriptions WHERE id=$1',[sub.id])).rows[0];
+  assert.equal(current.quota,20000);assert.equal(current.daily_limit,10000);
+  assert.equal(current.used,24999);assert.equal(current.held,1);assert.equal(current.repricing_usage_ceiling,25000);
+  assert.equal(+current.starts_at,+sub.starts_at);assert.equal(+current.ends_at,+sub.ends_at);
+  await assert.rejects(f.reserve(),/commerce_quota_exhausted/);
+  await f.pool.query('UPDATE usage_requests SET status=$2,units_actual=$3 WHERE id=$1',[held,settlement,settlement==='committed'?1:0]);
+  current=(await f.pool.query('SELECT * FROM hub_commerce.subscriptions WHERE id=$1',[sub.id])).rows[0];
+  assert.equal(current.used,settlement==='committed'?25000:24999);assert.equal(current.held,0);
+  assert.equal((await f.pool.query('SELECT state FROM hub_commerce.usage WHERE request_id=$1',[held])).rows[0].state,settlement==='committed'?'consumed':'released');
+  await assert.rejects(f.reserve(),/commerce_quota_exhausted/);
+  if(settlement==='committed')await assert.rejects(f.pool.query('UPDATE hub_commerce.subscriptions SET held=held+1 WHERE id=$1',[sub.id]),/subscriptions_usage_ceiling_check/);
+});
+
+for(const [sku,dailyUsed,limited] of [
+  ['ip-risk-basic-annual',10000,true],['ip-risk-pro-annual',20000,true],['ip-risk-enterprise-annual',30000,false],
+])test(`DataPort annual repricing enforces the actual new daily policy for ${sku}`,database,async t=>{
+  const f=await fixture(t,{space:true,offers:true});
+  const item=(await f.service.catalog()).items.find(p=>p.sku===sku);
+  const order=await f.service.create(f.tenant,{sku,revision:item.revision,environment:'live'},randomUUID(),'owner');
+  const paid=await f.eventFor(order);await f.service.commit(paid.source,paid.event,paid.payment);
+  await f.upgradePricing();
+  const sub=(await f.pool.query('SELECT * FROM hub_commerce.subscriptions WHERE order_id=$1',[order.id])).rows[0];
+  // Synthetic already-completed records; no gateway, provider or payment calls.
+  await f.pool.query(`WITH records AS (
+    INSERT INTO usage_requests(id,tenant_id,consumer_id,api_key_id,idempotency_key,fingerprint,platform,status,units_reserved,units_actual)
+    SELECT gen_random_uuid(),$1,$2,$3,gen_random_uuid()::text,repeat('d',64),'ip_risk','committed',1,1 FROM generate_series(1,$4)
+    RETURNING id
+  ) INSERT INTO hub_commerce.usage(request_id,subscription_id,state) SELECT id,$5,'consumed' FROM records`,[f.tenant,f.consumer,f.keyId,dailyUsed,sub.id]);
+  await f.pool.query('UPDATE hub_commerce.subscriptions SET used=$2 WHERE id=$1',[sub.id,dailyUsed]);
+  if(limited) {
+    await assert.rejects(f.reserve(),/commerce_daily_limit_exhausted/);
+    await f.pool.query(`UPDATE hub_commerce.usage SET created_at=now()-interval '2 days'
+      WHERE request_id=(SELECT request_id FROM hub_commerce.usage WHERE subscription_id=$1 LIMIT 1)`,[sub.id]);
+    const held=await f.reserve();assert.ok(held);
+    await assert.rejects(f.reserve(),/commerce_daily_limit_exhausted/);
+  } else {
+    assert.equal(sub.daily_limit,null);assert.ok(await f.reserve(),'enterprise keeps working above both other daily caps');
+  }
+});
+
+test('DataPort annual repricing rolls back terms and restores the immutable-order guard on a mid-migration failure',database,async t=>{
+  const f=await fixture(t,{space:true,offers:true});
+  const basic=(await f.service.catalog()).items.find(p=>p.sku==='ip-risk-basic-annual');
+  await f.service.create(f.tenant,{sku:basic.sku,revision:basic.revision,environment:'live'},randomUUID(),'owner');
+  const before=(await f.pool.query('SELECT * FROM hub_commerce.orders ORDER BY id')).rows,products=await f.service.catalog(true);
+  await f.pool.query(`CREATE FUNCTION public.reject_test_repricing() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'synthetic_repricing_failure'; END $$;
+    CREATE TRIGGER reject_test_repricing BEFORE INSERT ON hub_commerce.audit
+    FOR EACH ROW WHEN (NEW.actor='migration:179' AND NEW.action='order.entitlement.adjusted')
+    EXECUTE FUNCTION public.reject_test_repricing();`);
+  await assert.rejects(f.upgradePricing(),/synthetic_repricing_failure/);
+  assert.deepEqual((await f.pool.query('SELECT * FROM hub_commerce.orders ORDER BY id')).rows,before);
+  assert.deepEqual(await f.service.catalog(true),products);
+  assert.equal((await f.pool.query("SELECT tgenabled FROM pg_trigger WHERE tgrelid='hub_commerce.orders'::regclass AND tgname='commerce_order_immutable'")).rows[0].tgenabled,'O');
+  assert.equal((await f.pool.query("SELECT 1 FROM information_schema.columns WHERE table_schema='hub_commerce' AND table_name='subscriptions' AND column_name='repricing_usage_ceiling'")).rowCount,0);
+  assert.equal((await f.pool.query("SELECT 1 FROM schema_migrations WHERE filename='179_dataport_annual_pricing.sql'")).rowCount,0);
+});
