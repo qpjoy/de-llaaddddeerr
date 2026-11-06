@@ -4,6 +4,7 @@ import { restorePaymentReturn } from '../shared/payment-return.mjs'
 import { WechatOverview } from './wechat-product.jsx'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
+import { FILE_DATASET_NAV_DESCRIPTION, FILE_DATASET_NAV_LABEL, FILE_DATASET_NAV_SECTION, FILE_DATASET_PATHS, fileDataset } from '../shared/file-datasets.mjs'
 import { WechatSelfHostedPage } from './wechat-self-hosted.jsx'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { ProvisioningPage } from './pages-provisioning.jsx'
@@ -17,6 +18,8 @@ import { DocsPage } from './pages-docs.jsx'
 import { WebSearchPage } from './pages-web-search.jsx'
 import { IpRiskPage } from './pages-ip-risk.jsx'
 import { TwitterUserEmailPage } from './pages-twitter-user-email.jsx'
+import { EmailDirectoryPage } from './pages-email-directory.jsx'
+import { PhoneDirectoryPage } from './pages-phone-directory.jsx'
 import { DemoCredentialProvider, DemoProductPage } from './demo-credentials.jsx'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -26,6 +29,7 @@ import {
   ChatsCircle,
   Database,
   DeviceMobile,
+  Files,
   DownloadSimple,
   MagnifyingGlass,
   NewspaperClipping,
@@ -360,6 +364,12 @@ function AgentRuntimeRoute(props) {
 const SESSION_KEY = 'mx-insight-hub.admin-token'
 const THEME_KEY = 'mx-insight-hub.theme'
 const DATA_PRODUCTS_NAV_KEY = 'data-products'
+// Collapsible groups inside a nav parent (route.navSection).
+const NAV_SECTIONS = {
+  wechat: { label: '微信', description: '公众号、视频号与搜一搜', icon: Scroll },
+  xiaohongshu: { label: '小红书', description: '笔记、热门内容与创作灵感', icon: Scroll },
+  [FILE_DATASET_NAV_SECTION]: { label: FILE_DATASET_NAV_LABEL, description: FILE_DATASET_NAV_DESCRIPTION, icon: Files },
+}
 const DATA_CLEANING_NAV_KEY = 'data-cleaning'
 const AGENT_CENTER_NAV_KEY = 'agent-center'
 const SYSTEM_SETTINGS_NAV_KEY = 'system-settings'
@@ -407,7 +417,11 @@ const ROUTES = [
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/web-search', label: 'Web Search', description: '全网检索与多渠道搜索', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WebSearchPage, capability: 'apikey.read' },
   { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
-  { path: '/data-products/twitter-user-email', label: 'Twitter 用户邮箱', description: '用户名与邮箱双向查询', icon: Users, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TwitterUserEmailPage, capability: 'apikey.read' },
+  // 场景应用 → 文件数据集: versioned PostgreSQL datasets cleaned from server files.
+  ...[['twitter-user-email', TwitterUserEmailPage, Users], ['email-directory', EmailDirectoryPage, Files], ['phone-directory', PhoneDirectoryPage, DeviceMobile]].map(([key, component, icon]) => {
+    const dataset = fileDataset(key)
+    return { path: dataset.productPath, label: dataset.label, description: dataset.navDescription, icon, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, navSection: FILE_DATASET_NAV_SECTION, component, capability: 'apikey.read' }
+  }),
   { path: '/data-products/enterprise', label: '企业数据', description: '企业查询与接口调试', icon: House, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EnterprisePage, capability: 'apikey.read' },
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, navSection: 'wechat', description: product.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatOverview, capability: 'apikey.read' })),
   { path: WECHAT_SELF_HOSTED.path, label: WECHAT_SELF_HOSTED.label, navLabel: WECHAT_SELF_HOSTED.navLabel, navSection: 'wechat', description: WECHAT_SELF_HOSTED.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatSelfHostedPage, capability: 'apikey.read' },
@@ -785,7 +799,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES, invoiceTasks }) {
                         renderedSections.add(child.navSection)
                         const sectionChildren = children.filter(candidate => candidate.navSection === child.navSection)
                         const sectionExpanded = expandedSections.has(child.navSection)
-                        return <div className="mih-nav__subgroup" key={child.navSection}>{heading}<button type="button" className="mih-nav__item mih-nav__parent mih-nav__child" aria-expanded={sectionExpanded} aria-controls={`mih-nav-section-${child.navSection}`} onClick={() => setExpandedSections(current => { const next = new Set(current); if (next.has(child.navSection)) next.delete(child.navSection); else next.add(child.navSection); return next })}><Scroll size={16} /><span><strong>{child.navSection === 'wechat' ? '微信' : '小红书'}</strong><small>{child.navSection === 'wechat' ? '公众号、视频号与搜一搜' : '笔记、热门内容与创作灵感'}</small></span><CaretDown className="mih-nav__parent-caret" size={14} /></button>{sectionExpanded ? <div className="mih-nav__children" id={`mih-nav-section-${child.navSection}`}>{sectionChildren.map(item => routeLink(item, true))}</div> : null}</div>
+                        return <div className="mih-nav__subgroup" key={child.navSection}>{heading}<button type="button" className="mih-nav__item mih-nav__parent mih-nav__child" aria-expanded={sectionExpanded} aria-controls={`mih-nav-section-${child.navSection}`} onClick={() => setExpandedSections(current => { const next = new Set(current); if (next.has(child.navSection)) next.delete(child.navSection); else next.add(child.navSection); return next })}>{(() => { const SectionIcon = NAV_SECTIONS[child.navSection].icon; return <SectionIcon size={16} /> })()}<span><strong>{NAV_SECTIONS[child.navSection].label}</strong><small>{NAV_SECTIONS[child.navSection].description}</small></span><CaretDown className="mih-nav__parent-caret" size={14} /></button>{sectionExpanded ? <div className="mih-nav__children" id={`mih-nav-section-${child.navSection}`}>{sectionChildren.map(item => routeLink(item, true))}</div> : null}</div>
                       })}
                     </div>
                   ) : null}
@@ -981,7 +995,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), WECHAT_SELF_HOSTED.path, '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search', '/data-products/twitter-user-email'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), WECHAT_SELF_HOSTED.path, '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search', ...FILE_DATASET_PATHS].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
     strategySession,

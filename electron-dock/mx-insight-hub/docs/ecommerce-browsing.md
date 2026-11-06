@@ -27,7 +27,7 @@
 
 ## 参数覆盖与边界
 
-商品搜索合同支持淘宝、天猫、京东、小红书电商、闲鱼、抖音电商；本次增量仍待部署并配置抖音采购价格。规范请求 query→keyword，page→page；淘宝/天猫 price.min/max→startPrice/endPrice，天猫标记由 marketplace 设置；淘宝/闲鱼 sort 按受审查枚举映射；小红书和抖音 searchId 包在签名 continuation 中，第 2 页起使用 Hub cursor。上游没有公开可设置的 pageSize，不承诺每页固定返回 10 条。
+商品搜索合同支持淘宝、天猫、京东、小红书电商、闲鱼、抖音电商。合同覆盖与运行可用性分别核验：实际调用仍受当前部署版本、授权、运行开关、凭据、价格与余额控制；抖音的样本和字段核验见 [2026-11-06 验证记录](operations/douyin-ecommerce-verification-2026-11-06.md)。规范请求 query→keyword，page→page；淘宝/天猫 price.min/max→startPrice/endPrice，天猫标记由 marketplace 设置；淘宝/闲鱼 sort 按受审查枚举映射；小红书和抖音 searchId 包在签名 continuation 中，第 2 页起使用 Hub cursor。上游没有公开可设置的 pageSize，不承诺每页固定返回 10 条。
 
 [官方淘宝搜索 V1](https://docs.justoneapi.com/zh/api/taobao-and-tmall/product-search-v1)确认 page、sort、tmall、startPrice/endPrice。
 [官方闲鱼目录](https://docs.justoneapi.com/en/api/xianyu-goofish/)确认关键词搜索支持 page/sort。

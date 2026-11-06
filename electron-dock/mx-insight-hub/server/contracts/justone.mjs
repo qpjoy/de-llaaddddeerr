@@ -77,6 +77,8 @@ function endpoint({
   tmall = false,
   pagination = null,
   projectItem = null,
+  companionPath = null,
+  singlePage = false,
 }) {
   return Object.freeze({
     endpointKey,
@@ -93,6 +95,10 @@ function endpoint({
     // down and prices arrive as styled text runs, so it declares how to reach a
     // flat item before the shared field mapping runs.
     projectItem,
+    // A parallel list in the same response whose same-index entry projectItem may read.
+    companionPath: companionPath ? Object.freeze([...companionPath]) : null,
+    // The upstream serves only its first page; Hub issues no continuation.
+    singlePage,
   })
 }
 
@@ -153,15 +159,55 @@ function projectXiaohongshuProduct(element) {
   }
 }
 
-function projectDouyinProduct(element) {
+function projectDouyinProduct(element, summary) {
   if (!plainObject(element.base_info)) return null
+  // Long product IDs must arrive as strings. Once JSON parsing has rounded a
+  // numeric ID, converting it to text would publish a different identity.
+  if (typeof element.product_id !== 'string'
+    && !(Number.isSafeInteger(element.product_id) && element.product_id > 0)) return null
   const item = element.base_info
   return {
     productId: element.product_id, title: item.title, itemUrl: item.detail_url,
     images: item.main_img?.url_list,
-    // The reviewed response has price=null. Do not guess units/structure for
-    // future populated price objects, or use promotion_id as the product ID.
+    // base_info.price stays null in live responses; promotion_id is never the product ID.
+    ...douyinSummaryFields(element, summary),
   }
+}
+
+const fenToYuan = fen => `${Math.floor(fen / 100)}${fen % 100 ? `.${String(fen % 100).padStart(2, '0').replace(/0+$/u, '')}` : ''}`
+
+// The search response repeats each promotion at the same index in
+// data.summary_promotions (精选联盟选品卡). Live page 2026-11-06: 30/30 with the
+// same product_id/promotion_id; price.origin always equalled the displayed
+// 到手价 x 100 (fen). Only that exact pairing and unit check is trusted.
+function douyinSummaryFields(element, summary) {
+  if (!plainObject(summary) || summary.product_id !== element.product_id
+    || summary.promotion_id !== element.promotion_id || !plainObject(summary.base_model)) return {}
+  const model = summary.base_model
+  const product = plainObject(model.product_info) ? model.product_info : {}
+  const shop = plainObject(model.shop_info) ? model.shop_info : {}
+  const fields = {}
+  const price = model.marketing_info?.price_desc?.price
+  if (plainObject(price) && Number.isSafeInteger(price.origin) && price.origin >= 0
+    && typeof price.integer === 'string' && /^\d{1,3}(?:,?\d{3})*$/u.test(price.integer)
+    && (price.decimal == null || price.decimal === '' || typeof price.decimal === 'string' && /^\d{1,2}$/u.test(price.decimal))) {
+    const shown = `${BigInt(price.integer.replaceAll(',', ''))}${(price.decimal || '').replace(/0+$/u, '') ? `.${price.decimal.replace(/0+$/u, '')}` : ''}`
+    if (shown === fenToYuan(price.origin)) fields.currentPrice = shown
+  }
+  // shop_info.shop_id is numeric; data_report.shop_id carries the same digits as text.
+  const reported = model.extend_info?.data_report?.shop_id
+  if (typeof shop.shop_id === 'string' && /^\d{1,64}$/u.test(shop.shop_id)) fields.shopId = shop.shop_id
+  else if (Number.isSafeInteger(shop.shop_id) && shop.shop_id > 0) fields.shopId = String(shop.shop_id)
+  else if (typeof shop.shop_id === 'number' && typeof reported === 'string' && /^\d{1,64}$/u.test(reported)
+    && Number(reported) === shop.shop_id) fields.shopId = reported
+  if (typeof shop.shop_name === 'string') fields.shopName = shop.shop_name
+  // 月销: a monthly sales count, published as the sales signal.
+  if (Number.isSafeInteger(product.month_sale?.origin) && product.month_sale.origin >= 0) fields.sales = String(product.month_sale.origin)
+  const levels = ['fourth_category', 'third_category', 'second_category', 'first_category']
+  const leaf = levels.map(level => product.category?.[level]?.category_name)
+    .find(name => typeof name === 'string' && name.trim())
+  if (leaf) fields.category = leaf
+  return fields
 }
 
 // `data` is intentionally untyped in the upstream OpenAPI documents. These
@@ -205,6 +251,11 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
     path: '/api/douyin-ec/search-item-list/v1',
     itemPaths: [['data', 'promotions']],
     projectItem: projectDouyinProduct,
+    companionPath: ['data', 'summary_promotions'],
+    // Live 2026-11-06: page 1 said has_more=true/total=500, but page=2 returned
+    // 0 items, has_more=false, total=0 (still code 0, billed) both with the
+    // documented searchId from page 1 and without it.
+    singlePage: true,
   }),
   xianyu: endpoint({
     endpointKey: 'xianyu.product-search.v1',
@@ -514,7 +565,12 @@ export function normalizeJustOneProductSearchRequest(body, {
     throw new JustOneContractError('cursor_scope_mismatch', 'cursor does not belong to this search')
   }
   const page = state?.page ?? normalizedPage(body.page)
-  if (['xiaohongshu_ec', 'douyin_ec'].includes(marketplace) && page > 1 && !state?.continuation) {
+  // Includes cursors issued before the marketplace became single-page: their
+  // page was a billed empty page, so refuse before any dispatch.
+  if (descriptor.singlePage && page > 1) {
+    throw new JustOneContractError('pagination_unavailable', 'this marketplace returns only its first page')
+  }
+  if (marketplace === 'xiaohongshu_ec' && page > 1 && !state?.continuation) {
     throw new JustOneContractError('continuation_required', 'a valid cursor is required after the first page')
   }
 
@@ -523,7 +579,7 @@ export function normalizeJustOneProductSearchRequest(body, {
   if (descriptor.tmall) upstreamQuery.tmall = 'true'
   if (price.min !== null) upstreamQuery.startPrice = price.min
   if (price.max !== null) upstreamQuery.endPrice = price.max
-  if (['xiaohongshu_ec', 'douyin_ec'].includes(marketplace) && state?.continuation) {
+  if (marketplace === 'xiaohongshu_ec' && state?.continuation) {
     upstreamQuery.searchId = state.continuation
   }
 
@@ -818,13 +874,14 @@ function productAppLink(item, marketplace, id, secret) {
   } catch { return null }
 }
 
-export function normalizeJustOneProductItem(rawItem, marketplace, { secret = null } = {}) {
+export function normalizeJustOneProductItem(rawItem, marketplace, { secret = null, companion = null } = {}) {
   const descriptor = JUSTONE_ENDPOINTS[marketplace]
   if (!plainObject(rawItem) || !descriptor) return null
   // A marketplace that returns a render tree flattens it here first. The
   // original element is what gets archived as evidence; only the normalized
-  // product is projected.
-  const item = descriptor.projectItem ? descriptor.projectItem(rawItem) : rawItem
+  // product is projected. `companion` is the same-index entry of a parallel
+  // list in the same (fully archived) response, e.g. Douyin summary_promotions.
+  const item = descriptor.projectItem ? descriptor.projectItem(rawItem, companion) : rawItem
   if (!plainObject(item)) return null
   const idField = PRODUCT_ID_FIELDS[marketplace].find((key) => own(item, key) && scalarText(item[key], 256) !== null)
   const rawId = idField === undefined ? null : item[idField]
@@ -900,7 +957,6 @@ function explicitPageHasMore(raw, request) {
 }
 
 function explicitContinuation(raw, marketplace) {
-  if (marketplace === 'douyin_ec') return scalarText(valueAt(raw, ['data', 'extra', 'search_id']), 2_048)
   for (const path of [
     ['data', 'searchId'], ['data', 'search_id'], ['searchId'], ['search_id'],
   ]) {
@@ -1112,11 +1168,14 @@ export function normalizeJustOneProductSearchResponse(raw, request, {
     secret,
   })]
   const businessContext = responseBusinessContext(raw, extracted.path, secret)
+  const companionPath = JUSTONE_ENDPOINTS[request.marketplace].companionPath
+  const companions = companionPath ? valueAt(raw, companionPath) : null
   const items = []
   let discardedCount = 0
   for (const [index, rawItem] of extracted.items.entries()) {
     assertBoundedJson(rawItem)
-    const projectedItem = normalizeJustOneProductItem(rawItem, request.marketplace, { secret })
+    const projectedItem = normalizeJustOneProductItem(rawItem, request.marketplace, { secret,
+      companion: Array.isArray(companions) ? companions[index] : null })
     const normalizedItem = projectedItem
       ? redactJustOnePrivateFields(projectedItem, { secret })
       : null
@@ -1149,12 +1208,13 @@ export function normalizeJustOneProductSearchResponse(raw, request, {
   // The provider's public OpenAPI leaves response data untyped. A non-empty
   // page alone does not prove that another page exists, so Hub issues a
   // continuation only when the pinned response explicitly says hasMore=true.
-  if (extracted.items.length > 0 && explicitHasMore === true && request.page < MAX_PAGE) {
+  // A single-page marketplace keeps hasMore unknown (null) and issues no cursor.
+  if (extracted.items.length > 0 && explicitHasMore === true && request.page < MAX_PAGE
+    && !JUSTONE_ENDPOINTS[request.marketplace].singlePage) {
     const previousContinuation = request.upstreamQuery.searchId || null
-    const requiresContinuation = ['xiaohongshu_ec', 'douyin_ec'].includes(request.marketplace)
+    const requiresContinuation = request.marketplace === 'xiaohongshu_ec'
     const continuation = requiresContinuation
-      ? (request.marketplace === 'douyin_ec' ? explicitContinuation(raw, request.marketplace) || previousContinuation
-        : previousContinuation || explicitContinuation(raw, request.marketplace))
+      ? previousContinuation || explicitContinuation(raw, request.marketplace)
       : null
     if (requiresContinuation && !continuation) {
       if (explicitHasMore === true) {

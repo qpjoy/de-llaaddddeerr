@@ -1,13 +1,10 @@
-// Admin-plane control for the "Twitter 用户清洗计划" cleaning task.
+// Admin-plane control of one file dataset's cleaning task ("清洗计划").
 //
 // The Admin listener only records intent (source, start/pause/resume/discard,
 // publish/rollback) and reads progress. The dedicated dictionary worker does
-// the heavy work, so the Admin process never parses the 7+ GB source file.
+// the heavy work, so the Admin process never parses the multi-GB source file.
 import { AppError } from '../../core/errors.mjs'
-import {
-  DATASET_KEY, PARTITION_COUNT, PIPELINE_KEY, PIPELINE_LABEL, PRODUCT_LABEL, PRODUCT_PATH,
-  QUARANTINE_REASONS,
-} from './contract.mjs'
+import { inspectSource, isArchivePath } from './source.mjs'
 import { datasetView, versionView } from './store.mjs'
 
 const STAGE_LABELS = {
@@ -39,18 +36,20 @@ export function versionProgress(row, partitions = []) {
   let percent = 0
   let etaSeconds = null
   let estimatedTotalPairs = null
+  // Inside a .zip the checkpoint counts uncompressed bytes of the entry.
+  const contentBytes = view.source.entryBytes || bytes
   if (view.pairsRead > 0 && view.byteOffset > 0) {
     const bytesPerPair = view.byteOffset / view.pairsRead
-    estimatedTotalPairs = view.parserState === 'end' ? view.pairsRead : Math.round(bytes / bytesPerPair)
+    estimatedTotalPairs = view.parserState === 'end' ? view.pairsRead : Math.round(contentBytes / bytesPerPair)
     if (view.stage === 'importing' && view.rowsPerSecond > 0) {
-      etaSeconds = Math.round(((bytes - view.byteOffset) / bytesPerPair) / view.rowsPerSecond)
+      etaSeconds = Math.round(((contentBytes - view.byteOffset) / bytesPerPair) / view.rowsPerSecond)
     }
   }
   const steps = { staged: 0, deduplicated: 1, indexed: 2, attached: 3 }
   const partitionSteps = partitions.reduce((sum, partition) => sum + (steps[partition.step] ?? 0), 0)
-  const totalSteps = (view.partitionCount || PARTITION_COUNT) * 3
+  const totalSteps = (view.partitionCount || partitions.length || 1) * 3
   if (view.stage === 'verifying') percent = bytes ? view.source.shaBytes / bytes : 0
-  else if (view.stage === 'importing') percent = bytes ? view.byteOffset / bytes : 0
+  else if (view.stage === 'importing') percent = contentBytes ? view.byteOffset / contentBytes : 0
   else if (view.stage === 'building') percent = partitionSteps / totalSteps
   else if (['validating', 'ready', 'published', 'retired'].includes(view.stage)) percent = 1
   const heartbeatAge = view.heartbeatAt ? Date.now() - Date.parse(view.heartbeatAt) : null
@@ -78,10 +77,16 @@ export function versionProgress(row, partitions = []) {
   }
 }
 
-export class TwitterUserEmailPipeline {
-  constructor({ store, serverFileReader = null }) {
+export class FileDatasetPipeline {
+  constructor({ store, product, serverFileReader = null }) {
     this.store = store
+    this.product = product
+    this.kind = store.kind
     this.serverFileReader = serverFileReader
+  }
+
+  get #extensions() {
+    return { extensions: this.kind.extensions || this.product.sourceExtensions }
   }
 
   #reader() {
@@ -96,10 +101,20 @@ export class TwitterUserEmailPipeline {
     const byId = new Map(recent.map(row => [row.id, row]))
     const load = async id => id ? (byId.get(id) || await this.store.version(id)) : null
     return {
-      key: PIPELINE_KEY,
-      label: PIPELINE_LABEL,
-      product: { label: PRODUCT_LABEL, path: PRODUCT_PATH },
-      datasetKey: DATASET_KEY,
+      key: this.product.key,
+      label: this.product.pipelineLabel,
+      summary: this.product.pipelineSummary,
+      product: { label: this.product.label, path: this.product.productPath },
+      datasetKey: this.product.key,
+      source: {
+        format: this.product.sourceFormat,
+        extensions: this.#extensions.extensions,
+        // A .zip on the server works too; the worker reads the entry as a stream.
+        archiveExtensions: ['.zip'],
+        defaultRelativePath: this.product.defaultSource.relativePath,
+        defaultEntry: this.product.defaultSource.entry || null,
+        defaultSha256: this.product.defaultSource.sha256 || null,
+      },
       // PostgreSQL only: no canonical records, outbox, Elasticsearch, HanLP or embeddings.
       storage: { engine: 'postgresql', schema: 'account_dictionary', elasticsearch: false },
       dataset: datasetView(dataset),
@@ -107,7 +122,7 @@ export class TwitterUserEmailPipeline {
       active: versionView(await load(dataset.active_version_id)),
       previous: versionView(await load(dataset.previous_version_id)),
       recent: recent.map(versionView),
-      quarantineReasonLabels: QUARANTINE_REASONS,
+      quarantineReasonLabels: this.kind.quarantineReasons,
       serverFiles: this.serverFileReader ? this.serverFileReader.describeRoots() : { enabled: false, roots: [] },
     }
   }
@@ -129,18 +144,26 @@ export class TwitterUserEmailPipeline {
 
   async configure(body, { updatedBy }) {
     if (!body || typeof body !== 'object') throw new AppError(400, 'invalid_request', 'Request body must be an object')
-    const unsupported = Object.keys(body).filter(key => !['serverPath', 'rootId', 'relativePath', 'expectedSha256', 'owner', 'purpose', 'legalBasis'].includes(key))
+    const unsupported = Object.keys(body).filter(key => !['serverPath', 'rootId', 'relativePath', 'entry', 'expectedSha256', 'owner', 'purpose', 'legalBasis'].includes(key))
     if (unsupported.length) throw new AppError(400, 'unsupported_fields', `Unsupported fields: ${unsupported.join(', ')}`)
     const locator = await this.#locator(body)
     const expected = text(body.expectedSha256, 'expectedSha256', { max: 64 })?.toLowerCase() ?? null
     if (expected && !/^[0-9a-f]{64}$/.test(expected)) throw new AppError(400, 'invalid_request', 'expectedSha256 must be 64 hexadecimal characters')
-    const file = await this.#reader().inspectLargeLocator(locator)
+    const requestedEntry = text(body.entry, 'entry', { max: 1024 })
+    const { file, entry, entries } = await inspectSource(this.#reader(), locator, {
+      ...this.#extensions, entry: requestedEntry,
+      preferredEntry: isArchivePath(locator.relativePath) ? this.product.defaultSource.entry || null : null,
+    })
     const dataset = await this.store.configureSource({
-      rootId: file.rootId, relativePath: file.relativePath, expectedSha256: expected,
+      rootId: file.rootId, relativePath: file.relativePath, entry: entry?.name ?? null, expectedSha256: expected,
       owner: text(body.owner, 'owner', { max: 200 }), purpose: text(body.purpose, 'purpose', { max: 1000 }),
       legalBasis: text(body.legalBasis, 'legalBasis', { max: 1000 }), updatedBy,
     })
-    return { dataset: datasetView(dataset), file: { rootId: file.rootId, relativePath: file.relativePath, filename: file.filename, bytes: file.bytes, mtime: file.mtime } }
+    return {
+      dataset: datasetView(dataset),
+      file: { rootId: file.rootId, relativePath: file.relativePath, filename: file.filename, bytes: file.bytes, mtime: file.mtime },
+      archive: entries ? { entry, entries } : null,
+    }
   }
 
   async action(body, { by }) {
@@ -148,8 +171,10 @@ export class TwitterUserEmailPipeline {
     if (action === 'start') {
       const dataset = await this.store.dataset()
       if (!dataset.source_root_id) throw new AppError(409, 'dictionary_source_unconfigured', '请先指定服务器上的源文件')
-      const file = await this.#reader().inspectLargeLocator({ rootId: dataset.source_root_id, relativePath: dataset.source_relative_path })
-      const created = await this.store.createVersion({ file, expectedSha256: dataset.expected_sha256, createdBy: by })
+      const { file, entry } = await inspectSource(this.#reader(), { rootId: dataset.source_root_id, relativePath: dataset.source_relative_path }, {
+        ...this.#extensions, entry: dataset.source_entry,
+      })
+      const created = await this.store.createVersion({ file, entry, expectedSha256: dataset.expected_sha256, createdBy: by })
       return versionProgress(created)
     }
     const open = await this.store.openVersion()

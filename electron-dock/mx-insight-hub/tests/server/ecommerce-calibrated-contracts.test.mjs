@@ -11,7 +11,16 @@ const capturedAt = '2026-10-12T00:30:00+08:00'
 const douyin = { code: 0, message: null, recordTime: null, data: { promotions: [{ product_id: '3841000000000000001', promotion_id: '3842000000000000002', base_info: {
   title: 'Synthetic phone', price: null, main_img: { url_list: ['https://example.invalid/phone.jpg'] },
   detail_url: 'https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3841000000000000001&origin_type=2631',
-} }], has_more: true, extra: { search_id: 'fixture-search' } } }
+} }], has_more: true, total: 500, extra: { search_id: 'fixture-search' },
+  // Same-index 精选联盟 card, field layout of the 2026-11-06 live page (values synthetic).
+  summary_promotions: [{ product_id: '3841000000000000001', promotion_id: '3842000000000000002', base_model: {
+    product_info: { name: 'Synthetic phone', month_sale: { origin: 310 }, month_sale_text: '月销',
+      category: { first_category: { category_id: 1, category_name: '3C数码及配件' }, second_category: { category_id: 2, category_name: '二手手机' },
+        third_category: { category_id: 0, category_name: '' }, fourth_category: { category_id: 0, category_name: '' }, leaf_layer: 2 } },
+    marketing_info: { price_desc: { price: { origin: 518850, integer: '5,188', decimal: '5', suffix: '' }, price_text: '到手价' } },
+    shop_info: { shop_id: 286119112, shop_name: 'Synthetic shop' },
+    extend_info: { data_report: { shop_id: '286119112', product_id: '3841000000000000001' } },
+  } }] } }
 const xhs = { code: 0, message: null, recordTime: null, data: { code: 0, success: true, search_id: 'fixture-xhs-search', page: 1, next_page: 2, data: {
   hierarchy: { common: { load_more: true } }, module: { data: [{ card_type: 'dsl', card_name: 'cosmos_search_goods_card', id: 'render-card-id', content: {
     id: 'fixture-product', title: 'Synthetic product', price_info: { price: 85, origin_price: 90, rds_price: 12.85, symbol: '$', foreign_price: '≈$12.85' },
@@ -20,31 +29,77 @@ const xhs = { code: 0, message: null, recordTime: null, data: { code: 0, success
   } }] },
 } } }
 
-test('Douyin produces the same product contract, exact IDs/web links and a scoped continuation', () => {
-  const states = new Map()
-  const options = { capturedAt, encodeCursor: state => { states.set('opaque', state); return 'opaque' } }
+test('Douyin produces the same product contract with summary price/shop/sales and serves only its first page', () => {
+  const options = { capturedAt, encodeCursor: () => assert.fail('Douyin must not issue a continuation') }
   const result = normalizeJustOneProductSearchPayload(douyin, request({ marketplace: 'douyin_ec', query: '手机' }), options)
   assert.equal(result.items.length, 1)
   const product = result.items[0]
   assert.equal(product.id, douyin.data.promotions[0].product_id)
   assert.equal(product.url, douyin.data.promotions[0].base_info.detail_url)
   assert.equal(product.urlSource, 'upstream')
-  assert.equal(product.pricing.current, null)
+  assert.deepEqual(product.pricing, { current: '5188.5', original: null, currency: 'CNY' })
+  assert.deepEqual(product.shop, { id: '286119112', name: 'Synthetic shop' })
+  assert.deepEqual([product.signals.sales, product.attributes.category], ['310', '二手手机'])
   assert.deepEqual(product.images, douyin.data.promotions[0].base_info.main_img.url_list)
   assert.equal(result.records[0].platform, 'ecommerce')
   assert.equal(result.archiveObjects[0].sourceKey, 'source-catalog-0062')
   assert.ok(result.archiveObjects.every(o => o.capturedDate === '2026-10-11'))
-  assert.equal(result.page.hasMore, true)
-  assert.equal(result.page.nextCursor, 'opaque')
-  const next = request({ marketplace: 'douyin_ec', query: '手机', cursor: 'opaque' }, { decodeCursor: token => states.get(token) })
-  assert.deepEqual(next.upstreamQuery, { keyword: '手机', page: '2', searchId: 'fixture-search' })
-  assert.throws(() => request({ marketplace: 'douyin_ec', query: '手机', page: 2 }), { code: 'continuation_required' })
+  // The item archive keeps the original promotion element; the summary card stays in the call archive.
+  assert.deepEqual(result.archiveObjects[1].rawItem, douyin.data.promotions[0])
+  // Live page 2 was a billed empty page with or without searchId: no cursor, unknown hasMore.
+  assert.deepEqual([result.page.hasMore, result.page.nextCursor], [null, null])
+  const issued = { version: 1, adapterId: request({ marketplace: 'douyin_ec', query: '手机' }).adapterId, marketplace: 'douyin_ec',
+    page: 2, scope: request({ marketplace: 'douyin_ec', query: '手机' }).cursorScope, continuation: 'fixture-search' }
+  assert.throws(() => request({ marketplace: 'douyin_ec', query: '手机', cursor: 'issued-before' }, { decodeCursor: () => issued }), { code: 'pagination_unavailable' })
+  assert.throws(() => request({ marketplace: 'douyin_ec', query: '手机', page: 2 }), { code: 'pagination_unavailable' })
   assert.throws(() => request({ marketplace: 'douyin_ec', query: '手机', sort: 'sales_desc' }), { code: 'unsupported_sort' })
   assert.throws(() => request({ marketplace: 'douyin_ec', query: '手机', price: { min: '1' } }), { code: 'unsupported_price_filter' })
-  const missing = structuredClone(douyin); delete missing.data.extra.search_id
-  assert.throws(() => response(missing, request({ marketplace: 'douyin_ec', query: '手机' }), options), { code: 'missing_upstream_continuation' })
+  const noSession = structuredClone(douyin); delete noSession.data.extra.search_id
+  assert.equal(response(noSession, request({ marketplace: 'douyin_ec', query: '手机' }), options).page.nextCursor, null)
   const last = structuredClone(douyin); last.data.has_more = false
-  assert.equal(response(last, next, options).page.nextCursor, null)
+  assert.equal(response(last, request({ marketplace: 'douyin_ec', query: '手机' }), options).page.hasMore, false)
+})
+
+test('Douyin summary fields are used only for the exact same product and a verified fen price', () => {
+  const project = mutate => {
+    const raw = structuredClone(douyin); mutate(raw.data.summary_promotions[0], raw); raw.data.has_more = false
+    return response(raw, request({ marketplace: 'douyin_ec', query: '手机' }), { capturedAt }).items[0]
+  }
+  for (const mismatch of [s => { s.product_id = '3841000000000000009' }, s => { s.promotion_id = 'other' },
+    (_s, raw) => { raw.data.summary_promotions = [] }, (_s, raw) => { delete raw.data.summary_promotions }]) {
+    const item = project(mismatch)
+    assert.deepEqual([item.id, item.pricing.current, item.shop.id, item.signals.sales, item.attributes.category],
+      ['3841000000000000001', null, null, null, null])
+  }
+  // Unit or display disagreement leaves the price unknown, never rescaled.
+  assert.equal(project(s => { s.base_model.marketing_info.price_desc.price.origin = 5188 }).pricing.current, null)
+  assert.equal(project(s => { s.base_model.marketing_info.price_desc.price.origin = 5188.5 }).pricing.current, null)
+  assert.equal(project(s => { s.base_model.marketing_info.price_desc.price = { origin: 518800, integer: '5,188', decimal: '' } }).pricing.current, '5188')
+  assert.equal(project(s => { s.base_model.marketing_info.price_desc.price = { origin: 518805, integer: '5,188', decimal: '05' } }).pricing.current, '5188.05')
+  // An unsafe numeric shop ID is published only through its exact text twin.
+  assert.equal(project(s => { s.base_model.shop_info.shop_id = Number('7311111111111111111'); s.base_model.extend_info.data_report.shop_id = '7311111111111111111' }).shop.id, '7311111111111111111')
+  assert.equal(project(s => { s.base_model.shop_info.shop_id = Number('7311111111111111111'); delete s.base_model.extend_info }).shop.id, null)
+  assert.equal(project(s => { s.base_model.product_info.month_sale.origin = -1 }).signals.sales, null)
+  assert.equal(project(s => { s.base_model.product_info.category.third_category.category_name = '折叠屏' }).attributes.category, '折叠屏')
+})
+
+test('Douyin rejects lossy or non-identity product IDs without losing the raw item evidence', () => {
+  for (const productId of [Number('3841000000000000001'), true, false, 1.5, 0, -1]) {
+    const raw = structuredClone(douyin)
+    raw.data.promotions[0].product_id = productId
+    raw.data.has_more = false
+    const result = response(raw, request({ marketplace: 'douyin_ec', query: '手机' }), { capturedAt })
+    assert.deepEqual(result.items, [])
+    assert.equal(result.page.discardedCount, 1)
+    assert.equal(result.archiveObjects[1].normalizedItem, null)
+    assert.deepEqual(result.archiveObjects[1].rawItem, raw.data.promotions[0])
+  }
+  const raw = structuredClone(douyin)
+  raw.data.promotions[0].product_id = 12345
+  raw.data.has_more = false
+  const result = response(raw, request({ marketplace: 'douyin_ec', query: '手机' }), { capturedAt })
+  assert.equal(result.items[0].id, '12345')
+  assert.equal(result.page.discardedCount, 0)
 })
 
 test('Xiaohongshu render cards retain product/App identity, source price and seller identity', () => {

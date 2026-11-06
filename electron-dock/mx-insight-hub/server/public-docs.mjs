@@ -3,6 +3,7 @@ import { DATA_SEARCH_V2_OPENAPI, DATA_SEARCH_RECOVERY_OPENAPI, TWITTER_SEARCH_PA
 import { DATA_SEARCH_V2_PLATFORMS } from './contracts/data-search-v2.mjs'
 import { ipRiskV2Paths, ipRiskV2Guide, ipRiskSubscriptionPaths } from './contracts/ip-risk-v2-docs.mjs'
 import { twitterUserEmailOpenApiPaths, twitterUserEmailDocumentationHtml } from './contracts/twitter-user-email-docs.mjs'
+import { fileDatasetDocPaths, fileDatasetDocumentationHtml, fileDatasetOpenApiPaths } from './contracts/file-dataset-docs.mjs'
 import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
 import { wechatSelfHostedPaths, wechatSelfHostedGuide } from './self-hosted/docs.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
@@ -1303,6 +1304,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     { name: 'Mobile Commerce', description: 'Read stored mobile-collector commerce captures and their governed source-catalog classification.' },
     { name: 'Virtual Supermarket', description: 'Reconstruct the on-shelf Hub storefront using semantic department, aisle, shelf and position data.' },
     { name: 'Twitter User Email', description: 'Look up Twitter usernames and e-mail addresses in the published PostgreSQL dictionary.' },
+    { name: 'Email Directory', description: 'Look up addresses, prefixes and whole domains in the published e-mail list (file dataset, PostgreSQL only).' },
+    { name: 'Phone Directory', description: 'Look up numbers by exact match, country/area-code prefix or last digits in the published phone list (file dataset, PostgreSQL only).' },
     { name: 'External Data', description: 'Call governed external data platforms through provider-neutral Hub contracts.' },
     { name: 'Search', description: 'Idempotent content search.' },
     { name: 'Compatibility', description: 'Temporary legacy routes with transparent Hub-native routing where contracted, durable Hub evidence and exact last-good fallback.' },
@@ -1339,6 +1342,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...ipRiskHistoryPaths,
     ...ipRiskV2Paths, ...ipRiskProductPaths, ...ipRiskSubscriptionPaths,
     ...twitterUserEmailOpenApiPaths,
+    ...fileDatasetOpenApiPaths,
     '/data/ip/risk': {
       post: {
         tags: ['IP 风险画像'], summary: '查询 IPv4 风险画像', operationId: 'queryIpRisk',
@@ -1615,7 +1619,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           400: [
             'invalid_request', 'invalid_marketplace', 'unsupported_marketplace',
             'invalid_query', 'invalid_page', 'invalid_cursor', 'invalid_pagination',
-            'cursor_scope_mismatch', 'continuation_required', 'unsupported_sort',
+            'cursor_scope_mismatch', 'continuation_required', 'pagination_unavailable', 'unsupported_sort',
             'invalid_price', 'unsupported_price_filter', 'unsupported_request_field',
             'invalid_delivery_mode', 'idempotency_key_required', 'invalid_idempotency_key',
             'invalid_uncertain_retry',
@@ -2856,7 +2860,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
           page: {
             type: 'integer', minimum: 1, maximum: 1000, default: 1,
-            description: 'Numeric page for a first traversal. xiaohongshu_ec and douyin_ec require a Hub cursor after page 1. Do not combine page with cursor.',
+            description: 'Numeric page for a first traversal. xiaohongshu_ec requires a Hub cursor after page 1; douyin_ec serves only page 1 (page>1 returns pagination_unavailable). Do not combine page with cursor.',
           },
           cursor: {
             type: 'string', minLength: 1, maxLength: 4096,
@@ -5556,6 +5560,8 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '数据产品' })),
   { key: 'virtual-supermarket', path: '/docs/virtual-supermarket', label: '虚拟超市', section: '数据产品' },
   { key: 'twitter-user-email', path: '/docs/twitter-user-email', label: 'Twitter 用户邮箱', section: '数据产品' },
+  { key: 'email-directory', path: '/docs/email-directory', label: '邮箱库', section: '数据产品' },
+  { key: 'phone-directory', path: '/docs/phone-directory', label: '手机号库', section: '数据产品' },
   { key: 'telegram', path: '/docs/telegram', label: 'Telegram 会话', section: '数据产品' },
   { key: 'public-opinion', path: '/docs/public-opinion', label: '全国舆情', section: '数据产品' },
   { key: 'saved-record-categories', path: '/docs/saved-record-categories', label: '数据类别目录', section: '数据目录' },
@@ -5829,6 +5835,7 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
 
     ${ipRiskDocumentationHtml()}
     ${twitterUserEmailDocumentationHtml()}
+    ${Object.values(fileDatasetDocumentationHtml).map(render => render()).join('\n')}
     <section class="doc-page" data-doc-page="ecommerce-treasure-box">
     <h2 id="ecommerce-treasure-box">电商数据</h2>
     <h3>下游接入从这里开始</h3>
@@ -5904,7 +5911,8 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
     <tr><td>taobao / tmall</td><td>sales_desc、relevance、price_asc、price_desc</td><td>price.min / max；page 或 cursor</td></tr>
     <tr><td>xianyu</td><td>relevance、recent、seller_credit、price_asc、price_desc、price_drop、newest</td><td>不支持采集 price；page 或 cursor</td></tr>
     <tr><td>jd</td><td>不传 sort</td><td>不支持采集 price；page 或 cursor</td></tr>
-    <tr><td>xiaohongshu_ec / douyin_ec</td><td>不传 sort</td><td>不支持采集 price；第 2 页起必须携带 Hub cursor 中封装的 continuation</td></tr>
+    <tr><td>xiaohongshu_ec</td><td>不传 sort</td><td>不支持采集 price；第 2 页起必须携带 Hub cursor 中封装的 continuation</td></tr>
+    <tr><td>douyin_ec</td><td>不传 sort</td><td>不支持采集 price；只返回第 1 页（hasMore=null、nextCursor=null），page&gt;1 或旧 cursor 在采购前返回 400 pagination_unavailable</td></tr>
     </tbody></table>
     <h4>图片来源、费用与缓存</h4>
     <p>product.images 保留外部原始链接。历史项 media 包含 originalUrl、hubUrl、externalFeeStatus（当前 unknown）、storage=memory_relay、retrievalPolicy=cache_first、staticUrl=null。外部费用不能根据链接判断；图片 GET 不发起商品搜索 API，但外部服务/流量费仍可能存在。unknown 不代表免费，未来接入持久存储时仍保留原链接。</p>
@@ -5915,7 +5923,7 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
 
     <h3>3. 消费统一响应</h3>
     <p>网页商品链接统一读取 <code>data.items[].url</code>，并保留 <code>urlSource</code>：<code>upstream</code> 表示源站返回（协议相对链接补 HTTPS）；<code>derived_from_id</code> 表示依据可靠商品 ID 生成，不能作为上游原样返回或页面可访问的证明。没有可靠网页链接时为 null。可选 <code>appUrl</code> 是源站 App 商品链接，不能当作网页地址；客户端应在用户点击后交由对应 App 打开。历史缓存、存量结果及相同幂等键重放保留原字段，不会因升级自动补链。</p>
-    <p>抖音使用 <code>marketplace=douyin_ec</code>，与短视频搜索、TikTok Shop 分开；商品 ID 始终是字符串，不能转成 Number。当前校准样本价格缺失，<code>pricing.current=null</code>，不填零。小红书商品卡使用商品自身 ID 和 seller_id，原价与当前价使用商品价格字段，不使用换算展示价。后续页原样传 <code>data.page.nextCursor</code>，每页使用新的幂等键；无下一页游标时停止。</p>
+    <p>抖音使用 <code>marketplace=douyin_ec</code>，与短视频搜索、TikTok Shop 分开；商品 ID 始终是字符串，不能转成 Number。数据来自抖音精选联盟选品广场（可推广商品），不是全量店铺商品。<code>pricing.current</code> 是同条选品卡的「到手价」（元），<code>shop.id/name</code> 为店铺，<code>signals.sales</code> 是<strong>月销量</strong>，<code>attributes.category</code> 为最末级类目；选品卡缺失或与商品 ID 不一致时这些字段为 null，不填零。上游第 2 页实测为计费空页，因此只返回第 1 页。小红书商品卡使用商品自身 ID 和 seller_id，原价与当前价使用商品价格字段，不使用换算展示价。后续页原样传 <code>data.page.nextCursor</code>，每页使用新的幂等键；无下一页游标时停止。</p>
     <pre><code>{
   "contractVersion": "mx-insight-hub.ecommerce-products.v1",
   "data": {
@@ -6781,6 +6789,7 @@ const TENANT_PRODUCT_PATHS = {
   'saved-record-categories': ['/data/platforms', '/data/saved-records/categories'],
   'virtual-supermarket': ['/data/virtual-supermarket/products'], 'topic-reports': ['/data/platforms', '/data/topic-reports', '/data/topic-reports/{id}'],
   'twitter-user-email': Object.keys(twitterUserEmailOpenApiPaths),
+  ...fileDatasetDocPaths,
   'news-discovery': Object.keys(newsOpenApiPaths),
   'taobao-tmall': ['/data/ecommerce/taobao/product-detail', '/data/ecommerce/taobao/product-reviews', '/data/ecommerce/taobao/product-questions', '/data/ecommerce/taobao/shop-products'],
   'jd-native': [], 'xianyu-native': [], 'xiaohongshu-ec-native': [],
@@ -6859,6 +6868,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === 'ip-risk-v2') return ipRiskV2Guide
   if (route.key === 'ip-risk') return ipRiskDocumentationHtml()
   if (route.key === 'twitter-user-email') return twitterUserEmailDocumentationHtml()
+  if (fileDatasetDocumentationHtml[route.key]) return fileDatasetDocumentationHtml[route.key]()
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
   const resolve = value => value?.$ref ? value.$ref.slice(2).split('/').reduce((node, key) => node?.[key], PUBLIC_OPENAPI_DOCUMENT) : value
   const copy = value => String(value || '').split(/(?<=[。.!])\s*/).filter(sentence => !/upstream|provider|supplier|procurement|供应|上游|采购|成本|Night-All|TikHub|JustOne/i.test(sentence)).join(' ')

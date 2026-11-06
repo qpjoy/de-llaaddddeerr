@@ -1,4 +1,7 @@
-/* Twitter 用户清洗计划 + Twitter 用户邮箱 product page. */
+/* File datasets (文件数据集): cleaning-task cards/modal and product pages. */
+.mih-file-dataset-group { display: grid; gap: 4px; margin: 8px 0 -4px; }
+.mih-file-dataset-group h2 { font-size: 16px; margin: 0; }
+.mih-file-dataset-group p { font-size: 13px; color: var(--qp-text-3); margin: 0; line-height: 1.6; }
 .mih-tue { --tue-muted: var(--qp-text-3); --tue-warning: #a36716; --tue-danger: #c34847; display: grid; gap: 16px; min-width: 0; }
 .mih-tue [hidden] { display: none !important; }
 .mih-tue h2 { font-size: 17px; margin: 0; }

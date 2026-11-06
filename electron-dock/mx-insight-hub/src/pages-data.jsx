@@ -17,7 +17,8 @@ import {
   Warning,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
-import { TwitterUserEmailPipelineCard } from './twitter-user-email-pipeline.jsx'
+import { FileDatasetPipelineCard } from './file-dataset-pipeline.jsx'
+import { FILE_DATASETS, FILE_DATASET_NAV_DESCRIPTION, FILE_DATASET_NAV_LABEL } from '../shared/file-datasets.mjs'
 import { crawlerCheckFeedback, crawlerRecoveryFeedback, isCrawlerPipelineSnapshot } from './crawler-feedback.mjs'
 import {
   DropdownField,
@@ -375,13 +376,19 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
         onRetry={nightAllSavedRecordsPipeline.refresh}
       />
 
-      <TwitterUserEmailPipelineCard token={token} onUnauthorized={onUnauthorized} notify={notify} />
+      <div className="mih-file-dataset-group" id="file-datasets">
+        <h2>{FILE_DATASET_NAV_LABEL}</h2>
+        <p>{FILE_DATASET_NAV_DESCRIPTION}：读取服务器上的大文件，只写 PostgreSQL，可暂停、继续，发布后在「场景应用 → {FILE_DATASET_NAV_LABEL}」查询。同一时间只运行一个版本，其余排队。</p>
+      </div>
+      {FILE_DATASETS.map(dataset => (
+        <FileDatasetPipelineCard key={dataset.key} datasetKey={dataset.key} token={token} onUnauthorized={onUnauthorized} notify={notify} />
+      ))}
 
       {genericSources.length === 0 ? (
         <EmptyState
           icon={Database}
           title="还没有注册通用数据源"
-          description="Telegram monitor、SQLite API、全国省份舆情、手机电商、Night-All-A saved records 与 Twitter 用户清洗计划已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
+          description="Telegram monitor、SQLite API、全国省份舆情、手机电商、Night-All-A saved records 与文件数据集（Twitter 用户、邮箱库、手机号库）清洗计划已作为固定业务任务单独管理；这里可继续注册文件或其他只读 PostgreSQL 数据源。"
         />
       ) : (
         <Panel title="通用数据源" subtitle="每个源有独立的 dataset，不会与固定业务清洗任务混合">

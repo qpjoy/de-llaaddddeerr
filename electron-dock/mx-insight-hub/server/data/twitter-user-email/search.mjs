@@ -1,41 +1,22 @@
 // Read path for the published Twitter user-email dictionary.
-//
-// Stability rules (measured, see the architecture doc):
-// - exact and prefix lookups use B-tree indexes and run in the fast lane;
-// - contains and fuzzy use trigram GIN indexes. They first pass a cost
-//   precheck from sampled trigram frequencies, then run in a slow lane that
-//   allows only a few concurrent queries across all Hub processes, each with
-//   a short statement timeout. Too-broad queries get a clear 422 instead of
-//   loading the shared database.
-// - the query text is never logged or stored; audit keeps an HMAC.
-import { createHmac } from 'node:crypto'
-import { setTimeout as delay } from 'node:timers/promises'
-import { AppError } from '../../core/errors.mjs'
-import { CONTRACT_VERSION, PRODUCT_LABEL, QUERY_LIMITS, escapeLike, maskEmail } from './contract.mjs'
-import { SCHEMA, SLOW_LANE_LOCK_CLASS, versionTables } from './store.mjs'
+// Lanes, precheck, audit and version switching: ../file-datasets/search-base.mjs.
+import { FileDatasetSearchBase, escapeLike } from '../file-datasets/search-base.mjs'
+import { SCHEMA, versionTables } from '../file-datasets/store.mjs'
+import { CONTRACT_VERSION, PRODUCT, PRODUCT_LABEL, QUERY_LIMITS, maskEmail } from './contract.mjs'
 
-const ACTIVE_CACHE_MS = 5_000
+const TIMEOUT_MESSAGE = '查询超时：条件太宽，请补充更多字符、加域名，或改用前缀/精确查询'
+const BROAD_MESSAGES = Object.freeze({
+  contains: '片段太常见，请补充更多字符或加域名',
+  fuzzy: '近似匹配范围太大，请输入更长、更具体的用户名或改用前缀查询',
+})
 
-function tooBroad(message) {
-  return new AppError(422, 'query_too_broad', message)
-}
-
-export class TwitterUserEmailSearch {
+export class TwitterUserEmailSearch extends FileDatasetSearchBase {
   constructor({ pool, store, hmacKey, limits = QUERY_LIMITS, now = Date.now }) {
-    if (!hmacKey) throw new Error('TwitterUserEmailSearch requires an HMAC key')
-    Object.assign(this, { pool, store, hmacKey, limits, now })
-    this.cached = null
+    super({ pool, store, hmacKey, limits, product: PRODUCT, now })
   }
 
-  async active({ fresh = false } = {}) {
-    if (!fresh && this.cached && this.now() - this.cached.at < ACTIVE_CACHE_MS) return this.cached.value
-    const value = await this.store.activeVersion()
-    this.cached = { at: this.now(), value }
-    return value
-  }
-
-  hmac(value) {
-    return createHmac('sha256', this.hmacKey).update(`twitter-user-email:${value}`).digest('hex')
+  #auditKey(request) {
+    return JSON.stringify([request.mode, request.field, request.query, request.domain])
   }
 
   /** Usage fingerprint without plaintext query or domain. */
@@ -43,7 +24,7 @@ export class TwitterUserEmailSearch {
     return {
       mode: request.mode,
       field: request.field,
-      query: this.hmac(JSON.stringify([request.mode, request.field, request.query, request.domain])),
+      query: this.hmac(this.#auditKey(request)),
       limit: request.limit,
       reveal: request.reveal,
     }
@@ -72,48 +53,27 @@ export class TwitterUserEmailSearch {
   }
 
   async search(context, request) {
-    const startedAt = this.now()
-    let version = await this.active()
-    if (!version) throw new AppError(503, 'twitter_user_email_not_published', 'Twitter 用户邮箱尚未发布数据版本')
-    const audit = { mode: request.mode, field: request.field, hmac: this.hmac(JSON.stringify([request.mode, request.field, request.query, request.domain])) }
-    try {
-      let result
-      try {
-        result = await this.#run(version, request)
-      } catch (error) {
-        // A version switched or dropped between cache and query: retry once.
-        if (error.code !== '42P01') throw error
-        version = await this.active({ fresh: true })
-        if (!version) throw new AppError(503, 'twitter_user_email_not_published', 'Twitter 用户邮箱尚未发布数据版本')
-        result = await this.#run(version, request)
-      }
-      const items = result.map(row => this.#item(row, request))
-      const tookMs = this.now() - startedAt
-      await this.#audit(context, version, audit, 'ok', items.length, request.reveal ? items.length : 0, tookMs)
-      return {
-        contractVersion: CONTRACT_VERSION,
-        items,
-        meta: {
-          datasetVersion: version.id,
-          publishedAt: version.publishedAt,
-          mode: request.mode,
-          field: request.field,
-          domain: request.domain,
-          limit: request.limit,
-          returned: items.length,
-          truncated: items.length === request.limit,
-          revealed: request.reveal,
-          tookMs,
-          note: '结果是来源文件记录的关联，近似匹配不代表已验证的账号归属。',
-        },
-      }
-    } catch (error) {
-      const outcome = error.code === 'query_too_broad' ? 'too_broad'
-        : error.code === 'twitter_user_email_busy' ? 'busy'
-          : error.code === '57014' ? 'timeout' : 'error'
-      await this.#audit(context, version, audit, outcome, 0, 0, this.now() - startedAt).catch(() => {})
-      if (error.code === '57014') throw tooBroad('查询超时：条件太宽，请补充更多字符、加域名，或改用前缀/精确查询')
-      throw error
+    const audit = { mode: request.mode, field: request.field, hmac: this.hmac(this.#auditKey(request)) }
+    const { version, rows, startedAt } = await this.execute(context, request, audit, current => this.#run(current, request), { timeoutMessage: TIMEOUT_MESSAGE })
+    const items = rows.map(row => this.#item(row, request))
+    const tookMs = this.now() - startedAt
+    await this.audit(context, version, audit, 'ok', items.length, request.reveal ? items.length : 0, tookMs)
+    return {
+      contractVersion: CONTRACT_VERSION,
+      items,
+      meta: {
+        datasetVersion: version.id,
+        publishedAt: version.publishedAt,
+        mode: request.mode,
+        field: request.field,
+        domain: request.domain,
+        limit: request.limit,
+        returned: items.length,
+        truncated: items.length === request.limit,
+        revealed: request.reveal,
+        tookMs,
+        note: '结果是来源文件记录的关联，近似匹配不代表已验证的账号归属。',
+      },
     }
   }
 
@@ -133,51 +93,18 @@ export class TwitterUserEmailSearch {
     }
   }
 
-  async #domainId(name) {
-    const { rows } = await this.pool.query(`SELECT id FROM ${SCHEMA}.domains WHERE name = $1`, [name])
-    return rows[0]?.id ?? null
-  }
-
-  async #trigramCounts(version, field, query) {
-    const { rows } = await this.pool.query(
-      `SELECT t.trigram, coalesce(sum(s.sample_count), 0)::bigint AS count
-       FROM unnest(show_trgm(lower($1))) AS t(trigram)
-       LEFT JOIN ${SCHEMA}.trigram_stats s
-         ON s.version_id = $2 AND s.field = $3 AND s.trigram = t.trigram
-       GROUP BY t.trigram`,
-      [query, version.id, field === 'username' ? 'u' : 'l'],
-    )
-    const scale = version.sampleRows > 0 ? version.uniqueMappings / version.sampleRows : 0
-    return rows.map(row => ({ trigram: row.trigram, estimate: Number(row.count) * scale }))
-  }
-
   /** Upper-bound candidate estimate; throws query_too_broad above budget. */
   async precheck(version, request) {
-    const counts = await this.#trigramCounts(version, request.field, request.query)
-    if (request.mode === 'contains') {
-      // LIKE '%q%' can only use trigrams inside a word of 3+ letters/digits.
-      const inner = counts.filter(row => !row.trigram.includes(' '))
-      if (!inner.length) throw tooBroad('片段里至少要有连续 3 个字母或数字')
-      const estimate = Math.min(...inner.map(row => row.estimate))
-      if (estimate > this.limits.containsMaxCandidates) throw tooBroad('片段太常见，请补充更多字符或加域名')
-      return estimate
-    }
-    // A match with similarity >= t shares at least ceil(t*k) of the k query
-    // trigrams, so it must contain one of the (k - m + 1) rarest of them.
-    if (!counts.length) throw tooBroad('近似匹配需要包含字母或数字')
-    const k = counts.length
-    const m = Math.ceil(this.limits.fuzzyThreshold * k)
-    const rarest = counts.map(row => row.estimate).sort((a, b) => a - b).slice(0, k - m + 1)
-    const estimate = rarest.reduce((sum, value) => sum + value, 0)
-    if (estimate > this.limits.fuzzyMaxCandidates) throw tooBroad('近似匹配范围太大，请输入更长、更具体的用户名或改用前缀查询')
-    return estimate
+    return this.trigramPrecheck(version, {
+      field: request.field === 'username' ? 'u' : 'l', mode: request.mode, query: request.query,
+    }, BROAD_MESSAGES)
   }
 
   async #run(version, request) {
     const tables = versionTables(version.id, version.partitionCount)
     let domainId = null
     if (request.domain) {
-      domainId = await this.#domainId(request.domain)
+      domainId = await this.domainId(request.domain)
       if (domainId === null) return []
     }
     const slow = request.mode === 'contains' || request.mode === 'fuzzy'
@@ -217,46 +144,6 @@ export class TwitterUserEmailSearch {
         ${domainId ? `AND m.domain_id = ${param(domainId)}` : ''}
         ORDER BY score DESC LIMIT ${param(request.limit)}`
     }
-    const client = await this.pool.connect()
-    try {
-      await client.query('BEGIN READ ONLY')
-      const timeout = slow ? this.limits.slowStatementTimeoutMs : this.limits.fastStatementTimeoutMs
-      await client.query(`SET LOCAL statement_timeout = ${Number(timeout)}`)
-      if (slow) await this.#acquireSlowLane(client)
-      if (request.mode === 'fuzzy') await client.query(`SET LOCAL pg_trgm.similarity_threshold = ${Number(this.limits.fuzzyThreshold)}`)
-      const { rows } = await client.query(sql, params)
-      await client.query('COMMIT')
-      return rows
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw error
-    } finally {
-      client.release()
-    }
-  }
-
-  async #acquireSlowLane(client) {
-    const deadline = this.now() + this.limits.slowLaneWaitMs
-    while (true) {
-      const { rows } = await client.query(
-        `SELECT slot FROM generate_series(0, $2::integer - 1) AS slot WHERE pg_try_advisory_xact_lock($1::integer, slot) LIMIT 1`,
-        [SLOW_LANE_LOCK_CLASS, this.limits.slowLaneSlots],
-      )
-      if (rows.length) return rows[0].slot
-      if (this.now() >= deadline) {
-        throw new AppError(503, 'twitter_user_email_busy', '片段/近似查询正忙，请稍后重试', { retryAfterMs: 1000 })
-      }
-      await delay(100)
-    }
-  }
-
-  async #audit(context, version, audit, outcome, resultCount, revealedCount, tookMs) {
-    await this.pool.query(
-      `INSERT INTO ${SCHEMA}.access_events (dataset_key, version_id, tenant_id, consumer_id, api_key_id, mode, field,
-         query_hmac, outcome, result_count, revealed_count, took_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [this.store.datasetKey, version?.id ?? null, context?.tenant?.id ?? null, context?.consumer?.id ?? null,
-        context?.apiKey?.id ?? null, audit.mode, audit.field, audit.hmac, outcome, resultCount, revealedCount, Math.round(tookMs)],
-    )
+    return this.readOnly(sql, params, { slow, similarityThreshold: request.mode === 'fuzzy' ? this.limits.fuzzyThreshold : null })
   }
 }

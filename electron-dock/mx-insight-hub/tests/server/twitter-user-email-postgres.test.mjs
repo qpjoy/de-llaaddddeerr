@@ -8,8 +8,9 @@ import { join } from 'node:path'
 import test from 'node:test'
 import pg from 'pg'
 import { ServerFileReader } from '../../server/ingest/external/server-files.mjs'
-import { TwitterUserEmailStore, versionTables } from '../../server/data/twitter-user-email/store.mjs'
-import { TwitterUserEmailEngine } from '../../server/data/twitter-user-email/engine.mjs'
+import { FileDatasetStore, versionTables } from '../../server/data/file-datasets/store.mjs'
+import { FileDatasetEngine } from '../../server/data/file-datasets/engine.mjs'
+import { userEmailKind } from '../../server/data/file-datasets/kinds/user-email.mjs'
 import { TwitterUserEmailSearch } from '../../server/data/twitter-user-email/search.mjs'
 import { normalizeSearchRequest } from '../../server/data/twitter-user-email/contract.mjs'
 
@@ -44,10 +45,12 @@ async function setup(t) {
   const url = new URL(connectionString)
   url.pathname = `/${database}`
   const pool = new pg.Pool({ connectionString: url.toString(), max: 6 })
-  await pool.query(await readFile(new URL('../../migrations/178_twitter_user_email_dictionary.sql', import.meta.url), 'utf8'))
+  for (const name of ['178_twitter_user_email_dictionary.sql', '180_file_datasets_email_phone.sql']) {
+    await pool.query(await readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'))
+  }
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tue-')))
   const reader = await ServerFileReader.create({ roots: [{ rootId: 'test-root', path: root }] })
-  const store = new TwitterUserEmailStore(pool, { partitions: PARTITIONS })
+  const store = new FileDatasetStore(pool, { datasetKey: 'twitter-user-email', kind: userEmailKind, partitions: PARTITIONS })
   t.after(async () => {
     await pool.end()
     await admin.query(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`)
@@ -58,7 +61,7 @@ async function setup(t) {
 }
 
 function engineFor(ctx, overrides = {}) {
-  return new TwitterUserEmailEngine({
+  return new FileDatasetEngine({
     pool: ctx.pool, store: ctx.store, fileReader: ctx.reader, logger: process.env.TUE_DEBUG ? console : { log() {}, error() {} },
     batchPairs: 97, chunkBytes: 1024, targetRowsPerSecond: 1e9, shaBytesPerSecond: 1e12,
     sleep: async () => {}, ...overrides,

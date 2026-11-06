@@ -29,6 +29,7 @@ import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
 import { POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
+import { fileDataset } from '../shared/file-datasets.mjs'
 import { retryAfterSeconds } from './self-hosted/wechat-contract.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
@@ -789,7 +790,7 @@ export function createApp({
   backfillPlatforms = [],
   importer = null,
   serverFileReader = null,
-  twitterUserEmailPipeline = null,
+  fileDatasetPipelines = {},
   databasePuller = null,
   sqliteApiPuller = null,
   telegramSourcePreparer = null,
@@ -3774,39 +3775,44 @@ export function createApp({
         return
       }
 
-      if (pathname.startsWith('/internal/v1/admin/pipelines/twitter-user-email')) {
-        // PostgreSQL-only dictionary cleaning task; the dedicated worker runs it.
+      // File-dataset cleaning tasks (PostgreSQL only; the dedicated worker
+      // runs them). The Twitter path predates the generic one and stays.
+      const fileDatasetRoute = /^\/internal\/v1\/admin\/pipelines\/(?:file-datasets\/([a-z][a-z0-9-]{1,62})|(twitter-user-email))(\/[a-z]+)?$/.exec(pathname)
+      if (fileDatasetRoute) {
         requireSourceAdmin(principal)
-        if (!twitterUserEmailPipeline) throw new AppError(503, 'twitter_user_email_unavailable', 'Twitter user-email pipeline requires PostgreSQL')
-        const base = '/internal/v1/admin/pipelines/twitter-user-email'
+        const key = fileDatasetRoute[1] || fileDatasetRoute[2]
+        const action = fileDatasetRoute[3] || ''
+        if (!fileDataset(key)) throw new AppError(404, 'file_dataset_not_found', 'Unknown file dataset')
+        const pipeline = fileDatasetPipelines[key]
+        if (!pipeline) throw new AppError(503, 'file_dataset_unavailable', 'File-dataset cleaning tasks require PostgreSQL')
         const by = principal.memberId || 'admin-token'
-        if (pathname === base && request.method === 'GET') {
-          requireNoQuery(searchParams, 'Twitter user-email pipeline')
-          sendJson(response, 200, { data: await twitterUserEmailPipeline.get(), requestId }, { 'cache-control': 'no-store' })
+        if (action === '' && request.method === 'GET') {
+          requireNoQuery(searchParams, 'File-dataset pipeline')
+          sendJson(response, 200, { data: await pipeline.get(), requestId }, { 'cache-control': 'no-store' })
           return
         }
-        if (pathname === base && request.method === 'PUT') {
-          sendJson(response, 200, { data: await twitterUserEmailPipeline.configure(await readJson(request), { updatedBy: by }), requestId })
+        if (action === '' && request.method === 'PUT') {
+          sendJson(response, 200, { data: await pipeline.configure(await readJson(request), { updatedBy: by }), requestId })
           return
         }
-        if (pathname === `${base}/progress` && request.method === 'GET') {
-          sendJson(response, 200, { data: await twitterUserEmailPipeline.progress(), requestId }, { 'cache-control': 'no-store' })
+        if (action === '/progress' && request.method === 'GET') {
+          sendJson(response, 200, { data: await pipeline.progress(), requestId }, { 'cache-control': 'no-store' })
           return
         }
-        if (pathname === `${base}/status` && request.method === 'POST') {
-          sendJson(response, 200, { data: await twitterUserEmailPipeline.action(await readJson(request), { by }), requestId })
+        if (action === '/status' && request.method === 'POST') {
+          sendJson(response, 200, { data: await pipeline.action(await readJson(request), { by }), requestId })
           return
         }
-        if (pathname === `${base}/publish` && request.method === 'POST') {
-          sendJson(response, 200, { data: await twitterUserEmailPipeline.publish(await readJson(request), { by }), requestId })
+        if (action === '/publish' && request.method === 'POST') {
+          sendJson(response, 200, { data: await pipeline.publish(await readJson(request), { by }), requestId })
           return
         }
-        if (pathname === `${base}/rollback` && request.method === 'POST') {
-          sendJson(response, 200, { data: await twitterUserEmailPipeline.rollback({ by }), requestId })
+        if (action === '/rollback' && request.method === 'POST') {
+          sendJson(response, 200, { data: await pipeline.rollback({ by }), requestId })
           return
         }
-        if (pathname === `${base}/access` && request.method === 'GET') {
-          sendJson(response, 200, { data: await twitterUserEmailPipeline.accessLog(), requestId }, { 'cache-control': 'no-store' })
+        if (action === '/access' && request.method === 'GET') {
+          sendJson(response, 200, { data: await pipeline.accessLog(), requestId }, { 'cache-control': 'no-store' })
           return
         }
       }
@@ -6333,18 +6339,24 @@ export function createApp({
         })
         return
       }
-      if (request.method === 'POST' && pathname === '/api/v1/data/twitter-user-email/search') {
-        requireNoQuery(searchParams, 'Twitter user-email search')
-        const context = await requirePublic(request)
-        sendJson(response, 200, { data: await service.twitterUserEmailSearch(context, await readJson(request, 8192)), requestId },
-          { 'cache-control': 'private, no-store' })
-        return
-      }
-      if (request.method === 'GET' && pathname === '/api/v1/data/twitter-user-email/metadata') {
-        requireNoQuery(searchParams, 'Twitter user-email metadata')
-        const context = await requirePublic(request)
-        sendJson(response, 200, { data: await service.twitterUserEmailMetadata(context), requestId }, { 'cache-control': 'private, no-store' })
-        return
+      // File datasets (Twitter 用户邮箱, 邮箱库, 手机号库): published PostgreSQL
+      // versions only; each has its own platform, capability and endpoints.
+      const fileDatasetApi = /^\/api\/v1\/data\/([a-z][a-z0-9-]{1,62})\/(search|metadata)$/.exec(pathname)
+      if (fileDatasetApi && fileDataset(fileDatasetApi[1])) {
+        const key = fileDatasetApi[1]
+        if (fileDatasetApi[2] === 'search' && request.method === 'POST') {
+          requireNoQuery(searchParams, `${key} search`)
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await service.fileDatasetSearch(context, key, await readJson(request, 8192)), requestId },
+            { 'cache-control': 'private, no-store' })
+          return
+        }
+        if (fileDatasetApi[2] === 'metadata' && request.method === 'GET') {
+          requireNoQuery(searchParams, `${key} metadata`)
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await service.fileDatasetMetadata(context, key), requestId }, { 'cache-control': 'private, no-store' })
+          return
+        }
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/virtual-supermarket/search') {
         const context = await requirePublic(request)

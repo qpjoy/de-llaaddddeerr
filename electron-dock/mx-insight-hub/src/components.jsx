@@ -1119,6 +1119,8 @@ export function platformLabel(platform) {
     kuaishou: '快手',
     twitter: 'X / Twitter',
     twitter_user_email: 'Twitter 用户邮箱',
+    email_directory: '邮箱库',
+    phone_directory: '手机号库',
     facebook: 'Facebook',
     wechat_mp: '微信公众号',
     telegram: 'Telegram',

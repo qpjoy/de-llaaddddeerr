@@ -4,6 +4,7 @@
 // canonical records, the outbox, Elasticsearch, HanLP or embeddings.
 import { AppError } from '../../core/errors.mjs'
 import { TWITTER_USER_EMAIL_SCOPES } from '../../../shared/access-limits.mjs'
+import { fileDataset } from '../../../shared/file-datasets.mjs'
 
 export const DATASET_KEY = 'twitter-user-email'
 export const PIPELINE_KEY = 'twitter-user-email'
@@ -12,20 +13,19 @@ export const PIPELINE_LABEL = 'Twitter 用户清洗计划'
 export const PLATFORM = TWITTER_USER_EMAIL_SCOPES.platform
 export const SEARCH_CAPABILITY = TWITTER_USER_EMAIL_SCOPES.search
 export const REVEAL_CAPABILITY = TWITTER_USER_EMAIL_SCOPES.reveal
-export const SEARCH_PATH = '/api/v1/data/twitter-user-email/search'
-export const METADATA_PATH = '/api/v1/data/twitter-user-email/metadata'
-export const PRODUCT_PATH = '/data-products/twitter-user-email'
+export const PRODUCT = fileDataset('twitter-user-email')
+export const SEARCH_PATH = PRODUCT.searchPath
+export const METADATA_PATH = PRODUCT.metadataPath
+export const PRODUCT_PATH = PRODUCT.productPath
 export const CONTRACT_VERSION = 'mx-insight-hub.twitter-user-email.v1'
 export const PARSER_VERSION = 'json-object-string-pairs.v1'
 
 // Built-in tuning (no env keys). Measured on a 12.5M-row synthetic partition;
-// see docs/architecture/twitter-user-email-dictionary.md.
+// see docs/architecture/file-datasets.md.
 export const PARTITION_COUNT = 16
-export const IMPORT_BATCH_PAIRS = 50_000
-export const IMPORT_READ_CHUNK_BYTES = 8 * 1024 * 1024
-export const IMPORT_TARGET_ROWS_PER_SECOND = 25_000
-export const IMPORT_SLOW_COMMIT_MS = 3_000
-export const SHA_MAX_BYTES_PER_SECOND = 200 * 1024 * 1024
+export {
+  IMPORT_BATCH_PAIRS, IMPORT_READ_CHUNK_BYTES, IMPORT_SLOW_COMMIT_MS, IMPORT_TARGET_ROWS_PER_SECOND, SHA_MAX_BYTES_PER_SECOND,
+} from '../file-datasets/tuning.mjs'
 export const MAX_USERNAME_CHARS = 256
 export const MAX_EMAIL_CHARS = 320
 export const MAX_DOMAIN_CHARS = 253

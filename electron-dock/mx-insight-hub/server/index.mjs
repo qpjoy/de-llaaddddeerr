@@ -81,9 +81,7 @@ import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
 import { SQLiteApiSourcePuller } from './ingest/external/sqlite-api-source.mjs'
 import { ServerFileReader } from './ingest/external/server-files.mjs'
-import { TwitterUserEmailStore } from './data/twitter-user-email/store.mjs'
-import { TwitterUserEmailSearch } from './data/twitter-user-email/search.mjs'
-import { TwitterUserEmailPipeline } from './data/twitter-user-email/pipeline.mjs'
+import { createFileDatasetServices } from './data/file-datasets/services.mjs'
 import { TelegramMonitorSourcePreparer } from './ingest/telegram/source-preparer.mjs'
 import { createIdentityService } from './identity/index.mjs'
 import { MemoryStore } from './stores/memory-store.mjs'
@@ -151,15 +149,12 @@ export async function createRuntime(config = loadConfig()) {
   const serverFileReader = config.listenerMode === 'public'
     ? null
     : await ServerFileReader.create({ roots: config.serverFiles?.roots || [] })
-  // Twitter user-email dictionary: PostgreSQL only. Public serves searches;
-  // Admin records cleaning-task intent; the dictionary worker does the work.
-  const twitterUserEmailStore = pool ? new TwitterUserEmailStore(pool) : null
-  const twitterUserEmail = pool
-    ? new TwitterUserEmailSearch({ pool, store: twitterUserEmailStore, hmacKey: config.apiKeyPepper })
-    : null
-  const twitterUserEmailPipeline = pool && config.listenerMode !== 'public'
-    ? new TwitterUserEmailPipeline({ store: twitterUserEmailStore, serverFileReader })
-    : null
+  // File datasets (Twitter 用户邮箱, 邮箱库, 手机号库): PostgreSQL only. Public
+  // serves searches; Admin records cleaning-task intent; the dictionary
+  // worker does the work.
+  const fileDatasets = createFileDatasetServices({
+    pool, hmacKey: config.apiKeyPepper, serverFileReader, admin: config.listenerMode !== 'public',
+  })
   const databasePuller = config.storeDriver === 'postgres'
     ? new DatabaseSourcePuller({ store, queue })
     : null
@@ -725,7 +720,7 @@ export async function createRuntime(config = loadConfig()) {
     },
     topicReports,
     newsDiscovery,
-    twitterUserEmail,
+    fileDatasets: fileDatasets.searches,
   })
   const embedding = pool && search
     ? new EmbeddingPipeline({
@@ -782,7 +777,7 @@ export async function createRuntime(config = loadConfig()) {
     queue,
     importer,
     serverFileReader,
-    twitterUserEmailPipeline,
+    fileDatasetPipelines: fileDatasets.pipelines,
     databasePuller,
     sqliteApiPuller,
     telegramSourcePreparer,

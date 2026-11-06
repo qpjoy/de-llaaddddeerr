@@ -1,16 +1,17 @@
-// "Twitter 用户清洗计划": cleaning-task card and task control on the 清洗任务计划 page.
+// File-dataset cleaning tasks ("Twitter 用户清洗计划", "邮箱库清洗计划", ...):
+// card and task control on the 清洗任务计划 page, one per dataset.
 // PostgreSQL only; the dedicated dictionary worker does the work.
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowClockwise, ArrowCounterClockwise, Database, Pause, Play, Trash, UploadSimple, Warning } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { ErrorState, Field, Modal, StatusBadge, formatDate, formatNumber, useRemoteData } from './components.jsx'
-import './twitter-user-email.css'
+import { fileDataset } from '../shared/file-datasets.mjs'
+import './file-datasets.css'
 
 const STAGES = [
   ['verifying', '校验文件'], ['importing', '导入'], ['building', '去重与建索引'],
   ['validating', '核对计数'], ['ready', '待发布'], ['published', '已发布'],
 ]
-const DEFAULT_SHA = 'c63812d32bbd144f210647d3ade3ef7d475e407158e96858b5669ba51555ebda'
 
 export function formatBytes(value) {
   if (value === null || value === undefined) return '—'
@@ -53,26 +54,29 @@ const FAILURE_HINTS = {
   database_busy: '自动重试已用完：PostgreSQL 连接数已满，等负载下降后点继续。',
 }
 
-const sourceLabel = source =>source ? `${source.rootId}:${source.relativePath}` : '尚未指定'
+const sourceLabel = source => source ? `${source.rootId}:${source.relativePath}${source.entry ? ` › ${source.entry}` : ''}` : '尚未指定'
+const isZip = path => /\.zip$/i.test(String(path || '').trim())
 // Exact counts in the task control; the card uses compact numbers.
 const exact = value => new Intl.NumberFormat('zh-CN').format(Number(value || 0))
 const shortSha = sha => sha ? `${sha.slice(0, 8)}…${sha.slice(-5)}` : '不校验'
 
-export function TwitterUserEmailPipelineCard({ token, onUnauthorized, notify }) {
-  const load = useCallback(() => adminApi.twitterUserEmailPipeline(token), [token])
+export function FileDatasetPipelineCard({ datasetKey, token, onUnauthorized, notify }) {
+  const product = fileDataset(datasetKey)
+  const load = useCallback(() => adminApi.fileDatasetPipeline(token, datasetKey), [token, datasetKey])
   const state = useRemoteData(load, onUnauthorized)
   const [open, setOpen] = useState(false)
   const pipeline = state.data
   const status = pipelineStatus(pipeline)
   const version = pipeline?.open || pipeline?.active
+  const titleId = `${datasetKey}-pipeline-title`
   return (
-    <section className="qp-panel mih-telegram-card" aria-labelledby="twitter-user-email-pipeline-title">
+    <section className="qp-panel mih-telegram-card" aria-labelledby={titleId}>
       <div className="mih-telegram-card__identity">
         <span className="mih-telegram-card__icon"><Database size={22} weight="duotone" aria-hidden="true" /></span>
         <div>
-          <p className="qp-kicker">BUSINESS PIPELINE / TWITTER USER EMAIL</p>
-          <h2 id="twitter-user-email-pipeline-title">Twitter 用户清洗计划</h2>
-          <p>读取服务器上的 用户名 → 邮箱 JSON 文件，流式分批写入 PostgreSQL 字典；去重、建索引并核对计数后发布到「Twitter 用户邮箱」数据产品。</p>
+          <p className="qp-kicker">FILE DATASET / {datasetKey.toUpperCase().replaceAll('-', ' ')}</p>
+          <h2 id={titleId}>{product.pipelineLabel}</h2>
+          <p>{product.pipelineSummary}</p>
         </div>
       </div>
       {state.error && !pipeline ? (
@@ -84,9 +88,9 @@ export function TwitterUserEmailPipelineCard({ token, onUnauthorized, notify }) 
             <div><dt>源文件</dt><dd><code>{sourceLabel(pipeline?.open?.source || pipeline?.dataset?.source)}</code></dd></div>
             <div><dt>文件指纹</dt><dd><code>{shortSha(pipeline?.open?.source?.expectedSha256 ?? pipeline?.dataset?.expectedSha256)}</code></dd></div>
             <div><dt>写入目标</dt><dd><code>PostgreSQL · account_dictionary</code></dd></div>
-            <div><dt>已清洗</dt><dd>{version ? `${formatNumber(version.pairsRead || 0)} 组` : '—'}{pipeline?.open?.progress ? ` · ${Math.floor(pipeline.open.progress.percent * 100)}%` : ''}</dd></div>
+            <div><dt>已清洗</dt><dd>{version ? `${formatNumber(version.pairsRead || 0)} ${product.recordUnit}` : '—'}{pipeline?.open?.progress ? ` · ${Math.floor(pipeline.open.progress.percent * 100)}%` : ''}</dd></div>
             <div><dt>入库 / 隔离</dt><dd>{version ? `${formatNumber(version.pairsLoaded || 0)} / ${formatNumber(version.pairsQuarantined || 0)}` : '—'}</dd></div>
-            <div><dt>当前发布</dt><dd>{pipeline?.active ? `v${pipeline.active.id} · ${formatNumber(pipeline.active.uniqueMappings || 0)} 条映射` : '尚未发布'}</dd></div>
+            <div><dt>当前发布</dt><dd>{pipeline?.active ? `v${pipeline.active.id} · ${product.uniqueLabel} ${formatNumber(pipeline.active.uniqueMappings || 0)}` : '尚未发布'}</dd></div>
             <div><dt>最近更新</dt><dd>{version?.updatedAt ? formatDate(version.updatedAt) : '尚未运行'}</dd></div>
           </dl>
           <div className="mih-telegram-card__actions">
@@ -98,7 +102,7 @@ export function TwitterUserEmailPipelineCard({ token, onUnauthorized, notify }) 
         </>
       )}
       {open && pipeline ? (
-        <TwitterUserEmailPipelineModal token={token} pipeline={pipeline} onUnauthorized={onUnauthorized} notify={notify}
+        <FileDatasetPipelineModal datasetKey={datasetKey} token={token} pipeline={pipeline} onUnauthorized={onUnauthorized} notify={notify}
           onRefresh={state.refresh} onClose={() => { setOpen(false); state.refresh() }} />
       ) : null}
     </section>
@@ -114,7 +118,7 @@ function Stages({ stage }) {
   </ol>
 }
 
-function OpenVersionProgress({ version, reasonLabels }) {
+function OpenVersionProgress({ version, reasonLabels, product }) {
   const progress = version.progress || {}
   const reasons = Object.entries(version.quarantineReasons || {}).sort((a, b) => b[1] - a[1])
   return <div className="mih-tue">
@@ -124,7 +128,7 @@ function OpenVersionProgress({ version, reasonLabels }) {
     <p className="mih-tue-muted">
       版本 v{version.id} · {version.stageLabel} {Math.floor((progress.percent || 0) * 1000) / 10}%
       {version.stage === 'verifying' ? ` · 已校验 ${formatBytes(version.source.shaBytes)} / ${formatBytes(version.source.bytes)}` : ''}
-      {version.stage === 'importing' ? ` · 已读取 ${formatBytes(version.byteOffset)} / ${formatBytes(version.source.bytes)}` : ''}
+      {version.stage === 'importing' ? ` · 已读取 ${formatBytes(version.byteOffset)} / ${formatBytes(version.source.entryBytes || version.source.bytes)}${version.source.entry ? `（从压缩包流式解压 ${version.source.entry}）` : ''}` : ''}
       {version.stage === 'building' ? ` · 已完成 ${progress.partitionsDone || 0}/${version.partitionCount} 个分区` : ''}
       {version.heartbeatAt ? ` · 心跳 ${formatDate(version.heartbeatAt)}` : ''}
     </p>
@@ -136,26 +140,27 @@ function OpenVersionProgress({ version, reasonLabels }) {
       <p className="mih-tue-notice mih-tue-warning"><Warning size={16} aria-hidden="true" /><span>数据库资源暂时不足，worker 会自动重试，无需操作。<br /><strong>{version.error.code}</strong> · {version.error.message}</span></p>
     ) : null}
     <dl className="mih-tue-metrics">
-      <div><dt>已读取</dt><dd>{exact(version.pairsRead || 0)}<small>{progress.estimatedTotalPairs ? ` / 约 ${exact(progress.estimatedTotalPairs)}` : ''} 组</small></dd></div>
+      <div><dt>已读取</dt><dd>{exact(version.pairsRead || 0)}<small>{progress.estimatedTotalPairs ? ` / 约 ${exact(progress.estimatedTotalPairs)}` : ''} {product.recordUnit}</small></dd></div>
       <div><dt>已入库</dt><dd>{exact(version.pairsLoaded || 0)}</dd></div>
       <div><dt>已隔离</dt><dd>{exact(version.pairsQuarantined || 0)}</dd></div>
-      <div><dt>速度</dt><dd>{version.stage === 'importing' && version.rowsPerSecond ? exact(Math.round(version.rowsPerSecond)) : '—'}<small> 组/秒</small></dd></div>
+      <div><dt>速度</dt><dd>{version.stage === 'importing' && version.rowsPerSecond ? exact(Math.round(version.rowsPerSecond)) : '—'}<small> {product.recordUnit}/秒</small></dd></div>
       <div><dt>预计剩余</dt><dd>{version.stage === 'importing' ? formatDuration(progress.etaSeconds) : '—'}</dd></div>
-      {version.uniqueMappings !== null ? <div><dt>唯一映射</dt><dd>{exact(version.uniqueMappings)}<small> · 重复 {exact(version.duplicatePairs || 0)}</small></dd></div> : null}
+      {version.uniqueMappings !== null ? <div><dt>{product.uniqueLabel}</dt><dd>{exact(version.uniqueMappings)}<small> · 重复 {exact(version.duplicatePairs || 0)}</small></dd></div> : null}
     </dl>
     {version.partitions?.length ? <div>
       <p className="mih-tue-muted">分区（浅：已去重 · 中：已建索引 · 深：已挂接）</p>
-      <div className="mih-tue-partitions">{version.partitions.map(partition => (
+      <div className="mih-tue-partitions" style={{ gridTemplateColumns: `repeat(${Math.min(16, version.partitions.length)}, minmax(0, 1fr))` }}>{version.partitions.map(partition => (
         <span key={partition.no} data-step={partition.step} title={`分区 ${partition.no} · ${partition.step}${partition.uniqueRows !== null ? ` · ${exact(partition.uniqueRows)} 行` : ''}`}>{partition.no}</span>
       ))}</div>
     </div> : null}
-    {reasons.length ? <div className="mih-tue-scroll"><table className="mih-tue-table"><thead><tr><th>隔离原因</th><th className="num">组数</th></tr></thead><tbody>
+    {reasons.length ? <div className="mih-tue-scroll"><table className="mih-tue-table"><thead><tr><th>隔离原因</th><th className="num">{product.recordUnit}数</th></tr></thead><tbody>
       {reasons.map(([reason, count]) => <tr key={reason}><td>{reasonLabels?.[reason] || reason} <code>{reason}</code></td><td className="num">{exact(count)}</td></tr>)}
     </tbody></table></div> : null}
   </div>
 }
 
-export function TwitterUserEmailPipelineModal({ token, pipeline: initial, onUnauthorized, notify, onRefresh, onClose }) {
+export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial, onUnauthorized, notify, onRefresh, onClose }) {
+  const product = fileDataset(datasetKey)
   const [pipeline, setPipeline] = useState(initial)
   const [busy, setBusy] = useState(null)
   const [actionError, setActionError] = useState(null)
@@ -164,20 +169,24 @@ export function TwitterUserEmailPipelineModal({ token, pipeline: initial, onUnau
   const [form, setForm] = useState(() => ({
     serverPath: '',
     rootId: dataset.source?.rootId || roots[0]?.rootId || 'shared-dir',
-    relativePath: dataset.source?.relativePath || 'imports/twitter/new_email.json',
-    expectedSha256: dataset.expectedSha256 ?? DEFAULT_SHA,
+    relativePath: dataset.source?.relativePath || product.defaultSource.relativePath,
+    entry: dataset.source?.entry || product.defaultSource.entry || '',
+    expectedSha256: dataset.expectedSha256 ?? product.defaultSource.sha256 ?? '',
     owner: dataset.owner || '', purpose: dataset.purpose || '', legalBasis: dataset.legalBasis || '',
   }))
   const [confirmDiscard, setConfirmDiscard] = useState('')
+  // Files found in the .zip by the last 校验并保存 (or by its error details).
+  const [archiveEntries, setArchiveEntries] = useState([])
+  const zipSource = isZip(form.serverPath || form.relativePath)
   const open = pipeline.open
   const status = pipelineStatus(pipeline)
   const refresh = useCallback(async () => {
     try {
-      setPipeline(await adminApi.twitterUserEmailPipeline(token))
+      setPipeline(await adminApi.fileDatasetPipeline(token, datasetKey))
     } catch (error) {
       if (error?.status === 401) onUnauthorized?.(error)
     }
-  }, [token, onUnauthorized])
+  }, [token, datasetKey, onUnauthorized])
   const moving = open && open.stage !== 'ready' && open.runState !== 'failed' && !(open.desiredState === 'paused' && open.runState === 'paused')
   useEffect(() => {
     if (!moving) return undefined
@@ -206,20 +215,31 @@ export function TwitterUserEmailPipelineModal({ token, pipeline: initial, onUnau
     const body = form.serverPath.trim()
       ? { serverPath: form.serverPath.trim() }
       : { rootId: form.rootId.trim(), relativePath: form.relativePath.trim() }
-    mutate('save', () => adminApi.configureTwitterUserEmailPipeline(token, {
-      ...body, expectedSha256: form.expectedSha256.trim() || null,
-      owner: form.owner, purpose: form.purpose, legalBasis: form.legalBasis,
-    }), '源文件已校验并保存；开启后由 worker 先核对 SHA-256')
+    mutate('save', async () => {
+      try {
+        const saved = await adminApi.configureFileDatasetPipeline(token, datasetKey, {
+          ...body, ...(zipSource && form.entry.trim() ? { entry: form.entry.trim() } : {}),
+          expectedSha256: form.expectedSha256.trim() || null,
+          owner: form.owner, purpose: form.purpose, legalBasis: form.legalBasis,
+        })
+        const archive = saved?.archive
+        setArchiveEntries(archive?.entries || [])
+        if (archive?.entry) setForm(current => ({ ...current, entry: archive.entry.name }))
+      } catch (error) {
+        if (error?.details?.entries) setArchiveEntries(error.details.entries)
+        throw error
+      }
+    }, zipSource ? '压缩包已校验并保存；worker 会先核对整个压缩包的 SHA-256，再流式解压读取所选文件' : '源文件已校验并保存；开启后由 worker 先核对 SHA-256')
   }
-  const act = (action, message) => mutate(action, () => adminApi.twitterUserEmailPipelineAction(token, action, open?.id), message)
+  const act = (action, message) => mutate(action, () => adminApi.fileDatasetPipelineAction(token, datasetKey, action, open?.id), message)
 
   return (
-    <Modal title="Twitter 用户清洗计划" size="xlarge" onClose={onClose}
+    <Modal title={product.pipelineLabel} size="xlarge" onClose={onClose}
       description="服务器文件 → PostgreSQL 字典（account_dictionary）· 不进 ES、HanLP 或向量化 · 暂停后从已提交批次继续"
       footer={<button className="qp-button qp-button--ghost" type="button" onClick={onClose}>关闭</button>}>
       <div className="mih-tue">
         <div className="mih-telegram-toolbar">
-          <div><StatusBadge status={status.status} label={status.label} /><code>twitter-user-email</code></div>
+          <div><StatusBadge status={status.status} label={status.label} /><code>{datasetKey}</code></div>
           <div className="mih-page-actions">
             {!open ? <button className="qp-button" type="button" disabled={Boolean(busy) || !dataset.source}
               title={!dataset.source ? '先指定并保存源文件' : ''} onClick={() => act('start', '已开启清洗；worker 会先校验文件指纹')}>
@@ -232,11 +252,11 @@ export function TwitterUserEmailPipelineModal({ token, pipeline: initial, onUnau
                 <Play size={16} />{busy === 'resume' ? '正在继续…' : '继续'}</button>) : null}
             {open?.stage === 'ready' ? (
               <button className="qp-button" type="button" disabled={Boolean(busy)}
-                onClick={() => mutate('publish', () => adminApi.publishTwitterUserEmail(token, open.id), `v${open.id} 已发布；数据产品立即使用新版本`)}>
+                onClick={() => mutate('publish', () => adminApi.publishFileDataset(token, datasetKey, open.id), `v${open.id} 已发布；数据产品立即使用新版本`)}>
                 <UploadSimple size={16} />{busy === 'publish' ? '正在发布…' : `发布 v${open.id}`}</button>) : null}
             {pipeline.previous && !pipeline.previous.dataDroppedAt ? (
               <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busy)}
-                onClick={() => mutate('rollback', () => adminApi.rollbackTwitterUserEmail(token), `已切回 v${pipeline.previous.id}`)}>
+                onClick={() => mutate('rollback', () => adminApi.rollbackFileDataset(token, datasetKey), `已切回 v${pipeline.previous.id}`)}>
                 <ArrowCounterClockwise size={16} />{busy === 'rollback' ? '正在回退…' : `回退到 v${pipeline.previous.id}`}</button>) : null}
             <button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busy)} onClick={refresh}><ArrowClockwise size={16} />刷新</button>
           </div>
@@ -245,21 +265,26 @@ export function TwitterUserEmailPipelineModal({ token, pipeline: initial, onUnau
 
         <section className="qp-panel">
           <h3>进度</h3>
-          {open ? <OpenVersionProgress version={open} reasonLabels={pipeline.quarantineReasonLabels} /> : (
-            <p className="mih-tue-muted">{pipeline.active ? `当前发布 v${pipeline.active.id}（${exact(pipeline.active.uniqueMappings || 0)} 条映射，${formatDate(pipeline.active.publishedAt)}）。` : '还没有发布过数据版本。'}指定源文件后点击“开启”，会新建一个未发布版本；完成核对后需要手动发布。</p>
+          {open ? <OpenVersionProgress version={open} reasonLabels={pipeline.quarantineReasonLabels} product={product} /> : (
+            <p className="mih-tue-muted">{pipeline.active ? `当前发布 v${pipeline.active.id}（${product.uniqueLabel} ${exact(pipeline.active.uniqueMappings || 0)}，${formatDate(pipeline.active.publishedAt)}）。` : '还没有发布过数据版本。'}指定源文件后点击“开启”，会新建一个未发布版本；完成核对后需要手动发布。</p>
           )}
         </section>
 
         <section className="qp-panel">
           <h3>源文件</h3>
-          <p className="mih-tue-muted">文件需放在服务器受控目录 {roots.length ? roots.map(root => <code key={root.rootId}>{root.rootId}</code>) : <code>未配置</code>} 下（Internal 默认 <code>/shared_dir</code>）。可直接粘贴服务器绝对路径；期望 SHA-256 不一致时 worker 会拒绝导入。正在进行的版本始终使用它开启时的文件。</p>
+          <p className="mih-tue-muted">格式：{product.sourceFormat}（{product.sourceExtensions.join(' / ')}）。可以直接填写服务器上的 .zip 路径：worker 不落地解压，边解压边读取所选文件，断点按解压后的字节记录，继续时重新解压并跳到断点（约每 GB 数秒）；.rar 等其他压缩格式需先在服务器解压。文件需放在服务器受控目录 {roots.length ? roots.map(root => <code key={root.rootId}>{root.rootId}</code>) : <code>未配置</code>} 下（Internal 默认 <code>/shared_dir</code>）。可直接粘贴服务器绝对路径；期望 SHA-256 不一致时 worker 会拒绝导入。正在进行的版本始终使用它开启时的文件。</p>
           <form className="mih-form mih-form--grid" onSubmit={saveSource}>
-            <Field label="服务器路径（可选）" hint="例如 /shared_dir/imports/twitter/new_email.json；填写后忽略下面两项">
-              <input className="qp-input" value={form.serverPath} placeholder="/shared_dir/imports/twitter/new_email.json" onChange={event => setForm({ ...form, serverPath: event.target.value })} />
+            <Field label="服务器路径（可选）" hint={`例如 /shared_dir/${product.defaultSource.relativePath}；填写后忽略下面两项`}>
+              <input className="qp-input" value={form.serverPath} placeholder={`/shared_dir/${product.defaultSource.relativePath}`} onChange={event => setForm({ ...form, serverPath: event.target.value })} />
             </Field>
             <Field label="根目录 ID"><input className="qp-input" value={form.rootId} onChange={event => setForm({ ...form, rootId: event.target.value })} /></Field>
             <Field label="相对路径"><input className="qp-input" value={form.relativePath} onChange={event => setForm({ ...form, relativePath: event.target.value })} /></Field>
-            <Field label="期望 SHA-256" hint="与本地 /tmp/new_email.json 一致；留空则不校验">
+            {zipSource ? <Field label="压缩包内文件" hint={archiveEntries.length ? `可选：${archiveEntries.filter(row => row.supported).map(row => row.name).join('、')}` : '留空时自动选择；校验后列出包内可用文件'}>
+              <input className="qp-input" value={form.entry} list={`${datasetKey}-archive-entries`} spellCheck={false}
+                placeholder={product.defaultSource.entry || ''} onChange={event => setForm({ ...form, entry: event.target.value })} />
+              <datalist id={`${datasetKey}-archive-entries`}>{archiveEntries.map(row => <option key={row.name} value={row.name}>{`${formatBytes(row.size)} · ${row.method}${row.supported ? '' : ' · 不支持'}`}</option>)}</datalist>
+            </Field> : null}
+            <Field label="期望 SHA-256" hint={zipSource ? '整个压缩包的指纹（服务器上 sha256sum 压缩包）；留空则不校验' : product.defaultSource.sha256 ? '预填的是已知来源文件的指纹；留空则不校验' : '留空则不校验'}>
               <input className="qp-input" value={form.expectedSha256} spellCheck={false} onChange={event => setForm({ ...form, expectedSha256: event.target.value })} />
             </Field>
             <Field label="数据负责人"><input className="qp-input" value={form.owner} onChange={event => setForm({ ...form, owner: event.target.value })} /></Field>
@@ -275,7 +300,7 @@ export function TwitterUserEmailPipelineModal({ token, pipeline: initial, onUnau
         <section className="qp-panel">
           <h3>版本</h3>
           <div className="mih-tue-scroll"><table className="mih-tue-table"><thead><tr>
-            <th>版本</th><th>状态</th><th className="num">唯一映射</th><th className="num">隔离</th><th className="num">表 / 索引</th><th>开启</th><th>发布</th>
+            <th>版本</th><th>状态</th><th className="num">{product.uniqueLabel}</th><th className="num">隔离</th><th className="num">表 / 索引</th><th>开启</th><th>发布</th>
           </tr></thead><tbody>
             {(pipeline.recent || []).map(row => <tr key={row.id}>
               <td>v{row.id}{row.id === pipeline.dataset?.activeVersionId ? ' · 当前' : row.id === pipeline.dataset?.previousVersionId ? ' · 可回退' : ''}</td>

@@ -482,12 +482,16 @@ Catalog coverage and provider execution are separate facts. The Admin table ther
 
 | Catalog rows | Marker | Meaning |
 | --- | --- | --- |
-| 淘宝、天猫、京东、小红书店铺、闲鱼 | `JustOne · 商品搜索已接` | Runtime marketplace exists in the reviewed Hub contract. |
-| 抖音电商、快手小店 | `JustOne · 接入线索` | Historical catalog evidence exists, but there is no callable JustOne product-search contract. |
+| 淘宝、天猫、京东、小红书店铺、闲鱼、抖音电商 | `JustOne · 商品搜索已接` | Runtime marketplace exists in the reviewed Hub contract; this is contract coverage, not a live health guarantee. |
+| 快手小店 | `JustOne · 接入线索` | Historical catalog evidence exists, but there is no callable JustOne product-search contract. |
 
-Douyin ecommerce and Kuaishou Shop can still have Hub mobile-collector data. That is a different ingestion
-path and must not be presented as JustOne runtime support. The built-in `JustOne 已接` view contains only the
-five reviewed runtime rows.
+The built-in `JustOne 已接` view contains these six reviewed runtime rows. Douyin ecommerce uses the unified
+`douyin_ec` search contract; its separate detail, SKU, comments and shop interfaces require their own availability
+and field verification. The connected marker does not certify all six Douyin interfaces as currently usable.
+See [the 2026-11-06 verification](../operations/douyin-ecommerce-verification-2026-11-06.md) for dated evidence.
+
+Douyin ecommerce and Kuaishou Shop can also have Hub mobile-collector data. That is a different ingestion
+path and must not be presented as JustOne runtime support.
 
 ## 11. Capability-atlas rules
 

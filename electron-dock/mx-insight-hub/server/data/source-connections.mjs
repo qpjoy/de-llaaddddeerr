@@ -235,6 +235,16 @@ export function implementedRoutes(sources = []) {
     operation: 'twitter.user_email.search', path: '/api/v1/data/twitter-user-email/search',
     defaultRule: '已获查询授权的 Key 默认从发布版本读取完整邮箱，reveal=false 可获取脱敏结果。完整邮箱返回条数计入审计。',
     evidence: 'server/data/twitter-user-email/contract.mjs',
+  }), route('email-directory', {
+    platform: 'email_directory', provider: null, product: '邮箱库', mode: 'stored',
+    operation: 'email.directory.search', path: '/api/v1/data/email-directory/search',
+    defaultRule: '只读已发布的文件数据集版本，不触发采集；默认返回完整邮箱，reveal=false 可获取脱敏结果。完整邮箱返回条数计入审计。',
+    evidence: 'server/data/email-directory/contract.mjs',
+  }), route('phone-directory', {
+    platform: 'phone_directory', provider: null, product: '手机号库', mode: 'stored',
+    operation: 'phone.directory.search', path: '/api/v1/data/phone-directory/search',
+    defaultRule: '只读已发布的文件数据集版本，不触发采集；默认返回完整号码，reveal=false 可获取脱敏结果。完整号码返回条数计入审计。',
+    evidence: 'server/data/phone-directory/contract.mjs',
   }))
   rows.push(route('virtual-supermarket', {
     platform: 'virtual_supermarket', provider: null, product: '虚拟超市',

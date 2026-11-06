@@ -1,8 +1,9 @@
-# Twitter user-email dictionary worker ("Twitter 用户清洗计划").
+# File-dataset worker ("文件数据集" cleaning tasks: Twitter 用户清洗计划,
+# 邮箱库清洗计划, 手机号库清洗计划; one version at a time across datasets).
 #
-# Streams an operator-selected file under /shared_dir into PostgreSQL schema
+# Streams operator-selected files under /shared_dir into PostgreSQL schema
 # account_dictionary: paced batches, per-partition deduplication and index
-# builds. PostgreSQL only -- no Elasticsearch, HanLP, embeddings, Launcher,
+# builds. See docs/architecture/file-datasets.md. PostgreSQL only -- no Elasticsearch, HanLP, embeddings, Launcher,
 # DNS, WireGuard or user-session path, so MX-H2I login and networking never
 # depend on it. Pause/resume/discard come from the Admin cleaning-task page via
 # PostgreSQL; a restart resumes from the last committed batch.

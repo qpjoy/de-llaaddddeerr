@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readPairWindows, scanPairs, JsonPairsError } from '../../server/data/twitter-user-email/json-pairs.mjs'
-import { publicFailure } from '../../server/data/twitter-user-email/engine.mjs'
+import { readPairWindows, scanPairs, JsonPairsError } from '../../server/data/file-datasets/json-pairs.mjs'
+import { publicFailure } from '../../server/data/file-datasets/engine.mjs'
 import {
   FLAG_DOMAIN_CASE, FLAG_VALUE_TRIMMED, classifyPair, escapeLike, maskEmail, normalizeSearchRequest,
 } from '../../server/data/twitter-user-email/contract.mjs'

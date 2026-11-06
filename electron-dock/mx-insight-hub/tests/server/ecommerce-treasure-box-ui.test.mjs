@@ -559,12 +559,12 @@ test('generated mascot poses are real transparent raster assets', async () => {
 test('source catalog distinguishes verified JustOne runtime marketplaces from connector evidence', async () => {
   const [, , , catalogSource] = await sources()
 
-  for (const sourceKey of ['0058', '0059', '0060', '0064', '0073']) {
+  for (const sourceKey of ['0058', '0059', '0060', '0062', '0064', '0073']) {
     assert.match(catalogSource, new RegExp(`source-catalog-${sourceKey}`, 'u'))
   }
   assert.doesNotMatch(
     catalogSource.match(/const JUSTONE_CONNECTED_SOURCE_KEYS = new Set\(\[[\s\S]*?\]\)/u)?.[0] || '',
-    /source-catalog-0062|source-catalog-0063/u,
+    /source-catalog-0063/u,
   )
   assert.match(catalogSource, /JustOne · 商品搜索已接/u)
   assert.match(catalogSource, /JustOne · 接入线索/u)

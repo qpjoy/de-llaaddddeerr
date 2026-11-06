@@ -248,6 +248,9 @@ export const publicDataApi = {
     return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, retryOfRequestId })
   },
   productRequest: (key, input, idempotencyKey) => publicDataRequest(key, input.path, { method: input.method, body: input.body, idempotencyKey }),
+  // File datasets: `dataset` is the shared registry key (twitter-user-email, email-directory, ...).
+  fileDatasetSearch: (key, dataset, body) => publicDataRequest(key, `/api/v1/data/${encodeURIComponent(dataset)}/search`, { method: 'POST', body }),
+  fileDatasetMetadata: (key, dataset) => publicDataRequest(key, `/api/v1/data/${encodeURIComponent(dataset)}/metadata`),
   twitterUserEmailSearch: (key, body) => publicDataRequest(key, '/api/v1/data/twitter-user-email/search', { method: 'POST', body }),
   twitterUserEmailMetadata: key => publicDataRequest(key, '/api/v1/data/twitter-user-email/metadata'),
   servicePricing: (key, path) => publicDataRequest(key, `/api/v1/data/services/pricing?path=${encodeURIComponent(path)}`),
@@ -1030,23 +1033,24 @@ export const adminApi = {
   resetNightAllSavedRecordsPipelineCheckpoints: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/night-all-saved-records/checkpoints/reset`, { method: 'POST', body },
   ),
-  // Twitter user-email dictionary (PostgreSQL only; the dictionary worker runs it).
-  twitterUserEmailPipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/twitter-user-email`),
-  configureTwitterUserEmailPipeline: (token, body) => request(
-    token, `${ADMIN_ROOT}/pipelines/twitter-user-email`, { method: 'PUT', body },
+  // File datasets (Twitter 用户邮箱, 邮箱库, 手机号库): PostgreSQL only; the
+  // dictionary worker runs the cleaning tasks.
+  fileDatasetPipeline: (token, key) => request(token, `${ADMIN_ROOT}/pipelines/file-datasets/${encodeURIComponent(key)}`),
+  configureFileDatasetPipeline: (token, key, body) => request(
+    token, `${ADMIN_ROOT}/pipelines/file-datasets/${encodeURIComponent(key)}`, { method: 'PUT', body },
   ),
-  twitterUserEmailPipelineProgress: (token) => request(token, `${ADMIN_ROOT}/pipelines/twitter-user-email/progress`),
-  twitterUserEmailPipelineAction: (token, action, versionId) => request(
-    token, `${ADMIN_ROOT}/pipelines/twitter-user-email/status`,
+  fileDatasetPipelineProgress: (token, key) => request(token, `${ADMIN_ROOT}/pipelines/file-datasets/${encodeURIComponent(key)}/progress`),
+  fileDatasetPipelineAction: (token, key, action, versionId) => request(
+    token, `${ADMIN_ROOT}/pipelines/file-datasets/${encodeURIComponent(key)}/status`,
     { method: 'POST', body: { action, ...(versionId ? { versionId } : {}) } },
   ),
-  publishTwitterUserEmail: (token, versionId) => request(
-    token, `${ADMIN_ROOT}/pipelines/twitter-user-email/publish`, { method: 'POST', body: { versionId } },
+  publishFileDataset: (token, key, versionId) => request(
+    token, `${ADMIN_ROOT}/pipelines/file-datasets/${encodeURIComponent(key)}/publish`, { method: 'POST', body: { versionId } },
   ),
-  rollbackTwitterUserEmail: (token) => request(
-    token, `${ADMIN_ROOT}/pipelines/twitter-user-email/rollback`, { method: 'POST', body: {} },
+  rollbackFileDataset: (token, key) => request(
+    token, `${ADMIN_ROOT}/pipelines/file-datasets/${encodeURIComponent(key)}/rollback`, { method: 'POST', body: {} },
   ),
-  twitterUserEmailAccess: (token) => request(token, `${ADMIN_ROOT}/pipelines/twitter-user-email/access`),
+  fileDatasetAccess: (token, key) => request(token, `${ADMIN_ROOT}/pipelines/file-datasets/${encodeURIComponent(key)}/access`),
   mobileCommercePipeline: (token) => request(token, `${ADMIN_ROOT}/pipelines/mobile-commerce`),
   updateMobileCommercePipeline: (token, body) => request(
     token, `${ADMIN_ROOT}/pipelines/mobile-commerce`, { method: 'PUT', body },

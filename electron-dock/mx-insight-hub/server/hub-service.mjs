@@ -78,6 +78,9 @@ import {
   storedSearchResponse,
 } from './data/stored-search.mjs'
 import * as TWITTER_USER_EMAIL from './data/twitter-user-email/contract.mjs'
+import { normalizeEmailSearchRequest } from './data/email-directory/contract.mjs'
+import { normalizePhoneSearchRequest } from './data/phone-directory/contract.mjs'
+import { FILE_DATASETS, fileDataset } from '../shared/file-datasets.mjs'
 import { normalizeSearchRequest as normalizeTwitterUserEmailRequest } from './data/twitter-user-email/contract.mjs'
 import { listCrawlerSpecs } from './ingest/crawler/source-contract.mjs'
 import {
@@ -284,9 +287,17 @@ function replayWindowFor(resultType) {
 }
 const RESERVED_PLATFORM_NAMES = new Set(['*', 'all'])
 const TOKENIZE_CAPABILITY = 'nlp.tokenize'
-const TWITTER_USER_EMAIL_CAPABILITIES = [TWITTER_USER_EMAIL.SEARCH_CAPABILITY, TWITTER_USER_EMAIL.REVEAL_CAPABILITY]
+// File datasets (Twitter 用户邮箱, 邮箱库, 手机号库): one search capability each,
+// plus retired grants that stay visible and removable.
+const FILE_DATASET_CAPABILITIES = new Map(FILE_DATASETS.flatMap(dataset =>
+  [dataset.searchCapability, ...(dataset.legacyCapabilities || [])].map(capability => [capability, dataset])))
+const FILE_DATASET_REQUESTS = Object.freeze({
+  'twitter-user-email': normalizeTwitterUserEmailRequest,
+  'email-directory': normalizeEmailSearchRequest,
+  'phone-directory': normalizePhoneSearchRequest,
+})
 const PUBLIC_CAPABILITIES = new Set([
-  ...TWITTER_USER_EMAIL_CAPABILITIES,
+  ...FILE_DATASET_CAPABILITIES.keys(),
   'web.search', ...WEB_SEARCH_PROVIDERS.map(row => row.capability),
   ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation),
   ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.operation),
@@ -636,6 +647,7 @@ export class HubService {
     topicReports = null,
     newsDiscovery = null,
     twitterUserEmail = null,
+    fileDatasets = null,
     logger = console,
   }) {
     const mediaPolicy = externalMediaPolicy || DEFAULT_EXTERNAL_MEDIA_POLICY
@@ -678,7 +690,10 @@ export class HubService {
     this.topicReports = topicReports
     this.newsDiscovery = newsDiscovery
     // PostgreSQL-only username/e-mail dictionary (no canonical/ES projection).
-    this.twitterUserEmail = twitterUserEmail
+    // Search services keyed by file-dataset key; `twitterUserEmail` is the
+    // older single-dataset option.
+    this.fileDatasets = { ...(twitterUserEmail ? { 'twitter-user-email': twitterUserEmail } : {}), ...(fileDatasets || {}) }
+    this.twitterUserEmail = this.fileDatasets['twitter-user-email'] || null
     this.externalMediaPolicy = {
       maxRequests: Math.max(1, Math.floor(Number(mediaPolicy.maxRequests) || DEFAULT_EXTERNAL_MEDIA_POLICY.maxRequests)),
       windowMs: Math.max(1_000, Math.floor(Number(mediaPolicy.windowMs) || DEFAULT_EXTERNAL_MEDIA_POLICY.windowMs)),
@@ -1423,11 +1438,11 @@ export class HubService {
     return operations
   }
 
-  async #twitterUserEmailReady() {
+  async #fileDatasetReady(key) {
     try {
-      return (await this.twitterUserEmail?.metadata())?.published === true
+      return (await this.fileDatasets[key]?.metadata())?.published === true
     } catch {
-      this.logger?.warn?.('[twitter-user-email] Published dictionary status is unavailable')
+      this.logger?.warn?.(`[${key}] Published dataset status is unavailable`)
       return false
     }
   }
@@ -1500,15 +1515,18 @@ export class HubService {
     const ecommerceSearch = this.externalPlatformCapabilities
       ? await this.externalPlatformCapabilities({ consumerId: normalizedConsumerId })
       : null
-    const dictionaryReady = await this.#twitterUserEmailReady()
     const capabilityGrants = normalizedConsumerId && typeof this.store.listCapabilityGrants === 'function'
       ? await this.store.listCapabilityGrants(normalizedConsumerId) : []
-    // Historical reveal grants can still be inspected and removed.
-    const dictionaryOperations = TWITTER_USER_EMAIL_CAPABILITIES.filter(capability =>
-      capability === TWITTER_USER_EMAIL.SEARCH_CAPABILITY || capabilityGrants.includes(capability))
     const operationReadiness = Object.fromEntries(Object.entries({ ...ecommerceSearch?.operations, ...xiaohongshuAcquisition?.operations }).map(([operation,state]) => [operation,{ready:state?.ready === true,effectiveState:state?.effectiveState || 'unknown'}]))
-    for (const capability of dictionaryOperations) {
-      operationReadiness[capability] = { ready: dictionaryReady, effectiveState: dictionaryReady ? 'active' : 'blocked' }
+    const fileDatasetOperations = []
+    for (const dataset of FILE_DATASETS) {
+      const ready = await this.#fileDatasetReady(dataset.key)
+      // Historical grants (e.g. Twitter reveal) can still be inspected and removed.
+      const operations = [dataset.searchCapability, ...(dataset.legacyCapabilities || []).filter(capability => capabilityGrants.includes(capability))]
+      for (const capability of operations) {
+        operationReadiness[capability] = { ready, effectiveState: ready ? 'active' : 'blocked' }
+        fileDatasetOperations.push({ capability, ready })
+      }
     }
     return {
       operationReadiness,
@@ -1519,7 +1537,7 @@ export class HubService {
         ? await this.store.listCapabilityPolicies(normalizedConsumerId)
         : [],
       availableCapabilities: [
-        ...dictionaryOperations.map(capability => ({ capability, ready: dictionaryReady })),
+        ...fileDatasetOperations,
         ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => ({ capability: row.operation, ready: providerOperationReady(ecommerceSearch, row.operation) })),
         ...XHS_DISCOVERY_OPERATIONS.map(capability => ({ capability, ready: providerOperationReady(capability === 'social.posts.hot_search' ? ecommerceSearch : xiaohongshuAcquisition, capability) })),
         { capability: 'ip.risk.subscription.query', ready: providerOperationReady(ecommerceSearch, 'ip.risk.subscription.query') },
@@ -1927,13 +1945,18 @@ export class HubService {
       }
     }
     const capabilityGrants = await this.#effectiveCapabilityGrants(context)
-    const dictionaryGranted = context.apiKey?.scopeMode === 'snapshot'
-      && canonicalGrants.includes(TWITTER_USER_EMAIL.PLATFORM) && capabilityGrants.includes(TWITTER_USER_EMAIL.SEARCH_CAPABILITY)
-    const dictionaryReady = dictionaryGranted && await this.#twitterUserEmailReady()
-    if (dictionaryGranted) {
+    // File datasets appear only for snapshot Keys holding both the platform
+    // and the search capability (personal data is never inherited).
+    const fileDatasetAccess = new Map()
+    for (const dataset of FILE_DATASETS) {
+      const granted = context.apiKey?.scopeMode === 'snapshot'
+        && canonicalGrants.includes(dataset.platform) && capabilityGrants.includes(dataset.searchCapability)
+      if (!granted) continue
+      const ready = await this.#fileDatasetReady(dataset.key)
+      fileDatasetAccess.set(dataset.key, ready)
       payload.data.platforms.push({
-        platform: TWITTER_USER_EMAIL.PLATFORM, ready: dictionaryReady, source: 'hub', servingMode: 'stored',
-        capabilities: TWITTER_USER_EMAIL_CAPABILITIES.filter(capability => capabilityGrants.includes(capability)),
+        platform: dataset.platform, ready, source: 'hub', servingMode: 'stored',
+        capabilities: [dataset.searchCapability, ...(dataset.legacyCapabilities || [])].filter(capability => capabilityGrants.includes(capability)),
       })
     }
     let externalPostCapability = null
@@ -2032,10 +2055,10 @@ export class HubService {
         ...(payload?.data || {}),
         capabilities: capabilityGrants
           .filter((capability) => PUBLIC_CAPABILITIES.has(capability)
-            && (dictionaryGranted || !TWITTER_USER_EMAIL_CAPABILITIES.includes(capability)))
+            && (!FILE_DATASET_CAPABILITIES.has(capability) || fileDatasetAccess.has(FILE_DATASET_CAPABILITIES.get(capability).key)))
           .map((capability) => ({
             capability,
-            ready: TWITTER_USER_EMAIL_CAPABILITIES.includes(capability) ? dictionaryReady
+            ready: FILE_DATASET_CAPABILITIES.has(capability) ? fileDatasetAccess.get(FILE_DATASET_CAPABILITIES.get(capability).key) === true
               : capability.startsWith('native.') || Object.values(HUB_SOCIAL_ENDPOINTS).some(row => row.operation === capability) ? nativeReady[capability] === true : capability === TOKENIZE_CAPABILITY
               ? typeof this.segmenter?.segmentWithMeta === 'function'
               : capability === PUBLIC_OPINION_ALL_INGESTED_CAPABILITY
@@ -2895,37 +2918,54 @@ export class HubService {
     return { storefrontRevision: before, value }
   }
 
-  async #twitterUserEmailAccess(context) {
-    // Legacy dynamic Keys silently inherit every new consumer grant. This
-    // personal-data product requires a Key whose scopes were chosen explicitly.
+  async #fileDatasetAccess(context, dataset) {
+    // Legacy dynamic Keys silently inherit every new consumer grant. These
+    // personal-data products require a Key whose scopes were chosen explicitly.
     assert(context.apiKey?.scopeMode === 'snapshot', 403, 'snapshot_key_required',
-      'Twitter 用户邮箱只接受显式授权范围的 Key；请在 API Keys 中调整 Key 权限后重试')
-    const policy = await this.#storedPlatformPolicy(context, TWITTER_USER_EMAIL.PLATFORM, 'Twitter user email')
+      `${dataset.label}只接受显式授权范围的 Key；请在 API Keys 中调整 Key 权限后重试`)
+    const policy = await this.#storedPlatformPolicy(context, dataset.platform, dataset.label)
     const capabilities = await this.#effectiveCapabilityGrants(context)
-    assert(capabilities.includes(TWITTER_USER_EMAIL.SEARCH_CAPABILITY), 403, 'capability_not_granted',
-      'Twitter user-email search is not granted', { capability: TWITTER_USER_EMAIL.SEARCH_CAPABILITY })
-    assert(this.twitterUserEmail, 503, 'twitter_user_email_unavailable', 'Twitter user-email dictionary is unavailable')
+    assert(capabilities.includes(dataset.searchCapability), 403, 'capability_not_granted',
+      `${dataset.label} search is not granted`, { capability: dataset.searchCapability })
+    assert(this.fileDatasets[dataset.key], 503, `${dataset.platform}_unavailable`, `${dataset.label} is unavailable`)
     return policy
   }
 
-  async twitterUserEmailMetadata(context) {
-    const policy = await this.#twitterUserEmailAccess(context)
-    return this.#meterStoredRead(context, TWITTER_USER_EMAIL.PLATFORM, policy, {
-      path: TWITTER_USER_EMAIL.METADATA_PATH,
+  #fileDataset(key) {
+    const dataset = fileDataset(key)
+    assert(dataset, 404, 'not_found', 'Unknown data product')
+    return dataset
+  }
+
+  async fileDatasetMetadata(context, key) {
+    const dataset = this.#fileDataset(key)
+    const policy = await this.#fileDatasetAccess(context, dataset)
+    return this.#meterStoredRead(context, dataset.platform, policy, {
+      path: dataset.metadataPath,
       fingerprintBody: {},
-      operation: () => this.twitterUserEmail.metadata(),
+      operation: () => this.fileDatasets[key].metadata(),
     })
   }
 
-  async twitterUserEmailSearch(context, body) {
-    const policy = await this.#twitterUserEmailAccess(context)
-    const request = normalizeTwitterUserEmailRequest(body)
-    return this.#meterStoredRead(context, TWITTER_USER_EMAIL.PLATFORM, policy, {
-      path: TWITTER_USER_EMAIL.SEARCH_PATH,
+  async fileDatasetSearch(context, key, body) {
+    const dataset = this.#fileDataset(key)
+    const policy = await this.#fileDatasetAccess(context, dataset)
+    const request = FILE_DATASET_REQUESTS[key](body)
+    const search = this.fileDatasets[key]
+    return this.#meterStoredRead(context, dataset.platform, policy, {
+      path: dataset.searchPath,
       // HMAC only: neither usage evidence nor request snapshots keep the query.
-      fingerprintBody: this.twitterUserEmail.fingerprint(request),
-      operation: () => this.twitterUserEmail.search(context, request),
+      fingerprintBody: search.fingerprint(request),
+      operation: () => search.search(context, request),
     })
+  }
+
+  async twitterUserEmailMetadata(context) {
+    return this.fileDatasetMetadata(context, 'twitter-user-email')
+  }
+
+  async twitterUserEmailSearch(context, body) {
+    return this.fileDatasetSearch(context, 'twitter-user-email', body)
   }
 
   async virtualSupermarketMetadata(context) {

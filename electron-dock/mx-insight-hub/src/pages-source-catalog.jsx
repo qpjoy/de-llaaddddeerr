@@ -128,6 +128,7 @@ const JUSTONE_CONNECTED_SOURCE_KEYS = new Set([
   'source-catalog-0058',
   'source-catalog-0059',
   'source-catalog-0060',
+  'source-catalog-0062',
   'source-catalog-0064',
   'source-catalog-0073',
 ])

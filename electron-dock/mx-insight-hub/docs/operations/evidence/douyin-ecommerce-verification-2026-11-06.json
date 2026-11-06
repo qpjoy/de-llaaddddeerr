@@ -1,0 +1,232 @@
+{
+  "verifiedOn": "2026-11-06",
+  "timezone": "Asia/Shanghai",
+  "scope": "Existing local Hub adapters, direct JustOne calls using the existing Night-All credential; no production Hub admission, customer billing, deployment or H2I changes.",
+  "authorizedMaximumDispatches": 2,
+  "actualDispatches": 2,
+  "retryCount": 0,
+  "successfulBusinessResponses": 2,
+  "billingBasis": "Both responses code=0; classified as supplier-billed by the documented JustOne rule. Exact debits were not reconciled against a supplier account statement.",
+  "officialContracts": {
+    "date": "2026-11-06",
+    "scope": "Public JustOne OpenAPI documents only; zero paid or data API requests",
+    "endpointCount": 6,
+    "results": [
+      {
+        "key": "j.api_428cf0b9fc142162",
+        "sourceUrl": "https://docs.justoneapi.com/openapi/douyin-e-commerce/item-details-v2-zh.json",
+        "checkedDate": "2026-11-06",
+        "httpStatus": 200,
+        "path": "/api/douyin-ec/get-item-detail/v2",
+        "method": "GET",
+        "parameters": [
+          {
+            "name": "itemId",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "parametersMatch": true,
+        "responseDataSchema": {},
+        "sha256": "1972e20a32567f6f52af00e247a95efd3cb0592262ed1fef47c65161fbd8e3f9"
+      },
+      {
+        "key": "j.api_6cbe0d4d445175a6",
+        "sourceUrl": "https://docs.justoneapi.com/openapi/douyin-e-commerce/product-sku-info-v1-zh.json",
+        "checkedDate": "2026-11-06",
+        "httpStatus": 200,
+        "path": "/api/douyin-ec/get-item-sku-info/v1",
+        "method": "GET",
+        "parameters": [
+          {
+            "name": "itemId",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "parametersMatch": true,
+        "responseDataSchema": {},
+        "sha256": "2a341237dc1b6c085bcf31add6ed8d5b3dd771b7e8b8a62dcbe5d3dc5a9ae0a5"
+      },
+      {
+        "key": "j.api_da0ada7f35b91baa",
+        "sourceUrl": "https://docs.justoneapi.com/openapi/douyin-e-commerce/product-sku-info-v2-zh.json",
+        "checkedDate": "2026-11-06",
+        "httpStatus": 200,
+        "path": "/api/douyin-ec/get-item-sku-info/v2",
+        "method": "GET",
+        "parameters": [
+          {
+            "name": "itemId",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "parametersMatch": true,
+        "responseDataSchema": {},
+        "sha256": "304cf115730bfb1e4fb295f6463523b6c6c49ebebbcba6ce648cb460a486d258"
+      },
+      {
+        "key": "j.api_f6ea6dfd00969e8f",
+        "sourceUrl": "https://docs.justoneapi.com/openapi/douyin-e-commerce/product-search-v1-zh.json",
+        "checkedDate": "2026-11-06",
+        "httpStatus": 200,
+        "path": "/api/douyin-ec/search-item-list/v1",
+        "method": "GET",
+        "parameters": [
+          {
+            "name": "keyword",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "page",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "searchId",
+            "required": false,
+            "type": "string",
+            "default": ""
+          }
+        ],
+        "parametersMatch": true,
+        "responseDataSchema": {},
+        "sha256": "cec4b5a77380158cc888674fac3264bad3e433cd3fe78cd5ec7038adb208932e"
+      },
+      {
+        "key": "j.api_906cfcd9d2654192",
+        "sourceUrl": "https://docs.justoneapi.com/openapi/douyin-e-commerce/item-comments-v1-zh.json",
+        "checkedDate": "2026-11-06",
+        "httpStatus": 200,
+        "path": "/api/douyin-ec/get-item-comments/v1",
+        "method": "GET",
+        "parameters": [
+          {
+            "name": "itemId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "page",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "parametersMatch": true,
+        "responseDataSchema": {},
+        "sha256": "b7b48dc975a3fa4b7385a15495f08d42e3d79d5a9cd93fc8086ea3dc6b96165d"
+      },
+      {
+        "key": "j.api_9278fa14334f6fb2",
+        "sourceUrl": "https://docs.justoneapi.com/openapi/douyin-e-commerce/shop-product-list-v1-zh.json",
+        "checkedDate": "2026-11-06",
+        "httpStatus": 200,
+        "path": "/api/douyin-ec/get-shop-item-list/v1",
+        "method": "GET",
+        "parameters": [
+          {
+            "name": "shopId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "page",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "parametersMatch": true,
+        "responseDataSchema": {},
+        "sha256": "8319df97403876f982d762187d65bb6be3af09d6a535d0a3337e811b4e097506"
+      }
+    ]
+  },
+  "samples": [
+    {
+      "operation": "search",
+      "endpoint": "/api/douyin-ec/search-item-list/v1",
+      "method": "GET",
+      "capturedAt": "2026-11-06T02:30:26.275Z",
+      "httpStatus": null,
+      "httpStatusClass": "2xx",
+      "httpEvidence": "Adapter accepted successful HTTP envelope; exact HTTP status was not separately retained",
+      "businessCode": 0,
+      "upstreamRequestId": "ab4493888deb41ebb6a578d8dae8d512",
+      "responseBytes": 186997,
+      "responseSha256": "6da2c7a8a15b549fe2a1f2aadccf330ddb98609edb0f4847a5924ed10097411d",
+      "hubAdapterAccepted": true,
+      "dispatchAttempts": 1
+    },
+    {
+      "operation": "detail",
+      "endpoint": "/api/douyin-ec/get-item-detail/v2",
+      "method": "GET",
+      "capturedAt": "2026-11-06T02:31:15.569Z",
+      "httpStatus": 200,
+      "httpStatusClass": "2xx",
+      "httpEvidence": "Captured response.status=200",
+      "businessCode": 0,
+      "upstreamRequestId": "9d57426502a54f3795c9fb7c5fd4f483",
+      "responseBytes": 5288,
+      "responseSha256": "9dae1b5d86cc33f869cab9e108dba179bf1876e17d7e6f9578664e6635f4d3e8",
+      "hubAdapterAccepted": true,
+      "dispatchAttempts": 1
+    }
+  ],
+  "offlineReplay": {
+    "archiveHashesVerified": true,
+    "networkCalls": 0,
+    "injectedResponses": 2,
+    "search": {
+      "items": 30,
+      "discarded": 0,
+      "exactIdsAndLinks": true,
+      "trimmedTitlesAndImages": true,
+      "missingPricesPreserved": true,
+      "nextRequestMappingValid": true,
+      "liveSecondPageVerified": false
+    },
+    "detail": {
+      "sameProduct": true,
+      "rawBusinessDataPreserved": true,
+      "images": 5,
+      "bigImages": 7,
+      "shopIdAndNamePresent": true,
+      "pricePresent": false,
+      "moduleCodes": {
+        "promotion_data": -1,
+        "comment_data": -1,
+        "author_data": -1,
+        "content_data": -1,
+        "hot_content_data": -1,
+        "shop_product_data": -1,
+        "material_data": -1
+      }
+    }
+  },
+  "searchFields": {
+    "rawRows": 30,
+    "projectedRows": 30,
+    "discardedRows": 0,
+    "exactStringId": 30,
+    "title": 30,
+    "webUrl": 30,
+    "images": 30,
+    "pricesProvided": 0,
+    "shopProvided": 0,
+    "hasMore": true,
+    "continuationPresent": true,
+    "liveSecondPageVerified": false
+  },
+  "notVerified": [
+    "Live SKU V1",
+    "Live SKU V2",
+    "Live comments",
+    "Live shop product list",
+    "Live second search page",
+    "Current production Hub key/grants/prices/breaker/credential alignment",
+    "Exact supplier account debit"
+  ]
+}

@@ -1,16 +1,18 @@
-// Dedicated worker for the Twitter user-email dictionary ("Twitter 用户清洗计划").
+// Dedicated worker for every file dataset ("文件数据集" cleaning tasks:
+// Twitter 用户清洗计划, 邮箱库清洗计划, 手机号库清洗计划, ...).
 //
-// It is the only Hub process that streams the large source file. It writes
+// It is the only Hub process that streams the large source files. It writes
 // PostgreSQL only (schema account_dictionary): no outbox, Elasticsearch, HanLP
 // or embeddings, and it never touches Launcher, login or network paths. One
-// session advisory lock keeps it single-flight even if scaled above one Pod.
+// session advisory lock keeps it single-flight even if scaled above one Pod,
+// and it processes one dataset version at a time.
 import { hostname } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import pg from 'pg'
 import { loadConfig } from '../config.mjs'
 import { ServerFileReader, parseServerFileRoots } from '../ingest/external/server-files.mjs'
-import { TwitterUserEmailStore } from '../data/twitter-user-email/store.mjs'
-import { TwitterUserEmailEngine, runDictionaryWorker } from '../data/twitter-user-email/engine.mjs'
+import { runDictionaryWorker } from '../data/file-datasets/engine.mjs'
+import { createFileDatasetEngines } from '../data/file-datasets/services.mjs'
 
 export async function main(config = loadConfig()) {
   if (config.storeDriver !== 'postgres') throw new Error('dictionary worker requires MX_INSIGHT_STORE=postgres')
@@ -33,10 +35,9 @@ export async function main(config = loadConfig()) {
     // drops file roots; this worker reads the same deployment allowlist itself.
     const roots = config.serverFiles?.roots?.length ? config.serverFiles.roots : parseServerFileRoots(process.env.MX_INSIGHT_SERVER_FILE_ROOTS)
     const fileReader = await ServerFileReader.create({ roots })
-    const store = new TwitterUserEmailStore(pool)
-    const engine = new TwitterUserEmailEngine({ pool, store, fileReader, workerId: `${hostname()}:${process.pid}` })
-    console.log('[dictionary] worker started (PostgreSQL only; no Elasticsearch projection)')
-    await runDictionaryWorker({ pool, engine, signal: controller.signal })
+    const engines = createFileDatasetEngines({ pool, fileReader, workerId: `${hostname()}:${process.pid}` })
+    console.log(`[dictionary] worker started for ${engines.length} file datasets (PostgreSQL only; no Elasticsearch projection)`)
+    await runDictionaryWorker({ pool, engines, signal: controller.signal })
   } finally {
     process.removeListener('SIGINT', stop)
     process.removeListener('SIGTERM', stop)

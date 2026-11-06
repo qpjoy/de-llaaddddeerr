@@ -1,21 +1,31 @@
-// PostgreSQL state for the Twitter user-email dictionary.
+// PostgreSQL state of one file dataset (schema account_dictionary).
 //
-// Each version owns two hash-partitioned tables named from its integer id:
-//   stage_v<N>     raw accepted pairs while importing (dropped per partition
-//                  as soon as that partition is deduplicated)
+// Each version owns two hash-partitioned tables named from its integer id
+// (ids come from one sequence, so names never collide across datasets):
+//   stage_v<N>     raw accepted records while importing (dropped per
+//                  partition as soon as that partition is deduplicated)
 //   mappings_v<N>  deduplicated, indexed, read-only rows that searches use
 // Publishing only moves datasets.active_version_id; no table is rewritten.
 import { AppError } from '../../core/errors.mjs'
-import { DATASET_KEY, PARSER_VERSION, PARTITION_COUNT } from './contract.mjs'
 
 export const SCHEMA = 'account_dictionary'
-// Session advisory lock held by the single active dictionary worker.
+// Session advisory lock held by the single active dictionary worker process.
 export const WORKER_LOCK = Object.freeze([0x4d580178, 1])
+// Session advisory lock (class, dataset hash) held while one dataset's
+// version is processed or its tables are dropped.
+export const DATASET_LOCK_CLASS = 0x4d58017a
 // Transaction advisory locks (class, slot) bounding concurrent slow queries.
 export const SLOW_LANE_LOCK_CLASS = 0x4d580179
 export const OPEN_STAGES = Object.freeze(['pending', 'verifying', 'importing', 'building', 'validating', 'ready'])
 
-export function versionTables(versionId, partitions = PARTITION_COUNT) {
+// FNV-1a: a stable 31-bit lock key per dataset.
+export function datasetLock(datasetKey) {
+  let hash = 0x811c9dc5
+  for (const char of Buffer.from(datasetKey)) hash = Math.imul(hash ^ char, 0x01000193) >>> 0
+  return Object.freeze([DATASET_LOCK_CLASS, hash & 0x7fffffff])
+}
+
+export function versionTables(versionId, partitions = 16) {
   if (!Number.isSafeInteger(versionId) || versionId <= 0) throw new Error('Invalid dictionary version id')
   if (!Number.isSafeInteger(partitions) || partitions < 1 || partitions > 64) throw new Error('Invalid dictionary partition count')
   const base = `v${versionId}`
@@ -45,6 +55,9 @@ export function versionView(row) {
       relativePath: row.source_relative_path,
       filename: row.source_filename,
       bytes: count(row.source_bytes),
+      // Set when the content is one file inside a .zip archive.
+      entry: row.source_entry ?? null,
+      entryBytes: count(row.source_entry_bytes ?? null),
       expectedSha256: row.expected_sha256,
       sha256: row.source_sha256,
       shaBytes: count(row.sha_bytes),
@@ -85,7 +98,7 @@ export function datasetView(row) {
     owner: row.owner,
     purpose: row.purpose,
     legalBasis: row.legal_basis,
-    source: row.source_root_id ? { rootId: row.source_root_id, relativePath: row.source_relative_path } : null,
+    source: row.source_root_id ? { rootId: row.source_root_id, relativePath: row.source_relative_path, entry: row.source_entry ?? null } : null,
     expectedSha256: row.expected_sha256,
     activeVersionId: row.active_version_id,
     previousVersionId: row.previous_version_id,
@@ -95,27 +108,30 @@ export function datasetView(row) {
   }
 }
 
-export class TwitterUserEmailStore {
-  constructor(pool, { datasetKey = DATASET_KEY, partitions = PARTITION_COUNT } = {}) {
-    if (!pool) throw new Error('TwitterUserEmailStore requires a PostgreSQL pool')
+export class FileDatasetStore {
+  constructor(pool, { datasetKey, kind, partitions = kind?.partitions } = {}) {
+    if (!pool) throw new Error('FileDatasetStore requires a PostgreSQL pool')
+    if (!datasetKey || !kind) throw new Error('FileDatasetStore requires a dataset key and storage kind')
     this.pool = pool
     this.datasetKey = datasetKey
+    this.kind = kind
     this.partitions = partitions
+    this.lock = datasetLock(datasetKey)
   }
 
   async dataset(client = this.pool) {
     const { rows } = await client.query(`SELECT * FROM ${SCHEMA}.datasets WHERE dataset_key = $1`, [this.datasetKey])
-    if (!rows[0]) throw new AppError(503, 'twitter_user_email_unavailable', 'Twitter user-email dataset is not migrated')
+    if (!rows[0]) throw new AppError(503, 'file_dataset_unavailable', `File dataset ${this.datasetKey} is not migrated`)
     return rows[0]
   }
 
-  async configureSource({ rootId, relativePath, expectedSha256, owner, purpose, legalBasis, updatedBy }) {
+  async configureSource({ rootId, relativePath, entry = null, expectedSha256, owner, purpose, legalBasis, updatedBy }) {
     const { rows } = await this.pool.query(
       `UPDATE ${SCHEMA}.datasets SET source_root_id = $2, source_relative_path = $3, expected_sha256 = $4,
          owner = coalesce($5, owner), purpose = coalesce($6, purpose), legal_basis = coalesce($7, legal_basis),
-         updated_by = $8, revision = revision + 1, updated_at = now()
+         updated_by = $8, source_entry = $9, revision = revision + 1, updated_at = now()
        WHERE dataset_key = $1 RETURNING *`,
-      [this.datasetKey, rootId, relativePath, expectedSha256, owner ?? null, purpose ?? null, legalBasis ?? null, updatedBy],
+      [this.datasetKey, rootId, relativePath, expectedSha256, owner ?? null, purpose ?? null, legalBasis ?? null, updatedBy, entry],
     )
     return rows[0]
   }
@@ -149,15 +165,17 @@ export class TwitterUserEmailStore {
     return rows
   }
 
-  async createVersion({ file, expectedSha256, createdBy }) {
+  async createVersion({ file, entry = null, expectedSha256, createdBy }) {
     try {
       const { rows } = await this.pool.query(
         `INSERT INTO ${SCHEMA}.versions (
            dataset_key, source_root_id, source_relative_path, source_filename, source_bytes,
-           source_identity, source_mtime_ns, expected_sha256, parser_version, partition_count, created_by
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+           source_identity, source_mtime_ns, expected_sha256, parser_version, partition_count, created_by,
+           source_entry, source_entry_bytes
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
         [this.datasetKey, file.rootId, file.relativePath, file.filename, file.bytes,
-          file.identity, file.mtimeNs, expectedSha256, PARSER_VERSION, this.partitions, createdBy],
+          file.identity, file.mtimeNs, expectedSha256, this.kind.parserVersion, this.partitions, createdBy,
+          entry?.name ?? null, entry?.size ?? null],
       )
       return rows[0]
     } catch (error) {
@@ -196,9 +214,9 @@ export class TwitterUserEmailStore {
   }
 
   /**
-   * Discard an unpublished version. When no worker holds the dictionary lock
-   * the tables are dropped immediately; otherwise the running worker drops
-   * them after its current batch or partition step.
+   * Discard an unpublished version. When no worker is processing this
+   * dataset the tables are dropped immediately; otherwise the running worker
+   * drops them after its current batch or partition step.
    */
   async requestDiscard(versionId) {
     const { rows } = await this.pool.query(
@@ -207,19 +225,19 @@ export class TwitterUserEmailStore {
       [versionId, this.datasetKey, OPEN_STAGES],
     )
     if (!rows[0]) throw new AppError(409, 'dictionary_not_discardable', 'Only an unpublished version can be discarded')
-    const dropped = await this.withWorkerLock(client => this.discardVersion(client, rows[0]))
+    const dropped = await this.withDatasetLock(client => this.discardVersion(client, rows[0]))
     return dropped.acquired ? await this.version(versionId) : rows[0]
   }
 
-  async withWorkerLock(fn) {
+  async withDatasetLock(fn) {
     const client = await this.pool.connect()
     try {
-      const { rows } = await client.query('SELECT pg_try_advisory_lock($1, $2) AS acquired', WORKER_LOCK)
+      const { rows } = await client.query('SELECT pg_try_advisory_lock($1, $2) AS acquired', this.lock)
       if (!rows[0]?.acquired) return { acquired: false }
       try {
         return { acquired: true, value: await fn(client) }
       } finally {
-        await client.query('SELECT pg_advisory_unlock($1, $2)', WORKER_LOCK).catch(() => {})
+        await client.query('SELECT pg_advisory_unlock($1, $2)', this.lock).catch(() => {})
       }
     } finally {
       client.release()

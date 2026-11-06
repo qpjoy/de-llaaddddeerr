@@ -1,5 +1,6 @@
 import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
 import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
+import { FILE_DATASETS } from './file-datasets.mjs'
 // Console visibility follows current consumer grants, independent of key issue/binding dates.
 import nativeServiceCapabilities from './native-service-access.json' with { type: 'json' }
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../server/contracts/night-all-legacy.mjs'
@@ -25,7 +26,7 @@ export const PRODUCT_ACCESS = {
   '/data-products/xiaohongshu-inspiration': { platform: 'xiaohongshu', any: ['social.inspiration.list'], docs: 'xiaohongshu-inspiration' },
   '/data-products/enterprise': { platform: 'enterprise', any: ['enterprise.query'], docs: 'enterprise' },
   '/data-products/ip-risk': { platform: 'ip_risk', any: ['ip.risk.query', 'ip.risk.query.v2', 'ip.risk.subscription.query'], docs: 'ip-risk' },
-  '/data-products/twitter-user-email': { platform: 'twitter_user_email', any: ['twitter.user_email.search'], docs: 'twitter-user-email' },
+  ...Object.fromEntries(FILE_DATASETS.map(dataset => [dataset.productPath, { platform: dataset.platform, any: [dataset.searchCapability], docs: dataset.docsKey }])),
   '/source-catalog': { platform: 'source_catalog', docs: 'source-catalog' },
   '/data-products/telegram': { platform: 'telegram', docs: 'telegram' },
   '/data-products/ecommerce-treasure-box': { platform: 'ecommerce', any: ['ecommerce.products.search', ...nativeServiceCapabilities.ecommerce], docs: 'ecommerce-treasure-box' },
