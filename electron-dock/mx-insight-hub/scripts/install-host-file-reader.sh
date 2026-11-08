@@ -3,12 +3,34 @@ set -euo pipefail
 
 # Only the explicit Internal install command enters here. The optional helper
 # is socket-activated; installing it never restarts Hub Pods or other services.
+verify_host_file_reader_socket() {
+  /usr/bin/python3 -I - "$1" <<'PY'
+import os
+import stat
+import sys
+
+try:
+    info = os.lstat(sys.argv[1])
+except OSError as error:
+    sys.exit('Cannot inspect the host reader socket: ' + error.strerror)
+mode = stat.S_IMODE(info.st_mode)
+if not stat.S_ISSOCK(info.st_mode) or (info.st_uid, info.st_gid, mode) != (0, 1000, 0o660):
+    sys.exit('Expected a Unix socket with uid=0 gid=1000 mode=0660; found uid={} gid={} mode={:04o} type={}'.format(
+        info.st_uid, info.st_gid, mode, stat.filemode(info.st_mode)[0]))
+PY
+}
+
+host_file_reader_diagnostics() {
+  systemctl status --no-pager --full "$1.socket" "$1.service" >&2 || true
+  journalctl -b -u "$1.socket" -u "$1.service" --no-pager -n 25 >&2 || true
+}
+
 install_host_file_reader() (
   local prefix="$1" source="$2"
   local name=mx-insight-file-reader
   local lib="$prefix/usr/local/lib/mx-insight-hub" units="$prefix/etc/systemd/system"
   local socket_dir="$prefix/var/lib/mx-insight-hub/file-reader-socket"
-  local pending="$lib/.host-file-reader-restart-pending" i unit probe_status entry
+  local pending="$lib/.host-file-reader-restart-pending" i unit probe_status entry status
   local sources=("$source/scripts/host-file-reader.py" "$source/deploy/systemd/$name.service" "$source/deploy/systemd/$name.socket")
   local targets=("$lib/host-file-reader.py" "$units/$name.service" "$units/$name.socket")
 
@@ -47,14 +69,24 @@ install_host_file_reader() (
   for unit in "$name.service" "$name.socket"; do
     if systemctl is-failed --quiet "$unit"; then systemctl reset-failed "$unit"; fi
   done
-  systemctl enable --now "$name.socket"
-  systemctl is-active --quiet "$name.socket"
+  systemctl enable --now "$name.socket" &&
+    systemctl is-active --quiet "$name.socket" &&
+    verify_host_file_reader_socket "$socket_dir/reader.sock" || {
+      status=$?
+      host_file_reader_diagnostics "$name"
+      return "$status"
+    }
   # Exercise activation and registry startup without opening any data file.
   probe_status="$(curl --disable --silent --show-error --noproxy '*' --max-time 10 \
     --unix-socket "$socket_dir/reader.sock" --output /dev/null --write-out '%{http_code}' \
-    --header 'Content-Type: application/json' --data '{}' http://localhost/open)"
+    --header 'Content-Type: application/json' --data '{}' http://localhost/open)" || {
+      status=$?
+      host_file_reader_diagnostics "$name"
+      return "$status"
+    }
   if [ "$probe_status" != 400 ]; then
-    printf 'Host file reader activation probe returned HTTP %s; inspect journalctl -u %s.service\n' "$probe_status" "$name" >&2
+    printf 'Host file reader activation probe returned HTTP %s\n' "$probe_status" >&2
+    host_file_reader_diagnostics "$name"
     return 1
   fi
   rm -f -- "$pending"

@@ -3,8 +3,10 @@ Description=MX Insight Hub host file reader socket
 
 [Socket]
 ListenStream=/var/lib/mx-insight-hub/file-reader-socket/reader.sock
-SocketGroup=1000
 SocketMode=0660
+# systemd 239 resolves SocketGroup through NSS, even for a numeric ID.
+# Set the Pods' numeric GID on each newly bound socket before activation.
+ExecStartPost=/usr/bin/chgrp +1000 /var/lib/mx-insight-hub/file-reader-socket/reader.sock
 DirectoryMode=0755
 RemoveOnStop=yes
 

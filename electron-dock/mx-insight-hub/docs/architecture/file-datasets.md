@@ -127,6 +127,11 @@ systemctl is-active mx-insight-file-reader.socket
 宿主服务由 systemd 按请求激活。Admin 和 dictionary 通过专用 Unix 套接字访问它。
 需要在备份或迁移主机时保留 `/var/lib/mx-insight-file-reader` 的引用索引，以便已保存的计划能继续找到原文件。
 
+旧版安装若出现 `status=216/GROUP` 且 `getent group 1000` 无输出，原因是 systemd 239
+在启动 socket 时尝试解析宿主组。同步新版代码后，重新执行 `sudo bash scripts/manage.sh install-host-file-reader`。
+新版 unit 在每次绑定后直接设置数字 GID 1000。安装器会检查 socket 的属主、属组和权限
+为 `0:1000:660`，并验证读取服务能响应。修复这项宿主安装故障只需重跑安装命令。
+
 ### 运行时使用任意数据盘
 
 1. 在「手机号库清洗计划」的「服务器路径」中粘贴真实绝对路径，例如
