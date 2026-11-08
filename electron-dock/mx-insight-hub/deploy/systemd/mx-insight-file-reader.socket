@@ -1,0 +1,12 @@
+[Unit]
+Description=MX Insight Hub host file reader socket
+
+[Socket]
+ListenStream=/var/lib/mx-insight-hub/file-reader-socket/reader.sock
+SocketGroup=1000
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

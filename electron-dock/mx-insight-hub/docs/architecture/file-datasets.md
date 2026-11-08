@@ -114,31 +114,32 @@
 
 ## 运维
 
-文件已放在配置的受控目录时，可直接粘贴它的真实绝对路径，例如
-`/shared_dir/imports/email-phone.zip`。Admin 和 dictionary 都需要能读取文件。
+### 首次启用宿主机文件读取
 
-若 Internal 上的文件在 `/data/shared-archives-20260909/email-phone.zip`，可以原地读取。
-先检查当前根目录配置，再在 Hub 的 `.env.internal` 中给原 JSON 对象增加
-`"email-phone-archive":"/data/shared-archives-20260909"`，保留所有原有 ID 和路径。
+在 Internal 主机同步新版 Hub 代码，在 `electron-dock/mx-insight-hub` 目录执行：
 
 ```bash
-kubectl -n mx-insight-hub get configmap mx-insight-hub-config \
-  -o jsonpath='{.data.MX_INSIGHT_SERVER_FILE_ROOTS}{"\n"}'
-```
-
-在 Internal 的 `electron-dock/mx-insight-hub` 目录使用更新后的代码发布。它将该目录中的
-`email-phone.zip` 作为单个只读文件挂入 Admin 和 dictionary。该 ZIP 应是容器用户可读的普通文件，
-并且路径中不能含软链接。可以在同一台主机验证两个容器均可读取它：
-
-```bash
+sudo bash scripts/manage.sh install-host-file-reader
 MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
-archive=/data/shared-archives-20260909/email-phone.zip
-kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- test -r "$archive"
-kubectl -n mx-insight-hub exec deployment/mx-insight-hub-dictionary -c dictionary -- test -r "$archive"
+systemctl is-active mx-insight-file-reader.socket
 ```
 
-在「手机号库清洗计划」粘贴上述绝对路径，压缩包内文件填 `phone_only.txt`，点击「校验并保存」。
-也可清空绝对路径，填根目录 ID `email-phone-archive` 和相对路径 `email-phone.zip`。
-邮箱库使用同一 ZIP 中的 `email_only.txt`。期望指纹可用 `sha256sum` 对整个 ZIP 计算。
-「开启」才会创建清洗版本，完成核对后可手动发布。查询端需要相应的数据域和 Key 授权。
-如需换包，待当前清洗版本结束后再替换宿主文件并重新部署这两个 Pod，使单文件挂载指向新文件，再校验新版本。
+宿主服务由 systemd 按请求激活。Admin 和 dictionary 通过专用 Unix 套接字访问它。
+需要在备份或迁移主机时保留 `/var/lib/mx-insight-file-reader` 的引用索引，以便已保存的计划能继续找到原文件。
+
+### 运行时使用任意数据盘
+
+1. 在「手机号库清洗计划」的「服务器路径」中粘贴真实绝对路径，例如
+   `/data/shared-archives-20260909/email-phone.zip`。包内文件填 `phone_only.txt`。
+2. 点击「校验并保存」。服务按需打开文件，Hub 保存文件引用和 ZIP 条目。下一份文件在其他已挂载磁盘上时，直接换路径即可；无需登记目录、复制 ZIP、编辑 `.env.internal` 或重新发布。
+3. 点击「开启」创建版本。worker 校验整个源文件的 SHA-256 并流式读取选中的条目。
+   原文件必须在该版本读取期间保持可访问且内容稳定；改名或替换源文件后，请重新校验并开启新版本。
+
+宿主服务以独立非 root 身份运行，只接受普通数据文件和数据集支持的扩展名，不跟随软链接。磁盘需要已经挂载在 Internal 主机上；服务身份需要能够进入上级目录并读取文件。系统目录、隐藏路径和伪文件系统受限制。
+遇到 `server_file_host_unavailable` 时检查 `systemctl status mx-insight-file-reader.socket mx-insight-file-reader.service`；遇到 `server_file_unreadable` 时检查文件及其上级目录的权限。首次请求前，socket 可以已激活而 service 尚未启动。
+
+### 已有的挂载来源
+
+已保存的 `internal`、`shared-dir` 或 `email-phone-archive` 来源继续按原设置读取。
+清洗计划仍支持用根目录 ID 和相对路径指定已有来源。通用服务器文件导入继续使用
+`MX_INSIGHT_SERVER_FILE_ROOTS`。文件数据集的宿主机读取只用于清洗管理操作与 dictionary worker。

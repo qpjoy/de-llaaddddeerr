@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ArrowClockwise, ArrowCounterClockwise, Database, Pause, Play, Trash, UploadSimple, Warning } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { ErrorState, Field, Modal, StatusBadge, formatDate, formatNumber, useRemoteData } from './components.jsx'
-import { fileDataset } from '../shared/file-datasets.mjs'
+import { fileDataset, HOST_FILE_ROOT_ID } from '../shared/file-datasets.mjs'
 import { fileDatasetSourceError, initialFileDatasetSource } from './file-dataset-source-form.mjs'
 import './file-datasets.css'
 
@@ -48,14 +48,21 @@ export function pipelineStatus(pipeline) {
 // What the operator does before pressing 继续; the worker already retried
 // the transient ones on its own.
 const FAILURE_HINTS = {
-  server_file_unreadable: '确认 dictionary worker 的 Pod 有宿主机 group 10，且文件对该组可读（chmod 644）。',
+  server_file_unreadable: '检查读取账号对源文件的读权限和对上级目录的访问权限。',
+  server_file_host_unavailable: '在 Internal 主机检查 mx-insight-file-reader.socket 和 mx-insight-file-reader.service，恢复后点继续。',
   database_disk_full: 'mx-common PostgreSQL 所在的根盘已满：先腾出空间再点继续。',
   database_shared_memory_full: '自动重试已用完：PostgreSQL 的 /dev/shm 长时间被占满，等 Hub 高峰过去后点继续。',
   database_out_of_memory: '自动重试已用完：PostgreSQL 内存不足，等负载下降后点继续。',
   database_busy: '自动重试已用完：PostgreSQL 连接数已满，等负载下降后点继续。',
 }
 
-const sourceLabel = source => source ? `${source.rootId}:${source.relativePath}${source.entry ? ` › ${source.entry}` : ''}` : '尚未指定'
+const sourceLabel = source => {
+  if (!source) return '尚未指定'
+  const label = source.rootId === HOST_FILE_ROOT_ID
+    ? `${source.relativePath.split('/').at(-1)}（引用 ${source.relativePath.slice(0, 8)}）`
+    : `${source.rootId}:${source.relativePath}`
+  return source.entry ? `${label} › ${source.entry}` : label
+}
 const isZip = path => /\.zip$/i.test(String(path || '').trim())
 // Exact counts in the task control; the card uses compact numbers.
 const exact = value => new Intl.NumberFormat('zh-CN').format(Number(value || 0))
@@ -167,6 +174,7 @@ export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial,
   const [actionError, setActionError] = useState(null)
   const dataset = pipeline.dataset || {}
   const roots = pipeline.serverFiles?.roots || []
+  const hostPaths = pipeline.serverFiles?.hostPaths === true
   const [form, setForm] = useState(() => ({
     serverPath: '',
     ...initialFileDatasetSource(product, dataset, roots),
@@ -202,7 +210,7 @@ export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial,
       onRefresh?.()
     } catch (error) {
       if (error?.status === 401) onUnauthorized?.(error)
-      const displayed = fileDatasetSourceError(error, product, roots)
+      const displayed = fileDatasetSourceError(error, product, roots, hostPaths)
       setActionError(displayed)
       notify?.(displayed.message, 'error')
     } finally {
@@ -223,7 +231,10 @@ export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial,
         })
         const archive = saved?.archive
         setArchiveEntries(archive?.entries || [])
-        if (archive?.entry) setForm(current => ({ ...current, entry: archive.entry.name }))
+        const source = saved?.dataset?.source
+        if (source) setForm(current => current === form
+          ? { ...current, serverPath: '', rootId: source.rootId, relativePath: source.relativePath, entry: source.entry || '' }
+          : current)
       } catch (error) {
         if (error?.details?.entries) setArchiveEntries(error.details.entries)
         throw error
@@ -271,13 +282,15 @@ export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial,
 
         <section className="qp-panel">
           <h3>源文件</h3>
-          <p className="mih-tue-muted">格式：{product.sourceFormat}（{product.sourceExtensions.join(' / ')}）。可以直接填写服务器上的 .zip 路径：worker 不落地解压，边解压边读取所选文件，断点按解压后的字节记录，继续时重新解压并跳到断点（约每 GB 数秒）；.rar 等其他压缩格式需先在服务器解压。当前可用的根目录 ID：<code>{roots.map(root => root.rootId).join('、') || '未配置'}</code>。每个 ID 代表一个只读挂载目录。期望 SHA-256 不一致时 worker 会拒绝导入。正在进行的版本始终使用它开启时的文件。</p>
+          <p className="mih-tue-muted">格式：{product.sourceFormat}（{product.sourceExtensions.join(' / ')}）。ZIP 会按所选条目流式解压；其他压缩格式请先解压。{hostPaths ? '可直接粘贴 Internal 主机上数据文件的绝对路径，文件读取服务需要有读权限。' : `可用挂载根目录 ID：${roots.map(root => root.rootId).join('、') || '未配置'}。`}正在进行的版本继续使用开启时的源文件。</p>
           <form className="mih-form mih-form--grid" onSubmit={saveSource}>
-            <Field label="服务器路径（可选）" hint="填写后优先使用这个路径；留空时使用下方根目录 ID 和相对路径。">
-              <input className="qp-input" value={form.serverPath} placeholder="粘贴服务只读挂载内的绝对文件路径" onChange={event => setForm({ ...form, serverPath: event.target.value })} />
+            <Field label="服务器路径（可选）" hint={form.rootId === HOST_FILE_ROOT_ID ? '留空保留已保存的文件；粘贴新路径可更换。' : '填写后优先使用这个路径。'}>
+              <input className="qp-input" value={form.serverPath} placeholder={hostPaths ? '粘贴 Internal 主机上的绝对文件路径' : '粘贴服务只读挂载内的绝对文件路径'} onChange={event => setForm({ ...form, serverPath: event.target.value })} />
             </Field>
-            <Field label="根目录 ID" hint="填写上方列出的目录标识。"><input className="qp-input" value={form.rootId} onChange={event => setForm({ ...form, rootId: event.target.value })} /></Field>
-            <Field label="相对路径"><input className="qp-input" value={form.relativePath} onChange={event => setForm({ ...form, relativePath: event.target.value })} /></Field>
+            {!form.serverPath.trim() && form.rootId !== HOST_FILE_ROOT_ID ? <>
+              <Field label="根目录 ID" hint={`可用挂载：${roots.map(root => root.rootId).join('、') || '未配置'}`}><input className="qp-input" value={form.rootId} onChange={event => setForm({ ...form, rootId: event.target.value })} /></Field>
+              <Field label="相对路径"><input className="qp-input" value={form.relativePath} onChange={event => setForm({ ...form, relativePath: event.target.value })} /></Field>
+            </> : null}
             {zipSource ? <Field label="压缩包内文件" hint={archiveEntries.length ? `可选：${archiveEntries.filter(row => row.supported).map(row => row.name).join('、')}` : '留空时自动选择；校验后列出包内可用文件'}>
               <input className="qp-input" value={form.entry} list={`${datasetKey}-archive-entries`} spellCheck={false}
                 placeholder={product.defaultSource.entry || ''} onChange={event => setForm({ ...form, entry: event.target.value })} />

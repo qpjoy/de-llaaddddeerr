@@ -2,12 +2,17 @@
 // MX_INSIGHT_TEST_DATABASE_URL; it creates and drops its own database.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import pg from 'pg'
 import { ServerFileReader } from '../../server/ingest/external/server-files.mjs'
+import { createFileDatasetReader, HOST_FILE_ROOT_ID } from '../../server/data/file-datasets/host-reader.mjs'
 import { FileDatasetEngine, runDictionaryWorker } from '../../server/data/file-datasets/engine.mjs'
 import { createFileDatasetServices } from '../../server/data/file-datasets/services.mjs'
 import { versionTables } from '../../server/data/file-datasets/store.mjs'
@@ -19,7 +24,7 @@ import { buildZip } from '../fixtures/zip-writer.mjs'
 const connectionString = process.env.MX_INSIGHT_TEST_DATABASE_URL || ''
 const context = { tenant: { id: randomUUID() }, consumer: { id: randomUUID() }, apiKey: { id: randomUUID() } }
 
-async function setup(t) {
+async function setup(t, socketPath = null) {
   const admin = new pg.Pool({ connectionString, max: 2 })
   const database = `mx_fds_${randomUUID().replaceAll('-', '').slice(0, 12)}`
   await admin.query(`CREATE DATABASE ${database} TEMPLATE template0 ENCODING 'UTF8'`)
@@ -33,10 +38,10 @@ async function setup(t) {
   const root = join(directory, 'shared_dir')
   const archiveRoot = join(directory, 'shared-archives-20260909')
   await Promise.all([mkdir(root), mkdir(archiveRoot)])
-  const reader = await ServerFileReader.create({ roots: [
+  const reader = createFileDatasetReader(await ServerFileReader.create({ roots: [
     { rootId: 'test-root', path: root },
     { rootId: 'email-phone-archive', path: archiveRoot },
-  ] })
+  ] }), socketPath)
   const services = createFileDatasetServices({ pool, hmacKey: 'test-pepper-at-least-32-bytes-long!!', serverFileReader: reader, admin: true })
   t.after(async () => {
     await pool.end()
@@ -227,6 +232,49 @@ test('one worker handles an absolute-path phone archive and a concurrent discard
   assert.equal(Number(imported.unique_mappings), 2)
   const tables = versionTables(email.id, 4)
   assert.equal((await ctx.pool.query(`SELECT to_regclass('${tables.stage}') AS t`)).rows[0].t, null)
+})
+
+test('an operator can paste files from new directories at runtime and clean the selected host ZIP', {
+  skip: !connectionString || process.getuid?.() === 0,
+}, async t => {
+  const dir = await realpath(await mkdtemp('/tmp/mx-reader-'))
+  const socket = join(dir, 'reader.sock')
+  const host = spawn('python3', ['-I', fileURLToPath(new URL('../../scripts/host-file-reader.py', import.meta.url)),
+    '--socket', socket, '--state-dir', join(dir, 'state')], { stdio: ['ignore', 'ignore', 'inherit'] })
+  const exited = once(host, 'exit')
+  t.after(async () => {
+    host.kill('SIGTERM')
+    await exited
+    await rm(dir, { recursive: true, force: true })
+  })
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (host.exitCode !== null) assert.fail('host reader exited during startup')
+    if (await access(socket).then(() => true, () => false)) break
+    await delay(50)
+  }
+  await access(socket)
+  const ctx = await setup(t, socket)
+  const plan = ctx.pipelines['phone-directory']
+  assert.equal((await plan.get()).serverFiles.hostPaths, true)
+  const refs = []
+  for (const [name, line] of [['first', '+14155550123'], ['second', '+14155550124']]) {
+    const disk = join(dir, name)
+    await mkdir(disk)
+    const path = join(disk, 'list.zip')
+    await writeFile(path, buildZip([{ name: 'phone_only.txt', data: line + '\n' }]))
+    const saved = await plan.configure({ serverPath: path }, { updatedBy: 'test' })
+    assert.equal(saved.dataset.source.rootId, HOST_FILE_ROOT_ID)
+    assert.equal(saved.dataset.source.entry, 'phone_only.txt')
+    assert.ok(!JSON.stringify(saved).includes(dir))
+    refs.push(saved.dataset.source.relativePath)
+  }
+  assert.notEqual(refs[0], refs[1])
+  const version = await plan.action({ action: 'start' }, { by: 'test' })
+  assert.equal(await engineFor(ctx, 'phone-directory').runOpenVersion(), 'ready')
+  await plan.publish({ versionId: version.id }, { by: 'test' })
+  const search = query => ctx.searches['phone-directory'].search(context, normalizePhoneSearchRequest({ query }))
+  assert.deepEqual((await search('+14155550124')).items.map(item => item.phone), ['+14155550124'])
+  assert.equal((await search('+14155550123')).items.length, 0)
 })
 
 test('both datasets read in place from one .zip: default entries, pause/resume inside the archive', { skip: !connectionString }, async t => {

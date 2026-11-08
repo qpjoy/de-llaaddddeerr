@@ -7,6 +7,8 @@ import { openZipEntry, readZipDirectory } from '../../server/data/file-datasets/
 import { chooseEntry } from '../../server/data/file-datasets/source.mjs'
 import { readLineWindows } from '../../server/data/file-datasets/lines.mjs'
 import { buildZip } from '../fixtures/zip-writer.mjs'
+import { AppError } from '../../server/core/errors.mjs'
+import { publicFailure } from '../../server/data/file-datasets/engine.mjs'
 
 const lines = count => Array.from({ length: count }, (_, i) => `user${i}@example${i % 7}.com`).join('\n') + '\n'
 
@@ -99,4 +101,24 @@ test('entry choice: requested name, then the dataset default, then the only cand
   assert.throws(() => chooseEntry(both, { ...options, requested: 'nope.txt' }), error => error.code === 'archive_entry_not_found')
   assert.throws(() => chooseEntry(both, { ...options, requested: 'readme.md' }), error => error.code === 'unsupported_file_type')
   assert.throws(() => chooseEntry([entry('x.txt', { method: 9, methodName: 'Deflate64', supported: false })], options), error => error.code === 'archive_method_unsupported')
+})
+
+test('a lost host reader during ZIP inflation is retryable and a changed source stays failed', async t => {
+  const text = lines(250)
+  const { handle, bytes } = await withZip(t, buildZip([{ name: 'phone.txt', data: text }]))
+  const [entry] = await readZipDirectory(handle, bytes)
+  for (const code of ['source_changed', 'server_file_host_unavailable']) {
+    const failure = new AppError(code === 'source_changed' ? 409 : 503, code, 'fixture')
+    let interrupt = false
+    const reader = await openZipEntry({ read(...args) {
+      if (interrupt) throw failure
+      return handle.read(...args)
+    } }, entry)
+    interrupt = true
+    await assert.rejects(reader.read(0, 64), error => error === failure)
+    const classified = publicFailure(failure)
+    assert.equal(classified.code, code)
+    assert.equal(Boolean(classified.transient), code === 'server_file_host_unavailable')
+    await reader.close()
+  }
 })

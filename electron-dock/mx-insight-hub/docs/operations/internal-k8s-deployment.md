@@ -249,10 +249,11 @@ For a browser POST, inspect the JSON error code rather than treating every HTTP
 
 The Admin and dictionary Pods receive the read-only `/shared_dir` hostPath.
 Both use supplemental GID 10 (`wheel`) to read operator-owned files. Confirm
-the host group before moving this deployment to another node. A configured
-`email-phone-archive` root also mounts the single `email-phone.zip` file in
-those two Pods. See [file dataset operations](../architecture/file-datasets.md#运维)
-for the Internal configuration and readback commands.
+the host group before moving this deployment to another node. These two Pods
+also mount the socket directory for the optional Internal host file reader.
+Once installed, operators can paste a data file's absolute path at runtime, including on newly mounted disks.
+The existing `email-phone-archive` single-file mount is still supported.
+See [file dataset operations](../architecture/file-datasets.md#运维) for one-time setup and verification.
 
 The command is idempotent after an interrupted deployment. A migration Job is
 single-attempt with a 240-second active deadline. On timeout or interruption,

@@ -9,6 +9,8 @@
 export const FILE_DATASET_NAV_SECTION = 'file-datasets'
 export const FILE_DATASET_NAV_LABEL = '文件数据集'
 export const FILE_DATASET_NAV_DESCRIPTION = '服务器文件清洗入库 · 版本化查询'
+// '@' cannot start a deployment-defined import root ID.
+export const HOST_FILE_ROOT_ID = '@internal-host'
 
 const define = dataset => Object.freeze({
   ...dataset,

@@ -12,6 +12,7 @@ import pg from 'pg'
 import { loadConfig } from '../config.mjs'
 import { ServerFileReader, parseServerFileRoots } from '../ingest/external/server-files.mjs'
 import { runDictionaryWorker } from '../data/file-datasets/engine.mjs'
+import { createFileDatasetReader } from '../data/file-datasets/host-reader.mjs'
 import { createFileDatasetEngines } from '../data/file-datasets/services.mjs'
 
 export async function main(config = loadConfig()) {
@@ -34,7 +35,7 @@ export async function main(config = loadConfig()) {
     // Runs with MX_INSIGHT_LISTENER_MODE=public (no Admin token), where config
     // drops file roots; this worker reads the same deployment allowlist itself.
     const roots = config.serverFiles?.roots?.length ? config.serverFiles.roots : parseServerFileRoots(process.env.MX_INSIGHT_SERVER_FILE_ROOTS)
-    const fileReader = await ServerFileReader.create({ roots })
+    const fileReader = createFileDatasetReader(await ServerFileReader.create({ roots }))
     const engines = createFileDatasetEngines({ pool, fileReader, workerId: `${hostname()}:${process.pid}` })
     console.log(`[dictionary] worker started for ${engines.length} file datasets (PostgreSQL only; no Elasticsearch projection)`)
     await runDictionaryWorker({ pool, engines, signal: controller.signal })

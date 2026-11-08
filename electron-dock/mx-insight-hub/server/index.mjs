@@ -86,6 +86,7 @@ import { ExternalImporter } from './ingest/external/importer.mjs'
 import { DatabaseSourcePuller } from './ingest/external/database-source.mjs'
 import { SQLiteApiSourcePuller } from './ingest/external/sqlite-api-source.mjs'
 import { ServerFileReader } from './ingest/external/server-files.mjs'
+import { createFileDatasetReader } from './data/file-datasets/host-reader.mjs'
 import { createFileDatasetServices } from './data/file-datasets/services.mjs'
 import { TelegramMonitorSourcePreparer } from './ingest/telegram/source-preparer.mjs'
 import { createIdentityService } from './identity/index.mjs'
@@ -159,7 +160,7 @@ export async function createRuntime(config = loadConfig()) {
   // serves searches; Admin records cleaning-task intent; the dictionary
   // worker does the work.
   const fileDatasets = createFileDatasetServices({
-    pool, hmacKey: config.apiKeyPepper, serverFileReader, admin: config.listenerMode !== 'public',
+    pool, hmacKey: config.apiKeyPepper, serverFileReader: createFileDatasetReader(serverFileReader), admin: config.listenerMode !== 'public',
   })
   const databasePuller = config.storeDriver === 'postgres'
     ? new DatabaseSourcePuller({ store, queue })

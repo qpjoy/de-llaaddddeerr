@@ -417,6 +417,7 @@ Internal Kubernetes:
   bash scripts/manage.sh ops internal-production control-plane-preflight
                                          # 只读检查 Kubernetes API，无需 Hub 凭据
   bash scripts/manage.sh reindex-search  # 用当前 HanLP/jieba 重建可再生搜索投影
+  sudo bash scripts/manage.sh install-host-file-reader  # 安装宿主文件读取器，无需 .env
   bash scripts/manage.sh verify-data-path [api-key]
                                          # 端到端：search -> PG -> outbox -> ES
 
@@ -3580,6 +3581,9 @@ stop_hub_workloads() {
 
 main() {
   case "${1:-}" in
+    install-host-file-reader)
+      bash "${ROOT_DIR}/scripts/install-host-file-reader.sh"
+      ;;
     local)
       shift
       local_action "${1:-}"

@@ -1,0 +1,18 @@
+[Unit]
+Description=MX Insight Hub host file reader
+Requires=mx-insight-file-reader.socket
+After=mx-insight-file-reader.socket
+
+[Service]
+ExecStart=/usr/bin/python3 -I /usr/local/lib/mx-insight-hub/host-file-reader.py --state-dir /var/lib/mx-insight-file-reader
+DynamicUser=yes
+SupplementaryGroups=10
+StateDirectory=mx-insight-file-reader
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX

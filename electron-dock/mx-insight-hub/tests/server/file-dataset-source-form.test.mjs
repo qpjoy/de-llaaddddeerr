@@ -58,9 +58,17 @@ test('a rejected path explains the mounted IDs and relative-path input and prese
   const internal = fileDatasetSourceError(error, phone, roots('internal')).message
   assert.match(internal, /根目录 ID：internal。/u)
   assert.match(internal, /请将文件放在其中一个挂载目录内/u)
-  assert.match(internal, /启用只读挂载 email-phone-archive，部署后重新打开任务/u)
+  assert.match(internal, /启用宿主文件读取服务/u)
   assert.doesNotMatch(fileDatasetSourceError(error, twitter, roots('internal')).message, /email-phone-archive/u)
   assert.match(fileDatasetSourceError(error, phone, []).message, /未配置可读根目录/u)
   const missing = Object.assign(new Error('File not found'), { code: 'server_file_not_found' })
   assert.equal(fileDatasetSourceError(missing, phone, []), missing)
+})
+
+test('host-path connection and permission failures point to the host reader instead of a redeploy', () => {
+  const error = { code: 'server_file_host_unavailable', status: 503, requestId: 'request-5' }
+  assert.deepEqual(fileDatasetSourceError(error, phone, [], true), {
+    ...error, message: '连接不到 Internal 的文件读取服务。请在 Internal 主机检查 mx-insight-file-reader.socket 和 mx-insight-file-reader.service，恢复后重试。',
+  })
+  assert.match(fileDatasetSourceError({ code: 'server_file_unreadable' }, phone, [], true).message, /读权限/)
 })

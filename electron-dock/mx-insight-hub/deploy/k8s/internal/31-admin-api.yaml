@@ -134,6 +134,8 @@ spec:
               value: "18151"
             - name: MX_INSIGHT_LISTENER_MODE
               value: admin
+            - name: MX_INSIGHT_HOST_FILE_READER_SOCKET
+              value: /run/mx-insight-file-reader/reader.sock
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -194,6 +196,9 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - name: host-file-reader-socket
+              mountPath: /run/mx-insight-file-reader
+              readOnly: true
             - name: dataport-ai
               mountPath: /run/dataport-ai
               readOnly: true
@@ -210,6 +215,10 @@ spec:
               readOnly: true
             # email-phone-archive:mount
       volumes:
+        - name: host-file-reader-socket
+          hostPath:
+            path: /var/lib/mx-insight-hub/file-reader-socket
+            type: DirectoryOrCreate
         - name: dataport-ai
           secret:
             secretName: mx-dataport-ai

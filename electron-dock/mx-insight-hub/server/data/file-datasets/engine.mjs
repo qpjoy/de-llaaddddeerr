@@ -67,6 +67,8 @@ export function publicFailure(error) {
   if (error instanceof LineRecordsError) return { code: 'malformed_source_lines', message: error.message }
   // Archive messages name the entry and the problem, never record values.
   if (error instanceof ArchiveError) return { code: error.code, message: error.message }
+  if (error?.code === 'source_changed') return { code: error.code, message: 'The source file changed while being read; start a new version' }
+  if (error?.code === 'server_file_host_unavailable') return { code: error.code, message: 'Internal host file reader is unavailable', transient: true }
   const resource = error?.code ? resourceFailure(error) : null
   if (resource) return resource
   if (error?.code && /^[0-9A-Z]{5}$/.test(error.code)) {

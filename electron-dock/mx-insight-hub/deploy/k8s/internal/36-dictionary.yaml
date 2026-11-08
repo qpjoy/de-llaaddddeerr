@@ -70,6 +70,8 @@ spec:
             # Public mode only relaxes the Admin HTTP token; no listener here.
             - name: MX_INSIGHT_LISTENER_MODE
               value: public
+            - name: MX_INSIGHT_HOST_FILE_READER_SOCKET
+              value: /run/mx-insight-file-reader/reader.sock
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -93,11 +95,18 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - name: host-file-reader-socket
+              mountPath: /run/mx-insight-file-reader
+              readOnly: true
             - name: server-files
               mountPath: /shared_dir
               readOnly: true
             # email-phone-archive:mount
       volumes:
+        - name: host-file-reader-socket
+          hostPath:
+            path: /var/lib/mx-insight-hub/file-reader-socket
+            type: DirectoryOrCreate
         - name: server-files
           hostPath:
             path: /shared_dir

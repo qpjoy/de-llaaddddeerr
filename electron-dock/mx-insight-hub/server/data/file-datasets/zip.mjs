@@ -13,6 +13,7 @@
 //   output beyond the declared size stops immediately (no zip-bomb growth).
 import { Readable } from 'node:stream'
 import zlib from 'node:zlib'
+import { AppError } from '../../core/errors.mjs'
 
 const EOCD = 0x06054b50
 const ZIP64_EOCD = 0x06064b50
@@ -212,7 +213,7 @@ export async function openZipEntry(fileHandle, entry, { chunkBytes = 1024 * 1024
     try {
       next = await iterator.next()
     } catch (error) {
-      if (error instanceof ArchiveError) throw error
+      if (error instanceof ArchiveError || error instanceof AppError) throw error
       throw new ArchiveError('archive_entry_corrupt', `${entry.name} cannot be decompressed (${error.code || error.message})`)
     }
     if (next.done) throw new ArchiveError('archive_entry_corrupt', `${entry.name} is shorter than its declared size`)
