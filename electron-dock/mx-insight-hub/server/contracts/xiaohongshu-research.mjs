@@ -119,8 +119,11 @@ export function projectXhsResearch(payload, request, capturedAt, { encodeCursor 
       || (entry.note_id != null && entry.note_id !== request.providerQuery.note_id)) unusable()
     return {
       id: entry.id || entry.comment_id, noteId: request.providerQuery.note_id,
-      text: entry.content, liked: count(entry.like_count), publishedAt: timestamp(entry.create_time),
-      author: { id: text(entry.user_info?.user_id || entry.user?.user_id), name: text(entry.user_info?.nickname || entry.user?.nickname), avatarUrl: url(entry.user_info?.image || entry.user_info?.avatar || entry.user?.avatar) },
+      // TikHub app_v2 rows (live 2026-11-07) use `time` and user.userid/images;
+      // earlier rows used create_time and user_info.user_id/image.
+      text: entry.content, liked: count(entry.like_count), publishedAt: timestamp(entry.create_time ?? entry.time),
+      author: { id: text(entry.user_info?.user_id || entry.user?.user_id || entry.user?.userid), name: text(entry.user_info?.nickname || entry.user?.nickname),
+        avatarUrl: url(entry.user_info?.image || entry.user_info?.avatar || entry.user?.avatar || entry.user?.images) },
       media: media(entry.pictures), replyCount: count(entry.sub_comment_count),
       replies: Array.isArray(entry.sub_comments) ? entry.sub_comments.map(comment) : [],
     }
@@ -130,12 +133,23 @@ export function projectXhsResearch(payload, request, capturedAt, { encodeCursor 
   if ([true, 1, '1', 'true'].includes(data.has_more)) more = true
   if ([false, 0, '0', 'false'].includes(data.has_more)) more = false
   // Incomplete continuation is visible as unknown; never guess or restart page 1.
-  const canContinue = more !== false && items.length > 0 && typeof data.cursor === 'string' && data.cursor.length > 0
-    && data.cursor.length <= 2048 && data.cursor !== request.providerCursor && count(data.index) != null
-    && typeof data.pageArea === 'string' && data.pageArea.length > 0 && data.pageArea.length <= 100
+  // TikHub app_v2 (live 2026-11-07) packs the next position into one JSON
+  // string {cursor, index, pageArea[, contextId]}; sending those three fields
+  // back returned 15 new comments with no overlap. Older pages sent them as
+  // separate top-level fields.
+  let position = { cursor: data.cursor, index: count(data.index), pageArea: data.pageArea }
+  if (typeof data.cursor === 'string' && data.cursor.startsWith('{')) {
+    try {
+      const packed = JSON.parse(data.cursor)
+      position = { cursor: packed?.cursor, index: count(packed?.index), pageArea: packed?.pageArea }
+    } catch { position = {} }
+  }
+  const canContinue = more !== false && items.length > 0 && typeof position.cursor === 'string' && position.cursor.length > 0
+    && position.cursor.length <= 2048 && position.cursor !== request.providerCursor && position.index != null
+    && typeof position.pageArea === 'string' && position.pageArea.length > 0 && position.pageArea.length <= 100
   const nextCursor = canContinue && request.page < 15 && encodeCursor ? encodeCursor({
     version: XHS_RESEARCH_VERSION, scope: request.scope, page: request.page + 1,
-    cursor: data.cursor, index: count(data.index), pageArea: data.pageArea,
+    cursor: position.cursor, index: position.index, pageArea: position.pageArea,
   }) : null
   return { ...base, meta: { ...base.meta, page: request.page, paginationStatus: request.page === 15 && more !== false ? 'limit_reached' : nextCursor ? 'continuable' : more === false ? 'exhausted' : 'unknown' }, data: { noteId: request.providerQuery.note_id, items, nextCursor, hasMore: nextCursor ? true : more === false ? false : null } }
 }

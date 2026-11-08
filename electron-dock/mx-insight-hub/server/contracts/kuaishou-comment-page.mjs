@@ -85,3 +85,56 @@ export function parseTikHubKuaishouCommentPage(payload, postId, continuation = n
     ...(!nextParams ? { stopReason: 'continuation_unproven' } : {}) },
   diagnostics: { previewRootCount, previewCommentCount, cursorState } }
 }
+
+// Sub-comment page of one root comment (TikHub App fetch_video_sub_comments).
+// Live page 2026-11-07: data.subComments uses the root-comment row fields;
+// reply_to is the replied-to user's ID (not a comment ID), so the direct parent
+// comment stays unknown. Its pcursor "no_more" arrived with all 4 of the root's
+// 4 sub-comments, so here it is a terminal page.
+export function parseTikHubKuaishouReplyPage(payload, { photoId, rootCommentId }, continuation = null) {
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const unusable = (reason = 'invalid_envelope') => {
+    const error = new Error('invalid_upstream_contract')
+    error.code = 'invalid_upstream_contract'
+    error.reason = reason
+    throw error
+  }
+  const identity = value => typeof value === 'string' && /^[1-9][0-9]{0,29}$/u.test(value) ? value
+    : Number.isSafeInteger(value) && value > 0 ? String(value) : null
+  const metric = value => {
+    if (value == null) return null
+    const number = typeof value === 'string' && /^[0-9]+$/u.test(value) ? Number(value) : value
+    if (!Number.isSafeInteger(number) || number < 0) unusable('comment_metrics')
+    return number
+  }
+  const timestamp = value => {
+    const number = typeof value === 'string' && /^[0-9]+$/u.test(value) ? Number(value) : value
+    if (!Number.isSafeInteger(number) || number <= 0) unusable('comment_time')
+    return new Date(number < 10_000_000_000 ? number * 1000 : number).toISOString()
+  }
+  const avatar = value => {
+    if (typeof value !== 'string') return null
+    try { const parsed = new URL(value); return ['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password ? parsed.href : null } catch { return null }
+  }
+  if (!object(payload) || payload.code !== 200 || !object(payload.data) || payload.data.result !== 1) unusable()
+  if (!object(payload.params) || payload.params.photo_id !== photoId || String(payload.params.root_comment_id) !== rootCommentId) unusable('root_id_mismatch')
+  const data = payload.data
+  if (!Array.isArray(data.subComments) || data.subComments.length > 1000) unusable('sub_comments_shape')
+  if (data.pcursor != null && (typeof data.pcursor !== 'string' || data.pcursor.length > 8192 || data.pcursor.includes('\0'))) unusable('pagination_shape')
+  const comments = data.subComments.map(raw => {
+    if (!object(raw) || !identity(raw.comment_id)) unusable('comment_identity')
+    if (typeof raw.content !== 'string') unusable('comment_text')
+    if (!identity(raw.author_id) || typeof raw.author_name !== 'string') unusable('author_identity')
+    return { raw, values: { commentId: identity(raw.comment_id), text: raw.content, publishedAt: timestamp(raw.timestamp),
+      publishedTime: typeof raw.time === 'string' ? raw.time : null,
+      author: { id: identity(raw.author_id), name: raw.author_name, avatarUrl: avatar(raw.headurl) },
+      likes: metric(raw.likedCount), replies: null,
+      parentExternalId: null, parentCommentId: null, parentRelationship: 'unknown', url: null,
+      replyToUser: { id: identity(raw.reply_to), name: typeof raw.replyToUserName === 'string' ? raw.replyToUserName : null } } }
+  })
+  const cursor = data.pcursor
+  const nextParams = typeof cursor === 'string' && cursor && cursor !== 'no_more' && cursor !== continuation?.pcursor ? { pcursor: cursor } : null
+  const terminal = cursor === 'no_more' || cursor === ''
+  return { comments, providerPage: { hasMore: nextParams ? true : terminal ? false : null, nextParams, nextPage: null,
+    ...(!nextParams && !terminal ? { stopReason: 'continuation_unproven' } : {}) } }
+}

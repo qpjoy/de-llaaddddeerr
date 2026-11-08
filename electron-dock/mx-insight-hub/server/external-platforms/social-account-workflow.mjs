@@ -1,4 +1,4 @@
-import { assertFacebookAccountEnabled } from './strategy-search-routing.mjs'
+import { assertFacebookAccountEnabled, assertCommentRouteEnabled } from './strategy-search-routing.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
 import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
@@ -16,6 +16,7 @@ import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
 import { SocialSearchStateStore } from './social-search-store.mjs'
 import { YOUTUBE_COMMENTS_TRAVERSAL } from '../contracts/youtube-comments.mjs'
 import { POST_COMMENTS_TRAVERSAL } from '../contracts/post-comments.mjs'
+import { COMMENT_REPLIES_TRAVERSAL } from '../contracts/comment-replies.mjs'
 
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -28,7 +29,7 @@ const uncertain = () => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
-    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline', 'facebook_account_paused', 'strategy_search_route_unavailable'].includes(error.code))
+    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline', 'facebook_account_paused', 'comment_acquisition_paused', 'strategy_search_route_unavailable'].includes(error.code))
 const descriptor = request => ({ provider: request.provider, operation: request.operationKey || request.procurementOperation || request.operation,
   endpointKey: request.endpointKey, endpointVersion: request.endpointVersion, contractVersion: request.endpointContractVersion })
 const sourceRows = (projected, operation) => operation === 'user-info' ? projected.profiles : projected.acquiredItems
@@ -86,10 +87,11 @@ export function projectPage(payload, step, operation, capturedAt, traversal = nu
 export async function runSocialAccountWorkflow({ gateway, context, request, delivery, deadlineAt, signal,
   resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse,
   workflowKind = 'social-account' }, { clock = Date.now } = {}) {
-  if (!['social-account', 'youtube-comments', 'post-comments'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
+  if (!['social-account', 'youtube-comments', 'post-comments', 'comment-replies'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
   const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL
-    : workflowKind === 'post-comments' ? POST_COMMENTS_TRAVERSAL : null
-  const manualProviderPagination = workflowKind === 'post-comments' && request.manualProviderPagination === true
+    : workflowKind === 'post-comments' ? POST_COMMENTS_TRAVERSAL
+      : workflowKind === 'comment-replies' ? COMMENT_REPLIES_TRAVERSAL : null
+  const manualProviderPagination = ['post-comments', 'comment-replies'].includes(workflowKind) && request.manualProviderPagination === true
   const store = gateway.platformStore, provider = gateway.providerKey
   const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform, workflowKind })
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
@@ -228,6 +230,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
           await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
+          await assertCommentRouteEnabled(gateway.strategySearchRoutingStore, request)
           const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, request.platform)])
           if (provider === 'tikhub' || isHubRateLimitExempt(context)) states[0] = internalCircuitState(gateway.usageStore, context, states[0])
           const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
@@ -270,6 +273,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'social_search_deadline', 'Account acquisition deadline reached before dispatch')
           await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
+          await assertCommentRouteEnabled(gateway.strategySearchRoutingStore, request)
           currentEvidence = null
           currentCall = await store.beginProviderCall({ ...delivery, operation: expected.operation,
             contractVersion: expected.contractVersion, endpointKey: expected.endpointKey, endpointVersion: expected.endpointVersion,
@@ -310,6 +314,20 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id) }
+            // TikHub's Zhihu profile endpoint can fail while its content
+            // endpoints still answer (2026-11-08: fetch_user_info returned 400
+            // "不扣费" for every input, including its docs example, while
+            // fetch_user_answers returned 200). Zhihu data recipes take the same
+            // user_url_token, so a definite rejection of the profile step settles
+            // that call and the content is acquired without the owner profile.
+            if (workflowKind === 'social-account' && request.platform === 'zhihu' && request.operation === 'crawl'
+              && step.socialCompat.stage === 'resolve' && evidence.outcome === 'rejected' && !job.resolvedIdentity?.profileUnavailable) {
+              await store.finishProviderStep({ ...currentEvidence, affectsCircuit: false })
+              currentCall = null
+              job.resolvedIdentity = { ...request.jobs[index].identity, lookupComplete: true, profileReady: true, profileUnavailable: true }
+              warn('account_profile_unavailable', 'The account profile could not be read; account content was acquired without it.')
+              continue
+            }
             if (workflowKind === 'social-account' && request.platform === 'weibo' && request.operation === 'crawl'
               && step.socialCompat.stage === 'data' && step.socialCompat.job.activityType === 'posts' && rowsByJob[index].length > 0
               && evidence.outcome === 'succeeded_unusable' && evidence.errorCode === 'invalid_social_contract'

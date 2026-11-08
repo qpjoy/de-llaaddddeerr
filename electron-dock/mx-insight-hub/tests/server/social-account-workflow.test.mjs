@@ -1256,3 +1256,20 @@ test('posts and replies together deliver the posts when replies cannot be priced
   assert.ok(result.body.data.warnings.some(warning => warning.code === 'social_page_fill_stopped' && /cost_control_unavailable/.test(warning.message)))
   assert.ok(h.calls.every(call => !call.url.pathname.endsWith('/tweetsAndReplies')))
 })
+
+test('a rejected Zhihu profile step settles that call and still delivers account content with a warning', async t => {
+  // 2026-11-08 live: TikHub fetch_user_info answered 400 "不扣费" for every
+  // input (docs example included) while fetch_user_answers answered 200.
+  const h = await harness(t, { platform: 'zhihu', fetchImpl: call => call.url.pathname.endsWith('/fetch_user_info')
+    ? Response.json({ detail: { code: 400, message: 'Request failed. Please retry.', router: call.url.pathname } }, { status: 400 })
+    : Response.json({ code: 200, data: { data: [{ id: 'a1', title: '文章', content: '<p>正文</p>', author: { url_token: '42', name: '作者' } }], paging: { is_end: true } } }) })
+  const result = await h.invoke({ platform: 'zhihu', userId: '42', count: 20 }, 'zhihu-profile-unavailable')
+  assert.equal(result.status, 200, JSON.stringify(result.body))
+  assert.deepEqual(result.body.data.items.map(item => item.content_id), ['a1'])
+  assert.ok(result.body.data.warnings.some(warning => warning.code === 'account_profile_unavailable'))
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/api/v1/zhihu/web/fetch_user_info', '/api/v1/zhihu/web/fetch_user_articles'])
+  assert.equal(h.calls[1].params.user_url_token, '42')
+  const replay = await h.invoke({ platform: 'zhihu', userId: '42', count: 20 }, 'zhihu-profile-unavailable')
+  assert.equal(replay.replay, true)
+  assert.equal(h.calls.length, 2, 'an exact replay never purchases again')
+})

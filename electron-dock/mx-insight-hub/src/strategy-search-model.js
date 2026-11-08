@@ -15,7 +15,37 @@ export const STRATEGY_SEARCH_INTERFACES = [
     input: 'Hub 接口接受 platform 与 username / userId / user_id / uid；各平台的 ID 与用户名不可互换，批量别名见详细文档。',
     output: '交付账号资料 items、raw_info JSON 字符串及请求关联信息，缺失字段与真实零值分别保留。',
     boundary: 'Hub 接口需要当前平台及 social.profile.get 授权。资料查询与内容采集独立管理，旧转发入口继续保留。' },
+  { id: 'post-comments', label: '帖子评论', description: '按 contentId（帖子 ID）或帖子链接获取一级评论，每条评论附带可直接用于查回复的 replyRef。',
+    paths: ['/api/v1/data/social/post-comments', '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'],
+    input: 'platform 与 contentId（或 postId、平台专用 ID、规范帖子 URL），可选 count（1–100，默认 20）与 cursor。',
+    output: '交付 items（评论）、page / pageInfo 分页状态和 warnings；每条评论含 commentId、正文、作者、时间、互动量与 replyRef。',
+    boundary: '需要当前平台及 social.comments.list 授权。供应商按「管理」中的平台策略选择，游标固定原供应商。' },
+  { id: 'comment-replies', label: '评论回复', description: '按 commentId 获取评论下的回复（楼中楼）；直接传评论返回的 replyRef 即可。',
+    paths: ['/api/v1/data/social/comment-replies'],
+    input: 'platform 与 commentId；抖音、小红书、快手、B站、Instagram、Reddit 还需要所属帖子的 contentId（replyRef 已包含）。',
+    output: '交付 items（回复），每条含 rootCommentId（被查询的评论）、parentCommentId（直接回复对象，未知为 null）及分页状态。',
+    boundary: '与帖子评论共用 social.comments.list 授权与计费。尚未校准的平台在派发前返回 external_platform_contract_unverified，不计费。' },
 ]
+export const STRATEGY_COMMENT_INTERFACES = ['post-comments', 'comment-replies']
+export const COMMENT_VERIFICATION_LABELS = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '沿用同平台已校准结构', pending: '待校准 · 暂不派发' }
+export const COMMENT_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新采购' }
+
+export function commentRouteOptions(row) {
+  if (!row?.editable || !row.policy || !Number.isSafeInteger(row.policy.revision) || row.policy.revision < 1) return { providers: [], modes: [] }
+  const providers = (row.providers || []).filter(provider => row.providerVerification?.[provider])
+  const modes = Object.keys(COMMENT_STRATEGY_MODE_LABELS).filter(mode => row.allowedModes?.includes(mode) && (mode !== 'priority' || providers.length > 1))
+  return { providers, modes }
+}
+
+export function commentRouteUpdate(row, draft) {
+  const { providers, modes } = commentRouteOptions(row)
+  if (!modes.includes(draft.mode) || !providers.includes(draft.primaryProvider)) throw new Error('当前平台不允许此供应商策略，请刷新后重试。')
+  const fallbackProvider = draft.mode === 'priority' ? draft.fallbackProvider : null
+  if (draft.mode === 'priority' && (!providers.includes(fallbackProvider) || fallbackProvider === draft.primaryProvider)) throw new Error('请选择与优先供应商不同的保底供应商。')
+  const reason = String(draft.reason || '').trim()
+  if (!reason || reason.length > 1000) throw new Error('请填写 1–1000 字的修改原因。')
+  return { mode: draft.mode, primaryProvider: draft.primaryProvider, fallbackProvider, expectedRevision: row.policy.revision, reason }
+}
 
 export const STRATEGY_PROVIDER_LABELS = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', 'night-all': 'Night-All', 'night-all-a': 'Night-All-A 自建' }
 export const INSTAGRAM_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新搜索' }
@@ -73,6 +103,10 @@ export const FACEBOOK_STRATEGY_MODE_LABELS = {
 export const FACEBOOK_SELFHOSTED_LIMITS = { concurrency: [1, 8], requestsPerMinute: [1, 120] }
 
 export function strategyPolicyEditor(interfaceId, row) {
+  if (STRATEGY_COMMENT_INTERFACES.includes(interfaceId)) {
+    const { providers, modes } = commentRouteOptions(row)
+    return providers.includes(row?.policy?.primaryProvider) && modes.includes(row.policy.mode) ? 'comment-route' : null
+  }
   if (['crawl', 'user-info'].includes(interfaceId) && row?.platform === 'facebook'
     && row.editable === true && ['fixed', 'paused'].includes(row.policy?.mode)
     && row.policy.primaryProvider === 'justone' && row.policy.fallbackProvider === null
@@ -100,6 +134,18 @@ export function strategyPolicySummary(interfaceId, row) {
   const editor = strategyPolicyEditor(interfaceId, row)
   const providerLabel = provider => STRATEGY_PROVIDER_LABELS[provider] || provider || '未提供'
   if (!row) return { title: '尚未选择目标平台', mode: '未提供', description: '选择业务接口和平台后查看策略。', providers: [], modes: [], editor: null }
+  if (editor === 'comment-route') {
+    const policy = row.policy, { providers, modes } = commentRouteOptions(row)
+    const primary = providerLabel(policy.primaryProvider), fallback = providerLabel(policy.fallbackProvider)
+    const level = provider => COMMENT_VERIFICATION_LABELS[row.providerVerification?.[provider]] || '未登记'
+    const current = policy.mode === 'priority'
+      ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: `首请求派发前，${primary} 的凭据、操作开关或价格未就绪时改用已就绪的 ${fallback}。已派发后的拒绝、超时、未知结果或不可解析响应不会自动换供应商重买；游标固定原供应商。` }
+      : policy.mode === 'paused'
+        ? { title: `暂停新的${interfaceId === 'comment-replies' ? '评论回复' : '帖子评论'}采购`, mode: '暂停', description: '停止新的供应商采购，包括续页需要的后续采购；已完成响应的精确重放和已购缓冲数据仍可交付。' }
+        : { title: `固定 ${primary}`, mode: '固定供应商', description: `新请求仅使用 ${primary}（${level(policy.primaryProvider)}）。该供应商未就绪时返回具体原因，不自动切换。` }
+    return { ...current, editor, providers, modes: modes.map(mode => COMMENT_STRATEGY_MODE_LABELS[mode]), revision: policy.revision,
+      verification: providers.map(provider => `${providerLabel(provider)}：${level(provider)}`) }
+  }
   if (editor === 'facebook-account') {
     const label = interfaceId === 'crawl' ? '账号内容' : '账号资料'
     return { editor, title: `${row.policy.mode === 'paused' ? '已暂停' : '已启用'} Facebook ${label}`,

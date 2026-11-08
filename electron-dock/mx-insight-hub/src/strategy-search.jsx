@@ -3,17 +3,20 @@ import { productForPath } from '../shared/product-workbenches.mjs'
 import { ProductApiConsole } from './product-workbench.jsx'
 import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
 import { StrategySearchExperience, useStrategySearchState } from './strategy-search-experience.jsx'
-import { ArrowRight, MagnifyingGlass, User, Users } from '@phosphor-icons/react'
+import { ArrowRight, MagnifyingGlass, User, Users, ChatCircleText, ChatsCircle } from '@phosphor-icons/react'
 import { adminApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, PageHeading, useRemoteData } from './components.jsx'
 import { StrategyDataStatistics } from './strategy-data-statistics.jsx'
 import { FacebookSearchPolicyForm } from './platform-search-policy.jsx'
 import { STRATEGY_SEARCH_INTERFACES, STRATEGY_PROVIDER_LABELS, INSTAGRAM_STRATEGY_MODE_LABELS, TWITTER_STRATEGY_MODE_LABELS,
-  STRATEGY_MIGRATION_LABELS, instagramStrategyOptions, instagramStrategyUpdate, twitterStrategyOptions, twitterStrategyUpdate, strategyPolicySummary } from './strategy-search-model.js'
+  STRATEGY_MIGRATION_LABELS, instagramStrategyOptions, instagramStrategyUpdate, twitterStrategyOptions, twitterStrategyUpdate, strategyPolicySummary,
+  COMMENT_STRATEGY_MODE_LABELS, COMMENT_VERIFICATION_LABELS, commentRouteOptions, commentRouteUpdate } from './strategy-search-model.js'
+import { StrategyCommentsExperience } from './strategy-comments.jsx'
+import { isCommentOperation } from './strategy-comments-model.js'
 import { recordStrategyAttempt } from './strategy-search-experience-model.js'
 import './strategy-search.css'
 
-const icons = { search: MagnifyingGlass, crawl: Users, 'user-info': User }
+const icons = { search: MagnifyingGlass, crawl: Users, 'user-info': User, 'post-comments': ChatCircleText, 'comment-replies': ChatsCircle }
 const supplier = value => STRATEGY_PROVIDER_LABELS[value] || value
 const migration = value => STRATEGY_MIGRATION_LABELS[value] || value || '状态未提供'
 
@@ -29,14 +32,19 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
   const selected = STRATEGY_SEARCH_INTERFACES.find(row => row.id === query.get('interface')) || STRATEGY_SEARCH_INTERFACES[0]
   const changeTab = view => { if (view === 'management') setManagementVisited(true); setQuery({ view }) }
   return <div className="mih-page mih-strategy-search">
-    <PageHeading title="策略搜索" description="从关键词、账号内容与资料接口接入 Hub，按目标平台查看内容与接入方式。">
+    <PageHeading title="策略搜索" description="从关键词、账号内容与资料、帖子评论与回复接口接入 Hub，按目标平台查看内容与接入方式。">
       <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/strategy-search')}>接口文档 ↗</a>
     </PageHeading>
     <ProductViewTabs label="策略搜索" value={tab} onChange={changeTab} session={session} />
     {pendingSearch ? <p role="status">有平台的原查询正在执行或结果待核实。产品展示可切换其他平台；接口调试暂不可发送新请求。可回到原平台只读核对。</p> : null}
     <div hidden={tab !== 'debug'}><ProductApiConsole product={productForPath('/data-products/strategy-search')} token={token} initialEndpoint={query.get('endpoint')} onResult={setResult} blocked={pendingSearch} attemptStore={searchState.consoleAttempts} onAttempt={event => recordStrategyAttempt(cell, event)} /></div>
-    <div hidden={tab !== 'product'}><StrategySearchExperience strategySession={searchSession} initialResult={result} onResult={setResult}
-      operation={selected.id} onOperationChange={interfaceId => setQuery({ interface: interfaceId })} /></div>
+    <div hidden={tab !== 'product'}>{isCommentOperation(selected.id)
+      ? <StrategyCommentsExperience operation={selected.id} onOperationChange={interfaceId => setQuery({ interface: interfaceId })}
+        prefill={{ platform: query.get('platform') || undefined, contentId: query.get('contentId') || undefined, commentId: query.get('commentId') || undefined }}
+        onOpenReplies={ref => setQuery({ view: 'product', interface: 'comment-replies', platform: ref.platform, contentId: ref.contentId || null, commentId: ref.commentId })} />
+      : <StrategySearchExperience strategySession={searchSession} initialResult={result} onResult={setResult}
+        operation={selected.id} onOperationChange={interfaceId => setQuery({ interface: interfaceId })}
+        onOpenComments={item => setQuery({ view: 'product', interface: 'post-comments', platform: item.platform, contentId: item.contentId, commentId: null })} />}</div>
     <div className="mih-strategy-guide" hidden={tab !== 'guide'}>
       <div className="mih-strategy-interface-cards" role="group" aria-label="选择业务接口">
         {STRATEGY_SEARCH_INTERFACES.map(row => { const Icon = icons[row.id]; return <button type="button" key={row.id}
@@ -54,6 +62,7 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
       </section>
       <ProductIntegrationGuide label="策略搜索" docs="strategy-search">
         <p>账号内容使用 <code>/api/v1/data/social/crawl</code>，账号资料使用 <code>/api/v1/data/social/user-info</code>。保留 username、userId、user_id、uid 等账号别名与 raw_info / raw_data JSON 字符串，并提供 items 与 pageInfo。各平台支持范围、批量参数和返回字段见接口文档。</p>
+        <p>帖子评论使用 <code>/api/v1/data/social/post-comments</code>（传 platform 与 contentId），评论回复使用 <code>/api/v1/data/social/comment-replies</code>（传帖子评论返回的 replyRef 或 commentId + contentId）。两者共用平台授权与 <code>social.comments.list</code>，供应商按「管理」中每个平台的策略选择，游标固定原供应商。</p>
         <p>账号接口分别要求平台授权及 <code>social.content.crawl</code>、<code>social.profile.get</code>。旧转发入口暂时保留；切换到 Hub 社交接口需从第一页开始，不能携带旧路径游标。</p>
         <p>统一内容搜索使用 <code>/api/v1/data/search</code>，一次选择一个平台；TikTok 使用统一条目和分页字段。多个平台同时检索请使用聚合搜索。</p>
         <p>微信也使用此路径，兼容既有原生响应 <code>contractVersion / endpoint / data / meta / requestId</code>；可用 <code>params.raw=false</code> 显示 items，按 <code>continue_flag / cursor</code> 续页。微信公众号默认检索文章；其他微信与 TikTok 系列接口继续保留。</p>
@@ -63,6 +72,50 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
     </div>
     {admin && (managementVisited || tab === 'management') ? <div hidden={tab !== 'management'}><StrategySearchManagement key={token} {...{ token, session, query, setQuery, onUnauthorized, notify }} /></div> : null}
   </div>
+}
+
+// Supplier policy for one comment interface on one platform. Saving uses the
+// audited revision CAS; a pending supplier is shown but cannot be selected.
+function CommentRoutePolicyForm({ token, row, notify, onSaved, interfaceId, label }) {
+  const options = commentRouteOptions(row)
+  const [mode, setMode] = useState(row.policy.mode)
+  const [primaryProvider, setPrimaryProvider] = useState(row.policy.primaryProvider)
+  const [fallbackProvider, setFallbackProvider] = useState(row.policy.fallbackProvider || options.providers.find(value => value !== row.policy.primaryProvider) || '')
+  const [reason, setReason] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(null)
+  const selectable = options.providers.filter(provider => row.providerVerification?.[provider] !== 'pending')
+  const conflict = error?.status === 409
+  let draft = null, validation = ''
+  try { draft = commentRouteUpdate(row, { mode, primaryProvider, fallbackProvider, reason }) } catch (failure) { validation = failure.message }
+  // Pausing is always allowed; dispatching modes need a calibrated supplier.
+  const pendingChoice = mode !== 'paused' && [primaryProvider, mode === 'priority' ? fallbackProvider : null].some(provider => provider && row.providerVerification?.[provider] === 'pending')
+  async function save(event) {
+    event.preventDefault()
+    if (busy || conflict || !draft || pendingChoice) return
+    setBusy(true); setError(null)
+    try { await adminApi.updateCommentRoute(token, interfaceId, row.platform, draft); onSaved(); notify?.(`${row.label || row.platform}${label}策略已保存`) }
+    catch (failure) { setError(failure) } finally { setBusy(false) }
+  }
+  const providerOption = value => ({ value, label: `${supplier(value)} · ${COMMENT_VERIFICATION_LABELS[row.providerVerification?.[value]] || '未登记'}` })
+  return <form className="mih-strategy-policy-form" onSubmit={save}>
+    <p>适用范围：{row.label || row.platform} 的 <code>{interfaceId === 'comment-replies' ? '/api/v1/data/social/comment-replies' : '/api/v1/data/social/post-comments'}</code>{interfaceId === 'post-comments' ? '（含两个 search/post-comments 别名）' : ''}。其他平台和业务接口不受影响。</p>
+    <div className="mih-external-two-column">
+      <DropdownField label="策略方式" value={mode} disabled={busy || conflict} onChange={setMode}
+        options={options.modes.map(value => ({ value, label: COMMENT_STRATEGY_MODE_LABELS[value] }))} />
+      <DropdownField label={mode === 'priority' ? '优先供应商' : mode === 'paused' ? '保留的供应商设置' : '固定供应商'} value={primaryProvider} disabled={busy || conflict}
+        onChange={setPrimaryProvider} options={options.providers.map(providerOption)} />
+      {mode === 'priority' ? <DropdownField label="保底供应商（派发前未就绪时使用）" value={fallbackProvider} disabled={busy || conflict}
+        onChange={setFallbackProvider} options={options.providers.filter(value => value !== primaryProvider).map(providerOption)} /> : null}
+    </div>
+    {pendingChoice ? <p role="status">所选供应商的返回结构尚待校准：该平台的新请求会在派发前返回 external_platform_contract_unverified（不调用供应商、不计费）。完成一次校准样本并发布后即可选择。</p> : null}
+    <p>{mode === 'priority' ? '只在首请求尚未派发、优先供应商凭据、操作开关或价格未就绪时改用保底供应商；已派发后的拒绝、超时、未知结果与不可解析响应不会换供应商重买。'
+      : mode === 'paused' ? '暂停新的供应商采购（含续页需要的后续采购）；精确重放和已购缓冲仍可交付。' : '新请求只使用所选供应商；未就绪时返回具体原因，不自动切换。'}
+      已有游标继续绑定原供应商。已校准可选：{selectable.map(supplier).join(' / ') || '暂无'}。</p>
+    <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy || conflict} onChange={event => setReason(event.target.value)} placeholder="记录此次策略调整的原因" /></Field>
+    {error ? <ErrorState error={error} /> : null}
+    {conflict ? <p role="alert">策略已被其他管理员修改，本次未覆盖。<button className="qp-button qp-button--outline" type="button" onClick={onSaved}>刷新策略并重新填写</button></p> : null}
+    {reason.trim() && validation ? <p role="status">{validation}</p> : null}
+    <div><button className="qp-button qp-button--primary" disabled={busy || conflict || !draft || pendingChoice}>{busy ? '保存中…' : `保存${label}策略`}</button><span className="qp-muted"> 当前修订 #{row.policy.revision}</span></div>
+  </form>
 }
 
 function InstagramSearchPolicyForm({ token, row, notify, onSaved }) {
@@ -204,7 +257,8 @@ function StrategySearchManagement({ token, session, query, setQuery, onUnauthori
         </div>
         {summary.editor ? <div className="mih-strategy-editor">
           <header><h3>修改 {row.label || row.platform} {selected.label}策略</h3><p>以下为待保存配置；填写修改原因并保存后生效。可用方式：{summary.modes.join('；')}。</p></header>
-          {summary.editor === 'facebook-account' ? <FacebookAccountPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} interfaceId={selected.id} label={selected.label} onSaved={remote.refresh} />
+          {summary.editor === 'comment-route' ? <CommentRoutePolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} interfaceId={selected.id} label={selected.label} onSaved={remote.refresh} />
+            : summary.editor === 'facebook-account' ? <FacebookAccountPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} interfaceId={selected.id} label={selected.label} onSaved={remote.refresh} />
             : summary.editor === 'instagram' ? <InstagramSearchPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} onSaved={remote.refresh} />
             : summary.editor === 'twitter' ? <TwitterSearchPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} onSaved={remote.refresh} />
             : <FacebookSearchPolicyForm key={`${row.platform}:${row.policy.revision}`} {...{ token, notify }} row={row.policy} allowedModes={row.allowedModes} onSaved={remote.refresh} />}

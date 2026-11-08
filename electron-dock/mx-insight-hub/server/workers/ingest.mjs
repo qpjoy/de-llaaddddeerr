@@ -4,7 +4,8 @@ import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { createPool, createQueue, runCommonMigrations, startWorker } from '@qpjoy/mx-common'
 import { NightAllAdapter } from '../adapters/night-all.mjs'
-import { POST_COMMENTS_RECIPES } from '../contracts/post-comments.mjs'
+import { POST_COMMENT_PROVIDER_RECIPES } from '../contracts/post-comments.mjs'
+import { COMMENT_REPLY_PROVIDER_RECIPES } from '../contracts/comment-replies.mjs'
 import { loadConfig } from '../config.mjs'
 import { NightAllBackfill } from '../ingest/backfill.mjs'
 import {
@@ -65,7 +66,9 @@ export function classifyExternalPlatformIngest(payload) {
       .includes(payload.datasetId)
     && payload.platform === 'xiaohongshu'
   const hubRaw = (payload?.datasetId === 'social.comments.v1'
-      && (POST_COMMENTS_RECIPES[payload.platform]?.provider === payload.providerKey
+      // Any reviewed comment or reply supplier selected by routing policy.
+      && (Boolean(POST_COMMENT_PROVIDER_RECIPES[payload.platform]?.[payload.providerKey])
+        || Boolean(COMMENT_REPLY_PROVIDER_RECIPES[payload.platform]?.[payload.providerKey])
         // Already queued comments retain their original procurement lineage
         // when new Twitter/Reddit/Kuaishou acquisitions move to TikHub.
         || ['twitter', 'reddit', 'kuaishou'].includes(payload.platform) && payload.providerKey === 'justone'))

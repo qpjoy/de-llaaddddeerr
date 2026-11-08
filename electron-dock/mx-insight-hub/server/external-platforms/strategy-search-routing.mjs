@@ -1,4 +1,5 @@
 import { AppError } from '../core/errors.mjs'
+import { COMMENT_INTERFACES, commentProviders, commentRoutePlatforms, defaultCommentRoute } from '../contracts/comment-routes.mjs'
 
 export const STRATEGY_SEARCH_PROVIDERS = Object.freeze(['justone', 'tikhub', 'rapidapi'])
 export const STRATEGY_SEARCH_MODES = Object.freeze(['fixed', 'priority', 'paused'])
@@ -8,15 +9,30 @@ const PROVIDERS_BY_PLATFORM = Object.freeze({
   facebook: Object.freeze(['justone']),
 })
 
-const editable = (interfaceId, platform) => platform === 'facebook'
-  ? ['crawl', 'user-info'].includes(interfaceId)
-  : interfaceId === 'search' && Object.hasOwn(PROVIDERS_BY_PLATFORM, platform)
-const validRoute = row => row && editable(row.interface_key, row.platform)
-  && STRATEGY_SEARCH_MODES.includes(row.mode) && PROVIDERS_BY_PLATFORM[row.platform].includes(row.primary_provider)
-  && (row.mode === 'priority'
-    ? PROVIDERS_BY_PLATFORM[row.platform].includes(row.fallback_provider) && row.fallback_provider !== row.primary_provider
-    : row.fallback_provider === null)
-  && Number.isSafeInteger(row.revision) && row.revision >= 1
+// Registered suppliers for one business interface on one platform. Comment
+// interfaces read the reviewed comment catalog; a pending supplier is still
+// registered (selectable once calibrated) but requests fail before dispatch.
+export function strategyRouteProviders(interfaceId, platform) {
+  if (COMMENT_INTERFACES.includes(interfaceId)) return Object.keys(commentProviders(interfaceId, platform) || {})
+  if (platform === 'facebook') return ['crawl', 'user-info'].includes(interfaceId) ? PROVIDERS_BY_PLATFORM.facebook : []
+  return interfaceId === 'search' ? PROVIDERS_BY_PLATFORM[platform] || [] : []
+}
+const editable = (interfaceId, platform) => strategyRouteProviders(interfaceId, platform).length > 0
+const validRoute = row => {
+  if (!row || !editable(row.interface_key, row.platform) || !STRATEGY_SEARCH_MODES.includes(row.mode)) return false
+  const providers = strategyRouteProviders(row.interface_key, row.platform)
+  if (row.platform === 'facebook' && row.mode === 'priority') return false
+  return providers.includes(row.primary_provider)
+    && (row.mode === 'priority'
+      ? providers.includes(row.fallback_provider) && row.fallback_provider !== row.primary_provider
+      : row.fallback_provider === null)
+    && Number.isSafeInteger(row.revision) && row.revision >= 1
+}
+const defaultCommentRow = (interfaceId, platform) => {
+  const route = defaultCommentRoute(interfaceId, platform)
+  return route && { interface_key: interfaceId, platform, mode: route.mode, primary_provider: route.primaryProvider,
+    fallback_provider: route.fallbackProvider, revision: 1, reason: 'default_route', updated_at: null }
+}
 
 const policy = row => ({ interface: row.interface_key, platform: row.platform, mode: row.mode,
   primaryProvider: row.primary_provider, fallbackProvider: row.fallback_provider,
@@ -39,6 +55,9 @@ export class StrategySearchRoutingStore {
       interface_key: interfaceId, platform: 'facebook', mode: 'fixed', primary_provider: 'justone',
       fallback_provider: null, revision: 1, reason: 'initial_route', updated_at: null,
     })
+    for (const interfaceId of COMMENT_INTERFACES) for (const platform of commentRoutePlatforms(interfaceId)) {
+      this.policies.set(`${interfaceId}/${platform}`, defaultCommentRow(interfaceId, platform))
+    }
     this.events = []
   }
 
@@ -48,6 +67,10 @@ export class StrategySearchRoutingStore {
       rows = this.pool ? (await this.pool.query('SELECT * FROM control.strategy_search_routes ORDER BY interface_key,platform')).rows
         : [...this.policies.values()]
     } catch { throw unavailable() }
+    // Comment routes without a saved row run on the reviewed default.
+    for (const interfaceId of COMMENT_INTERFACES) for (const platform of commentRoutePlatforms(interfaceId)) {
+      if (!rows.some(row => row.interface_key === interfaceId && row.platform === platform)) rows.push(defaultCommentRow(interfaceId, platform))
+    }
     if (rows.some(row => !validRoute(row))) throw unavailable()
     return rows.map(policy)
   }
@@ -60,6 +83,7 @@ export class StrategySearchRoutingStore {
         WHERE interface_key=$1 AND platform=$2`, [interfaceId, platform])).rows[0]
         : this.policies.get(`${interfaceId}/${platform}`)
     } catch { throw unavailable() }
+    if (!row && COMMENT_INTERFACES.includes(interfaceId)) row = defaultCommentRow(interfaceId, platform)
     if (!validRoute(row)) throw unavailable()
     return policy(row)
   }
@@ -114,4 +138,15 @@ export async function assertFacebookAccountEnabled(store, interfaceId, platform)
   if (route.mode === 'paused') throw new AppError(503, 'facebook_account_paused',
     `Facebook ${interfaceId === 'crawl' ? 'account content' : 'account profile'} acquisition is paused`,
     { platform, interface: interfaceId, upstreamDispatched: false })
+}
+
+// Comment interfaces: pausing stops new supplier purchases only. Exact replay
+// and already purchased buffered rows stay deliverable, like Facebook accounts.
+export async function assertCommentRouteEnabled(store, request) {
+  if (!COMMENT_INTERFACES.includes(request?.routeInterface)) return
+  const route = await store?.get(request.routeInterface, request.platform)
+  if (!route) throw unavailable()
+  if (route.mode === 'paused') throw new AppError(503, 'comment_acquisition_paused',
+    request.routeInterface === 'comment-replies' ? 'Comment reply acquisition is paused for this platform' : 'Comment acquisition is paused for this platform',
+    { platform: request.platform, interface: request.routeInterface, upstreamDispatched: false })
 }

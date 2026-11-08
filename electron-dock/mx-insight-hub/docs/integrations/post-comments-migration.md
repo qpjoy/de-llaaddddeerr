@@ -2,6 +2,50 @@
 
 2026-11-02：Twitter 旧 URL `/api/v1/search/post-comments` 的生产首屏验收已通过，usage `d167ad9e-48b4-4668-bcd3-8b1d6ef2aeb0` 返回 20 条评论，合同、标识、正文/作者/时间/互动字段、单次采购与分页检查全部通过。同一 usage 已 committed，账本恰好一条成功且计费的 TikHub `native.t.api_3cd88a6621a01120` 调用，原始归档已核验。此前运行容器路由检查和两份原生样本校准也已完成；不再追加 Twitter 探测。事件 af456ad4-2523-4f73-a1fc-c95104b329a4 的旧 Night-All HTTP 404 回执仍保留，不能据此推断供应商曾收到请求或评论为空。
 
+## 2026-11-07 评论回复（楼中楼）与评论供应商策略
+
+本地实现，未部署，未发起付费调用。评论放在「策略搜索」里，不新建数据产品：业务接口新增「帖子评论」「评论回复」两项，管理页按平台切换供应商，产品展示可从内容搜索结果点「查看评论」，再从评论点「查看回复」。
+
+### 接口
+
+- `POST /api/v1/data/social/post-comments`：不变。每条评论新增 `replyRef: { platform, commentId, contentId }`。
+- `POST /api/v1/data/social/comment-replies`：新接口。传 `platform` + `commentId`；Reddit、小红书、Instagram、抖音、B站、快手还要 `contentId`。直接传评论返回的 `replyRef` 即可。与帖子评论共用 `social.comments.list` 授权和计费；游标只能续同一供应商。每条回复有 `rootCommentId`（被查询的评论）和 `parentCommentId`（直接回复对象，未知为 null）。
+- B站接受 BV 号（本地换算为 AID，作为同一身份）。
+
+### 供应商与校准状态（`server/contracts/comment-routes.mjs`）
+
+2026-11-07 已按用户授权做付费校准（每个平台约 5 次，TikHub；凭据取自 Night-All `config.json`，只在进程内使用）：共 37 次请求，34 次成功，3 次 TikHub 返回 400 且声明不扣费。原始页面存于仓库外，测试使用匿名化的同结构样例。工具：`server/ops/calibrate-comment-replies.mjs`。
+
+| 平台 | 帖子评论 | 评论回复 |
+| --- | --- | --- |
+| Twitter | TikHub（已验证）/ JustOne（样例） | TikHub 已验证（36 条） |
+| Reddit | TikHub（已验证，**现可续页**）/ JustOne（样例） | TikHub 沿用结构（展开游标的接口已验证，评论内嵌游标未遇到） |
+| 小红书 | TikHub（已验证，**修复时间、作者与续页**） | TikHub 沿用结构（实测为空页） |
+| 微博 | TikHub（已验证，**修复 rootid 误判**）/ JustOne（样例） | TikHub 沿用结构（实测为空页） |
+| Instagram | TikHub（已验证） | TikHub 已验证（两种页面结构，17/17） |
+| 抖音 | TikHub（已验证）/ JustOne（样例） | TikHub 已验证（5/5） |
+| B站 | JustOne（样例，默认）/ TikHub（第 1 页只返回 3 条，可选） | TikHub 已验证（20 条/页，按页码续） |
+| 快手 | TikHub（已验证）/ JustOne（样例） | TikHub 已验证（4/4） |
+| 知乎 | TikHub（校准时供应商 400，未能实测）/ JustOne（样例） | TikHub 沿用 comment_v5 结构（同上） |
+
+本次修复的生产问题：
+
+- 微博评论：实测一级评论的 `rootid` 是评论自身 ID，原解析器要求等于帖子 ID，导致这类页面全部返回 502。现接受空、帖子 ID 或自身 ID。
+- 小红书评论（含 `/api/v1/data/xiaohongshu/notes/comments`）：TikHub app_v2 现在用 `time` 和 `user.userid/images`，原先发布时间和作者 ID 为空；下一页位置打包在 JSON 字符串 `cursor` 里，原先从未续页。把其中 `cursor/index/pageArea` 回传后实测拿到 15 条新评论。
+- Reddit 评论：评论树末尾的 depth 0 占位节点 `more.cursor` 交给 `fetch_comment_replies`（`native.t.api_e0a2654e9c191a80`）即返回下一批一级评论。帖子评论第 2 页起使用该接口，需在 TikHub 操作中启用并定价。评论内嵌的未展开回复占位会写入该评论的 `replyCursor` 和 `replyRef.cursor`。
+
+知乎（2026-11-08 排查）：TikHub 官方文档的参数与 Hub 一致，但用 TikHub 自己的文档示例调用 `fetch_comment_v5`、`fetch_sub_comment_v5`、`fetch_article_search_v3`、`fetch_user_info`、`fetch_answer_detail` 都返回 400（声明不扣费），同时 `fetch_user_answers` 正常返回 200，是供应商侧部分接口故障，与 Hub 参数或新式 19 位回答 ID 无关。期间 Hub 的知乎关键词搜索、评论/回复和账号资料返回 502 `external_platform_rejected`（不向客户计费，不触发 TikHub 共享熔断）；知乎账号内容已改为资料步骤被明确拒绝时继续取内容并给出 `account_profile_unavailable` 警告。可提交 TikHub 支持的请求 ID：`b4c99c96-66ef-43e8-9006-08f8ae845091`、`7a2a3700-79a3-4a2f-ade1-14031b6d059a`、`5242fa9f-21b4-4edf-8cf9-710b38b3aeeb`。
+
+### 策略
+
+迁移 181 把 `control.strategy_search_routes` 扩展到 `post-comments`（13 个平台）和 `comment-replies`（9 个平台），只补缺失行：TikHub 优先、JustOne 保底（两者都有解析器时）；B站评论固定 JustOne；回复固定 TikHub。管理页可改为固定、优先与保底或暂停。优先与保底只在首请求派发前、优先供应商凭据、操作开关或价格未就绪时切换；已派发后的拒绝、超时、未知结果或不可解析响应不会换供应商重买。暂停只停新采购，精确重放与已购缓冲仍可交付。上线前提：部署运行迁移 181；新增 TikHub 操作（抖音评论/回复、微博/知乎/Twitter 回复等）需启用且有价（部署补价脚本会为仅迁移/补价过的操作补 0.01 估价）。
+
+抖音帖子评论（2026-11-08 用户确认）：已上线功能里，只有抖音帖子评论的供应商会因这次部署改变，由原来的固定 JustOne 改为 TikHub 优先、JustOne 保底。两家共用同一字段映射，返回结构不变；部署前签发的 JustOne 游标仍在 JustOne 续页。之后要切换，在管理 → 策略搜索 → 帖子评论 → 抖音中修改：可改为固定 JustOne、改回 TikHub 优先，或暂停。保存后对新请求立即生效，不需要重新部署，其他平台的策略不受影响。HTTP 管理接口与选路联动由 `tests/server/strategy-search-api.test.mjs` 覆盖。
+
+### 文档
+
+`shared/comment-fields.mjs` 是评论/回复字段的唯一登记，生成 OpenAPI 结构、示例和指南字段表；测试保证解析器输出的每个字段都已登记。`shared/field-descriptions.mjs` 为策略搜索各接口补齐返回字段说明。接口调试新增「返回字段」表，发送后逐项标出已返回、为空或未返回，并列出响应中有但文档未登记的字段。
+
 ## 当前发布阻塞：JustOne 余额为零
 
 用户已确认 JustOne 当前无余额。下表是现有代码的固定路由事实；其中七个 JustOne 平台不能按可用功能上线，快手统一入口验收已通过，上一版“13 平台已接入”只代表实现与离线格式覆盖。Twitter、Reddit、快手已完成 TikHub 统一入口首屏验收，小红书、Instagram、YouTube 原已走 TikHub。剩余六个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。

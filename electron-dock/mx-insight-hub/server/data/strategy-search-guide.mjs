@@ -1,6 +1,8 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
 import { POST_COMMENTS_RECIPES } from '../contracts/post-comments.mjs'
+import { COMMENT_REPLY_RECIPES } from '../contracts/comment-replies.mjs'
+import { postCommentsGuide } from '../contracts/post-comments-docs.mjs'
 import { WECHAT_SEARCH_OPERATION, WECHAT_SEARCH_PATH } from '../contracts/wechat-search-alias.mjs'
 import { hubSocialAccountPlatforms } from '../contracts/hub-social-docs.mjs'
 import { HUB_SOCIAL_COMPAT_ACTIVITIES } from '../contracts/hub-social-compat.mjs'
@@ -18,17 +20,23 @@ export function strategySearchGuide(scopes = null) {
     ? NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS
     : operation === 'post-comments'
       ? Object.keys(POST_COMMENTS_RECIPES)
-      : NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation]).filter(platform =>
+      : operation === 'comment-replies'
+        ? Object.keys(COMMENT_REPLY_RECIPES)
+        : NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation]).filter(platform =>
     scopes == null || scopes.some(scope => scope.platforms?.includes(platform)
-      && (operation === 'post-comments' ? scope.capabilities?.includes('social.comments.list') : platform !== 'xiaohongshu' || scope.capabilities?.includes(XIAOHONGSHU_CAPABILITIES[operation]))))
+      && (['post-comments', 'comment-replies'].includes(operation) ? scope.capabilities?.includes('social.comments.list') : platform !== 'xiaohongshu' || scope.capabilities?.includes(XIAOHONGSHU_CAPABILITIES[operation]))))
   const rows = [
     ['关键词搜索', 'raw', 'platform + keyword / query', 'raw_data：内容列表'],
     ['账号内容', 'crawl', 'platform + username / userId / uid', 'raw_info + raw_data：账号与内容'],
     ['账号资料', 'user-info', 'platform + username / userId / uid', 'raw_info：账号资料'],
     ['帖子详情', 'post-detail', 'platform + postId / contentId / 专用帖子 ID / url', 'raw_data：完整正文、作者、时间与媒体'],
-    ['帖子评论', 'post-comments', 'platform + postId / contentId / url；可带 cursor 或 params', 'raw_data：评论 ID、正文 ID、正文、作者、时间与互动量'],
-  ].filter(([, operation]) => platforms(operation).length).map(([label, operation, params, output]) =>
-    `<tr><td>${label}</td><td><code>POST /api/v1/night-all/search/${operation}</code><br><code>POST /api/v1/search/${operation}</code></td><td>${params}</td><td>${output}</td><td>${platforms(operation).map(escape).join('、')}</td></tr>`).join('')
+    ['帖子评论', 'post-comments', 'platform + contentId / url；可带 count、cursor', 'items：评论 ID、正文、作者、时间、互动量与 replyRef'],
+    ['评论回复', 'comment-replies', 'platform + commentId（多数平台另需 contentId，传 replyRef 即可）', 'items：回复、rootCommentId、parentCommentId'],
+  ].filter(([, operation]) => platforms(operation).length).map(([label, operation, params, output]) => {
+    const paths = operation === 'post-comments' ? ['/api/v1/data/social/post-comments', '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments']
+      : operation === 'comment-replies' ? ['/api/v1/data/social/comment-replies'] : [`/api/v1/night-all/search/${operation}`, `/api/v1/search/${operation}`]
+    return `<tr><td>${label}</td><td>${paths.map(path => `<code>POST ${path}</code>`).join('<br>')}</td><td>${params}</td><td>${output}</td><td>${platforms(operation).map(escape).join('、')}</td></tr>`
+  }).join('')
   const standard = platforms('raw')
   const examplePlatform = standard.includes('instagram') ? 'instagram' : standard[0]
   const twitter = standard.includes('twitter')
@@ -84,5 +92,6 @@ export function strategySearchGuide(scopes = null) {
     ${twitter || facebook || standard.includes('instagram') ? `<p>已有接口路径、标准数组和兼容 raw 字符串合同继续保留，不能跨路径或跨供应链转换旧游标。已保存交付仍在原窗口内精确重放，包括此前的空结果或失败。已退役或无法验证归属的历史游标可能要求重新从第一页开始，不代表所有旧分页都能无缝续接；不要改写旧游标或自动新建查询。</p>` : ''}
     <h2>失败与请求核对</h2><p>保存响应中的 requestId，用于查询该次请求状态。400 检查参数；403 检查授权；402 检查余额；429 检查限额；502/503 查看请求诊断。外部接口的 400 拒绝可能呈现为 Hub 502，不能仅凭状态码认定为某个参数错误。本文不承诺 400 或任何已派发请求失败后自动切换路由。</p>
     <p>处理中或结果未知时，只读核查请求状态与账本，不自动新建请求重试。幂等回放有有效窗口，不能将超时后反复 POST 视为永远免费或不会重新采集。</p>
-    <p>管理端可按业务接口和目标平台选择已适配的路由。优先/保底只在其明确支持的条件下生效，不保证所有错误都自动换路。</p></section>`
+    <p>管理端可按业务接口和目标平台选择已适配的路由。优先/保底只在其明确支持的条件下生效，不保证所有错误都自动换路。</p>
+    ${postCommentsGuide(scopes)}</section>`
 }

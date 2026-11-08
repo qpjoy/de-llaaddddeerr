@@ -49,6 +49,7 @@ import { contentSearchPlan } from './content-search.mjs'
 import { socialAccountPlan } from './social-account-delivery.mjs'
 import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
 import { postCommentsPlan } from './post-comments-workflow.mjs'
+import { commentRepliesPlan } from './comment-replies-workflow.mjs'
 import { StrategySearchRoutingStore } from './strategy-search-routing.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
@@ -920,6 +921,24 @@ export class ExternalPlatformGateway {
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, input.platform)
         if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Comment count exceeds the current Key entitlement')
+        context = current
+        return current
+      },
+      enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
+      leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
+    } })
+    return this.#deliver(context, prepared.input, prepared.plan)
+  }
+
+  async commentReplies(context, input) {
+    const prepared = commentRepliesPlan({ gateway: this, context, input, dependencies: {
+      resolveCredential: () => this.#resolvedCredential(),
+      revalidateIdentity: async ({ totalLimit }) => {
+        const current = await this.#revalidateWaitingIdentity(context, input.platform, { operation: 'social.comments.list' })
+        const policy = await this.usageStore.getPolicy(current.consumer.id, input.platform)
+        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, input.platform)
+        if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Reply count exceeds the current Key entitlement')
         context = current
         return current
       },

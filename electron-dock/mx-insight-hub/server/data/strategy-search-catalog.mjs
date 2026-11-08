@@ -2,7 +2,7 @@ import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-leg
 import { WECHAT_LEGACY_SEARCH_PLATFORMS } from '../contracts/wechat-search-alias.mjs'
 import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../../shared/social-account-contract.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
-import { NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-comments.mjs'
+import { COMMENT_PROVIDER_CATALOG, commentRoutePlatforms } from '../contracts/comment-routes.mjs'
 
 const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
@@ -89,10 +89,27 @@ function accountPlatform(platform, operation, accountPolicy = null) {
   }
 }
 
+const VERIFICATION_LABELS = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '沿用同平台已校准结构（首个生产页待核对）', pending: '待校准，暂不派发' }
+// Comment interfaces are Hub-native and editable for every platform with a
+// registered supplier. Pending suppliers stay visible so operators can see
+// what calibration would unlock, but requests to them fail before dispatch.
+function commentPlatform(interfaceId, platform, policies) {
+  const providers = COMMENT_PROVIDER_CATALOG[interfaceId][platform]
+  const policy = policies.find(row => row.interface === interfaceId && row.platform === platform) || null
+  const names = Object.keys(providers)
+  return {
+    platform, label: LABELS[platform], editable: true, migrationStatus: 'hub_native',
+    providers: names, providerVerification: { ...providers },
+    allowedModes: names.length > 1 ? ['fixed', 'priority', 'paused'] : ['fixed', 'paused'],
+    policy: policy == null ? null : structuredClone(policy),
+    routeSummary: `${interfaceId === 'post-comments' ? 'POST /api/v1/data/social/post-comments' : 'POST /api/v1/data/social/comment-replies'} 由 Hub 直连供应商：${names.map(name => `${name === 'tikhub' ? 'TikHub' : name === 'justone' ? 'JustOne' : name}（${VERIFICATION_LABELS[providers[name]]}）`).join('、')}。优先与保底只在首请求派发前、优先供应商凭据、操作开关或价格未就绪时切换；游标固定原供应商，不转 Night-All。`,
+  }
+}
+
 // This is an Admin product/routing inventory, not a readiness declaration.
 // The compatibility sets deliberately exclude unsupported operation/platform
 // pairs; provider credential state and paid dispatch remain in their gateways.
-export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null, facebookCrawlPolicy = null, facebookProfilePolicy = null } = {}) {
+export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null, facebookCrawlPolicy = null, facebookProfilePolicy = null, commentPolicies = [] } = {}) {
   return {
     interfaces: [
       {
@@ -129,12 +146,15 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
       },
       {
         id: 'post-comments', label: '帖子评论',
-        paths: ['/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'],
-        description: '按帖子 ID、contentId 或 URL 获取单篇帖子的评论列表；支持 cursor/params 续页，单页最多 100 条。商品评论、搜索附带评论和频道评论接口不属于此合同。',
-        platforms: NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS.map(platform => ({
-          ...historicalPlatform(platform, 'post-comments'),
-          routeSummary: 'Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。',
-        })),
+        paths: ['/api/v1/data/social/post-comments', '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'],
+        description: '按 contentId（帖子 ID）或规范帖子 URL 获取单篇帖子的一级评论；三个路径共用同一 Hub 合同、授权（平台 + social.comments.list）与计费。每条评论返回 replyRef，可直接用于评论回复接口。',
+        platforms: commentRoutePlatforms('post-comments').map(platform => commentPlatform('post-comments', platform, commentPolicies)),
+      },
+      {
+        id: 'comment-replies', label: '评论回复',
+        paths: ['/api/v1/data/social/comment-replies'],
+        description: '按 commentId 获取一条评论下的回复（楼中楼）；多数平台还需要该评论所属帖子的 contentId，直接传评论返回的 replyRef 即可。与帖子评论共用授权与计费。',
+        platforms: commentRoutePlatforms('comment-replies').map(platform => commentPlatform('comment-replies', platform, commentPolicies)),
       },
     ],
   }

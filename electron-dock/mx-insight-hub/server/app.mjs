@@ -27,6 +27,7 @@ import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSear
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
 import { POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
+import { COMMENT_REPLIES_PATH } from './contracts/comment-replies.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { fileDataset } from '../shared/file-datasets.mjs'
@@ -829,6 +830,7 @@ export function createApp({
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
   youtubeCommentsGateway = null,
+  commentRepliesGateway = null,
   tikHubGateway = null,
   acquisitionHistory = null,
   admissionRecovery = null,
@@ -3220,8 +3222,10 @@ export function createApp({
           strategySearchRoutingStore?.get('crawl', 'facebook') ?? null,
           strategySearchRoutingStore?.get('user-info', 'facebook') ?? null,
         ])
+        const commentPolicies = (await strategySearchRoutingStore?.list() ?? [])
+          .filter(row => ['post-comments', 'comment-replies'].includes(row.interface))
         sendJson(response, 200, { data: strategySearchCatalog({ instagramPolicy, twitterPolicy, facebookCrawlPolicy, facebookProfilePolicy,
-          facebookPolicy: facebookPolicies.find(row => row.platform === 'facebook') || null }), requestId })
+          facebookPolicy: facebookPolicies.find(row => row.platform === 'facebook') || null, commentPolicies }), requestId })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/strategy-search/:interface/:platform')
@@ -6226,6 +6230,20 @@ export function createApp({
         requireNoQuery(searchParams, 'Post comments')
         const result = await withAdmissionSignal(response, async signal => service.postComments(context, {
           signal, body: await readJson(request, 64 * 1024), path: POST_COMMENTS_PATH,
+          idempotencyKey: request.headers['idempotency-key'],
+        }))
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === COMMENT_REPLIES_PATH) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'Comment replies')
+        if (!commentRepliesGateway) throw new AppError(503, 'external_platform_unavailable', 'Comment replies are unavailable')
+        const result = await withAdmissionSignal(response, async signal => commentRepliesGateway.commentReplies(context, {
+          signal, body: await readJson(request, 64 * 1024), path: COMMENT_REPLIES_PATH,
           idempotencyKey: request.headers['idempotency-key'],
         }))
         sendJson(response, result.status, result.body, {

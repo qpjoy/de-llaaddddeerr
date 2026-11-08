@@ -2,7 +2,9 @@
 // Verified contract from usage 7eb265f4-5c2c-4d15-91d5-7dc7fed83b61:
 // all three saved terminal Comment trees passed this same parser against the
 // saved request target before integration into the runtime projector.
-export function parseTikHubRedditCommentPage(payload, postId, continuation = null) {
+// With { rootCommentId } the page is one comment's hidden replies: a placeholder
+// under that comment continues it, and depth-0 rows are not post comments.
+export function parseTikHubRedditCommentPage(payload, postId, continuation = null, { rootCommentId = null } = {}) {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   const text = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !value.includes('\0') ? value : null
   const postIdentity = value => typeof value === 'string' && /^(?:t3_)?[a-z0-9]{1,17}$/u.test(value)
@@ -46,13 +48,23 @@ export function parseTikHubRedditCommentPage(payload, postId, continuation = nul
     return found
   }
 
-  const comments = [], children = new Map(), childCounts = new Map()
-  let unresolved = false
+  const comments = [], children = new Map(), childCounts = new Map(), replyCursors = new Map()
+  let unresolved = false, nextCursor = null
+  // Only the declared fetch_comment_replies cursor form (^commenttree:) counts.
+  const moreCursor = more => typeof more?.cursor === 'string' && /^commenttree:/u.test(more.cursor) && more.cursor.length <= 4096 && !more.cursor.includes('\0') ? more.cursor : null
   for (const tree of forest.trees) {
     if (!object(tree) || !count(tree.childCount) || !count(tree.depth)
       || tree.more != null && !object(tree.more)) unusable('tree_shape')
     unresolved = hiddenMore(tree) || unresolved
-    if (tree.node === null && object(tree.more)) continue
+    if (tree.node === null && object(tree.more)) {
+      // Live pages 2026-11-07: a depth-0 placeholder without parent loads the
+      // next batch of top-level comments (fetch_comment_replies, same forest
+      // shape); a placeholder under t1_ loads that comment's hidden replies.
+      const cursor = moreCursor(tree.more)
+      if (cursor && (rootCommentId ? commentIdentity(tree.parentId) === rootCommentId : tree.depth === 0 && tree.parentId == null)) nextCursor = cursor
+      else if (cursor && typeof tree.parentId === 'string' && commentIdentity(tree.parentId)) replyCursors.set(commentIdentity(tree.parentId), cursor)
+      continue
+    }
     const node = tree.node
     if (!object(node)) unusable('comment_node')
     // A post context entry is never a comment. Namespaces distinguish a real
@@ -102,12 +114,12 @@ export function parseTikHubRedditCommentPage(payload, postId, continuation = nul
       parentExternalId, parentCommentId, parentRelationship, url: permalink,
       ...(typeof node.isRemoved === 'boolean' ? { isRemoved: node.isRemoved } : {}) } })
   }
-  for (const [commentId, expected] of childCounts) if (expected > (children.get(commentId)?.size || 0)) unresolved = true
-  // The request contract has `after`, but this paid terminal sample does not
-  // establish its response-token location. `more.cursor` is documented for a
-  // separate comment-replies endpoint, not proven as this operation's after.
-  // Never reuse request echoes, nested cursors or guessed endCursor fields.
-  const terminal = moreFlag === false && !unresolved
-  return { comments, providerPage: { hasMore: terminal ? false : null, nextParams: null, nextPage: null,
-    ...(!terminal ? { stopReason: 'continuation_unproven' } : {}) } }
+  for (const [commentId, expected] of childCounts) if (expected > (children.get(commentId)?.size || 0) && !replyCursors.has(commentId)) unresolved = true
+  for (const row of comments) { const cursor = replyCursors.get(row.values.commentId); if (cursor) row.values.replyCursor = cursor }
+  // `after` is never used for continuation; only the top-level placeholder's
+  // cursor (sent to fetch_comment_replies) continues this post's comments.
+  const nextParams = nextCursor && ![continuation?.cursor, continuation?.after].includes(nextCursor) ? { cursor: nextCursor } : null
+  const terminal = !nextParams && moreFlag === false && !unresolved
+  return { comments, providerPage: { hasMore: nextParams ? true : terminal ? false : null, nextParams, nextPage: null,
+    ...(!nextParams && !terminal ? { stopReason: 'continuation_unproven' } : {}) } }
 }

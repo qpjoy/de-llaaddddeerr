@@ -3,10 +3,14 @@ import { AppError } from '../core/errors.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS, normalizeNativeForwardingRequest } from './native-forwarding.mjs'
 import { youtubeCommentVideoId } from './youtube-comments.mjs'
 import { projectPostCommentPage, POST_COMMENT_PROJECTION_PLATFORMS } from './post-comment-projection.mjs'
+import { COMMENT_PROVIDER_CATALOG, commentProviderAvailable } from './comment-routes.mjs'
 
 export const POST_COMMENTS_VERSION = 'mx-insight-hub.post-comments.v1'
 export const POST_COMMENTS_CAPABILITY = 'social.comments.list'
 export const POST_COMMENTS_PATH = '/api/v1/data/social/post-comments'
+export const POST_COMMENTS_ROUTE_INTERFACE = 'post-comments'
+// Baseline recipes: the supplier each platform used before routing policies.
+// Historical fingerprints, docs and cursor scopes keep this order.
 const definitions = [
   ['twitter', 'tikhub', '/api/v1/twitter/web/fetch_post_comments', 'tweet_id', ['cursor'], []],
   ['reddit', 'tikhub', '/api/v1/reddit/app/fetch_post_comments', 'post_id', ['after'], []],
@@ -22,12 +26,69 @@ const definitions = [
   ['xiaohongshu', 'tikhub', '/api/v1/xiaohongshu/app_v2/get_note_comments', 'note_id', ['cursor', 'index', 'pageArea'], ['sort_strategy']],
   ['youtube', 'tikhub', '/api/v1/youtube/web_v2/get_video_comments', 'video_id', ['continuation_token'], ['sort_by', 'language_code', 'country_code']],
 ]
-export const POST_COMMENTS_RECIPES = Object.freeze(Object.fromEntries(definitions.map(([platform, provider, path, idField, continuationFields, optionFields]) => {
+// Alternative suppliers selectable through Strategy Search routing. JustOne
+// rows reuse the layouts calibrated from its official samples on 2026-11-02.
+const alternatives = [
+  ['twitter', 'justone', '/api/twitter/get-post-comments/v1', 'tweetId', ['cursor'], []],
+  ['reddit', 'justone', '/api/reddit/get-post-comments/v1', 'postId', ['cursor'], []],
+  ['kuaishou', 'justone', '/api/kuaishou/get-video-comment/v1', 'videoId', ['pcursor'], []],
+  ['weibo', 'justone', '/api/weibo/get-post-comments/v1', 'mid', ['maxId'], ['sort']],
+  ['zhihu', 'justone', '/api/zhihu/get-answer-comments/v1', 'answerId', ['offset'], ['orderBy']],
+  ['douyin', 'tikhub', '/api/v1/douyin/app/v3/fetch_video_comments', 'aweme_id', ['cursor'], []],
+  ['bilibili', 'tikhub', '/api/v1/bilibili/web/fetch_video_comments', 'bv_id', ['pn'], []],
+]
+// Reddit continues a post's comments with the comment tree's load-more cursor,
+// answered by fetch_comment_replies in the same forest shape (live 2026-11-07).
+const CONTINUATION_ENDPOINTS = { 'reddit/tikhub': '/api/v1/reddit/app/fetch_comment_replies' }
+const recipe = ([platform, provider, path, idField, continuationFields, optionFields]) => {
   const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.provider === provider && row.path === path)
   if (!endpoint) throw new Error(`Missing reviewed comment request contract: ${platform}`)
-  return [platform, Object.freeze({ provider, path, key: endpoint.key, idField, continuationFields, optionFields,
-    available: POST_COMMENT_PROJECTION_PLATFORMS.includes(platform) })]
-})))
+  const continuationPath = CONTINUATION_ENDPOINTS[`${platform}/${provider}`]
+  const continuationKey = continuationPath ? NATIVE_FORWARDING_ENDPOINTS.find(row => row.provider === provider && row.path === continuationPath)?.key : null
+  if (continuationPath && !continuationKey) throw new Error(`Missing reviewed comment continuation contract: ${platform}`)
+  const verification = COMMENT_PROVIDER_CATALOG[POST_COMMENTS_ROUTE_INTERFACE][platform]?.[provider]
+  if (!verification) throw new Error(`Comment supplier is not registered in the routing catalog: ${platform}/${provider}`)
+  return Object.freeze({ platform, provider, path, key: endpoint.key, idField, continuationFields, optionFields, verification, continuationKey,
+    available: POST_COMMENT_PROJECTION_PLATFORMS.includes(platform) && commentProviderAvailable(POST_COMMENTS_ROUTE_INTERFACE, platform, provider) })
+}
+export const POST_COMMENTS_RECIPES = Object.freeze(Object.fromEntries(definitions.map(row => [row[0], recipe(row)])))
+export const POST_COMMENT_PROVIDER_RECIPES = Object.freeze(Object.fromEntries(Object.entries(POST_COMMENTS_RECIPES).map(([platform, baseline]) => [platform,
+  Object.freeze({ [baseline.provider]: baseline,
+    ...Object.fromEntries(alternatives.filter(row => row[0] === platform).map(row => [row[1], recipe(row)])) })])))
+for (const [platform, providers] of Object.entries(COMMENT_PROVIDER_CATALOG[POST_COMMENTS_ROUTE_INTERFACE])) {
+  if (Object.keys(providers).some(provider => !POST_COMMENT_PROVIDER_RECIPES[platform]?.[provider])) throw new Error(`Missing comment recipe for registered supplier: ${platform}`)
+}
+export const postCommentRecipe = (platform, provider = null) => provider == null ? POST_COMMENTS_RECIPES[platform] || null
+  : POST_COMMENT_PROVIDER_RECIPES[platform]?.[provider] || null
+
+// Bilibili's public BV identifier is a reversible encoding of the numeric AID.
+// Algorithm: https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/bvid_desc.md
+const BV_ALPHABET = 'FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf'
+const BV_XOR = 23442827791579n, BV_MASK = 2251799813685247n, BV_MAX_AID = 1n << 51n
+export function bilibiliBvid(aid) {
+  const value = BigInt(aid)
+  if (value < 1n || value >= BV_MAX_AID) return null
+  const bytes = ['B', 'V', '1', '0', '0', '0', '0', '0', '0', '0', '0', '0']
+  let index = bytes.length - 1, rest = (BV_MAX_AID | value) ^ BV_XOR
+  while (rest > 0n) { bytes[index--] = BV_ALPHABET[Number(rest % 58n)]; rest /= 58n }
+  ;[bytes[3], bytes[9]] = [bytes[9], bytes[3]]
+  ;[bytes[4], bytes[7]] = [bytes[7], bytes[4]]
+  return bytes.join('')
+}
+export function bilibiliAid(bvid) {
+  if (typeof bvid !== 'string' || !/^BV1[1-9A-HJ-NP-Za-km-z]{9}$/u.test(bvid)) return null
+  const chars = Array.from(bvid)
+  ;[chars[3], chars[9]] = [chars[9], chars[3]]
+  ;[chars[4], chars[7]] = [chars[7], chars[4]]
+  let value = 0n
+  for (const char of chars.slice(3)) {
+    const digit = BV_ALPHABET.indexOf(char)
+    if (digit < 0) return null
+    value = value * 58n + BigInt(digit)
+  }
+  const aid = (value & BV_MASK) ^ BV_XOR
+  return aid > 0n && bilibiliBvid(aid) === bvid ? String(aid) : null
+}
 // Retained only to reproduce historical JustOne request fingerprints. This
 // recipe is never available to dispatch or resume a traversal through TikHub.
 const legacyRedditEndpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.provider === 'justone' && row.path === '/api/reddit/get-post-comments/v1')
@@ -57,7 +118,7 @@ function integer(value, fallback, max, name) {
   if (!Number.isSafeInteger(n) || n < 1 || n > max) invalid(`${name} must be an integer between 1 and ${max}`)
   return n
 }
-function postId(platform, value) {
+export function postId(platform, value) {
   const text = scalar(value)?.trim()
   if (!text || text.length > 256) invalid('Post identifiers must be nonempty strings or safe integers')
   if (platform === 'youtube') { const id = youtubeCommentVideoId(text); if (!id) invalid('Invalid YouTube video ID'); return id }
@@ -67,7 +128,12 @@ function postId(platform, value) {
   }
   if (platform === 'xiaohongshu') { if (!/^[a-f0-9]{24}$/iu.test(text)) invalid('Invalid Xiaohongshu note ID'); return text.toLowerCase() }
   if (['twitter', 'douyin', 'tiktok', 'weibo', 'zhihu'].includes(platform) && !/^\d{1,30}$/u.test(text)) invalid('This platform requires a numeric post ID')
-  if (platform === 'bilibili') { if (!/^(?:av)?\d{1,30}$/u.test(text)) invalid('Use a Bilibili numeric AID or av video URL'); return text.replace(/^av/u, '') }
+  if (platform === 'bilibili') {
+    // BV and AV name the same video; keep the numeric AID as the identity so
+    // both spellings share one fingerprint and cursor scope.
+    if (/^BV1/u.test(text)) { const aid = bilibiliAid(text); if (!aid) invalid('Invalid Bilibili BV video ID'); return aid }
+    if (!/^(?:av)?\d{1,30}$/u.test(text)) invalid('Use a Bilibili numeric AID, BV ID or video URL'); return text.replace(/^av/u, '')
+  }
   if (platform === 'instagram') {
     const numeric = /^(\d{1,20})(?:_\d{1,30})?$/u.exec(text)
     if (numeric) {
@@ -103,7 +169,7 @@ function idFromUrl(platform, value, hasId = false) {
               : platform === 'tiktok' ? match(['tiktok.com'], /\/video\/(\d+)(?:\/|$)/u)
                 : platform === 'kuaishou' ? match(['kuaishou.com'], /\/(?:short-video|photo)\/([A-Za-z0-9_-]+)(?:\/|$)/u)
                   : platform === 'zhihu' ? match(['zhihu.com'], /\/answer\/(\d+)(?:\/|$)/u)
-                    : platform === 'bilibili' ? match(['bilibili.com'], /\/video\/(av\d+)(?:\/|$)/u)
+                    : platform === 'bilibili' ? match(['bilibili.com'], /\/video\/(av\d+|BV1[1-9A-HJ-NP-Za-km-z]{9})(?:\/|$)/u)
                       : platform === 'weibo' ? match(['weibo.cn', 'weibo.com'], /\/(?:detail|status)\/(\d+)(?:\/|$)/u)
                         : platform === 'linkedin' ? match(['linkedin.com'], /(?:activity-|urn:li:activity:)(\d+)/u)
                           : platform === 'facebook' ? match(['facebook.com'], /\/(?:posts|videos)\/(\d+)(?:\/|$)/u) || (host === 'facebook.com' ? u.searchParams.get('story_fbid') : null) : null
@@ -139,12 +205,16 @@ function paramsFor(recipe, params, rawCursor) {
   if (recipe.idField === 'note_id' && initialParams.cursor && (initialParams.index == null || initialParams.pageArea == null)) invalid('Xiaohongshu continuation needs cursor, index and pageArea')
   return { options, initialParams }
 }
-export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 100,
+export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 100, provider = null,
   allowHistoricalRedditCursor = false, allowHistoricalKuaishouCursor = false } = {}) {
   if (!object(body) || Object.keys(body).some(key => !fields.has(key))) invalid('Unsupported post comments request fields')
   for (const field of ['businessId', 'business_id']) if (body[field] != null && body[field] !== businessId) invalid('businessId must match the authenticated consumer')
-  const platform = postCommentsPlatform(body.platform), recipe = POST_COMMENTS_RECIPES[platform]
-  if (!recipe) throw new AppError(400, 'platform_operation_unsupported', 'Single-post comments are not registered for this platform')
+  const platform = postCommentsPlatform(body.platform)
+  if (!POST_COMMENTS_RECIPES[platform]) throw new AppError(400, 'platform_operation_unsupported', 'Single-post comments are not registered for this platform')
+  // A routing policy selects the supplier; without one the baseline recipe is
+  // used, which keeps historical validation and replay identities unchanged.
+  const recipe = postCommentRecipe(platform, provider)
+  if (!recipe) throw new AppError(503, 'strategy_search_route_unavailable', 'The selected comments supplier is not registered for this platform', { platform, provider })
   const ids = identityFields.filter(field => body[field] != null).map(field => postId(platform, body[field]))
   if (body.url != null) { const urlId = idFromUrl(platform, body.url, ids.length > 0); if (urlId) ids.push(urlId) }
   if (!ids.length || new Set(ids).size !== 1) invalid('Supply one post ID or URL; aliases must identify the same post')
@@ -179,9 +249,11 @@ export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 1
   // TikHub documents only Zhihu's two sort orders and declares no enum, so the
   // fixed recipe keeps the same closed set JustOne's orderBy enforced.
   if (platform === 'zhihu' && options.order_by != null && !['score', 'ts'].includes(options.order_by)) invalid('Zhihu order_by must be score or ts')
+  if (platform === 'zhihu' && options.orderBy != null && !['score', 'ts'].includes(options.orderBy)) invalid('Zhihu orderBy must be score or ts')
   if (signedCursor && Object.keys(initialParams).length) invalid('Do not combine a Hub cursor with provider continuation parameters')
   const identity = { platform, postId: ids[0], count, includeRaw: body.includeRaw === true, options }
-  const request = { ...identity, cursor, page, initialParams, operation: 'comments', path: POST_COMMENTS_PATH,
+  const request = { ...identity, provider: recipe.provider, cursor, page, initialParams, operation: 'comments', path: POST_COMMENTS_PATH,
+    routeInterface: POST_COMMENTS_ROUTE_INTERFACE,
     pageSize: count, totalLimit: count, jobs: [{ id: createHash('sha256').update(JSON.stringify(identity)).digest('hex'), provider: recipe.provider }],
     fingerprintBody: { ...identity, initialParams }, ...(legacyRedditCursor ? { legacyRedditCursor: true } : {}),
     ...(legacyKuaishouCursor ? { legacyKuaishouCursor: true } : {}) }
@@ -193,8 +265,8 @@ export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 1
   request.fingerprintBody = { ...identity, options: request.options, initialParams: request.initialParams }
   return request
 }
-function providerQuery(request, recipe, continuation) {
-  return { [recipe.idField]: request.postId,
+export function providerQuery(request, recipe, continuation) {
+  return { [recipe.idField]: recipe.idField === 'bv_id' ? bilibiliBvid(request.postId) : request.postId,
     ...(request.platform === 'linkedin' ? { sortOrder: 'RELEVANCE' } : {}),
     ...request.options, ...continuation,
     ...(request.platform === 'youtube' ? { need_format: true } : {}),
@@ -202,11 +274,14 @@ function providerQuery(request, recipe, continuation) {
 }
 export function buildPostCommentsDispatch(request, job = {}, buffer = null) {
   if (request.legacyRedditCursor || request.legacyKuaishouCursor || request.legacyProviderCursor) throw new AppError(400, 'invalid_cursor', 'Historical comment cursors are replay-only')
-  const recipe = POST_COMMENTS_RECIPES[request.platform]
-  if (!recipe?.available) throw new AppError(503, 'external_platform_contract_unverified', 'This platform requires comment response calibration before acquisition', { platform: request.platform })
+  const recipe = postCommentRecipe(request.platform, request.provider ?? null)
+  if (!recipe?.available) throw new AppError(503, 'external_platform_contract_unverified', 'This platform requires comment response calibration before acquisition', { platform: request.platform, provider: recipe?.provider ?? request.provider ?? null })
   const continuation = buffer ? buffer.providerCursor : job.providerCursor ?? request.initialParams
-  const native = normalizeNativeForwardingRequest(recipe.key, { params: providerQuery(request, recipe, continuation) })
-  const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.key === recipe.key)
+  const continued = Boolean(recipe.continuationKey && typeof continuation?.cursor === 'string' && /^commenttree:/u.test(continuation.cursor))
+  const key = continued ? recipe.continuationKey : recipe.key
+  const native = normalizeNativeForwardingRequest(key, { params: continued
+    ? { post_id: request.postId, cursor: continuation.cursor, need_format: false } : providerQuery(request, recipe, continuation) })
+  const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.key === key)
   return { ...native, provider: recipe.provider, platform: request.platform, operationKey: endpoint.operation,
     socialCompat: { stage: 'data' }, postComments: { request, recipe, continuation } }
 }

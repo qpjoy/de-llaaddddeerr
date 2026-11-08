@@ -6,6 +6,9 @@ import { useDemoApiKey, useDemoIdentity, useDemoAccessSnapshot } from './demo-cr
 import { WechatResult } from './wechat-product.jsx'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { requestUuid } from './request-id.js'
+import { commentRoutePlatforms } from '../server/contracts/comment-routes.mjs'
+
+const COMMENT_PLATFORMS = new Set(commentRoutePlatforms('post-comments'))
 import { STRATEGY_SEARCH_PLATFORMS, strategySearchPlatforms, strategySearchBody, strategySearchForm,
   strategyPageInfo, uncertainStrategySearch, safeStrategyUrl, isFacebookPhotoPage, createStrategySearchCell, strategyRequestFingerprint, strategyOutcomeMatches, strategyUnresolvedAttempt, strategyFailureRequestId,
   strategyAccountPlatforms, strategyOperationPath, strategyAccountBody, strategyAccountForm, strategyResultMatches, strategyAccountItem } from './strategy-search-experience-model.js'
@@ -18,7 +21,7 @@ export function useStrategySearchState(strategySession) {
   return { identity, access, cell, state }
 }
 
-export function StrategySearchExperience({ initialResult, strategySession, onResult, operation = 'search', onOperationChange }) {
+export function StrategySearchExperience({ initialResult, strategySession, onResult, operation = 'search', onOperationChange, onOpenComments }) {
   const [key] = useDemoApiKey()
   const { identity, access, cell, state } = useStrategySearchState(strategySession)
   const accountOperation = operation === 'crawl' || operation === 'user-info'
@@ -92,7 +95,7 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
     <section className="qp-panel mih-panel mih-strategy-composer" aria-label="策略搜索产品展示">
       <header><div><p className="qp-kicker">{accountOperation ? '账号数据' : '统一内容搜索'}</p><h2>{operation === 'crawl' ? '获取账号发布的内容' : operation === 'user-info' ? '查询账号公开资料' : '选择平台，搜索内容'}</h2><p>{accountOperation ? '每次查询一个平台的已知账号，完整字段保留在响应中。' : '每次查询一个目标平台，结果保留正文、作者、互动与来源。'}</p></div><code>POST {path}</code></header>
       {onOperationChange ? <DropdownField label="业务接口" value={operation} onChange={onOperationChange}
-        options={[{ value: 'search', label: '内容搜索' }, { value: 'crawl', label: '账号内容' }, { value: 'user-info', label: '账号资料' }]} /> : null}
+        options={[{ value: 'search', label: '内容搜索' }, { value: 'crawl', label: '账号内容' }, { value: 'user-info', label: '账号资料' }, { value: 'post-comments', label: '帖子评论' }, { value: 'comment-replies', label: '评论回复' }]} /> : null}
       <form onSubmit={event => { event.preventDefault(); void search(body) }}>
         <fieldset>
           <legend>目标平台 <span>{!key ? '请选择调用身份（可预览支持平台）' : access ? `当前 Key 可见 ${platforms.length} 个` : '支持平台 · 发送时验证权限'}</span></legend>
@@ -145,14 +148,24 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
     </section>
     {result?.identity === identity ? <>
       {!matching ? <p className="qp-muted">以下保留已返回结果；更改接口、平台或查询条件后需手动查询。</p> : null}
-      <StrategySearchResult payload={result.payload} evidence={result.evidence} operation={result.input?.path.endsWith('/user-info') ? 'user-info' : result.input?.path.endsWith('/crawl') ? 'crawl' : 'search'} />
+      <StrategySearchResult payload={result.payload} evidence={result.evidence} operation={result.input?.path.endsWith('/user-info') ? 'user-info' : result.input?.path.endsWith('/crawl') ? 'crawl' : 'search'} onOpenComments={onOpenComments} />
       {matching && pageInfo?.hasMore && pageInfo.nextCursor ? <button className="qp-button qp-button--outline mih-strategy-next" type="button" disabled={!canSend} onClick={() => search({ ...result.input.body, cursor: pageInfo.nextCursor })}><ArrowDown size={16} aria-hidden="true" />读取下一页（按当前规则计量）</button> : null}
       <details className="qp-panel mih-panel mih-strategy-response"><summary>完整响应与请求证据</summary><pre className="mih-api-response" role="region" aria-label="完整响应 JSON" tabIndex={0}>{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} /></details>
     </> : <section className="qp-panel mih-panel mih-strategy-result-empty"><MagnifyingGlass size={32} weight="duotone" /><h3>{operation === 'user-info' ? '账号资料将在这里展示' : accountOperation ? '账号内容将在这里展示' : '搜索内容将在这里展示'}</h3><p>{operation === 'user-info' ? '查看账号名称、简介、公开指标和主页链接。' : '可按平台查看正文、作者、互动指标与原文链接。'}</p></section>}
   </div>
 }
 
-export function StrategySearchResult({ payload, evidence, operation = 'search' }) {
+// A search row can open its comments when the platform has a comment
+// interface and the row carries the platform's post ID. Zhihu comments are
+// answer comments, so only answer rows qualify.
+function commentTarget(item, data) {
+  const platform = item.platform || data?.platform, contentId = item.externalId || item.external_id
+  if (!COMMENT_PLATFORMS.has(platform) || typeof contentId !== 'string' || !contentId) return null
+  if (platform === 'zhihu' && !String(item.contentType || '').includes('answer')) return null
+  return { platform, contentId }
+}
+
+export function StrategySearchResult({ payload, evidence, operation = 'search', onOpenComments }) {
   const [images, setImages] = useState(true)
   const data = payload?.data, nativeWechat = payload?.endpoint === 'wechat.search.search'
   const items = !nativeWechat && Array.isArray(data?.items) ? data.items.map(item => strategyAccountItem(item, operation)) : null
@@ -177,7 +190,7 @@ export function StrategySearchResult({ payload, evidence, operation = 'search' }
             const value = name === 'comments' ? item.metrics?.comments ?? item.metrics?.replies : item.metrics?.[name]
             return <span key={name}>{title} <b>{value == null ? '未提供' : value.toLocaleString()}</b></span>
           })}</div>
-          <footer><span>{item.contentType || '内容'}{item.externalId || item.id ? ` · ${item.externalId || item.id}` : ''}</span><span className="mih-strategy-media-links">{photoPages.map((href, index) => <a key={href} href={href} target="_blank" rel="noopener noreferrer">查看配图{photoPages.length > 1 ? ` ${index + 1}` : ''} <ArrowUpRight size={14} aria-hidden="true" /></a>)}{url ? <a href={url} target="_blank" rel="noopener noreferrer">查看原文 <ArrowUpRight size={14} aria-hidden="true" /></a> : <span>原文链接未提供</span>}</span></footer>
+          <footer><span>{item.contentType || '内容'}{item.externalId || item.id ? ` · ${item.externalId || item.id}` : ''}</span><span className="mih-strategy-media-links">{commentTarget(item, data) && onOpenComments ? <button type="button" className="qp-button qp-button--outline qp-button--sm" onClick={() => onOpenComments(commentTarget(item, data))}>查看评论</button> : null}{photoPages.map((href, index) => <a key={href} href={href} target="_blank" rel="noopener noreferrer">查看配图{photoPages.length > 1 ? ` ${index + 1}` : ''} <ArrowUpRight size={14} aria-hidden="true" /></a>)}{url ? <a href={url} target="_blank" rel="noopener noreferrer">查看原文 <ArrowUpRight size={14} aria-hidden="true" /></a> : <span>原文链接未提供</span>}</span></footer>
         </div>
       </article>
     })}</div>}

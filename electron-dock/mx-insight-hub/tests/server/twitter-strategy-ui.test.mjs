@@ -13,13 +13,13 @@ const view = build({
   plugins: [{ name: 'management-boundaries', setup(builder) {
     builder.onResolve({ filter: /^react\/jsx-runtime$/ }, args => ({ path: pathToFileURL(require.resolve(args.path)).href, external: true }))
     builder.onResolve({ filter: /^react$|^@phosphor-icons\/react$/ }, args => ({ path: args.path, namespace: 'fixture' }))
-    builder.onResolve({ filter: /\/(?:api|components|product-workbench|product-management|strategy-search-experience|strategy-data-statistics|platform-search-policy|strategy-search-experience-model)\.(?:jsx|js)$|\/product-workbenches\.mjs$|\.css$/ }, args => ({ path: args.path, namespace: 'fixture' }))
+    builder.onResolve({ filter: /\/(?:api|components|product-workbench|product-management|strategy-search-experience|strategy-data-statistics|platform-search-policy|strategy-search-experience-model|strategy-comments|strategy-comments-model)\.(?:jsx|js)$|\/product-workbenches\.mjs$|\.css$/ }, args => ({ path: args.path, namespace: 'fixture' }))
     builder.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => {
       let contents = ''
       if (path === 'react') contents = `const env = globalThis.__twitterStrategyUi;
         export const useState = initial => { const i=env.index++; if (!(i in env.state)) env.state[i]=initial; return [env.state[i], value => { env.state[i]=value }] };
-        export const useCallback=fn=>fn,useRef=value=>({current:value})`
-      else if (path === '@phosphor-icons/react') contents = 'export const ArrowRight=()=>null,MagnifyingGlass=()=>null,User=()=>null,Users=()=>null'
+        export const useCallback=fn=>fn,useRef=value=>({current:value}),useEffect=()=>{}`
+      else if (path === '@phosphor-icons/react') contents = 'export const ArrowRight=()=>null,MagnifyingGlass=()=>null,User=()=>null,Users=()=>null,ChatCircleText=()=>null,ChatsCircle=()=>null'
       else if (path.endsWith('/api.js')) contents = `export const publicDocsHref=value=>value, adminApi={ updateTwitterSearchStrategy: async (...args) => {
         const env=globalThis.__twitterStrategyUi; env.sends.push(args); if (env.failure) throw env.failure; return { revision:10 }; } }`
       else if (path.endsWith('/components.jsx')) contents = 'export const DropdownField=()=>null,ErrorState=()=>null,Field=()=>null,LoadingState=()=>null,PageHeading=()=>null,useRemoteData=()=>({})'
@@ -30,6 +30,8 @@ const view = build({
       else if (path.endsWith('/strategy-data-statistics.jsx')) contents = 'export const StrategyDataStatistics=()=>null'
       else if (path.endsWith('/platform-search-policy.jsx')) contents = 'export const FacebookSearchPolicyForm=()=>null'
       else if (path.endsWith('/strategy-search-experience-model.js')) contents = 'export const recordStrategyAttempt=()=>{}'
+      else if (path.endsWith('/strategy-comments.jsx')) contents = 'export const StrategyCommentsExperience=()=>null'
+      else if (path.endsWith('/strategy-comments-model.js')) contents = 'export const isCommentOperation=()=>false'
       return { contents, loader: 'js' }
     })
   } }],

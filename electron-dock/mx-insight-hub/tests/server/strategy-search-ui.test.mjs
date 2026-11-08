@@ -30,7 +30,7 @@ test('strategy search has its own data-services product and reciprocal documenta
   assert.equal(productForPath(STRATEGY_SEARCH_PATH).label, '策略搜索')
   assert.equal(productForDocs('/docs/strategy-search').path, STRATEGY_SEARCH_PATH)
   assert.notEqual(productForPath('/data-products/search'), productForPath(STRATEGY_SEARCH_PATH))
-  assert.deepEqual(STRATEGY_SEARCH_INTERFACES.map(item => item.id), ['search', 'crawl', 'user-info'])
+  assert.deepEqual(STRATEGY_SEARCH_INTERFACES.map(item => item.id), ['search', 'crawl', 'user-info', 'post-comments', 'comment-replies'])
   assert.ok(STRATEGY_SEARCH_INTERFACES.every(item => item.paths.every(path => /^\/api\/v[12]\//.test(path))))
   assert.ok(STRATEGY_SEARCH_INTERFACES.find(item => item.id === 'search').paths.includes('/api/v2/data/search'))
 })

@@ -1,22 +1,26 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { createDataSearchCursorCodec } from './cursor.mjs'
-import { normalizePostCommentsRequest, POST_COMMENTS_VERSION,
-  POST_COMMENTS_CAPABILITY, POST_COMMENTS_PATH, POST_COMMENTS_RECIPES } from '../contracts/post-comments.mjs'
+import { normalizePostCommentsRequest, POST_COMMENTS_VERSION, POST_COMMENTS_CAPABILITY, POST_COMMENTS_PATH,
+  POST_COMMENTS_RECIPES, postCommentRecipe } from '../contracts/post-comments.mjs'
 import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
+import { commentRoutePlatforms } from '../contracts/comment-routes.mjs'
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
 const invalidCursor = () => new AppError(400, 'invalid_cursor', 'The comments cursor is invalid, expired or belongs to another request/Key; restart explicitly')
 
-export function normalizePostCommentsDelivery(body, { context, maxPageSize, codec, allowHistoricalProviderCursor = false }) {
-  const request = normalizePostCommentsRequest(body, { maxPageSize, businessId: context.consumer.businessId,
+export function normalizePostCommentsDelivery(body, { context, maxPageSize, codec, allowHistoricalProviderCursor = false, provider = null }) {
+  const request = normalizePostCommentsRequest(body, { maxPageSize, businessId: context.consumer.businessId, provider,
     allowHistoricalRedditCursor: allowHistoricalProviderCursor, allowHistoricalKuaishouCursor: allowHistoricalProviderCursor })
   const { initialParams: _initialParams, cursor: _cursor, page: _page, ...identity } = request.fingerprintBody
-  const recipe = POST_COMMENTS_RECIPES[request.platform]
-  // These platforms changed suppliers. Old signed cursors must not resume a
-  // JustOne traversal through TikHub; historical receipt fingerprints stay put.
+  const recipe = postCommentRecipe(request.platform, request.provider)
+  // These platforms changed suppliers, and a routing policy may select any
+  // registered supplier. A signed cursor resumes only the supplier that
+  // issued it; historical receipt fingerprints stay put. The baseline
+  // supplier of an unmigrated platform keeps its original scope identity.
   const migratedProvider = ['twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu'].includes(request.platform)
+    || recipe.provider !== POST_COMMENTS_RECIPES[request.platform].provider
   const scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
     ...(migratedProvider ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
   const legacyScopeHash = migratedProvider ? hash({ version: POST_COMMENTS_VERSION, ...identity }) : null
@@ -29,6 +33,7 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
       const state = codec.decode(request.cursor)
       legacyProviderCursor = allowHistoricalProviderCursor && legacyScopeHash !== null && state.scopeHash === legacyScopeHash
       if (state.version !== POST_COMMENTS_VERSION || state.scopeHash !== scopeHash && !legacyProviderCursor
+        || state.provider != null && state.provider !== recipe.provider
         || !uuid(state.previousDeliveryId) || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
         || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now() && !(['reddit', 'kuaishou'].includes(request.platform) && legacyProviderCursor)
         || body.page != null && Number(body.page) !== state.page) throw new Error('cursor')
@@ -42,12 +47,19 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
     // still relays Zhihu's own is_end, so it keeps filling count as before.
     manualProviderPagination: ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform) && recipe.provider === 'tikhub',
     fingerprintBody: { ...identity, initialParams: request.initialParams ?? null, cursor: request.cursor ?? null },
-    encodeNext: deliveryId => codec.encode({ version: POST_COMMENTS_VERSION, scopeHash,
+    encodeNext: deliveryId => codec.encode({ version: POST_COMMENTS_VERSION, scopeHash, provider: recipe.provider,
       page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }
 }
 
+// Each comment carries the identities the replies interface needs, so callers
+// pass it back unchanged instead of assembling per-platform parameters.
+const REPLY_PLATFORMS = new Set(commentRoutePlatforms('comment-replies'))
+// Reddit names a comment's hidden replies by its tree cursor, carried here too.
+const withReplyRef = (platform, row) => REPLY_PLATFORMS.has(platform) && row.commentId
+  ? { ...row, replyRef: { platform, commentId: row.commentId, contentId: row.contentId ?? null, ...(row.replyCursor ? { cursor: row.replyCursor } : {}) } } : row
+
 export function postCommentsDeliveryBody(request, { rowsByJob, state, calls, warnings, deliveryId }) {
-  const job = state.jobs[0], items = rowsByJob[0]
+  const job = state.jobs[0], items = rowsByJob[0].map(row => withReplyRef(request.platform, row))
   const remaining = Boolean(job.buffer || !job.done && job.upstreamPages < 15)
   const hasNext = remaining && request.page < 15
   const nextCursor = hasNext ? request.encodeNext(deliveryId) : null
@@ -83,8 +95,8 @@ export function postCommentsPlan({ gateway, context, input, dependencies }) {
     capabilityMessage: 'Post comments are not granted for this API key', replayReleasedFailures: true,
     normalize: ({ policy }) => {
       request = normalizePostCommentsDelivery(input.body, { context, maxPageSize: policy.maxPageSize, codec,
-        allowHistoricalProviderCursor: true })
-      if (request.platform !== input.platform || POST_COMMENTS_RECIPES[request.platform]?.provider !== gateway.providerKey) {
+        allowHistoricalProviderCursor: true, provider: gateway.providerKey })
+      if (request.platform !== input.platform || request.provider !== gateway.providerKey) {
         throw new AppError(503, 'external_platform_unavailable', 'The configured comments provider does not match this platform')
       }
       return request
@@ -98,4 +110,17 @@ export function postCommentsPlan({ gateway, context, input, dependencies }) {
         buildResponse: values => postCommentsDeliveryBody(request, { ...values, deliveryId: delivery.usageRequestId }) })
     },
   } }
+}
+
+// The supplier that issued a signed comments cursor. Routing reads it before
+// choosing a gateway so a traversal never changes supplier mid-way. Cursors
+// issued before routing carry no supplier and resume on the baseline recipe.
+export function postCommentsCursorProvider(body, { gateway, context }) {
+  const cursor = typeof body?.cursor === 'string' ? body.cursor
+    : typeof body?.params?.cursor === 'string' && body.params.cursor.startsWith('mxds1.') ? body.params.cursor : null
+  if (!cursor?.startsWith('mxds1.')) return null
+  try {
+    const state = createDataSearchCursorCodec(gateway.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}:post-comments`).decode(cursor)
+    return typeof state.provider === 'string' ? state.provider : 'baseline'
+  } catch { return null }
 }

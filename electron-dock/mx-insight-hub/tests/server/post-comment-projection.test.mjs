@@ -211,16 +211,26 @@ test('supplier-returned descendant keeps its real parent while contentId remains
   assert.equal(project(reddit, step('reddit', 't3_123')).projected.acquiredItems[0].parentCommentId, null)
 })
 
-test('Twitter, Reddit, Kuaishou and Zhihu reject old JustOne projections after switching to fixed TikHub recipes', () => {
+test('JustOne comment projections run only when routing dispatched JustOne for a platform it serves', () => {
   const zhihuStep = step('zhihu', '123')
   assert.throws(() => projectPostCommentPage({ code: 0, data: justoneShapes.zhihu }, zhihuStep, { capturedAt }),
     { code: 'invalid_upstream_contract' }, 'a JustOne envelope is not a TikHub page')
-  assert.throws(() => projectPostCommentPage({ code: 0, data: justoneShapes.zhihu }, { ...zhihuStep, provider: 'justone' }, { capturedAt }),
-    { code: 'invalid_upstream_contract' }, 'a JustOne dispatch cannot settle a TikHub-routed platform')
-  assert.throws(() => justoneProject('kuaishou', kuaishouShape), { code: 'invalid_upstream_contract' })
-  assert.throws(() => justoneProject('reddit', redditShape), { code: 'invalid_upstream_contract' })
-  assert.throws(() => justoneProject('twitter', { status: 'ok', timeline: [], next_cursor: null }),
-    { code: 'invalid_upstream_contract' })
+  // 2026-11-07: JustOne is a registered guarantee supplier selectable by the
+  // Strategy Search routing policy, using the layout calibrated on 2026-11-02.
+  const zhihu = projectPostCommentPage({ code: 0, data: justoneShapes.zhihu }, { ...zhihuStep, provider: 'justone' }, { capturedAt })
+  assert(zhihu.projected.acquiredItems.length > 0)
+  assert.equal(zhihu.records[0].stableFields.connectorId, 'external-platform:justone')
+  const twitter = projectPostCommentPage({ code: 0, data: { status: 'ok', timeline: [], next_cursor: null } },
+    { ...step('twitter', '123'), provider: 'justone' }, { capturedAt })
+  assert.deepEqual(twitter.projected.acquiredItems, [])
+  for (const platform of ['instagram', 'xiaohongshu', 'youtube']) {
+    assert.throws(() => projectPostCommentPage({ code: 0, data: {} }, { ...step(platform, 'x'), provider: 'justone' }, { capturedAt }),
+      { code: 'invalid_upstream_contract' }, `${platform} has no JustOne comment parser`)
+  }
+  for (const platform of ['tiktok', 'linkedin', 'facebook', 'bilibili']) {
+    assert.throws(() => projectPostCommentPage({ code: 200, data: {} }, { ...step(platform, '1'), provider: 'tikhub' }, { capturedAt }),
+      { code: 'invalid_upstream_contract' }, `${platform} has no reviewed TikHub comment parser`)
+  }
 })
 
 test('known terminal fields override residual tokens while missing and repeated tokens remain unknown', () => {

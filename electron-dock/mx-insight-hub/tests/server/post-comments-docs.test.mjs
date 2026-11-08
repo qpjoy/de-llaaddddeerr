@@ -4,7 +4,7 @@ import { PUBLIC_OPENAPI_DOCUMENT, tenantOpenApiDocument, publicDocsHtmlForPath }
 import { servicePriceDefinition } from '../../server/contracts/service-pricing.mjs'
 import { implementedRoutes } from '../../server/data/source-connections.mjs'
 import { productAllowed } from '../../shared/product-access.mjs'
-import { POST_COMMENTS_PATH, POST_COMMENTS_RECIPES } from '../../server/contracts/post-comments.mjs'
+import { POST_COMMENTS_PATH, POST_COMMENTS_RECIPES, POST_COMMENT_PROVIDER_RECIPES } from '../../server/contracts/post-comments.mjs'
 
 test('canonical comments and both aliases expose the actual count and identity contract', () => {
   for (const path of ['/data/social/post-comments', '/search/post-comments', '/night-all/search/post-comments']) {
@@ -34,11 +34,14 @@ test('tenant comment visibility requires platform and capability in the same sco
   }
 })
 
-test('all platform inventory rows identify Hub execution and the fixed supplier', () => {
+test('all platform inventory rows identify Hub execution and every registered supplier', () => {
   const rows = implementedRoutes().filter(row => row.path === POST_COMMENTS_PATH)
-  assert.equal(rows.length, 13)
+  assert.equal(rows.length, Object.values(POST_COMMENT_PROVIDER_RECIPES).reduce((sum, recipes) => sum + Object.keys(recipes).length, 0))
+  for (const platform of Object.keys(POST_COMMENTS_RECIPES)) {
+    assert(rows.some(row => row.platform === platform && row.provider === POST_COMMENTS_RECIPES[platform].provider), `${platform} baseline row`)
+  }
   for (const row of rows) {
-    assert.equal(row.provider, POST_COMMENTS_RECIPES[row.platform].provider)
+    assert.equal(row.verification, POST_COMMENT_PROVIDER_RECIPES[row.platform][row.provider].verification)
     assert.equal(row.operation, 'social.comments.list')
     assert.deepEqual(row.datasets, ['social.comments.v1'])
   }

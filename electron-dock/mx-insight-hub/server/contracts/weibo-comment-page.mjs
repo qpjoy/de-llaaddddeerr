@@ -1,7 +1,10 @@
 // Import-free TikHub Weibo Web-V2 first-level comment parser.
 // The endpoint documents `max_id` continuation and an empty max_id terminal;
 // every other cursor shape is treated as unknown until verified.
-export function parseTikHubWeiboCommentPage(payload, postId, continuation = null) {
+// 2026-11-07 live pages: a first-level comment's rootid is the comment's own
+// ID; a sub-comment's rootid is its root comment. With { replies: true } the
+// second argument is the requested root comment ID.
+export function parseTikHubWeiboCommentPage(payload, postId, continuation = null, { replies = false } = {}) {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   const invalid = reason => { const error = new Error('invalid_upstream_contract'); error.code = 'invalid_upstream_contract'; error.reason = reason; throw error }
   const idString = value => typeof value === 'string' && /^[1-9][0-9]{0,29}$/u.test(value) ? value : null
@@ -48,7 +51,9 @@ export function parseTikHubWeiboCommentPage(payload, postId, continuation = null
     const commentId = identity(raw, ['idstr', 'mid', 'id'], 'comment_identity_conflict')
     if (!commentId) invalid('comment_identity')
     const rootId = identity(raw, ['rootidstr', 'rootid'], 'root_id_conflict')
-    if (rootId && rootId !== postId) invalid('root_id_mismatch')
+    // First-level rows: live 2026-11-07 rootid was the comment itself; the 11-02
+    // saved sample passed with rootid = post. Either is a first-level comment.
+    if (replies ? rootId && rootId !== postId : rootId && rootId !== commentId && rootId !== postId) invalid('root_id_mismatch')
     if (!object(raw.user)) invalid('author_identity')
     const authorId = identity(raw.user, ['idstr', 'id'], 'author_identity_conflict')
     if (!authorId) invalid('author_identity')

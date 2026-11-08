@@ -13,6 +13,7 @@ import { ServicePrice } from './service-price.jsx'
 import { requestSnippet } from './request-snippets.js'
 import { copyText } from './open-capabilities.js'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
+import { ResponseFieldTable } from './response-field-table.jsx'
 import { ProductViewTabs, ProductManagement } from './product-management.jsx'
 import { EcommerceRoutingPage } from './ecommerce-routing.jsx'
 import { isProductAdmin } from '../shared/product-management.mjs'
@@ -146,6 +147,7 @@ export function ProductApiConsole({ product, token, initialEndpoint, onResult, o
       {error ? <ErrorState error={error} /> : null}
       {product.docs === 'web-search' && result?.identity === identity ? <WebSearchResult key={result.evidence?.requestId} payload={result.payload}/> : null}
       {endpoint.path.startsWith('/api/v1/data/wechat/') && result?.identity === identity ? <WechatResult payload={result.payload} /> : null}
+      <ResponseFieldTable document={document} endpoint={endpoint} payload={result?.identity === identity ? result.payload : null} />
       <h3>JSON 响应</h3>{result?.identity === identity ? <><p>{result.evidence?.requestId} · {result.evidence?.idempotentReplay ? '幂等回放' : '本次返回'}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} aggregate={result.input.path === '/api/v1/data/aggregate/search'} /></> : <p>发送后展示实际响应。</p>}
     </> : <p>当前身份暂无可见接口。</p>}</div>
   </section>

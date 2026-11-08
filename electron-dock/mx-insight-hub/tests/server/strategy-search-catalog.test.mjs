@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { strategySearchCatalog } from '../../server/data/strategy-search-catalog.mjs'
+import { commentRoutePlatforms } from '../../server/contracts/comment-routes.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../../server/contracts/night-all-legacy.mjs'
 import { canRouteRawSearch } from '../../server/contracts/raw-search.mjs'
 import { canRouteDataSearch } from '../../server/contracts/hub-data-search.mjs'
@@ -23,7 +24,9 @@ test('strategy catalog separates supported operation sets and exposes the implem
   assert.equal(platformById(catalog, 'search', 'linkedin'), undefined)
   assert.equal(platformById(catalog, 'user-info', 'reddit').migrationStatus, 'hub_native')
   const editable = catalog.interfaces.flatMap(group => group.platforms.filter(row => row.editable).map(row => `${group.id}:${row.platform}`))
-  assert.deepEqual(editable.sort(), ['crawl:facebook', 'search:facebook', 'search:instagram', 'search:twitter', 'user-info:facebook'])
+  // Comment interfaces are Hub-native and editable for each registered platform.
+  const commentEditable = ['post-comments', 'comment-replies'].flatMap(id => commentRoutePlatforms(id).map(platform => `${id}:${platform}`))
+  assert.deepEqual(editable.sort(), ['crawl:facebook', 'search:facebook', 'search:instagram', 'search:twitter', 'user-info:facebook', ...commentEditable].sort())
   for (const row of catalog.interfaces.flatMap(group => group.platforms)) {
     assert(row.label && row.routeSummary)
     if (!row.editable) assert(row.readOnlyReason)

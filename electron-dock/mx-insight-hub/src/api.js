@@ -678,6 +678,10 @@ export const adminApi = {
     return request(token, `${ADMIN_ROOT}/strategy-search/${interfaceId}/facebook`, { method: 'PUT', body })
   },
   updateTwitterSearchStrategy: (token, body) => request(token, `${ADMIN_ROOT}/strategy-search/search/twitter`, { method: 'PUT', body }),
+  updateCommentRoute: (token, interfaceId, platform, body) => {
+    if (!['post-comments', 'comment-replies'].includes(interfaceId)) throw new Error('Unsupported comment interface')
+    return request(token, `${ADMIN_ROOT}/strategy-search/${interfaceId}/${encodeURIComponent(platform)}`, { method: 'PUT', body })
+  },
   ecommerceRouting: token => request(token, `${ADMIN_ROOT}/ecommerce-routing`),
   updateEcommerceRoute: (token, marketplace, body) => request(token, `${ADMIN_ROOT}/ecommerce-routing/${encodeURIComponent(marketplace)}`, { method: 'PUT', body }),
   updatePlatformSearchPolicy: (token, platform, body) => request(token, `${ADMIN_ROOT}/platform-search-policies/${encodeURIComponent(platform)}`, { method: 'PUT', body }),

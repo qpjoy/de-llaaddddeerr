@@ -14,7 +14,9 @@ import { parseTikHubWeiboCommentPage } from './weibo-comment-page.mjs'
 // A documented request endpoint alone does not verify a response projection.
 export const POST_COMMENT_PROJECTION_PLATFORMS = Object.freeze(['xiaohongshu', 'instagram', 'youtube',
   'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'])
-const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu'])
+// Platforms each supplier has a reviewed parser for.
+const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu', 'douyin', 'bilibili'])
+const JUSTONE_PLATFORMS = new Set(['twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'])
 const VERSION = 'mx-insight-hub.post-comments.v1'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const unusable = () => { throw new AppError(502, 'invalid_upstream_contract', 'Comment response does not match the released contract') }
@@ -143,6 +145,12 @@ function zhihuTikHub(payload, step, capturedAt) {
   if (object(payload.params) && payload.params.answer_id != null && scalar(payload.params.answer_id) !== request.postId) unusable()
   let data = payload.data
   if (object(data) && !Array.isArray(data.data) && object(data.data) && Array.isArray(data.data.data)) data = data.data
+  return projectZhihuCommentList(data, { request, continuation, capturedAt, provider: 'tikhub',
+    nextPath: `/api/v4/comment_v5/answers/${request.postId}/root_comment` })
+}
+// Zhihu's comment_v5 list layout, shared by root comments and child comments.
+// `valuesFor` adds relation fields that only the caller can establish.
+export function projectZhihuCommentList(data, { request, continuation, capturedAt, provider, nextPath, valuesFor = () => ({}) }) {
   if (!object(data) || !Array.isArray(data.data)) unusable()
   const rows = [], raws = []
   for (const raw of list(data.data)) {
@@ -150,7 +158,7 @@ function zhihuTikHub(payload, step, capturedAt) {
     rows.push(item(request, { commentId: raw.id, text: raw.content,
       publishedAt: timestamp(raw.created_time), author: author(raw.author?.id, raw.author?.name, raw.author?.avatar_url),
       likes: raw.like_count, replies: raw.child_comment_count, url: typeof raw.url === 'string' ? raw.url : null,
-      metrics: { dislikes: count(raw.dislike_count) } }, raw, capturedAt))
+      metrics: { dislikes: count(raw.dislike_count) }, ...valuesFor(raw) }, raw, capturedAt))
     raws.push(raw)
   }
   if (data.paging != null && !object(data.paging)) unusable()
@@ -159,14 +167,76 @@ function zhihuTikHub(payload, step, capturedAt) {
   if (ended !== true && data.paging?.next) {
     try {
       const next = new URL(data.paging.next)
-      if (next.hostname !== 'www.zhihu.com' || next.pathname !== `/api/v4/comment_v5/answers/${request.postId}/root_comment`) unusable()
+      if (next.hostname !== 'www.zhihu.com' || next.pathname !== nextPath) unusable()
       offset = next.searchParams.get('offset')
     } catch { unusable() }
   }
   const providerPage = cursorPage(offset ? { offset } : {}, 'offset', 'offset', continuation,
     ended === true ? false : ended === false ? true : null)
   return { projected: { acquiredItems: rows, profiles: [], providerPage },
+    records: rows.map((row, index) => canonical(row, raws[index], capturedAt, provider)) }
+}
+// Douyin's own comment-list object, relayed by JustOne and TikHub alike
+// (aweme/v1/comment/list and its reply list). Calibrated from JustOne's
+// official sample; TikHub rows are `derived` until a saved page is inspected.
+export function douyinCommentRows(comments, { request, append, awemeId = request.postId, valuesFor = () => ({}) }) {
+  for (const raw of list(comments)) {
+    if (!object(raw) || raw.aweme_id != null && scalar(raw.aweme_id) !== awemeId) unusable()
+    append(raw, { commentId: raw.cid, text: raw.text, publishedAt: timestamp(raw.create_time),
+      author: author(raw.user?.uid, raw.user?.nickname, raw.user?.avatar_thumb?.url_list?.[0]),
+      likes: raw.digg_count, replies: raw.reply_comment_total, url: request.url || null, ...valuesFor(raw) })
+  }
+}
+function douyinTikHub(payload, step, capturedAt) {
+  const { request, continuation = null } = step.postComments, data = payload.data
+  if (!object(data) || data.status_code != null && data.status_code !== 0) unusable()
+  if (data.comments != null && !Array.isArray(data.comments)) unusable()
+  const rows = [], raws = []
+  // Live 2026-11-07: first-level rows carry reply_id "0" (a reply names its root).
+  douyinCommentRows(data.comments ?? [], { request, append: (raw, values) => { rows.push(item(request, values, raw, capturedAt)); raws.push(raw) },
+    valuesFor: raw => [undefined, null, 0, '0'].includes(raw.reply_id) ? { parentExternalId: request.postId, parentCommentId: null, parentRelationship: 'post' } : {} })
+  return { projected: { acquiredItems: rows, profiles: [], providerPage: douyinCursorPage(data, continuation) },
     records: rows.map((row, index) => canonical(row, raws[index], capturedAt, 'tikhub')) }
+}
+// Bilibili's own reply object (/x/v2/reply), relayed by TikHub web for both a
+// video's comment list and one comment's reply list. Live pages 2026-11-07:
+// rows under data.data.replies, page { num, size, count }; root/parent are 0
+// on first-level comments and name the root/direct target on replies.
+export function bilibiliReplyRows(rows, { request, append, valuesFor = () => ({}) }) {
+  for (const raw of rows == null ? [] : list(rows)) {
+    const id = scalar(raw?.rpid_str ?? raw?.rpid)
+    if (!object(raw) || !id || typeof raw.content?.message !== 'string') unusable()
+    append(raw, { commentId: id, text: raw.content.message, publishedAt: timestamp(raw.ctime),
+      author: author(raw.member?.mid, raw.member?.uname, raw.member?.avatar), likes: raw.like, replies: raw.rcount,
+      url: request.url || null, ...valuesFor(raw, id) })
+  }
+}
+// Page-number continuation is offered only for a full page short of the total:
+// the live comment list returned 3 rows on page 1 of 240,390, so a short page
+// does not prove that page 2 exists.
+export function bilibiliPage(info, rows, continuation) {
+  if (!object(info)) unusable()
+  const num = count(info.num), size = count(info.size), total = count(info.count)
+  if (!num || !size || total === null) unusable()
+  if (num * size >= total) return page(null, true)
+  return rows >= size && Number(continuation?.pn ?? 0) !== num + 1 ? page({ pn: num + 1 }, false) : page(null, false)
+}
+function bilibiliTikHub(payload, step, capturedAt) {
+  const { request, continuation = null } = step.postComments, data = payload.data
+  if (!object(data) || data.code !== 0 || !object(data.data)) unusable()
+  const rows = [], raws = []
+  bilibiliReplyRows(data.data.replies, { request, append: (raw, values) => { rows.push(item(request, values, raw, capturedAt)); raws.push(raw) },
+    valuesFor: raw => { if (![0, '0', undefined].includes(raw.root)) unusable(); return { parentExternalId: request.postId, parentCommentId: null, parentRelationship: 'post' } } })
+  return { projected: { acquiredItems: rows, profiles: [], providerPage: bilibiliPage(data.data.page, rows.length, continuation) },
+    records: rows.map((row, index) => canonical(row, raws[index], capturedAt, 'tikhub')) }
+}
+// TikHub declares Douyin's cursor as an integer request parameter.
+export function douyinCursorPage(data, continuation) {
+  const more = flag(data.has_more)
+  if (data.cursor != null && !(Number.isSafeInteger(data.cursor) && data.cursor >= 0 || typeof data.cursor === 'string' && /^\d{1,18}$/u.test(data.cursor))) unusable()
+  const next = data.cursor == null ? null : Number(data.cursor)
+  if (more === true && next !== null && next !== Number(continuation?.cursor ?? -1)) return page({ cursor: next }, false)
+  return page(null, more === false)
 }
 function linkedCommentId(permalink) {
   try {
@@ -186,6 +256,52 @@ function justOne(payload, step, capturedAt) {
   const append = (raw, values) => { rows.push(item(request, values, raw, capturedAt)); raws.push(raw) }
   let providerPage
   switch (request.platform) {
+    case 'twitter':
+      if (data.status !== 'ok') unusable()
+      for (const raw of list(data.timeline)) {
+        if (!object(raw) || raw.type !== 'tweet') unusable()
+        // The requested post can appear as timeline context; it is not itself
+        // a comment. All acquired business data remains in the page archive.
+        if (scalar(raw.tweet_id) === request.postId) continue
+        if (scalar(raw.conversation_id) !== request.postId || !scalar(raw.in_reply_to_status_id_str)) unusable()
+        const user = raw.user_info || {}, parent = scalar(raw.in_reply_to_status_id_str)
+        append(raw, { commentId: raw.tweet_id, text: raw.text, publishedAt: timestamp(raw.created_at),
+          author: author(user.rest_id, user.name, user.avatar), authorHandle: scalar(user.screen_name),
+          parentCommentId: parent && parent !== request.postId ? parent : null,
+          url: `https://x.com/i/status/${scalar(raw.tweet_id)}`, likes: raw.favorites, replies: raw.replies,
+          metrics: { shares: count(raw.retweets), views: count(raw.views), bookmarks: count(raw.bookmarks), quotes: count(raw.quotes) } })
+      }
+      providerPage = cursorPage(data, 'next_cursor', 'cursor', continuation)
+      break
+    case 'reddit': {
+      const post = data.postInfoById, forest = post?.commentForest
+      if (!object(post) || !object(forest) || scalar(post.id)?.replace(/^t3_/u, '') !== request.postId.replace(/^t3_/u, '')) unusable()
+      const trees = list(forest.trees)
+      for (const tree of trees) {
+        if (!object(tree)) unusable()
+        if (tree.node === null && object(tree.more)) continue
+        const raw = tree.node, user = raw?.authorInfo || {}
+        if (!object(raw) || raw.__typename !== 'Comment') unusable()
+        append(tree, { commentId: raw.id, text: raw.content?.markdown, publishedAt: timestamp(raw.createdAt),
+          author: author(user.id, user.name, user.iconSmall?.url), likes: null, replies: tree.childCount,
+          metrics: { score: Number.isSafeInteger(raw.score) ? raw.score : null },
+          parentCommentId: scalar(tree.parentId)?.replace(/^t3_/u, '') === request.postId.replace(/^t3_/u, '') ? null : scalar(tree.parentId),
+          url: typeof raw.permalink === 'string' ? `https://www.reddit.com${raw.permalink}` : null })
+      }
+      providerPage = cursorPage({ cursor: trees.at(-1)?.more?.cursor }, 'cursor', 'cursor', continuation,
+        flag(forest.pageInfo?.hasNextPage))
+      break
+    }
+    case 'kuaishou':
+      if (data.result !== 1) unusable()
+      for (const raw of list(data.rootComments)) append(raw, { commentId: raw.comment_id, text: raw.content,
+        publishedAt: timestamp(raw.timestamp), author: author(raw.author_id, raw.author_name, raw.headurl),
+        likes: raw.likedCount, replies: raw.subCommentCount, url: request.url || null })
+      providerPage = data.pcursor === 'no_more' ? page(null, true) : cursorPage(data, 'pcursor', 'pcursor', continuation)
+      break
+    case 'zhihu':
+      return projectZhihuCommentList(data, { request, continuation, capturedAt, provider: 'justone',
+        nextPath: `/api/v4/comment_v5/answers/${request.postId}/root_comment` })
     case 'weibo':
       if (data.ok !== 1) unusable()
       for (const raw of list(data.data)) append(raw, { commentId: raw.idstr ?? raw.id, text: raw.text_raw ?? raw.text,
@@ -196,12 +312,7 @@ function justOne(payload, step, capturedAt) {
     case 'douyin':
     case 'tiktok':
       if (data.status_code !== 0) unusable()
-      for (const raw of list(data.comments)) {
-        if (raw.aweme_id != null && scalar(raw.aweme_id) !== request.postId) unusable()
-        append(raw, { commentId: raw.cid, text: raw.text, publishedAt: timestamp(raw.create_time),
-          author: author(raw.user?.uid, raw.user?.nickname, raw.user?.avatar_thumb?.url_list?.[0]),
-          likes: raw.digg_count, replies: raw.reply_comment_total, url: request.url || null })
-      }
+      douyinCommentRows(data.comments, { request, append })
       if (request.platform === 'douyin') providerPage = flag(data.has_more) === true
         ? page({ page: Number(continuation?.page || 1) + 1 }, false) : page(null, flag(data.has_more) === false)
       else providerPage = cursorPage(data, 'cursor', 'cursor', continuation, flag(data.has_more))
@@ -253,10 +364,15 @@ export function projectPostCommentPage(payload, step, { capturedAt }) {
     throw new AppError(503, 'external_platform_contract_unverified', 'This platform comment response requires calibration')
   }
   if (!object(payload)) unusable()
-  const provider = TIKHUB_PLATFORMS.has(request.platform) ? 'tikhub' : 'justone'
-  if (step.provider !== provider) unusable()
+  // The dispatched step names its supplier; the routing policy decided it
+  // before any call. A supplier without a parser for this platform fails closed.
+  const provider = step.provider
+  if (!JUSTONE_PLATFORMS.has(request.platform) && provider === 'justone' || !TIKHUB_PLATFORMS.has(request.platform) && provider === 'tikhub'
+    || !['justone', 'tikhub'].includes(provider)) unusable()
   if (provider === 'justone') return justOne(payload, step, capturedAt)
   if (payload.code !== 200) unusable()
+  if (request.platform === 'douyin') return douyinTikHub(payload, step, capturedAt)
+  if (request.platform === 'bilibili') return bilibiliTikHub(payload, step, capturedAt)
   if (request.platform === 'twitter') return twitterTikHub(payload, step, capturedAt)
   if (request.platform === 'reddit') return redditTikHub(payload, step, capturedAt)
   if (request.platform === 'kuaishou') return kuaishouTikHub(payload, step, capturedAt)
@@ -317,3 +433,5 @@ export function projectPostCommentPage(payload, step, { capturedAt }) {
   return { projected: { acquiredItems: rows, profiles: [], providerPage },
     records: rows.map((row, index) => canonical(row, rawRows[index], capturedAt, step.provider || 'tikhub')) }
 }
+
+export { item as postCommentItem, canonical as postCommentRecord, cursorPage as postCommentCursorPage, page as postCommentProviderPage }

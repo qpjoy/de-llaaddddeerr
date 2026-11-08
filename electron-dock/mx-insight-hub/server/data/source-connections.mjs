@@ -1,7 +1,8 @@
 import { WEB_SEARCH_PROVIDERS, WEB_SEARCH_PATH } from '../../shared/web-search.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
-import { POST_COMMENTS_RECIPES, POST_COMMENTS_PATH, POST_COMMENTS_CAPABILITY } from '../contracts/post-comments.mjs'
+import { POST_COMMENT_PROVIDER_RECIPES, POST_COMMENTS_PATH, POST_COMMENTS_CAPABILITY } from '../contracts/post-comments.mjs'
+import { COMMENT_REPLY_PROVIDER_RECIPES, COMMENT_REPLIES_PATH } from '../contracts/comment-replies.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from '../contracts/youtube-comments.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../contracts/tikhub-content-search.mjs'
@@ -116,12 +117,20 @@ export function implementedRoutes(sources = []) {
       : '现行历史帖子详情兼容入口；平台支持取自 Hub 固定合同，实时可用性待请求验证。',
     evidence: 'server/contracts/night-all-post-detail.mjs',
   }))
-  for (const [platform, recipe] of Object.entries(POST_COMMENTS_RECIPES)) rows.push(route(`hub-${platform}-post-comments`, {
+  const verificationLabel = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '沿用同平台已校准结构，首个生产页待核对', pending: '待校准，暂不派发' }
+  for (const [platform, recipes] of Object.entries(POST_COMMENT_PROVIDER_RECIPES)) for (const recipe of Object.values(recipes)) rows.push(route(`hub-${platform}-post-comments-${recipe.provider}`, {
     platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: recipe.provider,
     product: '社交内容与账号', operation: POST_COMMENTS_CAPABILITY, path: POST_COMMENTS_PATH,
-    datasets: ['social.comments.v1'], procurementOperation: false, keywordSearch: false,
-    defaultRule: 'Hub 单帖评论；旧两个 search/post-comments 是别名。固定供应商合同，完整归档、规范化入库和缓冲续页，无 Night-All 回退；就绪仍须审核授权、凭据、价格及操作开关。',
+    datasets: ['social.comments.v1'], procurementOperation: false, keywordSearch: false, verification: recipe.verification,
+    defaultRule: `Hub 单帖评论；旧两个 search/post-comments 是别名。按策略搜索「帖子评论」平台策略选择供应商（${verificationLabel[recipe.verification]}）；游标绑定原供应商，完整归档、规范化入库和缓冲续页，无 Night-All 回退；就绪仍须审核授权、凭据、价格及操作开关。`,
     evidence: 'server/contracts/post-comments.mjs',
+  }))
+  for (const [platform, recipes] of Object.entries(COMMENT_REPLY_PROVIDER_RECIPES)) for (const recipe of Object.values(recipes)) rows.push(route(`hub-${platform}-comment-replies-${recipe.provider}`, {
+    platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: recipe.provider,
+    product: '社交内容与账号', operation: POST_COMMENTS_CAPABILITY, path: COMMENT_REPLIES_PATH,
+    datasets: ['social.comments.v1'], procurementOperation: false, keywordSearch: false, verification: recipe.verification,
+    defaultRule: `Hub 评论回复（楼中楼），按 commentId（及平台要求的 contentId）获取；与单帖评论共用授权和计费。供应商按策略搜索「评论回复」平台策略选择（${verificationLabel[recipe.verification]}）。`,
+    evidence: 'server/contracts/comment-replies.mjs',
   }))
   for (const provider of ['rapidapi', 'justone']) for (const [kind, path] of [
     ['raw', '/api/v1/night-all/search/raw'], ['data', '/api/v1/data/search'],

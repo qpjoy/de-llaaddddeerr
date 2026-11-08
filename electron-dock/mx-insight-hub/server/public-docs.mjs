@@ -13,7 +13,7 @@ import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-rese
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
 import { hubSocialPaths, hubSocialGuide, hubSocialAccountPlatforms } from './contracts/hub-social-docs.mjs'
 import { youtubeCommentsPaths, youtubeCommentsGuide } from './contracts/youtube-comments-docs.mjs'
-import { postCommentsPaths, postCommentsAliasPaths, postCommentsGuide, postCommentsPlatforms } from './contracts/post-comments-docs.mjs'
+import { postCommentsPaths, postCommentsAliasPaths, postCommentsGuide, postCommentsPlatforms, commentRepliesPaths, commentRepliesPlatforms } from './contracts/post-comments-docs.mjs'
 import { productForDocs } from '../shared/product-workbenches.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
@@ -21,6 +21,7 @@ import { xhsDiscoveryPaths, xhsDiscoveryPages, xhsDiscoveryGuide } from './contr
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
 import { strategySearchGuide } from './data/strategy-search-guide.mjs'
+import { describeResponseFields } from '../shared/field-descriptions.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from './contracts/night-all-legacy.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml, ipRiskHistoryPaths } from './contracts/ip-risk-docs.mjs'
@@ -1326,6 +1327,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...hubSocialPaths,
     ...youtubeCommentsPaths,
     ...postCommentsPaths,
+    ...commentRepliesPaths,
     ...postCommentsAliasPaths,
     ...webSearchPaths,
     ...wechatSelfHostedPaths,
@@ -5534,6 +5536,30 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
   },
 })
 
+// Strategy Search interfaces: every documented response field carries a
+// meaning, so test and downstream teams can read each returned field against
+// the debugger's live response. Explicit schema descriptions always win.
+{
+  const responseOf = path => (PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get)?.responses?.['200']
+  const jsonOf = response => response?.content?.['application/json']
+  const crawl = jsonOf(responseOf('/data/social/crawl'))
+  const social = responseOf('/data/social/search')
+  // Twitter social search shares the account-content envelope and Twitter rows.
+  if (social && crawl?.schema && !jsonOf(social)?.schema) social.content = { 'application/json': { schema: JSON.parse(JSON.stringify(crawl.schema)) } }
+  const raw = responseOf('/search/raw')
+  if (raw && !jsonOf(raw)?.schema) raw.content = { 'application/json': { schema: { type: 'object', properties: {
+    contractVersion: { type: 'string' }, endpoint: { type: 'string', description: '原生接口标识；Hub 直连平台为原生合同 key，Night-All 兼容路径为 night-all。' },
+    requestId: { type: 'string' },
+    data: { type: 'object', additionalProperties: true, description: '平台原生业务数据，字段随平台变化；Night-All 兼容路径为 { raw_info, raw_data, page, meta }，raw_info/raw_data 是 JSON 字符串。',
+      properties: { raw_info: { type: 'string' }, raw_data: { type: 'string' }, page: { type: 'object', additionalProperties: true }, meta: { type: 'object', additionalProperties: true } } },
+  } } } }
+  for (const path of ['/data/search', '/data/social/search', '/data/social/crawl', '/data/social/user-info', '/search/{operation}', '/search/raw',
+    '/data/social/post-comments', '/data/social/comment-replies', '/data/youtube/comments', '/data/youtube/channel-comments', '/data/xiaohongshu/notes/comments']) {
+    const json = jsonOf(responseOf(path))
+    if (json?.schema) json.schema = describeResponseFields(PUBLIC_OPENAPI_DOCUMENT, JSON.parse(JSON.stringify(json.schema)))
+  }
+}
+
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
   {key:'web-search',path:'/docs/web-search',label:'Web Search',section:'数据产品'},
   ...WECHAT_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '微信数据服务' })),
@@ -6741,6 +6767,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
   if (path === '/api/v2/data/search') return scopes.some(scope => scope.platforms.some(platform => DATA_SEARCH_V2_PLATFORMS.includes(platform)))
   if (path === '/data/social/post-comments') return postCommentsPlatforms(scopes).length > 0
+  if (path === '/data/social/comment-replies') return commentRepliesPlatforms(scopes).length > 0
   if (path === '/requests/{requestId}/search-recovery') return scopes.some(scope => scope.platforms.includes('twitter'))
   if (['/data/social/crawl', '/data/social/user-info'].includes(path)) return hubSocialAccountPlatforms(path.split('/').at(-1), scopes).length > 0
   if (path === '/data/ip/risk/subscription') return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
@@ -6772,7 +6799,7 @@ const TENANT_PRODUCT_PATHS = {
   'web-search':Object.keys(webSearchPaths),
   [WECHAT_SELF_HOSTED.docs]: Object.keys(wechatSelfHostedPaths),
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
-  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths), ...Object.keys(postCommentsPaths)],
+  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths), ...Object.keys(postCommentsPaths), ...Object.keys(commentRepliesPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
@@ -6832,6 +6859,12 @@ export function tenantOpenApiDocument(scopes) {
     commentEntry['x-mx-platform-options'] = platforms
     commentEntry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
     commentEntry.requestBody.content['application/json'].example.platform = platforms[0]
+  }
+  const replyEntry = document.paths['/data/social/comment-replies']?.post
+  if (replyEntry) {
+    const platforms = commentRepliesPlatforms(scopes)
+    replyEntry['x-mx-platform-options'] = platforms
+    replyEntry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
   }
   const refs = new Set()
   const visit = value => {

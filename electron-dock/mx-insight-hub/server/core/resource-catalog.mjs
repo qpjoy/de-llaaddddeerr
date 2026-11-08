@@ -6,8 +6,11 @@ const normalize = path => path.replace(/\/{2,}/g, '/').replace(/\/$/, '')
 const full = path => path.startsWith('/api/') ? path : `/api/v1${path}`
 const nativeProducts = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [row.hubPath,
   row.authorizationPlatform === 'ecommerce' ? '/data-products/ecommerce-treasure-box' : '/data-products/social-content']))
+// Comment interfaces also appear in Strategy Search's debugger; their API rule
+// bucket stays with social content so existing per-product limits keep applying.
 const special = [['/data/ip/', 'ip-risk'], ['/data/enterprise/', 'enterprise'], ['/data/xiaohongshu/', 'xiaohongshu-note'],
-  ['/data/news/', 'news'], ['/tools/tokenize', 'tokenizer']]
+  ['/data/news/', 'news'], ['/tools/tokenize', 'tokenizer'],
+  ['/data/social/post-comments', 'social-content'], ['/data/social/comment-replies', 'social-content']]
 function productFor(path) {
   const discovery = XHS_DISCOVERY_PRODUCTS.find(row => row.path === path)
   if (discovery) return `/data-products/${discovery.key}`

@@ -85,3 +85,50 @@ test('strategy search administration is authenticated, revisioned and never disp
   assert.deepEqual(checks, [checkBody])
   assert.equal(store.requests.size, 0)
 })
+
+test('Douyin comments default to TikHub first and Admin can switch them to JustOne, back again, or pause', async t => {
+  const { createCommentRouter } = await import('../../server/external-platforms/comment-routing.mjs')
+  const { postCommentRecipe } = await import('../../server/contracts/post-comments.mjs')
+  const store = new MemoryStore()
+  const routing = new StrategySearchRoutingStore()
+  const adapter = { search() { throw new Error('administration must not search') } }
+  const service = new HubService({ store, adapter, apiKeyPepper: 'strategy-search-offline-fixture-secret' })
+  const server = createServer(createApp({ store, service, adapter, strategySearchRoutingStore: routing, adminToken: 'fixture-admin',
+    identity: { enabled: true, resolve: async () => ({ kind: 'launcher', platformAdmin: true, tenantIds: null }) },
+    listenerMode: 'admin', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const base = `http://127.0.0.1:${server.address().port}/internal/v1/admin/strategy-search`
+  const headers = { authorization: 'Bearer fixture-admin', 'content-type': 'application/json' }
+  const douyinRow = async () => (await (await fetch(base, { headers })).json()).data.interfaces
+    .find(row => row.id === 'post-comments').platforms.find(row => row.platform === 'douyin')
+  const initial = await douyinRow()
+  assert.equal(initial.editable, true)
+  assert.deepEqual(initial.allowedModes, ['fixed', 'priority', 'paused'])
+  assert.deepEqual(initial.providers.toSorted(), ['justone', 'tikhub'])
+  assert.deepEqual([initial.policy.mode, initial.policy.primaryProvider, initial.policy.fallbackProvider], ['priority', 'tikhub', 'justone'])
+
+  // Both suppliers ready: the saved policy alone decides which one is bought.
+  const gateway = provider => ({ providerKey: provider, nativeReadiness: async ({ operationKeys }) => Object.fromEntries(operationKeys.map(key => [key, true])) })
+  const route = createCommentRouter({ interfaceId: 'post-comments', gateways: { douyin: { tikhub: gateway('tikhub'), justone: gateway('justone') } },
+    policyStore: routing, recipeFor: postCommentRecipe, cursorProvider: () => null, platformFor: body => body.platform,
+    invoke: (_gateway, _context, input) => input.routing })
+  const context = { consumer: { id: 'consumer-fixture' } }
+  const selected = async () => (await route(context, { body: { platform: 'douyin' } })).provider
+  assert.equal(await selected(), 'tikhub')
+
+  const save = (value, auth = headers) => fetch(`${base}/post-comments/douyin`, { method: 'PUT', headers: auth, body: JSON.stringify(value) })
+  const toJustOne = { mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null, expectedRevision: 1, reason: 'Use JustOne for Douyin comments' }
+  assert.equal((await save(toJustOne, { ...headers, authorization: 'Bearer launcher-admin' })).status, 403)
+  assert.equal((await save({ ...toJustOne, primaryProvider: 'rapidapi' })).status, 400)
+  assert.equal((await save(toJustOne)).status, 200)
+  assert.equal((await save(toJustOne)).status, 409, 'a stale revision never overwrites a newer policy')
+  assert.equal((await douyinRow()).policy.primaryProvider, 'justone')
+  assert.equal(await selected(), 'justone')
+  assert.equal((await save({ mode: 'priority', primaryProvider: 'tikhub', fallbackProvider: 'justone', expectedRevision: 2, reason: 'Back to TikHub first' })).status, 200)
+  assert.equal(await selected(), 'tikhub')
+  assert.equal((await save({ mode: 'paused', primaryProvider: 'tikhub', fallbackProvider: null, expectedRevision: 3, reason: 'Pause Douyin comments' })).status, 200)
+  assert.equal((await douyinRow()).policy.mode, 'paused')
+  assert.equal(routing.events.length, 3)
+  assert.equal((await routing.get('post-comments', 'kuaishou')).revision, 1, 'other platforms keep their own policy')
+})

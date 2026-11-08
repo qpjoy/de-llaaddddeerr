@@ -43,7 +43,12 @@ import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
-import { normalizePostCommentsRequest, POST_COMMENTS_RECIPES, POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
+import { normalizePostCommentsRequest, POST_COMMENTS_RECIPES, POST_COMMENT_PROVIDER_RECIPES, POST_COMMENTS_PATH,
+  postCommentRecipe, postCommentsPlatform } from './contracts/post-comments.mjs'
+import { COMMENT_REPLY_PROVIDER_RECIPES, COMMENT_REPLIES_PATH, commentReplyRecipe } from './contracts/comment-replies.mjs'
+import { createCommentRouter } from './external-platforms/comment-routing.mjs'
+import { postCommentsCursorProvider } from './external-platforms/post-comments-workflow.mjs'
+import { commentRepliesCursorProvider } from './external-platforms/comment-replies-workflow.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../shared/social-account-contract.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
@@ -506,19 +511,39 @@ export async function createRuntime(config = loadConfig()) {
   const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   socialAccountDataGateways.facebook.strategySearchRoutingStore = strategySearchRoutingStore
+  // Baseline gateways keep their historical shape; routing adds one gateway per
+  // other registered supplier, sharing usage, ledger and archive stores.
   const postCommentsGateways = Object.fromEntries(Object.entries(POST_COMMENTS_RECIPES)
     .map(([platform, recipe]) => [platform, nativeSearchGateway(platform, recipe.provider)]))
-  const postComments = (context, input) => {
-    // Route legacy supplier cursor identities to the gateway's immutable-replay
-    // check. The workflow forbids using them for a new provider dispatch.
-    const normalized = normalizePostCommentsRequest(input.body, {
-      businessId: context.consumer.businessId, allowHistoricalRedditCursor: true,
-      allowHistoricalKuaishouCursor: true,
-    })
-    return postCommentsGateways[normalized.platform].postComments(context, {
-      ...input, platform: normalized.platform, path: POST_COMMENTS_PATH,
-    })
-  }
+  const postCommentProviderGateways = Object.fromEntries(Object.entries(POST_COMMENT_PROVIDER_RECIPES).map(([platform, recipes]) => [platform,
+    Object.fromEntries(Object.keys(recipes).map(provider => [provider, provider === POST_COMMENTS_RECIPES[platform].provider
+      ? postCommentsGateways[platform] : nativeSearchGateway(platform, provider)]))]))
+  const routePostComments = createCommentRouter({ interfaceId: 'post-comments', gateways: postCommentProviderGateways,
+    policyStore: strategySearchRoutingStore, recipeFor: postCommentRecipe, cursorProvider: postCommentsCursorProvider,
+    platformFor: body => {
+      const platform = postCommentsPlatform(body?.platform)
+      if (!POST_COMMENTS_RECIPES[platform]) throw new AppError(400, 'platform_operation_unsupported', 'Single-post comments are not registered for this platform')
+      return platform
+    },
+    invoke: (gateway, context, input) => {
+      // Route legacy supplier cursor identities to the gateway's immutable-replay
+      // check. The workflow forbids using them for a new provider dispatch.
+      normalizePostCommentsRequest(input.body, { businessId: context.consumer.businessId, provider: gateway.providerKey,
+        allowHistoricalRedditCursor: true, allowHistoricalKuaishouCursor: true })
+      return gateway.postComments(context, { ...input, path: POST_COMMENTS_PATH })
+    } })
+  const postComments = (context, input) => routePostComments(context, input)
+  const commentReplyGateways = Object.fromEntries(Object.entries(COMMENT_REPLY_PROVIDER_RECIPES).map(([platform, recipes]) => [platform,
+    Object.fromEntries(Object.keys(recipes).map(provider => [provider, provider === POST_COMMENTS_RECIPES[platform]?.provider
+      ? postCommentsGateways[platform] : postCommentProviderGateways[platform]?.[provider] || nativeSearchGateway(platform, provider)]))]))
+  const commentReplies = createCommentRouter({ interfaceId: 'comment-replies', gateways: commentReplyGateways,
+    policyStore: strategySearchRoutingStore, recipeFor: commentReplyRecipe, cursorProvider: commentRepliesCursorProvider,
+    platformFor: body => {
+      const platform = postCommentsPlatform(body?.platform ?? body?.replyRef?.platform)
+      if (!COMMENT_REPLY_PROVIDER_RECIPES[platform]) throw new AppError(400, 'platform_operation_unsupported', 'Comment replies are not registered for this platform')
+      return platform
+    },
+    invoke: (gateway, context, input) => gateway.commentReplies(context, { ...input, path: COMMENT_REPLIES_PATH }) })
   const socialDataGateway = { socialData: (context, input) => {
     if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
     // Twitter owns receipt-aware validation: historical identities may need
@@ -809,6 +834,7 @@ export async function createRuntime(config = loadConfig()) {
     socialAccountTikHubGateway,
     // Comments reserve usage in the YouTube domain, not account search's social domain.
     youtubeCommentsGateway: socialAccountDataGateways.youtube,
+    commentRepliesGateway: { commentReplies },
     tikHubGateway,
     acquisitionHistory,
     segmenterConfig: config.common.segmenter,
@@ -832,7 +858,8 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways, socialAccountDataGateways, postCommentsGateways, socialDataGateway, strategySearchRoutingStore,
+    nativeSearchGateways, socialAccountDataGateways, postCommentsGateways, postCommentProviderGateways, commentReplyGateways,
+    socialDataGateway, strategySearchRoutingStore,
   }
 }
 
