@@ -96,6 +96,7 @@ import { TopicReportStore } from './insights/topic-reports.mjs'
 import { NewsDiscoveryStore } from './data/news-discovery.mjs'
 import { CatalogClassifier } from './agent/catalog-classifier.mjs'
 import { NotificationService } from './notifications.mjs'
+import { UsageRollupMaintainer } from './stores/usage-rollup.mjs'
 import { FeishuAlertNotifier } from './notifications-feishu.mjs'
 import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs'
 import { createPaymentReporting } from './payments/reporting.mjs'
@@ -757,6 +758,9 @@ export async function createRuntime(config = loadConfig()) {
       })
     : null
   const notifications = config.listenerMode === 'public' ? null : new NotificationService(pool)
+  // One Admin process builds and compacts the hourly usage statistics; Public
+  // processes only write deltas through the database triggers.
+  const usageRollup = config.listenerMode === 'public' || !pool ? null : new UsageRollupMaintainer(pool)
   const customerMessages = config.listenerMode === 'public' ? null : new CustomerMessages(pool)
   const balanceMonitor = config.listenerMode === 'public' ? null : new SupplierBalanceMonitor({
     pool,
@@ -847,7 +851,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications, customerMessages, balanceMonitor, feishuAlerts, paymentReporting, recharge, peripherals, wechatSelfHosted,
+    notifications, usageRollup, customerMessages, balanceMonitor, feishuAlerts, paymentReporting, recharge, peripherals, wechatSelfHosted,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -871,6 +875,7 @@ export async function start(config = loadConfig()) {
     server.listen(config.port, config.host, resolveListen)
   })
   runtime.notifications?.start()
+  runtime.usageRollup?.start()
   runtime.customerMessages?.start()
   runtime.balanceMonitor?.start()
   runtime.feishuAlerts?.start()
@@ -886,6 +891,7 @@ export async function start(config = loadConfig()) {
     await runtime.feishuAlerts?.close()
     await runtime.balanceMonitor?.close()
     await runtime.notifications?.close()
+    await runtime.usageRollup?.close()
     await runtime.customerMessages?.close()
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()

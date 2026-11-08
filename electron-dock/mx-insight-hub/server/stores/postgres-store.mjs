@@ -30,6 +30,7 @@ import {
 } from '../ingest/normalizers.mjs'
 import { CRAWLER_FIELD_MAP } from '../ingest/crawler/source-contract.mjs'
 import { isSeparatedWeiboBody, retainWeiboFullText } from '../ingest/weibo-body.mjs'
+import { recentHourRanges, usageRollupPlan } from './usage-rollup.mjs'
 
 
 function iso(value) {
@@ -6564,7 +6565,14 @@ export class PostgresStore {
     return rows
   }
 
-  async usage(filters = {}) {
+  // Totals come from the hourly usage statistics (migration 182) once they are
+  // built, otherwise from request history; both return identical rows.
+  // `rollup: false` forces the history queries (tests, diagnosis).
+  // `partial` (platform dashboard only): a statistics section that exceeds the
+  // statement timeout is reported in `unavailableStatistics` with null values
+  // instead of failing the whole summary. Every other caller keeps the strict
+  // all-or-nothing behaviour.
+  async usage(filters = {}, { partial = false, rollup = true } = {}) {
     const values = []
     const clauses = []
     for (const [column, value] of [
@@ -6595,7 +6603,26 @@ export class PostgresStore {
       await client.query('SET LOCAL max_parallel_workers_per_gather = 0')
       await client.query("SET LOCAL statement_timeout = '5s'")
       await client.query("SET LOCAL lock_timeout = '1s'")
-      const aggregateResult = await client.query(
+      // First statement: fixes the snapshot every section below reads.
+      const plan = rollup ? await usageRollupPlan(client, filters) : null
+      const unavailable = []
+      // A savepoint keeps one timed-out section from aborting the snapshot the
+      // remaining sections read; all sections still share one REPEATABLE READ view.
+      const section = async (name, run) => {
+        if (!partial) return run()
+        await client.query('SAVEPOINT usage_statistics_section')
+        try {
+          const result = await run()
+          await client.query('RELEASE SAVEPOINT usage_statistics_section')
+          return result
+        } catch (error) {
+          if (error?.code !== '57014') throw error
+          await client.query('ROLLBACK TO SAVEPOINT usage_statistics_section')
+          unavailable.push(name)
+          return null
+        }
+      }
+      const aggregateResult = await section('requests', () => (plan ? client.query(plan.aggregate.text, plan.aggregate.values) : client.query(
         `SELECT
            request.platform,
            request.capability,
@@ -6608,8 +6635,8 @@ export class PostgresStore {
          FROM usage_requests request ${where}
          GROUP BY request.platform, request.capability`,
         values,
-      )
-      const meterResult = await client.query(
+      )))
+      const meterResult = await section('requestMetering', () => (plan ? client.query(plan.meter.text, plan.meter.values) : client.query(
         `SELECT coalesce(request.billing_meter_key, request.capability, request.platform) AS meter_key,
                 count(*)::bigint AS requests,
                 count(*) FILTER (WHERE request.status = 'committed')::bigint AS committed,
@@ -6623,8 +6650,17 @@ export class PostgresStore {
           GROUP BY coalesce(request.billing_meter_key, request.capability, request.platform)
           ORDER BY meter_key`,
         values,
-      )
-      const billingResult = await client.query(
+      )))
+      // Every charge references exactly one usage request (NOT NULL, UNIQUE,
+      // FK RESTRICT; migration 056), so without filters the join selects every
+      // charge once and the charges table alone gives the same totals without
+      // reading request history.
+      const billingSource = where
+        ? `FROM usage_requests request
+           JOIN billing.customer_charges charge ON charge.usage_request_id = request.id
+           ${where}`
+        : 'FROM billing.customer_charges charge'
+      const billingResult = await section('customerBilling', () => (plan ? client.query(plan.billing.text, plan.billing.values) : client.query(
         `SELECT charge.meter_key, charge.currency,
                 count(*)::bigint AS requests,
                 count(*) FILTER (
@@ -6654,14 +6690,26 @@ export class PostgresStore {
                 coalesce(sum(charge.quoted_minor) FILTER (
                   WHERE charge.enforcement_mode = 'shadow'
                 ), 0)::bigint AS shadow_quoted_minor
-           FROM usage_requests request
-           JOIN billing.customer_charges charge ON charge.usage_request_id = request.id
-           ${where}
+           ${billingSource}
           GROUP BY charge.meter_key, charge.currency
           ORDER BY charge.meter_key, charge.currency`,
         values,
-      )
-      const recentResult = await client.query(
+      )))
+      const recentResult = await section('recentRequests', async () => {
+        let recentWhere = where, recentValues = values
+        // With an owner filter, read only the hours that hold its newest rows
+        // instead of walking the global created_at index past other traffic.
+        if (plan?.recentHours) {
+          const hours = await client.query(plan.recentHours.text, plan.recentHours.values)
+          if (!hours.rows.length) return { rows: [] }
+          recentValues = [...values]
+          const ranges = recentHourRanges(hours.rows.map(row => row.bucket)).map(([start, end]) => {
+            recentValues.push(start, end)
+            return `(request.created_at >= $${recentValues.length - 1} AND request.created_at < $${recentValues.length})`
+          })
+          recentWhere = `${where} AND (${ranges.join(' OR ')})`
+        }
+        return client.query(
         `SELECT request.id, request.tenant_id, request.consumer_id,
                 request.api_key_id, request.platform, request.capability,
                 request.billing_meter_key, request.status, request.units_actual,
@@ -6673,16 +6721,23 @@ export class PostgresStore {
            FROM usage_requests request
            LEFT JOIN billing.customer_charges charge
              ON charge.usage_request_id = request.id
-           ${where}
+           ${recentWhere}
           ORDER BY request.created_at DESC, request.id DESC
           LIMIT 50`,
-        values,
-      )
+        recentValues,
+        )
+      })
+      // An unavailable section is null, never zero: a missing total must not
+      // read as "no traffic".
       const result = {
-        ...summarizeAggregates(aggregateResult.rows),
-        requestMetering: summarizeRequestMetering(meterResult.rows),
-        recentRequests: recentResult.rows.map(usageRequestSummaryRecord),
-        customerBilling: summarizeCustomerBilling(billingResult.rows),
+        ...(aggregateResult ? summarizeAggregates(aggregateResult.rows) : {
+          requests: null, committed: null, released: null, unknown: null, units: null,
+          averageUpstreamLatencyMs: null, byPlatform: null, byCapability: null,
+        }),
+        requestMetering: meterResult ? summarizeRequestMetering(meterResult.rows) : null,
+        recentRequests: recentResult ? recentResult.rows.map(usageRequestSummaryRecord) : null,
+        customerBilling: billingResult ? summarizeCustomerBilling(billingResult.rows) : null,
+        ...(unavailable.length ? { unavailableStatistics: unavailable } : {}),
       }
       await client.query('COMMIT')
       return result
@@ -6699,7 +6754,9 @@ export class PostgresStore {
       this.pool.query('SELECT count(*)::integer AS count FROM tenants'),
       this.pool.query('SELECT count(*)::integer AS count FROM consumers'),
       this.pool.query("SELECT count(*)::integer AS count FROM api_keys WHERE status = 'active' AND expires_at > now()"),
-      this.usage(),
+      // All-history totals: a slow section degrades instead of failing the
+      // platform summary (Admin overview counts, Launcher health, deploy smoke).
+      this.usage({}, { partial: true }),
     ])
     return {
       tenants: tenantsResult.rows[0].count,
