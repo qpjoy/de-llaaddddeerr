@@ -247,13 +247,12 @@ For a browser POST, inspect the JSON error code rather than treating every HTTP
   to Public `18150`, not Admin `18151`. Re-run the affected Admin/Public rollout
   after correcting a stale ConfigMap environment or image.
 
-Only the Admin Pod receives the read-only `/shared_dir` hostPath. The current
-Internal host owns that directory with numeric group `10` (`wheel`), so the Pod
-adds GID 10 and does not chmod/chown operator files. The current node runtime
-does not support `supplementalGroupsPolicy: Strict`; enable it only after the
-runtime is upgraded and verified. Confirm the host group before moving this
-manifest to another node. Public, projector and ingest workloads receive
-neither the mount nor the supplemental group.
+The Admin and dictionary Pods receive the read-only `/shared_dir` hostPath.
+Both use supplemental GID 10 (`wheel`) to read operator-owned files. Confirm
+the host group before moving this deployment to another node. A configured
+`email-phone-archive` root also mounts the single `email-phone.zip` file in
+those two Pods. See [file dataset operations](../architecture/file-datasets.md#运维)
+for the Internal configuration and readback commands.
 
 The command is idempotent after an interrupted deployment. A migration Job is
 single-attempt with a 240-second active deadline. On timeout or interruption,

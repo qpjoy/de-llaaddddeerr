@@ -96,8 +96,10 @@ spec:
             - name: server-files
               mountPath: /shared_dir
               readOnly: true
+            # email-phone-archive:mount
       volumes:
         - name: server-files
           hostPath:
             path: /shared_dir
             type: Directory
+        # email-phone-archive:volume

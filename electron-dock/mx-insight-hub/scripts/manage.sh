@@ -640,13 +640,24 @@ require_production_env() {
   esac
 }
 
+email_phone_archive_mount() {
+  if [ "$1" = preflight ] && [ -z "${MX_INSIGHT_SERVER_FILE_ROOTS:-}" ]; then return 0; fi
+  MX_INSIGHT_SERVER_FILE_ROOTS="${MX_INSIGHT_SERVER_FILE_ROOTS:-}" \
+    node "${ROOT_DIR}/scripts/email-phone-archive-mount.mjs" "$@"
+}
+
 render_file() {
   local file="$1"
   local image="${MX_INSIGHT_IMAGE:-mx-insight-hub:shadow}"
   case "$image" in
     *[!A-Za-z0-9./:_@-]*) die "MX_INSIGHT_IMAGE contains unsupported characters" ;;
   esac
-  sed "s#mx-insight-hub:shadow#${image}#g" "$file"
+  case "${file##*/}" in
+    31-admin-api.yaml|36-dictionary.yaml)
+      sed "s#mx-insight-hub:shadow#${image}#g" "$file" | email_phone_archive_mount render
+      ;;
+    *) sed "s#mx-insight-hub:shadow#${image}#g" "$file" ;;
+  esac
 }
 
 encoded_secret_value() {
@@ -3315,7 +3326,7 @@ ops_action() {
   local tikhub_clear_override_set=0
   local tikhub_clear_override=""
   [ "$environment" = internal-production ] || die "Only ops internal-production is supported"
-  need kubectl
+  [ "$action" = plan ] || need kubectl
   if [ "${MX_INSIGHT_SYNC_LAUNCHER+x}" = x ]; then
     sync_launcher_override_set=1
     sync_launcher_override="$MX_INSIGHT_SYNC_LAUNCHER"
@@ -3465,6 +3476,7 @@ ops_action() {
       ;;
     deploy)
       require_production_env
+      email_phone_archive_mount preflight
       need docker
       need ctr
       require_control_plane_ready
@@ -3495,6 +3507,7 @@ ops_action() {
       ;;
     apply)
       require_production_env
+      email_phone_archive_mount preflight
       need docker
       need ctr
       require_control_plane_ready

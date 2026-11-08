@@ -40,39 +40,20 @@ security:
 paths:
   /data/social/post-comments:
     post: &hub_post_comments
-      tags:
-      - 社媒与内容数据
+      tags: [社媒与内容数据]
       operationId: social_post_comments
       summary: 按帖子获取评论
-      x-mx-platform-options:
-      - twitter
-      - reddit
-      - kuaishou
-      - instagram
-      - weibo
-      - douyin
-      - tiktok
-      - zhihu
-      - linkedin
-      - bilibili
-      - facebook
-      - xiaohongshu
-      - youtube
-      x-mx-required-capabilities:
-      - social.comments.list
+      x-mx-platform-options: [twitter, reddit, kuaishou, instagram, weibo, douyin, tiktok, zhihu, linkedin, bilibili, facebook, xiaohongshu, youtube]
+      x-mx-required-capabilities: [social.comments.list]
       x-mx-meter-key: social.comments.list
       x-mx-doc-path: /docs/social-content
-      description: Hub 单帖评论接口。旧 /api/v1/search/post-comments 与 /api/v1/night-all/search/post-comments 共用此入口。count
-        默认 20、最大 100；使用返回的 Hub cursor 继续。每个成功交付页按 social.comments.list 结算一次，精确幂等重放不重复计费。需要目标平台及 social.comments.list
-        授权。
+      description: Hub 单帖评论接口。旧 /api/v1/search/post-comments 与 /api/v1/night-all/search/post-comments 共用此入口。count 默认 20、最大 100；使用返回的 Hub cursor 继续。每个成功交付页按 social.comments.list 结算一次，精确幂等重放不重复计费。每条评论的 replyRef 可直接用于 /api/v1/data/social/comment-replies。
       parameters:
       - name: Idempotency-Key
         in: header
         required: true
-        schema:
-          type: string
-          minLength: 8
-          maxLength: 128
+        schema: {type: string, minLength: 8, maxLength: 128}
+        description: 每个新请求（包括下一页）用新的键；同一请求重试保持原键，Hub 精确重放已保存响应且不重复计费。
       requestBody:
         required: true
         content:
@@ -80,190 +61,64 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required:
-              - platform
+              required: [platform]
               anyOf:
-              - required:
-                - postId
-              - required:
-                - post_id
-              - required:
-                - contentId
-              - required:
-                - content_id
-              - required:
-                - itemId
-              - required:
-                - item_id
-              - required:
-                - tweetId
-              - required:
-                - tweet_id
-              - required:
-                - noteId
-              - required:
-                - note_id
-              - required:
-                - awemeId
-              - required:
-                - aweme_id
-              - required:
-                - statusId
-              - required:
-                - status_id
-              - required:
-                - videoId
-              - required:
-                - video_id
-              - required:
-                - postUrn
-              - required:
-                - post_urn
-              - required:
-                - urn
-              - required:
-                - url
+              - required: [postId]
+              - required: [post_id]
+              - required: [contentId]
+              - required: [content_id]
+              - required: [itemId]
+              - required: [item_id]
+              - required: [tweetId]
+              - required: [tweet_id]
+              - required: [noteId]
+              - required: [note_id]
+              - required: [awemeId]
+              - required: [aweme_id]
+              - required: [statusId]
+              - required: [status_id]
+              - required: [videoId]
+              - required: [video_id]
+              - required: [postUrn]
+              - required: [post_urn]
+              - required: [urn]
+              - required: [url]
               properties:
                 platform:
                   type: string
-                  enum:
-                  - twitter
-                  - reddit
-                  - kuaishou
-                  - instagram
-                  - weibo
-                  - douyin
-                  - tiktok
-                  - zhihu
-                  - linkedin
-                  - bilibili
-                  - facebook
-                  - xiaohongshu
-                  - youtube
-                postId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                post_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                contentId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                content_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                itemId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                item_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                tweetId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                tweet_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                noteId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                note_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                awemeId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                aweme_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                statusId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                status_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                videoId:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                video_id:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                postUrn:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                post_urn:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                urn:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                url:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                count:
-                  type: integer
-                  minimum: 1
-                  maximum: 100
-                  default: 20
-                limit:
-                  type: integer
-                  minimum: 1
-                  maximum: 100
-                pageSize:
-                  type: integer
-                  minimum: 1
-                  maximum: 100
-                cursor:
-                  type: string
-                  minLength: 1
-                  maxLength: 8192
-                  description: 原样使用 data.page.nextCursor。params.cursor 是同义字段。
-                page:
-                  type: integer
-                  minimum: 1
-                  maximum: 1000
-                  default: 1
-                params:
-                  type: object
-                  description: 仅允许当前平台的固定排序与续页字段；不接受 provider、凭据或请求地址。旧原生续页状态视为新遍历的起点，之后只返回 Hub 游标。
-                businessId:
-                  type: string
-                  description: 可省略；提交时必须等于当前消费者的绑定值。
-                business_id:
-                  type: string
-                includeRaw:
-                  type: boolean
-                  default: false
-                cacheMaxAgeHours:
-                  type: number
-                  minimum: 0
-                  maximum: 720
-                  description: 兼容字段；新采集不使用旧快照替代刷新。
-            example:
-              platform: twitter
-              postId: '2117082385997250767'
-              count: 20
-              includeRaw: false
+                  enum: [twitter, reddit, kuaishou, instagram, weibo, douyin, tiktok, zhihu, linkedin, bilibili, facebook, xiaohongshu, youtube]
+                  description: 目标平台；支持别名 x、xhs、小红书、抖音、快手、知乎、微博、b站。
+                contentId: {type: string, minLength: 1, maxLength: 8192, description: 帖子 ID（推荐）。B站接受 AV/BV 号，Instagram 接受 shortcode 或数字媒体 ID，知乎为回答 ID，Reddit 为帖子 ID（可带 t3_）。}
+                url: {type: string, minLength: 1, maxLength: 8192, description: 规范帖子链接，Hub 从中解析 ID；短链接不解析。}
+                postId: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                post_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                content_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                itemId: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                item_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                tweetId: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                tweet_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                noteId: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                note_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                awemeId: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                aweme_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                statusId: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                status_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                videoId: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                video_id: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                postUrn: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                post_urn: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                urn: {type: string, minLength: 1, maxLength: 8192, description: contentId 的兼容别名；多个标识必须指向同一帖子。}
+                count: {type: integer, minimum: 1, maximum: 100, default: 20, description: 本页条数目标。Twitter、Reddit、快手、微博每次请求只取一个来源页，可能少于 count。}
+                limit: {type: integer, minimum: 1, maximum: 100, description: count 的别名。}
+                pageSize: {type: integer, minimum: 1, maximum: 100, description: count 的别名。}
+                cursor: {type: string, minLength: 1, maxLength: 8192, description: 原样使用 data.page.nextCursor。params.cursor 是同义字段。}
+                page: {type: integer, minimum: 1, maximum: 1000, default: 1, description: 兼容字段；续页请使用 cursor。}
+                params: {type: object, description: 仅允许当前平台的固定排序与续页字段；不接受 provider、凭据或请求地址。支持导入的平台将原生续页状态视为新遍历起点，之后只返回 Hub 游标。快手非空原生 pcursor 仅允许原键历史重放，新遍历只能使用 Hub nextCursor。}
+                businessId: {type: string, description: 可省略；提交时必须等于当前消费者的绑定值。}
+                business_id: {type: string}
+                includeRaw: {type: boolean, default: false, description: true 时每条评论附带来源原始对象 raw。}
+                cacheMaxAgeHours: {type: number, minimum: 0, maximum: 720, description: 兼容字段；新采集不使用旧快照替代刷新。}
+            example: {platform: twitter, contentId: '2117082385997250767', count: 20, includeRaw: false}
       responses:
         '200':
           description: 评论及明确的分页状态。未知时间或指标为 null；publishedTime 保留相对发布时间原文。
@@ -271,100 +126,338 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [contractVersion, data, requestId]
                 properties:
-                  contractVersion:
-                    const: mx-insight-hub.post-comments.v1
-                  requestId:
-                    type: string
-                    format: uuid
+                  contractVersion: {const: mx-insight-hub.post-comments.v1, description: 响应合同版本。}
+                  requestId: {type: string, format: uuid, description: Hub 请求 ID；排查和查询原请求时使用。}
                   data:
                     type: object
                     properties:
-                      platform:
-                        type: string
-                      postId:
-                        type: string
-                        minLength: 1
-                        maxLength: 8192
+                      platform: {type: string, description: 平台。}
+                      postId: {type: string, description: 规范化后的帖子 ID。}
                       items:
                         type: array
                         items:
                           type: object
-                          description: commentId/content_id 是评论 ID；postId/contentId 是原帖 ID。包含 text/content、author、publishedAt、publishedTime、metrics
-                            与已取得的父评论关系。
-                      raw_data:
-                        type: string
-                        description: items 的 JSON 字符串。
-                      raw_info:
-                        const: '[]'
+                          additionalProperties: true
+                          required: [id, commentId, platform, objectType, type, text, author, metrics]
+                          description: 一条帖子一级评论。replyRef 可直接用于查询回复。
+                          properties:
+                            id: {type: string, description: 'Hub 稳定 ID，格式 `{platform}:comment:{commentId}`。'}
+                            commentId: {type: string, description: 评论在平台上的原始 ID，查回复时作为 commentId 传入。}
+                            externalId: {type: string, description: 同 commentId，规范化入库时的外部 ID。}
+                            content_id: {type: string, description: 同 commentId（兼容旧 raw_data 字段名）。}
+                            contentId:
+                              type: [string, 'null']
+                              description: 评论所属帖子的规范化 ID；回复接口在调用方未提供且来源未给出时为 null。
+                            postId:
+                              type: [string, 'null']
+                              description: 同 contentId（兼容字段）。
+                            rootExternalId:
+                              type: [string, 'null']
+                              description: 所属帖子 ID，同 contentId。
+                            parentExternalId:
+                              type: [string, 'null']
+                              description: 直接父对象 ID：一级评论为帖子 ID，回复为被回复的评论 ID；无法确定时为 null。
+                            parentCommentId:
+                              type: [string, 'null']
+                              description: 直接父评论 ID；一级评论为 null，回复为被回复的评论；来源未给出关系时为 null。
+                            parentRelationship:
+                              type: string
+                              description: 父关系的可信度：post（一级评论）、comment（明确回复某评论）、unknown（同一会话但未给出直接父级）。仅部分平台返回。
+                              enum: [post, comment, unknown]
+                            replyRef:
+                              type: object
+                              description: 仅帖子评论接口：原样传给 /api/v1/data/social/comment-replies 即可查询这条评论的回复。
+                              properties:
+                                platform: {type: string, description: 平台}
+                                commentId: {type: string, description: 评论 ID}
+                                contentId:
+                                  type: [string, 'null']
+                                  description: 所属帖子 ID
+                                cursor: {type: string, description: 仅 Reddit：该评论还有未展开的回复时出现}
+                            replyCursor: {type: string, description: 仅 Reddit：该评论有未展开回复时的回复游标（已包含在 replyRef.cursor 中）。}
+                            replyToUser:
+                              type: object
+                              description: 被回复的用户（快手回复），评论 ID 未知时用于判断回复对象。
+                              properties:
+                                id:
+                                  type: [string, 'null']
+                                  description: 被回复用户 ID
+                                name:
+                                  type: [string, 'null']
+                                  description: 被回复用户昵称
+                            isRemoved: {type: boolean, description: Reddit：评论已被删除或移除时为 true。}
+                            platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                            objectType: {type: string, description: 固定为 comment。, const: comment}
+                            type:
+                              type: string
+                              description: comment（帖子一级评论）或 reply（评论回复接口返回的回复）。
+                              enum: [comment, reply]
+                            text:
+                              type: [string, 'null']
+                              description: 评论完整正文（保留原始空白与换行）；纯图片/贴纸评论可能为 null。
+                            content:
+                              type: [string, 'null']
+                              description: 同 text（兼容字段）。
+                            full_text:
+                              type: [string, 'null']
+                              description: 同 text（兼容字段）。
+                            author:
+                              type: object
+                              description: 评论作者。
+                              properties:
+                                id:
+                                  type: [string, 'null']
+                                  description: 作者在平台上的 ID
+                                name:
+                                  type: [string, 'null']
+                                  description: 作者昵称/显示名
+                                avatarUrl:
+                                  type: [string, 'null']
+                                  description: 头像地址
+                                handle:
+                                  type: [string, 'null']
+                                  description: 作者用户名（Twitter、微博等）
+                                profileUrl:
+                                  type: [string, 'null']
+                                  description: 作者主页（部分平台）
+                                channelId:
+                                  type: [string, 'null']
+                                  description: YouTube 频道 ID
+                                displayName:
+                                  type: [string, 'null']
+                                  description: YouTube 显示名
+                            author_id:
+                              type: [string, 'null']
+                              description: 同 author.id（兼容字段）。
+                            author_name:
+                              type: [string, 'null']
+                              description: 同 author.name（兼容字段）。
+                            authorHandle:
+                              type: [string, 'null']
+                              description: 作者用户名（Twitter、微博）。
+                            publishedAt:
+                              type: [string, 'null']
+                              description: 发布时间，ISO 8601（UTC）；平台只给相对时间时为 null。
+                              format: date-time
+                            publishedTime:
+                              type: [string, 'null']
+                              description: 平台原始时间文本，如 “2 days ago” 或微博时间串；只在来源给出时返回。
+                            collected_at: {type: string, description: 本次采集时间，ISO 8601。, format: date-time}
+                            likeCount:
+                              type: [integer, 'null']
+                              description: 点赞数；平台未提供为 null（不是 0）。
+                            like_count:
+                              type: [integer, 'null']
+                              description: 同 likeCount（兼容字段）。
+                            replyCount:
+                              type: [integer, 'null']
+                              description: 回复数（平台显示的总数，不代表本页已返回的回复）。
+                            reply_count:
+                              type: [integer, 'null']
+                              description: 同 replyCount（兼容字段）。
+                            metrics:
+                              type: object
+                              description: 互动指标；未提供的指标为 null。
+                              properties:
+                                likes:
+                                  type: [integer, 'null']
+                                  description: 点赞
+                                replies:
+                                  type: [integer, 'null']
+                                  description: 回复
+                                score:
+                                  type: [integer, 'null']
+                                  description: Reddit 得分（可为负；隐藏时为 null）
+                                shares:
+                                  type: [integer, 'null']
+                                  description: 转发（Twitter）
+                                views:
+                                  type: [integer, 'null']
+                                  description: 浏览（Twitter）
+                                bookmarks:
+                                  type: [integer, 'null']
+                                  description: 收藏（Twitter）
+                                quotes:
+                                  type: [integer, 'null']
+                                  description: 引用（Twitter）
+                                dislikes:
+                                  type: [integer, 'null']
+                                  description: 点踩（知乎）
+                                reactions:
+                                  type: [integer, 'null']
+                                  description: 表情回应总数（Facebook）
+                            repliesIncluded:
+                              type: [boolean, 'null']
+                              description: 该行本身是否是回复：true 为回复，false 为一级评论，null 为关系未知。
+                            url:
+                              type: [string, 'null']
+                              description: 评论或所属帖子的链接；平台不提供时为 null。
+                            media:
+                              type: array
+                              description: 评论附带的图片/贴纸（小红书、Facebook 等），每项含 type、url，可能含 width、height。
+                              items: {type: object}
+                            conversationId: {type: string, description: Twitter 会话根帖 ID。}
+                            mediaId:
+                              type: [string, 'null']
+                              description: Instagram 媒体 ID。
+                            videoId: {type: string, description: YouTube 视频 ID。}
+                            legacyCommentId:
+                              type: [string, 'null']
+                              description: Facebook 旧版评论 ID。
+                            raw: {type: object, description: 仅 includeRaw=true：该评论的来源原始对象，字段随来源平台变化。}
+                        description: 本页评论。
+                      comments:
+                        type: array
+                        items: {type: object}
+                        description: 同 items（兼容字段）。
+                      raw_data: {type: string, description: items 的 JSON 字符串（兼容旧 raw_data）。}
+                      raw_info: {const: '[]', description: '固定为 "[]"。'}
                       page:
                         type: object
-                        properties:
-                          hasMore:
-                            type:
-                            - boolean
-                            - 'null'
-                          nextCursor:
-                            type:
-                            - string
-                            - 'null'
-                          returnedCount:
-                            type: integer
-                            minimum: 0
-                          paginationStatus:
-                            enum:
-                            - continuable
-                            - exhausted
-                            - unknown
-                            - limit_reached
-                        required:
-                        - hasMore
-                        - nextCursor
-                        - returnedCount
-                        - paginationStatus
+                        required: [hasMore, nextCursor, returnedCount, paginationStatus]
                         additionalProperties: true
+                        properties:
+                          page: {type: integer, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, description: 本次请求的 count。}
+                          returnedCount: {type: integer, description: 本页实际返回条数。}
+                          duplicateCount: {type: integer, description: 跨页去重丢弃的重复条数。}
+                          hasMore:
+                            type: [boolean, 'null']
+                            description: true 有后续页；false 已确认结束；null 未知（来源未证明续页或已结束），不要自动补页。
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页的 Hub 游标，原样作为 cursor 传入；24 小时有效，绑定 Key、平台、ID、count 和数据通道。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 同 nextCursor（兼容字段）。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          nextParams:
+                            type: [object, 'null']
+                            description: '{ cursor: nextCursor }，便于原样提交。'
+                          paginationMode: {type: string, description: 固定为 cursor。}
+                          paginationStatus:
+                            type: string
+                            description: continuable 可继续；exhausted 已结束；unknown 不确定；limit_reached 达到 15 页上限。
+                            enum: [continuable, exhausted, unknown, limit_reached]
+                          continuationAvailable: {type: boolean, description: 每次只取一个来源页的平台（Twitter、Reddit、快手、微博）返回：是否可显式请求下一页。}
+                        description: 分页信息。
                       pageInfo:
                         type: object
-                        properties:
-                          hasMore:
-                            type:
-                            - boolean
-                            - 'null'
-                          nextCursor:
-                            type:
-                            - string
-                            - 'null'
-                          returnedCount:
-                            type: integer
-                            minimum: 0
-                          paginationStatus:
-                            enum:
-                            - continuable
-                            - exhausted
-                            - unknown
-                            - limit_reached
-                        required:
-                        - hasMore
-                        - nextCursor
-                        - returnedCount
-                        - paginationStatus
+                        required: [hasMore, nextCursor, returnedCount, paginationStatus]
                         additionalProperties: true
-        '400':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
-        '401':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
-        '402':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
-        '403':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
-        '409':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
-        '429':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
-        '502':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
-        '503':
-          description: 稳定错误码及 requestId；未知结果先查原请求，不换键盲重试。
+                        properties:
+                          page: {type: integer, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, description: 本次请求的 count。}
+                          returnedCount: {type: integer, description: 本页实际返回条数。}
+                          duplicateCount: {type: integer, description: 跨页去重丢弃的重复条数。}
+                          hasMore:
+                            type: [boolean, 'null']
+                            description: true 有后续页；false 已确认结束；null 未知（来源未证明续页或已结束），不要自动补页。
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页的 Hub 游标，原样作为 cursor 传入；24 小时有效，绑定 Key、平台、ID、count 和数据通道。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 同 nextCursor（兼容字段）。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          nextParams:
+                            type: [object, 'null']
+                            description: '{ cursor: nextCursor }，便于原样提交。'
+                          paginationMode: {type: string, description: 固定为 cursor。}
+                          paginationStatus:
+                            type: string
+                            description: continuable 可继续；exhausted 已结束；unknown 不确定；limit_reached 达到 15 页上限。
+                            enum: [continuable, exhausted, unknown, limit_reached]
+                          continuationAvailable: {type: boolean, description: 每次只取一个来源页的平台（Twitter、Reddit、快手、微博）返回：是否可显式请求下一页。}
+                        description: 同 page，另含 pageIndex 与 cursorType（opaque | none）。
+                      status:
+                        type: string
+                        description: ok 完整；partial 有后续页或有 warnings。
+                        enum: [ok, partial]
+                      warnings:
+                        type: array
+                        description: 非致命提示，如 pagination_completeness_unknown、page_limit_reached。
+                        items:
+                          type: object
+                          properties:
+                            code: {type: string, description: 提示代码}
+                            message: {type: string, description: 说明}
+                      meta:
+                        type: object
+                        description: 执行信息。
+                        properties:
+                          implementation: {const: hub, description: 执行方：hub。}
+                          scope: {type: string, description: single_post}
+                          resultCount: {type: integer, description: 本页条数}
+                          providerCalls: {type: integer, description: 本次请求实际发起的外部调用次数（0 表示全部来自已购缓冲或重放）}
+                          upstreamCallCount: {type: integer, description: 实际外部调用次数（兼容字段）}
+                          upstreamPages: {type: integer, description: 该遍历累计已取得的来源页数}
+                          maxUpstreamPages: {type: integer, description: 来源页上限（15）}
+                          paginationStatus: {type: string, description: 同 page.paginationStatus}
+                          repliesIncluded: {type: boolean, description: 本页是否含有回复行}
+                          repliesFetched: {const: false, description: 本接口不展开回复；请用评论回复接口}
+                    description: 业务数据。
+              example:
+                contractVersion: mx-insight-hub.post-comments.v1
+                requestId: 0a3c1d7e-5b6f-4d2a-9c8e-1f2b3c4d5e6f
+                data:
+                  platform: douyin
+                  postId: '7290000000000000000'
+                  items:
+                  - id: douyin:comment:7300000000000000001
+                    commentId: '7300000000000000001'
+                    externalId: '7300000000000000001'
+                    content_id: '7300000000000000001'
+                    contentId: '7290000000000000000'
+                    postId: '7290000000000000000'
+                    rootExternalId: '7290000000000000000'
+                    parentExternalId: '7290000000000000000'
+                    parentCommentId: null
+                    platform: douyin
+                    objectType: comment
+                    type: comment
+                    text: 完整评论正文
+                    content: 完整评论正文
+                    full_text: 完整评论正文
+                    author: {id: '1234567890', name: 评论作者, avatarUrl: 'https://example.com/avatar.jpg'}
+                    author_id: '1234567890'
+                    author_name: 评论作者
+                    publishedAt: '2026-11-06T08:00:00.000Z'
+                    collected_at: '2026-11-07T02:00:00.000Z'
+                    likeCount: 12
+                    like_count: 12
+                    replyCount: 3
+                    reply_count: 3
+                    metrics: {likes: 12, replies: 3}
+                    repliesIncluded: false
+                    url: null
+                    replyRef: {platform: douyin, commentId: '7300000000000000001', contentId: '7290000000000000000'}
+                  raw_info: '[]'
+                  page:
+                    page: 1
+                    pageSize: 20
+                    returnedCount: 1
+                    duplicateCount: 0
+                    hasMore: true
+                    nextCursor: mxds1.…
+                    providerCursor: mxds1.…
+                    nextPage: null
+                    nextParams: {cursor: mxds1.…}
+                    paginationMode: cursor
+                    paginationStatus: continuable
+                  status: partial
+                  warnings: []
+                  meta: {implementation: hub, scope: single_post, resultCount: 1, providerCalls: 1, upstreamCallCount: 1, upstreamPages: 1, maxUpstreamPages: 15, paginationStatus: continuable, repliesIncluded: false, repliesFetched: false}
+        '400': {description: 参数错误：invalid_post_comments_request / invalid_comment_replies_request、invalid_cursor、platform_operation_unsupported。}
+        '401': {description: API Key 无效。}
+        '402': {description: 余额或额度不足。}
+        '403': {description: 缺少平台或 social.comments.list 授权。}
+        '409': {description: 同一请求仍在执行（request_in_progress）或结果待核实（request_outcome_unknown）；先查询原请求，不要换键盲重试。}
+        '429': {description: 本 Key 或平台限流。}
+        '502': {description: 来源返回的结构不符合已发布合同（invalid_upstream_contract）；不计费。}
+        '503': {description: 数据通道未就绪、平台暂停（comment_acquisition_paused）或该平台尚未校准（external_platform_contract_unverified）；均在派发前返回，不计费。}
   /search/post-comments:
     post:
       <<: *hub_post_comments
@@ -373,6 +466,399 @@ paths:
     post:
       <<: *hub_post_comments
       operationId: social_post_comments_alias_2
+  /data/social/comment-replies:
+    post:
+      tags: [社媒与内容数据]
+      operationId: social_comment_replies
+      summary: 按评论获取回复（楼中楼）
+      x-mx-platform-options: [twitter, weibo, douyin, zhihu, reddit, xiaohongshu, instagram, bilibili, kuaishou]
+      x-mx-required-capabilities: [social.comments.list]
+      x-mx-meter-key: social.comments.list
+      x-mx-doc-path: /docs/social-content
+      description: 按 commentId 获取一条评论下的回复。reddit、xiaohongshu、instagram、douyin、bilibili、kuaishou 还需要该评论所属帖子的 contentId；最简单的方式是把帖子评论返回的 replyRef 原样传入。与帖子评论共用 social.comments.list 授权和计费；尚未校准的平台在派发前返回 503 external_platform_contract_unverified，不计费。
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, minLength: 8, maxLength: 128}
+        description: 每个新请求（包括下一页）用新的键；同一请求重试保持原键，Hub 精确重放已保存响应且不重复计费。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                platform:
+                  type: string
+                  enum: [twitter, weibo, douyin, zhihu, reddit, xiaohongshu, instagram, bilibili, kuaishou]
+                  description: 目标平台；可省略并由 replyRef.platform 提供。
+                replyRef:
+                  type: object
+                  additionalProperties: false
+                  description: 帖子评论接口每条评论返回的 replyRef，原样传入。
+                  properties:
+                    platform: {type: string}
+                    commentId: {type: string, minLength: 1, maxLength: 8192}
+                    contentId:
+                      type: [string, 'null']
+                commentId: {type: string, minLength: 1, maxLength: 8192, description: 要查看回复的评论 ID（帖子评论返回的 commentId）。别名：comment_id、rootCommentId、root_comment_id。}
+                comment_id: {type: string, minLength: 1, maxLength: 8192}
+                rootCommentId: {type: string, minLength: 1, maxLength: 8192}
+                root_comment_id: {type: string, minLength: 1, maxLength: 8192}
+                contentId: {type: string, minLength: 1, maxLength: 8192, description: 所属帖子 ID。reddit、xiaohongshu、instagram、douyin、bilibili、kuaishou 必填；其他平台可选（提供后用于校验与入库）。别名：postId、post_id、content_id、noteId、awemeId、tweetId、videoId、url。}
+                content_id: {type: string, minLength: 1, maxLength: 8192}
+                postId: {type: string, minLength: 1, maxLength: 8192}
+                post_id: {type: string, minLength: 1, maxLength: 8192}
+                noteId: {type: string, minLength: 1, maxLength: 8192}
+                note_id: {type: string, minLength: 1, maxLength: 8192}
+                awemeId: {type: string, minLength: 1, maxLength: 8192}
+                aweme_id: {type: string, minLength: 1, maxLength: 8192}
+                tweetId: {type: string, minLength: 1, maxLength: 8192}
+                tweet_id: {type: string, minLength: 1, maxLength: 8192}
+                videoId: {type: string, minLength: 1, maxLength: 8192}
+                video_id: {type: string, minLength: 1, maxLength: 8192}
+                url: {type: string, minLength: 1, maxLength: 8192}
+                count: {type: integer, minimum: 1, maximum: 100, default: 20, description: 本页条数目标。Twitter、Reddit、快手、微博每次请求只取一个来源页。}
+                limit: {type: integer, minimum: 1, maximum: 100}
+                pageSize: {type: integer, minimum: 1, maximum: 100}
+                cursor: {type: string, minLength: 1, maxLength: 8192, description: 原样使用 data.page.nextCursor；不接受平台原生游标。}
+                params:
+                  type: object
+                  description: 仅 Reddit：params.cursor 为评论树中隐藏回复的 more 游标。
+                  properties:
+                    cursor: {type: string, minLength: 1, maxLength: 8192}
+                  additionalProperties: false
+                includeRaw: {type: boolean, default: false, description: true 时每条回复附带来源原始对象 raw。}
+                businessId: {type: string, description: 可省略；提交时必须等于当前消费者的绑定值。}
+                business_id: {type: string}
+            example:
+              platform: douyin
+              replyRef: {platform: douyin, commentId: '7300000000000000001', contentId: '7290000000000000000'}
+              count: 20
+      responses:
+        '200':
+          description: 回复及明确的分页状态。rootCommentId 为被查询的评论，parentCommentId 为直接回复对象（未知为 null）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contractVersion, data, requestId]
+                properties:
+                  contractVersion: {const: mx-insight-hub.comment-replies.v1, description: 响应合同版本。}
+                  requestId: {type: string, format: uuid, description: Hub 请求 ID；排查和查询原请求时使用。}
+                  data:
+                    type: object
+                    properties:
+                      platform: {type: string, description: 平台。}
+                      commentId: {type: string, description: 被查询回复的评论 ID。}
+                      contentId:
+                        type: [string, 'null']
+                        description: 所属帖子 ID（调用方提供或来源给出）。
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                          required: [id, commentId, platform, objectType, type, text, author, metrics]
+                          description: 一条回复。rootCommentId 是被查询的评论；parentCommentId 是直接回复对象。
+                          properties:
+                            id: {type: string, description: 'Hub 稳定 ID，格式 `{platform}:comment:{commentId}`。'}
+                            commentId: {type: string, description: 评论在平台上的原始 ID，查回复时作为 commentId 传入。}
+                            externalId: {type: string, description: 同 commentId，规范化入库时的外部 ID。}
+                            content_id: {type: string, description: 同 commentId（兼容旧 raw_data 字段名）。}
+                            contentId:
+                              type: [string, 'null']
+                              description: 评论所属帖子的规范化 ID；回复接口在调用方未提供且来源未给出时为 null。
+                            postId:
+                              type: [string, 'null']
+                              description: 同 contentId（兼容字段）。
+                            rootExternalId:
+                              type: [string, 'null']
+                              description: 所属帖子 ID，同 contentId。
+                            parentExternalId:
+                              type: [string, 'null']
+                              description: 直接父对象 ID：一级评论为帖子 ID，回复为被回复的评论 ID；无法确定时为 null。
+                            parentCommentId:
+                              type: [string, 'null']
+                              description: 直接父评论 ID；一级评论为 null，回复为被回复的评论；来源未给出关系时为 null。
+                            parentRelationship:
+                              type: string
+                              description: 父关系的可信度：post（一级评论）、comment（明确回复某评论）、unknown（同一会话但未给出直接父级）。仅部分平台返回。
+                              enum: [post, comment, unknown]
+                            rootCommentId: {type: string, description: 仅回复接口：被查询回复的那条评论 ID（即请求中的 commentId）。}
+                            replyCursor: {type: string, description: 仅 Reddit：该评论有未展开回复时的回复游标（已包含在 replyRef.cursor 中）。}
+                            replyToUser:
+                              type: object
+                              description: 被回复的用户（快手回复），评论 ID 未知时用于判断回复对象。
+                              properties:
+                                id:
+                                  type: [string, 'null']
+                                  description: 被回复用户 ID
+                                name:
+                                  type: [string, 'null']
+                                  description: 被回复用户昵称
+                            isRemoved: {type: boolean, description: Reddit：评论已被删除或移除时为 true。}
+                            platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                            objectType: {type: string, description: 固定为 comment。, const: comment}
+                            type:
+                              type: string
+                              description: comment（帖子一级评论）或 reply（评论回复接口返回的回复）。
+                              enum: [comment, reply]
+                            text:
+                              type: [string, 'null']
+                              description: 评论完整正文（保留原始空白与换行）；纯图片/贴纸评论可能为 null。
+                            content:
+                              type: [string, 'null']
+                              description: 同 text（兼容字段）。
+                            full_text:
+                              type: [string, 'null']
+                              description: 同 text（兼容字段）。
+                            author:
+                              type: object
+                              description: 评论作者。
+                              properties:
+                                id:
+                                  type: [string, 'null']
+                                  description: 作者在平台上的 ID
+                                name:
+                                  type: [string, 'null']
+                                  description: 作者昵称/显示名
+                                avatarUrl:
+                                  type: [string, 'null']
+                                  description: 头像地址
+                                handle:
+                                  type: [string, 'null']
+                                  description: 作者用户名（Twitter、微博等）
+                                profileUrl:
+                                  type: [string, 'null']
+                                  description: 作者主页（部分平台）
+                                channelId:
+                                  type: [string, 'null']
+                                  description: YouTube 频道 ID
+                                displayName:
+                                  type: [string, 'null']
+                                  description: YouTube 显示名
+                            author_id:
+                              type: [string, 'null']
+                              description: 同 author.id（兼容字段）。
+                            author_name:
+                              type: [string, 'null']
+                              description: 同 author.name（兼容字段）。
+                            authorHandle:
+                              type: [string, 'null']
+                              description: 作者用户名（Twitter、微博）。
+                            publishedAt:
+                              type: [string, 'null']
+                              description: 发布时间，ISO 8601（UTC）；平台只给相对时间时为 null。
+                              format: date-time
+                            publishedTime:
+                              type: [string, 'null']
+                              description: 平台原始时间文本，如 “2 days ago” 或微博时间串；只在来源给出时返回。
+                            collected_at: {type: string, description: 本次采集时间，ISO 8601。, format: date-time}
+                            likeCount:
+                              type: [integer, 'null']
+                              description: 点赞数；平台未提供为 null（不是 0）。
+                            like_count:
+                              type: [integer, 'null']
+                              description: 同 likeCount（兼容字段）。
+                            replyCount:
+                              type: [integer, 'null']
+                              description: 回复数（平台显示的总数，不代表本页已返回的回复）。
+                            reply_count:
+                              type: [integer, 'null']
+                              description: 同 replyCount（兼容字段）。
+                            metrics:
+                              type: object
+                              description: 互动指标；未提供的指标为 null。
+                              properties:
+                                likes:
+                                  type: [integer, 'null']
+                                  description: 点赞
+                                replies:
+                                  type: [integer, 'null']
+                                  description: 回复
+                                score:
+                                  type: [integer, 'null']
+                                  description: Reddit 得分（可为负；隐藏时为 null）
+                                shares:
+                                  type: [integer, 'null']
+                                  description: 转发（Twitter）
+                                views:
+                                  type: [integer, 'null']
+                                  description: 浏览（Twitter）
+                                bookmarks:
+                                  type: [integer, 'null']
+                                  description: 收藏（Twitter）
+                                quotes:
+                                  type: [integer, 'null']
+                                  description: 引用（Twitter）
+                                dislikes:
+                                  type: [integer, 'null']
+                                  description: 点踩（知乎）
+                                reactions:
+                                  type: [integer, 'null']
+                                  description: 表情回应总数（Facebook）
+                            repliesIncluded:
+                              type: [boolean, 'null']
+                              description: 该行本身是否是回复：true 为回复，false 为一级评论，null 为关系未知。
+                            url:
+                              type: [string, 'null']
+                              description: 评论或所属帖子的链接；平台不提供时为 null。
+                            media:
+                              type: array
+                              description: 评论附带的图片/贴纸（小红书、Facebook 等），每项含 type、url，可能含 width、height。
+                              items: {type: object}
+                            conversationId: {type: string, description: Twitter 会话根帖 ID。}
+                            mediaId:
+                              type: [string, 'null']
+                              description: Instagram 媒体 ID。
+                            videoId: {type: string, description: YouTube 视频 ID。}
+                            legacyCommentId:
+                              type: [string, 'null']
+                              description: Facebook 旧版评论 ID。
+                            raw: {type: object, description: 仅 includeRaw=true：该评论的来源原始对象，字段随来源平台变化。}
+                        description: 本页回复。
+                      replies:
+                        type: array
+                        items: {type: object}
+                        description: 同 items（兼容字段）。
+                      raw_data: {type: string, description: items 的 JSON 字符串（兼容旧 raw_data）。}
+                      raw_info: {const: '[]', description: '固定为 "[]"。'}
+                      page:
+                        type: object
+                        required: [hasMore, nextCursor, returnedCount, paginationStatus]
+                        additionalProperties: true
+                        properties:
+                          page: {type: integer, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, description: 本次请求的 count。}
+                          returnedCount: {type: integer, description: 本页实际返回条数。}
+                          duplicateCount: {type: integer, description: 跨页去重丢弃的重复条数。}
+                          hasMore:
+                            type: [boolean, 'null']
+                            description: true 有后续页；false 已确认结束；null 未知（来源未证明续页或已结束），不要自动补页。
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页的 Hub 游标，原样作为 cursor 传入；24 小时有效，绑定 Key、平台、ID、count 和数据通道。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 同 nextCursor（兼容字段）。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          nextParams:
+                            type: [object, 'null']
+                            description: '{ cursor: nextCursor }，便于原样提交。'
+                          paginationMode: {type: string, description: 固定为 cursor。}
+                          paginationStatus:
+                            type: string
+                            description: continuable 可继续；exhausted 已结束；unknown 不确定；limit_reached 达到 15 页上限。
+                            enum: [continuable, exhausted, unknown, limit_reached]
+                          continuationAvailable: {type: boolean, description: 每次只取一个来源页的平台（Twitter、Reddit、快手、微博）返回：是否可显式请求下一页。}
+                        description: 分页信息。
+                      pageInfo:
+                        type: object
+                        required: [hasMore, nextCursor, returnedCount, paginationStatus]
+                        additionalProperties: true
+                        properties:
+                          page: {type: integer, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, description: 本次请求的 count。}
+                          returnedCount: {type: integer, description: 本页实际返回条数。}
+                          duplicateCount: {type: integer, description: 跨页去重丢弃的重复条数。}
+                          hasMore:
+                            type: [boolean, 'null']
+                            description: true 有后续页；false 已确认结束；null 未知（来源未证明续页或已结束），不要自动补页。
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页的 Hub 游标，原样作为 cursor 传入；24 小时有效，绑定 Key、平台、ID、count 和数据通道。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 同 nextCursor（兼容字段）。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          nextParams:
+                            type: [object, 'null']
+                            description: '{ cursor: nextCursor }，便于原样提交。'
+                          paginationMode: {type: string, description: 固定为 cursor。}
+                          paginationStatus:
+                            type: string
+                            description: continuable 可继续；exhausted 已结束；unknown 不确定；limit_reached 达到 15 页上限。
+                            enum: [continuable, exhausted, unknown, limit_reached]
+                          continuationAvailable: {type: boolean, description: 每次只取一个来源页的平台（Twitter、Reddit、快手、微博）返回：是否可显式请求下一页。}
+                        description: 同 page，另含 pageIndex 与 cursorType（opaque | none）。
+                      status:
+                        type: string
+                        description: ok 完整；partial 有后续页或有 warnings。
+                        enum: [ok, partial]
+                      warnings:
+                        type: array
+                        description: 非致命提示，如 pagination_completeness_unknown、page_limit_reached。
+                        items:
+                          type: object
+                          properties:
+                            code: {type: string, description: 提示代码}
+                            message: {type: string, description: 说明}
+                      meta:
+                        type: object
+                        description: 执行信息。
+                        properties:
+                          implementation: {const: hub, description: 执行方：hub。}
+                          scope: {type: string, description: comment_replies}
+                          resultCount: {type: integer, description: 本页条数}
+                          providerCalls: {type: integer, description: 本次请求实际发起的外部调用次数（0 表示全部来自已购缓冲或重放）}
+                          upstreamCallCount: {type: integer, description: 实际外部调用次数（兼容字段）}
+                          upstreamPages: {type: integer, description: 该遍历累计已取得的来源页数}
+                          maxUpstreamPages: {type: integer, description: 来源页上限（15）}
+                          paginationStatus: {type: string, description: 同 page.paginationStatus}
+                    description: 业务数据。
+              example:
+                contractVersion: mx-insight-hub.comment-replies.v1
+                requestId: 6d1e2f3a-4b5c-4d6e-8f70-81a2b3c4d5e6
+                data:
+                  platform: douyin
+                  commentId: '7300000000000000001'
+                  contentId: '7290000000000000000'
+                  items:
+                  - id: douyin:comment:7400000000000000002
+                    commentId: '7400000000000000002'
+                    externalId: '7400000000000000002'
+                    content_id: '7400000000000000002'
+                    contentId: '7290000000000000000'
+                    postId: '7290000000000000000'
+                    rootExternalId: '7290000000000000000'
+                    rootCommentId: '7300000000000000001'
+                    parentExternalId: '7300000000000000001'
+                    parentCommentId: '7300000000000000001'
+                    parentRelationship: comment
+                    platform: douyin
+                    objectType: comment
+                    type: reply
+                    text: 回复正文
+                    content: 回复正文
+                    full_text: 回复正文
+                    author: {id: '2234567890', name: 回复作者, avatarUrl: null}
+                    author_id: '2234567890'
+                    author_name: 回复作者
+                    publishedAt: '2026-11-06T09:00:00.000Z'
+                    collected_at: '2026-11-07T02:01:00.000Z'
+                    likeCount: 1
+                    like_count: 1
+                    replyCount: 0
+                    reply_count: 0
+                    metrics: {likes: 1, replies: 0}
+                    repliesIncluded: true
+                    url: null
+                  raw_info: '[]'
+                  page: {page: 1, pageSize: 20, returnedCount: 1, duplicateCount: 0, hasMore: false, nextCursor: null, providerCursor: null, nextPage: null, nextParams: null, paginationMode: cursor, paginationStatus: exhausted}
+                  status: ok
+                  warnings: []
+                  meta: {implementation: hub, scope: comment_replies, resultCount: 1, providerCalls: 1, upstreamCallCount: 1, upstreamPages: 1, maxUpstreamPages: 15, paginationStatus: exhausted}
+        '400': {description: 参数错误：invalid_post_comments_request / invalid_comment_replies_request、invalid_cursor、platform_operation_unsupported。}
+        '401': {description: API Key 无效。}
+        '402': {description: 余额或额度不足。}
+        '403': {description: 缺少平台或 social.comments.list 授权。}
+        '409': {description: 同一请求仍在执行（request_in_progress）或结果待核实（request_outcome_unknown）；先查询原请求，不要换键盲重试。}
+        '429': {description: 本 Key 或平台限流。}
+        '502': {description: 来源返回的结构不符合已发布合同（invalid_upstream_contract）；不计费。}
+        '503': {description: 数据通道未就绪、平台暂停（comment_acquisition_paused）或该平台尚未校准（external_platform_contract_unverified）；均在派发前返回，不计费。}
   /api/v2/data/search:
     servers:
       - url: /
@@ -9088,28 +9574,21 @@ paths:
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
   /data/social/crawl:
     post:
-      tags:
-      - 社媒与内容数据
+      tags: [社媒与内容数据]
       operationId: hubSocial_crawl
-      summary: Twitter · 账号内容（Hub 独立接口）
-      x-mx-required-platform: twitter
-      x-mx-required-capabilities:
-      - social.content.crawl
-      x-mx-data-platform: twitter
-      x-mx-category: Twitter
+      summary: 账号内容（Hub 账号接口）
+      x-mx-platform-options: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+      x-mx-required-capabilities: [social.content.crawl]
+      x-mx-category: 账号数据
       x-mx-meter-key: social.content.crawl
-      x-mx-doc-path: /docs/social-content
-      description: 独立的新合同，保留现有接口及授权。当前仅覆盖 Twitter；一次请求只采集一页或一次基础资料，无自动重试、补页、补详情或旧接口回退。账号内容保留该时间线中的转推。资料不含 about 补充。未知/失败响应不会伪装为空列表。raw_info/raw_data
-        为迁移辅助 JSON 字符串，字段和时间格式不承诺与历史接口完全相同；不能仅替换 URL 就宣称兼容。完整原始响应限管理审计；本批暂未接入已收录数据索引。新增权限、运行开关和价格独立审核，默认禁用。
+      x-mx-doc-path: /docs/strategy-search
+      description: Hub 执行账号解析、字段投影及分页，保留已声明的历史账号参数和 raw_info/raw_data JSON 字符串，新增统一 items、page/pageInfo。旧转发入口继续保留；下游切换新接口须从第一页开始。授权要求同一 Key 同时具备目标平台和本操作 capability，不自动开通权限。逻辑页优先消费已取得余量并去重，再在允许范围内继续获取；最多 15 个公开页，游标保留 24 小时，页大小不是保证返回条数。短页或空页应读取 hasMore/nextCursor，不能按条数判定结束。未提供指标为 null，真实零值为 0。失败或未知不会伪装为成功空列表，也不会自动新建请求重试。
       parameters:
       - name: Idempotency-Key
         in: header
         required: true
-        schema:
-          type: string
-          minLength: 8
-          maxLength: 128
-        description: 相同页重试保持原标识和请求体；下一页使用新标识。身份识别规则更新不改写已保存的精确历史回执，也不触发重新采集。未知结果禁止自动新建标识重发。
+        schema: {type: string, minLength: 8, maxLength: 128}
+        description: 同一页面重试保持原标识与原请求体；下一页使用新标识。身份识别规则更新不改写已保存的精确历史回执，也不触发重新采集。未知结果先只读核对，不自动换标识重发。
       requestBody:
         required: true
         content:
@@ -9117,124 +9596,473 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required:
-              - platform
+              required: [platform]
               properties:
                 platform:
                   type: string
-                  enum:
-                  - twitter
-                  - x
-                  default: twitter
-                username:
-                  type: string
-                  maxLength: 2048
-                  description: Twitter 自动识别账号字符串，与 userId 字段相同：1–19 位裸纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
-                userId:
-                  type: string
-                  maxLength: 2048
-                  description: 与 username 使用相同的自动识别规则；1–19 位裸纯数字字符串先按账号 ID、该 ID 没有账号时再按用户名查询，其他值按用户名查询，@ 显式表示用户名。
-                user_id:
-                  type: string
-                  maxLength: 2048
-                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
-                uid:
-                  type: string
-                  maxLength: 2048
-                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
-                count:
-                  type: integer
-                  minimum: 1
-                  maximum: 50
-                  default: 20
-                  description: 单页请求量，仍受 Key 上限约束；不足不自动补页。
-                pageSize:
-                  type: integer
-                  minimum: 1
-                  maximum: 50
-                  description: count 同义字段；同时提交须相同。
-                limit:
-                  type: integer
-                  minimum: 1
-                  maximum: 50
-                  description: count 同义字段；同时提交须相同。
-                cursor:
-                  type: string
-                  maxLength: 8192
-                  description: 本接口返回的不透明游标，同一 Key、操作、查询、排序和 count 下原样提交；最多 15 页、整轮有效期 24 小时。旧接口游标不可混用。
-              oneOf:
-              - required:
-                - username
-                not:
-                  anyOf:
-                  - required:
-                    - userId
-                  - required:
-                    - user_id
-                  - required:
-                    - uid
-              - anyOf:
-                - required:
-                  - userId
-                - required:
-                  - user_id
-                - required:
-                  - uid
-                not:
-                  required:
-                  - username
-            example:
-              platform: twitter
-              username: example
-              count: 20
+                  enum: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+                  description: 一次请求只选择一个平台；已发布的平台别名继续兼容，响应使用规范平台名。
+                businessId: {type: string, deprecated: true, description: 历史兼容字段；可省略。提交时必须等于当前认证消费者绑定的值，不能改变调用身份。}
+                business_id: {type: string, deprecated: true, description: businessId 的历史别名；同样受当前认证身份绑定。}
+                username: {type: string, minLength: 1, maxLength: 2048, description: 平台账号标识。Twitter 自动识别：无 @ 的 1–19 位纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @，也可通过 url/urls 字段提交主页 URL；ID 必须用字符串传输以保持精度。}
+                usernames:
+                  oneOf:
+                  - {type: string, minLength: 1, maxLength: 2048}
+                  - type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {type: string, minLength: 1, maxLength: 2048}
+                  description: 平台账号列表。Twitter 每项按内容自动识别，与 username 相同；1–19 位裸纯数字字符串先按账号 ID、再按用户名查询，@12345 只表示数字用户名；主页 URL 请使用 url/urls 字段。
+                userId: {type: string, minLength: 1, maxLength: 2048, description: 平台账号标识。Twitter 与 username 相同，1–19 位裸纯数字字符串先按 ID、该 ID 没有账号时再按用户名查询，其他值按用户名解析；Hub 内部任务 ID 不能保证存在对应平台账号。}
+                userIds:
+                  oneOf:
+                  - {type: string, minLength: 1, maxLength: 2048}
+                  - type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {type: string, minLength: 1, maxLength: 2048}
+                  description: 平台账号列表。Twitter 每项与 username 使用相同的自动识别规则。
+                user_id: {type: string, minLength: 1, maxLength: 2048, description: userId 兼容字段；Twitter 使用相同的自动识别规则。}
+                uid: {type: string, minLength: 1, maxLength: 2048, description: userId 兼容字段；Twitter 使用相同的自动识别规则。}
+                url: {type: string, minLength: 1, maxLength: 2048, description: 平台主页 URL；Twitter 路径中的账号名按用户名解析，包括纯数字账号名。}
+                urls:
+                  oneOf:
+                  - {type: string, minLength: 1, maxLength: 2048}
+                  - type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {type: string, minLength: 1, maxLength: 2048}
+                  description: 单账号或同一平台的账号列表；账号标识应来自对应平台，不能填内部任务 ID。
+                profileUrl: {type: string, minLength: 1, maxLength: 2048}
+                profile_url: {type: string, minLength: 1, maxLength: 2048}
+                channelId: {type: string, minLength: 1, maxLength: 2048}
+                channel_id: {type: string, minLength: 1, maxLength: 2048}
+                channelUrl: {type: string, minLength: 1, maxLength: 2048}
+                channel_url: {type: string, minLength: 1, maxLength: 2048}
+                count: {type: integer, minimum: 1, maximum: 500, default: 20, description: 逻辑页上限，仍受当前 Key 页大小上限约束。兼容优先级 count > pageSize > page_size > limit；pageSize 与 page_size 同时出现须相同。不足一页不代表没有后续。}
+                pageSize: {type: integer, minimum: 1, maximum: 500}
+                page_size: {type: integer, minimum: 1, maximum: 500}
+                limit: {type: integer, minimum: 1, maximum: 500}
+                cursor: {type: string, maxLength: 8192, description: 原样回传 data.pageInfo.nextCursor（兼容 data.page.nextCursor）。不解析、不改写，不与旧转发接口或内容搜索游标混用；原平台、账号、过滤条件、页大小及 Key 必须保持一致。}
+                page: {type: integer, minimum: 1, maximum: 15, default: 1, description: 首页为 1；后续页由 Hub 游标决定，不能单独递增页码跳页。}
+                params: {type: object, description: 仅接受对应平台、活动类型中已审核的业务参数；Twitter 的 username/usernames/userId/userIds/user_id/uid/screen_name/screenName 兼容账号别名采用相同的自动识别规则。未知参数会在派发前拒绝。不得提交 provider、endpoint、凭据或原生分页游标。}
+                concurrency: {type: integer, minimum: 1, maximum: 20, description: 兼容接收的历史提示，不覆盖 Hub 的实际并发、准入或采购保护。}
+                cacheMaxAgeHours: {type: number, minimum: 0, maximum: 720, description: 兼容接收的历史提示，不承诺强制缓存命中，也不覆盖 Hub 请求幂等规则。}
+                includeRaw:
+                  type: boolean
+                  enum: [false]
+                  default: false
+                  description: 保留 false/省略的兼容行为；raw_info/raw_data 始终是业务投影 JSON 字符串，不公开供应凭据或原始审计包。
+                activityTypes:
+                  type: array
+                  items: {type: string}
+                  default: [posts]
+                  description: 默认账号发布内容 posts。其他活动必须为该平台已声明的类型，不能把一个平台的活动复制到另一个平台。Twitter replies 只返回该账号自己发出的回复（含回复自己的串推），每条带 replyTo（被回复帖子 id、账号 userId/username）、parentExternalId、conversationId 与 isSelfReply；该账号的普通发帖请用 posts。
+              anyOf:
+              - required: [username]
+              - required: [usernames]
+              - required: [userId]
+              - required: [userIds]
+              - required: [user_id]
+              - required: [uid]
+              - required: [url]
+              - required: [urls]
+              - required: [profileUrl]
+              - required: [profile_url]
+              - required: [channelId]
+              - required: [channel_id]
+              - required: [channelUrl]
+              - required: [channel_url]
+              - required: [params]
+            example: {platform: twitter, username: example, pageSize: 20}
       responses:
         '200':
-          description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
-            表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
-        '400':
-          description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。
-        '401':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '402':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '403':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '404':
-          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
-        '422':
-          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
-        '409':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '429':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '502':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '503':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
+          description: contractVersion、data（platform、items、raw_info、raw_data、page、pageInfo、meta、status、warnings）与 requestId。raw_info/raw_data 是 JSON 字符串；items 是数组，posts 等为内容条目，followers/following 和账号资料为账号条目。page/pageInfo 的 hasMore 与 nextCursor 同步。returnedCount 只描述本页，不代表账号总内容数。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contractVersion, data, requestId]
+                properties:
+                  contractVersion: {const: mx-insight-hub.social-compat.v1, description: 新账号请求合同。原 Twitter 游标或已保存原幂等交付可能仍返回历史 mx-insight-hub.social-data.v1；该分支保持原字段，按原合同解析。}
+                  requestId: {type: string, format: uuid, description: Hub 请求 ID；排查问题、按 ID 查询原请求时使用。}
+                  data:
+                    type: object
+                    required: [platform, items, raw_info, raw_data, page, pageInfo, status, warnings, meta]
+                    properties:
+                      platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                      items:
+                        type: array
+                        items:
+                          anyOf:
+                          - type: object
+                            additionalProperties: true
+                            description: 兼容扁平内容字段；不同平台保持已声明的时间、媒体和业务字段。
+                            properties:
+                              id: {type: string, description: 'Hub 内条目 ID（平台:类型:平台 ID）。'}
+                              content_id: {type: string, description: 内容在平台上的原始 ID（兼容字段）。}
+                              external_id: {type: string, description: 同 externalId（兼容字段）。}
+                              platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                              platform_name: {type: string, description: 同 platform（兼容字段）。}
+                              content: {type: string, description: 同 text（兼容字段）。}
+                              full_text: {type: string, description: 同 text（兼容字段）。}
+                              text: {type: string, description: 完整正文。}
+                              title:
+                                type: [string, 'null']
+                                description: 标题；平台没有标题时为 null。
+                              content_type: {type: string, description: 同 contentType（兼容字段）。}
+                              activityType: {type: string, description: 账号内容的活动类型：posts、replies、likes、answers 等（与请求 activityTypes 对应）。}
+                              author_id:
+                                type: [string, 'null']
+                                description: 作者在平台上的 ID。
+                              author_name:
+                                type: [string, 'null']
+                                description: 作者昵称。
+                              author_avatar_url:
+                                type: [string, 'null']
+                                description: 作者头像地址。
+                              url:
+                                type: [string, 'null']
+                                description: 条目在平台上的链接；平台不提供时为 null。
+                              original_url:
+                                type: [string, 'null']
+                                description: 同 url（兼容字段）。
+                              collected_at: {type: string, format: date-time, description: 同 collectedAt（兼容字段）。}
+                              like_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              comment_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              reply_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              share_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              forward_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              view_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              collect_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              bookmark_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              image_urls: {type: string, description: '图片 URL 数组的 JSON 字符串；空数组为 "[]"。'}
+                              video_urls: {type: string, description: '视频 URL 数组的 JSON 字符串；空数组为 "[]"。'}
+                              metadata: {type: string, description: 业务元数据 JSON 字符串。}
+                          - type: object
+                            additionalProperties: true
+                            description: 兼容扁平账号资料字段；保留当前平台已声明的其他业务字段。
+                            properties:
+                              user_id: {type: string, description: 账号在平台上的 ID。}
+                              objectType: {const: user, description: 对象类型：user（账号资料）或 post/comment。}
+                              user_name: {type: string, description: 账号用户名（兼容字段）。}
+                              username: {type: string, description: 账号用户名。}
+                              name: {type: string, description: 显示名/昵称。}
+                              nickname: {type: string, description: 昵称（兼容字段）。}
+                              platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                              platform_name: {type: string, description: 同 platform（兼容字段）。}
+                              description: {type: string, description: 账号简介。}
+                              avatar_url: {type: string, description: 头像地址。}
+                              profile_image_url: {type: string, description: 头像地址（兼容字段）。}
+                              url: {type: string, description: 条目在平台上的链接；平台不提供时为 null。}
+                              original_url: {type: string, description: 同 url（兼容字段）。}
+                              followers_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              follower_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              friends_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              following_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              statuses_count:
+                                type: [number, 'null']
+                                minimum: 0
+                                description: 明确取得的零为 0；没有提供的值为 null。
+                              verified:
+                                type: [boolean, 'null']
+                                description: 是否认证；平台未提供为 null。
+                              location: {type: string, description: 账号填写的地区。}
+                              collected_at: {type: string, format: date-time, description: 同 collectedAt（兼容字段）。}
+                              metadata: {type: string, description: 业务元数据 JSON 字符串。}
+                        description: 本页条目。
+                      raw_info: {type: string, description: 账号资料数组的 JSON 字符串。}
+                      raw_data: {type: string, description: 本页业务条目数组的 JSON 字符串；followers/following 是 objectType=user、user_id 的账号条目，没有 content_id。不能将整段字符串视为一个条目。}
+                      page:
+                        type: object
+                        additionalProperties: true
+                        required: [page, pageSize, returnedCount, hasMore, nextCursor]
+                        properties:
+                          page: {type: integer, minimum: 1, maximum: 15, description: 分页信息。}
+                          pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
+                          returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
+                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 历史字段名；仅为同一个 Hub nextCursor 的兼容别名，不是原生游标。
+                          nextParams:
+                            type: [object, 'null']
+                            properties:
+                              cursor: {type: string, description: 游标（原样回传）。}
+                            description: 下一页可直接提交的参数，通常为 { cursor }。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          paginationMode: {const: cursor, description: 分页方式：cursor 或 page。}
+                        description: 分页信息。
+                      pageInfo:
+                        type: object
+                        additionalProperties: true
+                        required: [page, pageSize, returnedCount, hasMore, nextCursor]
+                        properties:
+                          page: {type: integer, minimum: 1, maximum: 15, description: 分页信息。}
+                          pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
+                          returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
+                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 历史字段名；仅为同一个 Hub nextCursor 的兼容别名，不是原生游标。
+                          nextParams:
+                            type: [object, 'null']
+                            properties:
+                              cursor: {type: string, description: 游标（原样回传）。}
+                            description: 下一页可直接提交的参数，通常为 { cursor }。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          paginationMode: {const: cursor, description: 分页方式：cursor 或 page。}
+                        description: 分页信息（同 page，另含 pageIndex、cursorType）。
+                      status:
+                        enum: [ok, partial]
+                        description: ok 完整；partial 有后续页、部分条目被丢弃或有 warnings。
+                      warnings:
+                        type: array
+                        items:
+                          type: object
+                          required: [code, message]
+                          properties:
+                            code: {type: string, description: 提示或错误代码。}
+                            message: {type: string, description: 可读说明。}
+                          additionalProperties: true
+                        description: 非致命提示列表；按 code 判断，不影响已返回数据。
+                      meta:
+                        type: object
+                        properties:
+                          implementation: {const: hub, description: 执行方：hub。}
+                          resultCount: {type: integer, minimum: 0, description: 本页条数。}
+                          upstreamCallCount: {type: integer, minimum: 0, description: 实际外部调用次数（兼容字段）。}
+                          providerCalls: {type: integer, minimum: 0, description: 本次请求实际发起的外部调用次数（0 表示全部来自已购缓冲或重放）。}
+                        additionalProperties: true
+                        description: 执行信息（不属于业务数据）。
+                      mode: {const: batch, description: batch 表示批量请求。}
+                      results:
+                        type: array
+                        description: 多账号或活动组合的逐工作项结果。顶层 page/pageInfo 控制整个请求续页。
+                        items:
+                          type: object
+                          properties:
+                            platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                            kind: {type: string, description: 账号标识类型：username、id 或 url。}
+                            value: {type: string, description: 账号标识值。}
+                            success: {type: boolean, description: 该工作项是否已开始并成功返回。}
+                            items:
+                              type: array
+                              items:
+                                anyOf:
+                                - type: object
+                                  additionalProperties: true
+                                  description: 兼容扁平内容字段；不同平台保持已声明的时间、媒体和业务字段。
+                                  properties:
+                                    id: {type: string, description: 'Hub 内条目 ID（平台:类型:平台 ID）。'}
+                                    content_id: {type: string, description: 内容在平台上的原始 ID（兼容字段）。}
+                                    external_id: {type: string, description: 同 externalId（兼容字段）。}
+                                    platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                                    platform_name: {type: string, description: 同 platform（兼容字段）。}
+                                    content: {type: string, description: 同 text（兼容字段）。}
+                                    full_text: {type: string, description: 同 text（兼容字段）。}
+                                    text: {type: string, description: 完整正文。}
+                                    title:
+                                      type: [string, 'null']
+                                      description: 标题；平台没有标题时为 null。
+                                    content_type: {type: string, description: 同 contentType（兼容字段）。}
+                                    activityType: {type: string, description: 账号内容的活动类型：posts、replies、likes、answers 等（与请求 activityTypes 对应）。}
+                                    author_id:
+                                      type: [string, 'null']
+                                      description: 作者在平台上的 ID。
+                                    author_name:
+                                      type: [string, 'null']
+                                      description: 作者昵称。
+                                    author_avatar_url:
+                                      type: [string, 'null']
+                                      description: 作者头像地址。
+                                    url:
+                                      type: [string, 'null']
+                                      description: 条目在平台上的链接；平台不提供时为 null。
+                                    original_url:
+                                      type: [string, 'null']
+                                      description: 同 url（兼容字段）。
+                                    collected_at: {type: string, format: date-time, description: 同 collectedAt（兼容字段）。}
+                                    like_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    comment_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    reply_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    share_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    forward_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    view_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    collect_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    bookmark_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    image_urls: {type: string, description: '图片 URL 数组的 JSON 字符串；空数组为 "[]"。'}
+                                    video_urls: {type: string, description: '视频 URL 数组的 JSON 字符串；空数组为 "[]"。'}
+                                    metadata: {type: string, description: 业务元数据 JSON 字符串。}
+                                - type: object
+                                  additionalProperties: true
+                                  description: 兼容扁平账号资料字段；保留当前平台已声明的其他业务字段。
+                                  properties:
+                                    user_id: {type: string, description: 账号在平台上的 ID。}
+                                    objectType: {const: user, description: 对象类型：user（账号资料）或 post/comment。}
+                                    user_name: {type: string, description: 账号用户名（兼容字段）。}
+                                    username: {type: string, description: 账号用户名。}
+                                    name: {type: string, description: 显示名/昵称。}
+                                    nickname: {type: string, description: 昵称（兼容字段）。}
+                                    platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                                    platform_name: {type: string, description: 同 platform（兼容字段）。}
+                                    description: {type: string, description: 账号简介。}
+                                    avatar_url: {type: string, description: 头像地址。}
+                                    profile_image_url: {type: string, description: 头像地址（兼容字段）。}
+                                    url: {type: string, description: 条目在平台上的链接；平台不提供时为 null。}
+                                    original_url: {type: string, description: 同 url（兼容字段）。}
+                                    followers_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    follower_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    friends_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    following_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    statuses_count:
+                                      type: [number, 'null']
+                                      minimum: 0
+                                      description: 明确取得的零为 0；没有提供的值为 null。
+                                    verified:
+                                      type: [boolean, 'null']
+                                      description: 是否认证；平台未提供为 null。
+                                    location: {type: string, description: 账号填写的地区。}
+                                    collected_at: {type: string, format: date-time, description: 同 collectedAt（兼容字段）。}
+                                    metadata: {type: string, description: 业务元数据 JSON 字符串。}
+                              description: 本页条目。
+                            raw_info: {type: string, description: 账号资料数组的 JSON 字符串（兼容旧 raw_info）。}
+                            raw_data: {type: string, description: 内容条目数组的 JSON 字符串（兼容旧 raw_data）。}
+                            page:
+                              type: object
+                              additionalProperties: true
+                              required: [page, pageSize, returnedCount, hasMore, nextCursor]
+                              properties:
+                                page: {type: integer, minimum: 1, maximum: 15, description: 分页信息。}
+                                pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
+                                pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
+                                returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
+                                hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                                nextCursor:
+                                  type: [string, 'null']
+                                  description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
+                                providerCursor:
+                                  type: [string, 'null']
+                                  description: 历史字段名；仅为同一个 Hub nextCursor 的兼容别名，不是原生游标。
+                                nextParams:
+                                  type: [object, 'null']
+                                  properties:
+                                    cursor: {type: string, description: 游标（原样回传）。}
+                                  description: 下一页可直接提交的参数，通常为 { cursor }。
+                                nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                                paginationMode: {const: cursor, description: 分页方式：cursor 或 page。}
+                              description: 分页信息。
+                          additionalProperties: true
+                    additionalProperties: true
+                    description: 业务数据。
+                additionalProperties: true
+        '400': {description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。}
+        '401': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '402': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '403': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '404': {description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。}
+        '409': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '422': {description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。}
+        '429': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '502': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '503': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
   /data/social/user-info:
     post:
-      tags:
-      - 社媒与内容数据
+      tags: [社媒与内容数据]
       operationId: hubSocial_user_info
-      summary: Twitter · 账号资料（Hub 独立接口）
-      x-mx-required-platform: twitter
-      x-mx-required-capabilities:
-      - social.profile.get
-      x-mx-data-platform: twitter
-      x-mx-category: Twitter
+      summary: 账号资料（Hub 账号接口）
+      x-mx-platform-options: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+      x-mx-required-capabilities: [social.profile.get]
+      x-mx-category: 账号数据
       x-mx-meter-key: social.profile.get
-      x-mx-doc-path: /docs/social-content
-      description: 独立的新合同，保留现有接口及授权。当前仅覆盖 Twitter；一次请求只采集一页或一次基础资料，无自动重试、补页、补详情或旧接口回退。账号内容保留该时间线中的转推。资料不含 about 补充。未知/失败响应不会伪装为空列表。raw_info/raw_data
-        为迁移辅助 JSON 字符串，字段和时间格式不承诺与历史接口完全相同；不能仅替换 URL 就宣称兼容。完整原始响应限管理审计；本批暂未接入已收录数据索引。新增权限、运行开关和价格独立审核，默认禁用。
+      x-mx-doc-path: /docs/strategy-search
+      description: Hub 执行账号解析、字段投影及分页，保留已声明的历史账号参数和 raw_info/raw_data JSON 字符串，新增统一 items、page/pageInfo。旧转发入口继续保留；下游切换新接口须从第一页开始。授权要求同一 Key 同时具备目标平台和本操作 capability，不自动开通权限。逻辑页优先消费已取得余量并去重，再在允许范围内继续获取；最多 15 个公开页，游标保留 24 小时，页大小不是保证返回条数。短页或空页应读取 hasMore/nextCursor，不能按条数判定结束。未提供指标为 null，真实零值为 0。失败或未知不会伪装为成功空列表，也不会自动新建请求重试。
       parameters:
       - name: Idempotency-Key
         in: header
         required: true
-        schema:
-          type: string
-          minLength: 8
-          maxLength: 128
-        description: 相同页重试保持原标识和请求体；下一页使用新标识。身份识别规则更新不改写已保存的精确历史回执，也不触发重新采集。未知结果禁止自动新建标识重发。
+        schema: {type: string, minLength: 8, maxLength: 128}
+        description: 同一页面重试保持原标识与原请求体；下一页使用新标识。身份识别规则更新不改写已保存的精确历史回执，也不触发重新采集。未知结果先只读核对，不自动换标识重发。
       requestBody:
         required: true
         content:
@@ -9242,79 +10070,313 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required:
-              - platform
+              required: [platform]
               properties:
                 platform:
                   type: string
-                  enum:
-                  - twitter
-                  - x
-                  default: twitter
-                username:
-                  type: string
-                  maxLength: 2048
-                  description: Twitter 自动识别账号字符串，与 userId 字段相同：1–19 位裸纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
-                userId:
-                  type: string
-                  maxLength: 2048
-                  description: 与 username 使用相同的自动识别规则；1–19 位裸纯数字字符串先按账号 ID、该 ID 没有账号时再按用户名查询，其他值按用户名查询，@ 显式表示用户名。
-                user_id:
-                  type: string
-                  maxLength: 2048
-                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
-                uid:
-                  type: string
-                  maxLength: 2048
-                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
-              oneOf:
-              - required:
-                - username
-                not:
-                  anyOf:
-                  - required:
-                    - userId
-                  - required:
-                    - user_id
-                  - required:
-                    - uid
-              - anyOf:
-                - required:
-                  - userId
-                - required:
-                  - user_id
-                - required:
-                  - uid
-                not:
-                  required:
-                  - username
-            example:
-              platform: twitter
-              username: example
+                  enum: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+                  description: 一次请求只选择一个平台；已发布的平台别名继续兼容，响应使用规范平台名。
+                businessId: {type: string, deprecated: true, description: 历史兼容字段；可省略。提交时必须等于当前认证消费者绑定的值，不能改变调用身份。}
+                business_id: {type: string, deprecated: true, description: businessId 的历史别名；同样受当前认证身份绑定。}
+                username: {type: string, minLength: 1, maxLength: 2048, description: 平台账号标识。Twitter 自动识别：无 @ 的 1–19 位纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @，也可通过 url/urls 字段提交主页 URL；ID 必须用字符串传输以保持精度。}
+                usernames:
+                  oneOf:
+                  - {type: string, minLength: 1, maxLength: 2048}
+                  - type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {type: string, minLength: 1, maxLength: 2048}
+                  description: 平台账号列表。Twitter 每项按内容自动识别，与 username 相同；1–19 位裸纯数字字符串先按账号 ID、再按用户名查询，@12345 只表示数字用户名；主页 URL 请使用 url/urls 字段。
+                userId: {type: string, minLength: 1, maxLength: 2048, description: 平台账号标识。Twitter 与 username 相同，1–19 位裸纯数字字符串先按 ID、该 ID 没有账号时再按用户名查询，其他值按用户名解析；Hub 内部任务 ID 不能保证存在对应平台账号。}
+                userIds:
+                  oneOf:
+                  - {type: string, minLength: 1, maxLength: 2048}
+                  - type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {type: string, minLength: 1, maxLength: 2048}
+                  description: 平台账号列表。Twitter 每项与 username 使用相同的自动识别规则。
+                user_id: {type: string, minLength: 1, maxLength: 2048, description: userId 兼容字段；Twitter 使用相同的自动识别规则。}
+                uid: {type: string, minLength: 1, maxLength: 2048, description: userId 兼容字段；Twitter 使用相同的自动识别规则。}
+                url: {type: string, minLength: 1, maxLength: 2048, description: 平台主页 URL；Twitter 路径中的账号名按用户名解析，包括纯数字账号名。}
+                urls:
+                  oneOf:
+                  - {type: string, minLength: 1, maxLength: 2048}
+                  - type: array
+                    minItems: 1
+                    maxItems: 100
+                    items: {type: string, minLength: 1, maxLength: 2048}
+                  description: 单账号或同一平台的账号列表；账号标识应来自对应平台，不能填内部任务 ID。
+                profileUrl: {type: string, minLength: 1, maxLength: 2048}
+                profile_url: {type: string, minLength: 1, maxLength: 2048}
+                channelId: {type: string, minLength: 1, maxLength: 2048}
+                channel_id: {type: string, minLength: 1, maxLength: 2048}
+                channelUrl: {type: string, minLength: 1, maxLength: 2048}
+                channel_url: {type: string, minLength: 1, maxLength: 2048}
+                count: {type: integer, minimum: 1, maximum: 500, default: 20, description: 逻辑页上限，仍受当前 Key 页大小上限约束。兼容优先级 limit > count > pageSize > page_size；pageSize 与 page_size 同时出现须相同。不足一页不代表没有后续。}
+                pageSize: {type: integer, minimum: 1, maximum: 500}
+                page_size: {type: integer, minimum: 1, maximum: 500}
+                limit: {type: integer, minimum: 1, maximum: 500}
+                cursor: {type: string, maxLength: 8192, description: 原样回传 data.pageInfo.nextCursor（兼容 data.page.nextCursor）。不解析、不改写，不与旧转发接口或内容搜索游标混用；原平台、账号、过滤条件、页大小及 Key 必须保持一致。}
+                page: {type: integer, minimum: 1, maximum: 15, default: 1, description: 首页为 1；后续页由 Hub 游标决定，不能单独递增页码跳页。}
+                params: {type: object, description: 仅接受对应平台、活动类型中已审核的业务参数；Twitter 的 username/usernames/userId/userIds/user_id/uid/screen_name/screenName 兼容账号别名采用相同的自动识别规则。未知参数会在派发前拒绝。不得提交 provider、endpoint、凭据或原生分页游标。}
+                concurrency: {type: integer, minimum: 1, maximum: 20, description: 兼容接收的历史提示，不覆盖 Hub 的实际并发、准入或采购保护。}
+                cacheMaxAgeHours: {type: number, minimum: 0, maximum: 720, description: 兼容接收的历史提示，不承诺强制缓存命中，也不覆盖 Hub 请求幂等规则。}
+                includeRaw:
+                  type: boolean
+                  enum: [false]
+                  default: false
+                  description: 保留 false/省略的兼容行为；raw_info/raw_data 始终是业务投影 JSON 字符串，不公开供应凭据或原始审计包。
+              anyOf:
+              - required: [username]
+              - required: [usernames]
+              - required: [userId]
+              - required: [userIds]
+              - required: [user_id]
+              - required: [uid]
+              - required: [url]
+              - required: [urls]
+              - required: [profileUrl]
+              - required: [profile_url]
+              - required: [channelId]
+              - required: [channel_id]
+              - required: [channelUrl]
+              - required: [channel_url]
+              - required: [params]
+            example: {platform: twitter, username: example}
       responses:
         '200':
-          description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
-            表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
-        '400':
-          description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。
-        '401':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '402':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '403':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '404':
-          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
-        '422':
-          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
-        '409':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '429':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '502':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
-        '503':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
+          description: contractVersion、data（platform、items、raw_info、raw_data、page、pageInfo、meta、status、warnings）与 requestId。raw_info/raw_data 是 JSON 字符串；items 是数组，posts 等为内容条目，followers/following 和账号资料为账号条目。page/pageInfo 的 hasMore 与 nextCursor 同步。returnedCount 只描述本页，不代表账号总内容数。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contractVersion, data, requestId]
+                properties:
+                  contractVersion: {const: mx-insight-hub.social-compat.v1, description: 新账号请求合同。原 Twitter 游标或已保存原幂等交付可能仍返回历史 mx-insight-hub.social-data.v1；该分支保持原字段，按原合同解析。}
+                  requestId: {type: string, format: uuid, description: Hub 请求 ID；排查问题、按 ID 查询原请求时使用。}
+                  data:
+                    type: object
+                    required: [platform, items, raw_info, raw_data, page, pageInfo, status, warnings, meta]
+                    properties:
+                      platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                          description: 兼容扁平账号资料字段；保留当前平台已声明的其他业务字段。
+                          properties:
+                            user_id: {type: string, description: 账号在平台上的 ID。}
+                            objectType: {const: user, description: 对象类型：user（账号资料）或 post/comment。}
+                            user_name: {type: string, description: 账号用户名（兼容字段）。}
+                            username: {type: string, description: 账号用户名。}
+                            name: {type: string, description: 显示名/昵称。}
+                            nickname: {type: string, description: 昵称（兼容字段）。}
+                            platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                            platform_name: {type: string, description: 同 platform（兼容字段）。}
+                            description: {type: string, description: 账号简介。}
+                            avatar_url: {type: string, description: 头像地址。}
+                            profile_image_url: {type: string, description: 头像地址（兼容字段）。}
+                            url: {type: string, description: 条目在平台上的链接；平台不提供时为 null。}
+                            original_url: {type: string, description: 同 url（兼容字段）。}
+                            followers_count:
+                              type: [number, 'null']
+                              minimum: 0
+                              description: 明确取得的零为 0；没有提供的值为 null。
+                            follower_count:
+                              type: [number, 'null']
+                              minimum: 0
+                              description: 明确取得的零为 0；没有提供的值为 null。
+                            friends_count:
+                              type: [number, 'null']
+                              minimum: 0
+                              description: 明确取得的零为 0；没有提供的值为 null。
+                            following_count:
+                              type: [number, 'null']
+                              minimum: 0
+                              description: 明确取得的零为 0；没有提供的值为 null。
+                            statuses_count:
+                              type: [number, 'null']
+                              minimum: 0
+                              description: 明确取得的零为 0；没有提供的值为 null。
+                            verified:
+                              type: [boolean, 'null']
+                              description: 是否认证；平台未提供为 null。
+                            location: {type: string, description: 账号填写的地区。}
+                            collected_at: {type: string, format: date-time, description: 同 collectedAt（兼容字段）。}
+                            metadata: {type: string, description: 业务元数据 JSON 字符串。}
+                        description: 本页条目。
+                      raw_info: {type: string, description: 账号资料数组的 JSON 字符串。}
+                      raw_data: {type: string, description: '资料查询保留 "[]"。'}
+                      page:
+                        type: object
+                        additionalProperties: true
+                        required: [page, pageSize, returnedCount, hasMore, nextCursor]
+                        properties:
+                          page: {type: integer, minimum: 1, maximum: 15, description: 分页信息。}
+                          pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
+                          returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
+                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 历史字段名；仅为同一个 Hub nextCursor 的兼容别名，不是原生游标。
+                          nextParams:
+                            type: [object, 'null']
+                            properties:
+                              cursor: {type: string, description: 游标（原样回传）。}
+                            description: 下一页可直接提交的参数，通常为 { cursor }。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          paginationMode: {const: cursor, description: 分页方式：cursor 或 page。}
+                        description: 分页信息。
+                      pageInfo:
+                        type: object
+                        additionalProperties: true
+                        required: [page, pageSize, returnedCount, hasMore, nextCursor]
+                        properties:
+                          page: {type: integer, minimum: 1, maximum: 15, description: 分页信息。}
+                          pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
+                          pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
+                          returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
+                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          nextCursor:
+                            type: [string, 'null']
+                            description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
+                          providerCursor:
+                            type: [string, 'null']
+                            description: 历史字段名；仅为同一个 Hub nextCursor 的兼容别名，不是原生游标。
+                          nextParams:
+                            type: [object, 'null']
+                            properties:
+                              cursor: {type: string, description: 游标（原样回传）。}
+                            description: 下一页可直接提交的参数，通常为 { cursor }。
+                          nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                          paginationMode: {const: cursor, description: 分页方式：cursor 或 page。}
+                        description: 分页信息（同 page，另含 pageIndex、cursorType）。
+                      status:
+                        enum: [ok, partial]
+                        description: ok 完整；partial 有后续页、部分条目被丢弃或有 warnings。
+                      warnings:
+                        type: array
+                        items:
+                          type: object
+                          required: [code, message]
+                          properties:
+                            code: {type: string, description: 提示或错误代码。}
+                            message: {type: string, description: 可读说明。}
+                          additionalProperties: true
+                        description: 非致命提示列表；按 code 判断，不影响已返回数据。
+                      meta:
+                        type: object
+                        properties:
+                          implementation: {const: hub, description: 执行方：hub。}
+                          resultCount: {type: integer, minimum: 0, description: 本页条数。}
+                          upstreamCallCount: {type: integer, minimum: 0, description: 实际外部调用次数（兼容字段）。}
+                          providerCalls: {type: integer, minimum: 0, description: 本次请求实际发起的外部调用次数（0 表示全部来自已购缓冲或重放）。}
+                        additionalProperties: true
+                        description: 执行信息（不属于业务数据）。
+                      mode: {const: batch, description: batch 表示批量请求。}
+                      results:
+                        type: array
+                        description: 多账号或活动组合的逐工作项结果。顶层 page/pageInfo 控制整个请求续页。
+                        items:
+                          type: object
+                          properties:
+                            platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                            kind: {type: string, description: 账号标识类型：username、id 或 url。}
+                            value: {type: string, description: 账号标识值。}
+                            success: {type: boolean, description: 该工作项是否已开始并成功返回。}
+                            items:
+                              type: array
+                              items:
+                                type: object
+                                additionalProperties: true
+                                description: 兼容扁平账号资料字段；保留当前平台已声明的其他业务字段。
+                                properties:
+                                  user_id: {type: string, description: 账号在平台上的 ID。}
+                                  objectType: {const: user, description: 对象类型：user（账号资料）或 post/comment。}
+                                  user_name: {type: string, description: 账号用户名（兼容字段）。}
+                                  username: {type: string, description: 账号用户名。}
+                                  name: {type: string, description: 显示名/昵称。}
+                                  nickname: {type: string, description: 昵称（兼容字段）。}
+                                  platform: {type: string, description: 平台标识，如 twitter、douyin、xiaohongshu。}
+                                  platform_name: {type: string, description: 同 platform（兼容字段）。}
+                                  description: {type: string, description: 账号简介。}
+                                  avatar_url: {type: string, description: 头像地址。}
+                                  profile_image_url: {type: string, description: 头像地址（兼容字段）。}
+                                  url: {type: string, description: 条目在平台上的链接；平台不提供时为 null。}
+                                  original_url: {type: string, description: 同 url（兼容字段）。}
+                                  followers_count:
+                                    type: [number, 'null']
+                                    minimum: 0
+                                    description: 明确取得的零为 0；没有提供的值为 null。
+                                  follower_count:
+                                    type: [number, 'null']
+                                    minimum: 0
+                                    description: 明确取得的零为 0；没有提供的值为 null。
+                                  friends_count:
+                                    type: [number, 'null']
+                                    minimum: 0
+                                    description: 明确取得的零为 0；没有提供的值为 null。
+                                  following_count:
+                                    type: [number, 'null']
+                                    minimum: 0
+                                    description: 明确取得的零为 0；没有提供的值为 null。
+                                  statuses_count:
+                                    type: [number, 'null']
+                                    minimum: 0
+                                    description: 明确取得的零为 0；没有提供的值为 null。
+                                  verified:
+                                    type: [boolean, 'null']
+                                    description: 是否认证；平台未提供为 null。
+                                  location: {type: string, description: 账号填写的地区。}
+                                  collected_at: {type: string, format: date-time, description: 同 collectedAt（兼容字段）。}
+                                  metadata: {type: string, description: 业务元数据 JSON 字符串。}
+                              description: 本页条目。
+                            raw_info: {type: string, description: 账号资料数组的 JSON 字符串（兼容旧 raw_info）。}
+                            raw_data: {type: string, description: 内容条目数组的 JSON 字符串（兼容旧 raw_data）。}
+                            page:
+                              type: object
+                              additionalProperties: true
+                              required: [page, pageSize, returnedCount, hasMore, nextCursor]
+                              properties:
+                                page: {type: integer, minimum: 1, maximum: 15, description: 分页信息。}
+                                pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
+                                pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
+                                returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
+                                hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                                nextCursor:
+                                  type: [string, 'null']
+                                  description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
+                                providerCursor:
+                                  type: [string, 'null']
+                                  description: 历史字段名；仅为同一个 Hub nextCursor 的兼容别名，不是原生游标。
+                                nextParams:
+                                  type: [object, 'null']
+                                  properties:
+                                    cursor: {type: string, description: 游标（原样回传）。}
+                                  description: 下一页可直接提交的参数，通常为 { cursor }。
+                                nextPage: {type: 'null', description: 固定为 null，请使用 nextCursor。}
+                                paginationMode: {const: cursor, description: 分页方式：cursor 或 page。}
+                              description: 分页信息。
+                          additionalProperties: true
+                    additionalProperties: true
+                    description: 业务数据。
+                additionalProperties: true
+        '400': {description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。}
+        '401': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '402': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '403': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '404': {description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。}
+        '409': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '422': {description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。}
+        '429': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '502': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
+        '503': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
   /data/native/t.kuaishou_ecommerce_shopping_top_list:
     post:
       tags:

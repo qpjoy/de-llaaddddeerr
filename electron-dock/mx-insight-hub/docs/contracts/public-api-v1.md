@@ -2455,7 +2455,82 @@ An accepted but missing/invalid note can still consume external capacity, so
 the Hub negative-caches only the narrowly verified request-local miss and does
 not automatically retry it.
 
-## Planned social capabilities
+## Strategy search: social accounts, post comments and comment replies
+
+Together with `POST /api/v1/data/search`, these Hub-executed routes form the
+strategy-search surface documented at runtime under `/docs/strategy-search`.
+Callers send business fields only; supplier, endpoint and credential selection
+are Hub routing policy and are rejected in the body or `params`. Each route
+requires the target platform and the listed capability on the same API key.
+
+| Route | Capability | Platforms |
+| --- | --- | --- |
+| `POST /api/v1/data/social/crawl` | `social.content.crawl` | twitter, facebook, instagram, tiktok, youtube, reddit, linkedin, douyin, kuaishou, xiaohongshu, weibo, bilibili, zhihu |
+| `POST /api/v1/data/social/user-info` | `social.profile.get` | same as crawl |
+| `POST /api/v1/data/social/post-comments` | `social.comments.list` | same as crawl |
+| `POST /api/v1/data/social/comment-replies` | `social.comments.list` | twitter, douyin, kuaishou, bilibili, instagram, reddit, weibo, xiaohongshu, zhihu |
+
+`/api/v1/search/post-comments` and `/api/v1/night-all/search/post-comments`
+are aliases of the post-comments route with the same contract, grant, meter
+and idempotency identity.
+
+**Account routes.** One platform per request. Identify accounts with
+`username/usernames`, `userId/userIds/user_id/uid`,
+`url/urls/profileUrl/profile_url` or `channelId/channel_id/channelUrl/channel_url`
+(lists up to 100, same platform). `count` is 1–500, default 20, still capped by
+the key; crawl precedence is `count > pageSize > page_size > limit`, user-info
+precedence is `limit > count > pageSize > page_size`. Crawl accepts
+`activityTypes` (default `["posts"]`) from the platform's declared set. The
+response is `mx-insight-hub.social-compat.v1`: `data.items` is an array,
+`data.raw_info` and `data.raw_data` are JSON strings, and `data.page` equals
+`data.pageInfo` (`page`, `pageSize`, `returnedCount`, `hasMore`, `nextCursor`).
+Twitter numeric identifiers of 1–19 digits are looked up as an account ID first
+and, only when that ID definitely has no account, once more as a username.
+
+**Post comments.** Send `platform` plus `contentId` (or a canonical post `url`;
+listed ID aliases must name the same post). `count` is 1–100, default 20.
+`includeRaw=true` attaches each comment's source object as `raw`. The response
+is `mx-insight-hub.post-comments.v1` with `data.postId`, `data.items[]` and
+`data.page`. Each comment carries `commentId`, `text`, `author`, nullable
+`publishedAt` (`publishedTime` keeps a relative source text), nullable
+`likeCount`/`replyCount`, `metrics`, and `replyRef`. Twitter, Reddit, Kuaishou
+and Weibo fetch one source page per request and may return fewer than `count`.
+Each successfully delivered page settles one `social.comments.list` charge; an
+exact replay does not charge again.
+
+**Comment replies.** Send the comment's `replyRef` unchanged, or `platform` plus
+`commentId`; reddit, xiaohongshu, instagram, douyin, bilibili and kuaishou also
+require the post's `contentId`. The response is
+`mx-insight-hub.comment-replies.v1`: items have `type=reply`, `rootCommentId`
+(the queried comment) and `parentCommentId` (the direct parent, or null when the
+source does not state it).
+
+**Pagination.** Return only the Hub `nextCursor` from the same route
+(`data.pageInfo` for accounts, `data.page` for comments) with the original
+platform, target and page size and a new `Idempotency-Key`. Cursors last 24
+hours and at most 15 pages. Only `paginationStatus=exhausted` (comments) or a
+null cursor without `pagination_completeness_unknown` (accounts) proves the end;
+`hasMore=null` or `paginationStatus=unknown` must not drive automatic loops.
+
+**Errors specific to these routes.**
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `400` | `invalid_social_request` | Invalid account field; see `error.details.field/reason`. |
+| `400` | `invalid_post_comments_request`, `invalid_comment_replies_request` | Invalid comment or reply request. |
+| `400` | `invalid_cursor` | Foreign, rewritten, cross-route or replay-only cursor. |
+| `400` | `platform_operation_unsupported` | The platform does not offer this route. |
+| `404` | `social_account_not_found` | Twitter account lookup definitely found no account. |
+| `422` | `social_account_unavailable` | The account is suspended, deactivated, deleted, protected or otherwise unavailable (`error.details.reason`). |
+| `502` | `invalid_upstream_contract` | The comment source returned a layout outside the published contract; not charged. |
+| `503` | `comment_acquisition_paused` | New comment or reply acquisition is paused for the platform; saved deliveries still replay. |
+| `503` | `facebook_account_paused` | New Facebook account content or profile acquisition is paused. |
+| `503` | `external_platform_contract_unverified` | The selected route is not calibrated; rejected before dispatch and not charged. |
+| `503` | `strategy_search_route_unavailable` | Routing configuration is unavailable. |
+| `503` | `social_data_unavailable`, `social_search_deadline` | Account acquisition is unavailable or could not dispatch before the deadline. |
+
+Authentication, quota, idempotency and external admission errors are the same
+as for `/data/search` (see Error semantics).
 
 `POST /api/v1/data/comments`, other platform-specific post resolvers, and
 cross-platform generic entity search remain unpublished until each adapter has
@@ -2569,14 +2644,15 @@ pagination protections still apply.
 | --- | --- |
 | `400` | Invalid field, missing idempotency key, page limit exceeded, or malformed/inapplicable retry-of header (`invalid_uncertain_retry`). |
 | `401` | Missing, invalid or revoked API key. |
-| `402` | Reserved for insufficient production credit. |
+| `402` | Insufficient tenant credit (`insufficient_credit`). |
 | `403` | Platform/capability is not explicitly granted. |
-| `404` | Resource or caller-owned request does not exist. |
+| `404` | Resource or caller-owned request does not exist, or a Twitter account lookup found no account (`social_account_not_found`). |
 | `409` | Idempotency conflict, in-progress request, unknown prior outcome, or a retry-of request whose referenced record is not eligible (`uncertain_retry_not_allowed`). |
 | `410` | A search cursor's Elasticsearch PIT has expired; restart from the first page. |
+| `422` | The account is unavailable (`social_account_unavailable`), or v2 search does not support the platform (`search_v2_platform_unsupported`). |
 | `429` | Request/concurrency/period quota exhausted. |
-| `502` | Safe Night-All 5xx/contract rejection, or ambiguous upstream outcome. |
-| `503` | A required stored-data or tokenizer runtime is unavailable. |
+| `502` | Safe Night-All 5xx/contract rejection, external rejection or unusable response, or ambiguous upstream outcome. |
+| `503` | A required runtime, route or supplier operation is unavailable, paused, uncalibrated, unpriced or circuit-open (for example `external_platform_*`, `comment_acquisition_paused`, `strategy_search_route_unavailable`); most are returned before dispatch. |
 
 Clients should retry only safe `GET` operations and documented pre-dispatch failures. Costly `POST` retry always reuses the same idempotency key.
 

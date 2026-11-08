@@ -6,6 +6,7 @@ import { ArrowClockwise, ArrowCounterClockwise, Database, Pause, Play, Trash, Up
 import { adminApi } from './api.js'
 import { ErrorState, Field, Modal, StatusBadge, formatDate, formatNumber, useRemoteData } from './components.jsx'
 import { fileDataset } from '../shared/file-datasets.mjs'
+import { fileDatasetSourceError, initialFileDatasetSource } from './file-dataset-source-form.mjs'
 import './file-datasets.css'
 
 const STAGES = [
@@ -168,10 +169,7 @@ export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial,
   const roots = pipeline.serverFiles?.roots || []
   const [form, setForm] = useState(() => ({
     serverPath: '',
-    rootId: dataset.source?.rootId || roots[0]?.rootId || 'shared-dir',
-    relativePath: dataset.source?.relativePath || product.defaultSource.relativePath,
-    entry: dataset.source?.entry || product.defaultSource.entry || '',
-    expectedSha256: dataset.expectedSha256 ?? product.defaultSource.sha256 ?? '',
+    ...initialFileDatasetSource(product, dataset, roots),
     owner: dataset.owner || '', purpose: dataset.purpose || '', legalBasis: dataset.legalBasis || '',
   }))
   const [confirmDiscard, setConfirmDiscard] = useState('')
@@ -204,8 +202,9 @@ export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial,
       onRefresh?.()
     } catch (error) {
       if (error?.status === 401) onUnauthorized?.(error)
-      setActionError(error)
-      notify?.(error.message, 'error')
+      const displayed = fileDatasetSourceError(error, product, roots)
+      setActionError(displayed)
+      notify?.(displayed.message, 'error')
     } finally {
       setBusy(null)
     }
@@ -272,12 +271,12 @@ export function FileDatasetPipelineModal({ datasetKey, token, pipeline: initial,
 
         <section className="qp-panel">
           <h3>源文件</h3>
-          <p className="mih-tue-muted">格式：{product.sourceFormat}（{product.sourceExtensions.join(' / ')}）。可以直接填写服务器上的 .zip 路径：worker 不落地解压，边解压边读取所选文件，断点按解压后的字节记录，继续时重新解压并跳到断点（约每 GB 数秒）；.rar 等其他压缩格式需先在服务器解压。文件需放在服务器受控目录 {roots.length ? roots.map(root => <code key={root.rootId}>{root.rootId}</code>) : <code>未配置</code>} 下（Internal 默认 <code>/shared_dir</code>）。可直接粘贴服务器绝对路径；期望 SHA-256 不一致时 worker 会拒绝导入。正在进行的版本始终使用它开启时的文件。</p>
+          <p className="mih-tue-muted">格式：{product.sourceFormat}（{product.sourceExtensions.join(' / ')}）。可以直接填写服务器上的 .zip 路径：worker 不落地解压，边解压边读取所选文件，断点按解压后的字节记录，继续时重新解压并跳到断点（约每 GB 数秒）；.rar 等其他压缩格式需先在服务器解压。当前可用的根目录 ID：<code>{roots.map(root => root.rootId).join('、') || '未配置'}</code>。每个 ID 代表一个只读挂载目录。期望 SHA-256 不一致时 worker 会拒绝导入。正在进行的版本始终使用它开启时的文件。</p>
           <form className="mih-form mih-form--grid" onSubmit={saveSource}>
-            <Field label="服务器路径（可选）" hint={`例如 /shared_dir/${product.defaultSource.relativePath}；填写后忽略下面两项`}>
-              <input className="qp-input" value={form.serverPath} placeholder={`/shared_dir/${product.defaultSource.relativePath}`} onChange={event => setForm({ ...form, serverPath: event.target.value })} />
+            <Field label="服务器路径（可选）" hint="填写后优先使用这个路径；留空时使用下方根目录 ID 和相对路径。">
+              <input className="qp-input" value={form.serverPath} placeholder="粘贴服务只读挂载内的绝对文件路径" onChange={event => setForm({ ...form, serverPath: event.target.value })} />
             </Field>
-            <Field label="根目录 ID"><input className="qp-input" value={form.rootId} onChange={event => setForm({ ...form, rootId: event.target.value })} /></Field>
+            <Field label="根目录 ID" hint="填写上方列出的目录标识。"><input className="qp-input" value={form.rootId} onChange={event => setForm({ ...form, rootId: event.target.value })} /></Field>
             <Field label="相对路径"><input className="qp-input" value={form.relativePath} onChange={event => setForm({ ...form, relativePath: event.target.value })} /></Field>
             {zipSource ? <Field label="压缩包内文件" hint={archiveEntries.length ? `可选：${archiveEntries.filter(row => row.supported).map(row => row.name).join('、')}` : '留空时自动选择；校验后列出包内可用文件'}>
               <input className="qp-input" value={form.entry} list={`${datasetKey}-archive-entries`} spellCheck={false}

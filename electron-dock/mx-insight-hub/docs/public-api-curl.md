@@ -959,10 +959,10 @@ curl -sS \
 
 ### `POST /api/v1/data/search`
 
-Twitter 标准搜索先消费已取得的余量，再有界补齐当前逻辑页并跨页去重，一次 Hub
-请求最多 3 次上游调用；整次查询最多 15 个上游页和 15 个公开页，游标有效期 24 小时。
+Twitter 标准搜索先消费已取得的余量，再有界补齐当前逻辑页并跨页去重，不再设置每次
+Hub 请求默认 3 次的补页调用上限；整次查询最多 15 个上游页和 15 个公开页，游标有效期 24 小时。
 例如前一页取得 24 条、交付 20 条，下一次由 Hub 将余下 4 条与后续结果合并。
-Facebook 标准搜索同样自动补页，最多 3 次实际派发，首次 429 后保底也计入上限；
+Facebook 标准搜索同样自动补页，同样不设每请求默认 3 次的派发上限，首次明确 429 的保底规则保留；
 已取得第一页或持有游标后固定原供应商，raw 仍保留单页边界。每个新页面
 保持原查询、页大小、type 和 Key，原样传回 `data.pageInfo.nextCursor`，使用新的
 `Idempotency-Key`；不要根据短页自行停止或补采。补齐受预算、期限和准入限制，不能
@@ -1112,6 +1112,130 @@ crawler candidate-only 契约。升级到该契约后，首次请求必须使用
 binding；包含 crawler 的 cursor 会绑定 candidate-only 契约。升级前创建的
 Elasticsearch PIT 若不是 content-v6 会返回 `503 search_cursor_unavailable`，应移除
 cursor、换新的 `Idempotency-Key` 并从第一页重新搜索。
+
+## 4A. 策略搜索：账号内容、账号资料、帖子评论、评论回复
+
+以下四个接口与 `/data/search` 一起组成运行时文档 `/docs/strategy-search` 中的策略搜索。调用方只传业务字段，
+不传 provider、endpoint 或凭据；Hub 按管理端策略选路。每个接口要求同一把 Key 同时具有目标平台和下表的
+capability，接口可见不代表已开通。
+
+| 用途 | 接口 | capability | 平台 |
+| --- | --- | --- | --- |
+| 账号内容 | `POST /api/v1/data/social/crawl` | `social.content.crawl` | twitter、facebook、instagram、tiktok、youtube、reddit、linkedin、douyin、kuaishou、xiaohongshu、weibo、bilibili、zhihu |
+| 账号资料 | `POST /api/v1/data/social/user-info` | `social.profile.get` | 同上 |
+| 帖子评论 | `POST /api/v1/data/social/post-comments` | `social.comments.list` | 同上 |
+| 评论回复 | `POST /api/v1/data/social/comment-replies` | `social.comments.list` | twitter、douyin、kuaishou、bilibili、instagram、reddit、weibo、xiaohongshu、zhihu |
+
+通用规则：
+
+- 每个 POST 都需要 `Idempotency-Key`（8–128 字符）；同一页重试保持原键和原 body，下一页用新键。
+- 续页只原样传本接口返回的 nextCursor：账号接口读 `data.pageInfo.nextCursor`（`data.page` 相同），评论接口读
+  `data.page.nextCursor`。游标 24 小时有效、最多 15 页，绑定 Key、平台、对象和页大小，不能跨接口使用。
+- 页大小是上限，不保证条数。`hasMore=null`、`paginationStatus=unknown` 或 warning
+  `pagination_completeness_unknown` 表示无法确认是否耗尽，不要自动循环。
+- 指标未提供为 `null`，真实为 0 时为 `0`。
+
+### `POST /api/v1/data/social/crawl`
+
+账号标识至少提供一个：`username/usernames`、`userId/userIds/user_id/uid`、`url/urls/profileUrl/profile_url`、
+`channelId/channel_id/channelUrl/channel_url`。列表最多 100 个，必须同一平台。`count` 为 1–500（默认 20，
+仍受 Key 上限约束），别名优先级 `count > pageSize > page_size > limit`。`activityTypes` 默认 `["posts"]`，
+其他值按平台：twitter `replies`；instagram `reels/stories/tagged_posts/highlights/followers/following`；
+tiktok `likes/reposts`；reddit `comments`；linkedin `company_posts`；douyin、xiaohongshu `likes`；
+weibo `original_posts`；zhihu `answers`。Twitter 1–19 位纯数字先按账号 ID 查询，查无账号时再按同名用户名查询一次；
+只查数字用户名请加 `@`。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"platform":"douyin","username":"<平台账号>","count":20,"activityTypes":["posts"]}'
+```
+
+返回 `contractVersion=mx-insight-hub.social-compat.v1`、`requestId` 与 `data`：`items` 为已投影数组；
+`raw_info`（账号资料）和 `raw_data`（本页条目）是 JSON 字符串，不能与 items 互换；`page/pageInfo` 含
+`page、pageSize、returnedCount、hasMore、nextCursor`；另有 `status`（ok/partial）、`warnings`、`meta`。
+多账号或多活动时另返回 `mode=batch` 与逐项 `results`，续页仍以顶层 pageInfo 为准。
+
+### `POST /api/v1/data/social/user-info`
+
+账号字段与 crawl 相同，没有 `activityTypes`；页大小别名优先级 `limit > count > pageSize > page_size`。
+资料在 `data.items` 与 `data.raw_info`，`data.raw_data` 为 `"[]"`。常用字段：`user_id`、`username`、`name`、
+`description`、`avatar_url`、`url`、`followers_count`、`following_count`、`statuses_count`、`verified`。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"platform":"twitter","username":"openai"}'
+```
+
+Twitter 账号查找阶段明确不存在返回 `404 social_account_not_found`；被封、注销、受保护等返回
+`422 social_account_unavailable`，原因看 `error.details.reason`。两者都不是空列表，不要自动重试。
+
+### `POST /api/v1/data/social/post-comments`
+
+传 `platform` 与 `contentId`（或规范帖子 `url`）。contentId 格式：B 站 AV/BV 号，Instagram shortcode 或数字媒体 ID，
+知乎回答 ID，Reddit 帖子 ID（可带 `t3_`），LinkedIn activity ID，其他平台为帖子/视频/笔记 ID；短链接不解析。
+`count` 为 1–100（默认 20）；Twitter、Reddit、快手、微博每次只取一个来源页，可能少于 count。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/data/social/post-comments" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"platform":"douyin","contentId":"<平台视频ID>","count":20}'
+```
+
+返回 `contractVersion=mx-insight-hub.post-comments.v1`。`data.items[]` 每条评论含 `commentId`、`contentId`、
+`text`、`author{id,name,avatarUrl}`、`publishedAt`（只有相对时间时为 null，原文见 `publishedTime`）、
+`likeCount`、`replyCount`、`metrics` 和 `replyRef`。`data.page.paginationStatus` 为
+`continuable/exhausted/unknown/limit_reached`，只有 `exhausted` 表示确认结束。每个成功交付页按
+`social.comments.list` 结算一次，精确重放不重复计费。
+
+### `POST /api/v1/data/social/comment-replies`
+
+把帖子评论返回的 `replyRef` 原样作为 `replyRef` 字段传入即可。不用 replyRef 时传 `platform` + `commentId`；
+reddit、xiaohongshu、instagram、douyin、bilibili、kuaishou 还必须传所属帖子的 `contentId`。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/data/social/comment-replies" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"replyRef":{"platform":"douyin","commentId":"<评论ID>","contentId":"<平台视频ID>"},"count":20}'
+```
+
+返回 `contractVersion=mx-insight-hub.comment-replies.v1`，结构与帖子评论相同；`items[].type=reply`，
+`rootCommentId` 是被查询的评论，`parentCommentId` 是直接回复对象（未知为 null）。
+
+### 策略搜索错误码
+
+| HTTP | 错误码 | 含义 |
+| --- | --- | --- |
+| 400 | `invalid_social_request` | 账号参数不合法，看 `error.details.field/reason` |
+| 400 | `invalid_post_comments_request`、`invalid_comment_replies_request` | 评论或回复参数不合法 |
+| 400 | `invalid_cursor` | 游标跨接口、跨 Key、被改写，或是只能重放的历史游标 |
+| 400 | `platform_operation_unsupported` | 该平台不支持此接口 |
+| 403 | `platform_not_granted`、`capability_not_granted` | 缺平台或 capability 授权 |
+| 404 | `social_account_not_found` | Twitter 账号不存在 |
+| 409 | `request_in_progress`、`request_outcome_unknown` | 同键请求仍在执行或结果未知；先查原请求，不要换键盲重试 |
+| 422 | `social_account_unavailable` | 账号不可用，原因看 `error.details.reason` |
+| 502 | `invalid_upstream_contract` | 评论来源结构不符合合同，不计费 |
+| 503 | `comment_acquisition_paused` | 该平台评论或回复已暂停新采集，已保存结果仍可重放 |
+| 503 | `facebook_account_paused` | Facebook 账号内容或资料已暂停新采集 |
+| 503 | `external_platform_contract_unverified` | 该平台当前路由尚未校准，派发前拒绝，不计费 |
+| 503 | `strategy_search_route_unavailable` | 路由配置暂不可用 |
+| 503 | `social_data_unavailable`、`social_search_deadline` | 账号接口未就绪或在截止时间内无法派发 |
+
+鉴权、配额、幂等和上游准入错误（`401`、`402 insufficient_credit`、`429 *_quota_exceeded`、
+`503 external_platform_*` 等）与 `/data/search` 相同。
 
 ## 5. 全国与省级 all-ingested 舆情 API
 
@@ -1281,12 +1405,13 @@ curl -sS -X POST "$HUB_URL/api/v1/search/post-detail" \
   --data '{"businessId":"agent:<Agent标识>:data_query:search_post_detail:twitter","platform":"twitter","postId":"<平台帖子ID>","url":"<帖子链接>","count":1,"includeRaw":false}'
 ```
 
-`post-comments` 用于智能策略、用户刷新和 Agent 获取单个帖子的评论列表。请求至少提供
-`postId`、`contentId`、平台专用帖子/视频 ID 或 `url` 之一；`count/pageSize/limit` 默认 20、最大 100。
-`cursor` 或 `params` 中的续页状态只应沿用上一页返回的 `page.nextCursor`/`page.nextParams`，每一页使用新的
-`Idempotency-Key`。`includeRaw=true`、provider、凭据、endpoint 和扩大评论工作量的控制字段会被 Hub 拒绝。
-返回的 `raw_data` 应保留评论 ID、正文 ID、评论正文、作者、发布时间、互动量以及 `page.nextCursor/hasMore`
-等分页状态；商品评论、搜索附带评论和 YouTube 频道评论不能替代此接口。
+`post-comments` 的两个旧路径与 `POST /api/v1/data/social/post-comments` 是同一个 Hub 接口，
+共用请求合同、`social.comments.list` 授权、计费和幂等身份；新接入请直接使用 4A 节的
+`/api/v1/data/social/post-comments`。请求至少提供 `contentId`、`postId`、平台专用帖子/视频 ID 或 `url` 之一，
+多个标识必须指向同一帖子；`count/pageSize/limit` 默认 20、最大 100。续页只原样传上一页的
+`data.page.nextCursor`，每一页使用新的 `Idempotency-Key`。`includeRaw=true` 时每条评论附带来源原始对象 `raw`；
+provider、凭据、endpoint 和扩大评论工作量的控制字段会被拒绝。`businessId` 可省略，提交时必须等于当前
+consumer 的绑定值。商品评论、搜索附带评论和 YouTube 频道评论不能替代此接口。
 
 ```bash
 IDEMPOTENCY_KEY="$(new_idempotency_key)"
@@ -1294,7 +1419,7 @@ curl -sS -X POST "$HUB_URL/api/v1/search/post-comments" \
   -H "Authorization: Bearer $HUB_KEY" \
   -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
   -H 'Content-Type: application/json' \
-  --data '{"businessId":"data-hub:<策略标识>:weibo:评论","platform":"weibo","postId":"<平台正文ID>","contentId":"<同一个平台正文ID>","url":"<原文链接>","count":100,"page":1,"includeRaw":false}'
+  --data '{"platform":"weibo","contentId":"<平台正文ID>","count":100,"includeRaw":false}'
 ```
 
 2026-09-30 起，`/api/v1/search/raw` 的 `wechat_search`（含 `wechat/weixin` 别名）和

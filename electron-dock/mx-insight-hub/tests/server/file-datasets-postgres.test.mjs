@@ -2,7 +2,7 @@
 // MX_INSIGHT_TEST_DATABASE_URL; it creates and drops its own database.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -29,16 +29,22 @@ async function setup(t) {
   for (const name of ['178_twitter_user_email_dictionary.sql', '180_file_datasets_email_phone.sql']) {
     await pool.query(await readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'))
   }
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'fds-')))
-  const reader = await ServerFileReader.create({ roots: [{ rootId: 'test-root', path: root }] })
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'fds-')))
+  const root = join(directory, 'shared_dir')
+  const archiveRoot = join(directory, 'shared-archives-20260909')
+  await Promise.all([mkdir(root), mkdir(archiveRoot)])
+  const reader = await ServerFileReader.create({ roots: [
+    { rootId: 'test-root', path: root },
+    { rootId: 'email-phone-archive', path: archiveRoot },
+  ] })
   const services = createFileDatasetServices({ pool, hmacKey: 'test-pepper-at-least-32-bytes-long!!', serverFileReader: reader, admin: true })
   t.after(async () => {
     await pool.end()
     await admin.query(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`)
     await admin.end()
-    await rm(root, { recursive: true, force: true })
+    await rm(directory, { recursive: true, force: true })
   })
-  return { pool, root, reader, ...services }
+  return { pool, root, archiveRoot, reader, ...services }
 }
 
 function engineFor(ctx, key, overrides = {}) {
@@ -172,12 +178,23 @@ test('手机号库: formatted duplicates merge and exact / prefix / suffix read 
   assert.equal((await run({ mode: 'suffix', query: '0123', reveal: false })).items[0].phone.includes('*'), true)
 })
 
-test('one worker runs datasets in turn; a discard elsewhere is not blocked by the running dataset', { skip: !connectionString }, async t => {
+test('one worker handles an absolute-path phone archive and a concurrent discard on another dataset', { skip: !connectionString }, async t => {
   const ctx = await setup(t)
   await writeFile(join(ctx.root, 'emails.txt'), 'a@x.io\nb@x.io\nc@y.io\n')
-  await writeFile(join(ctx.root, 'phones.txt'), '+14155550123\n+14155550124\n')
+  const archive = buildZip([
+    { name: 'email_only.txt', data: 'example@example.invalid\n' },
+    { name: 'phone_only.txt', data: '+14155550123\n+14155550124\n' },
+  ])
+  const archivePath = join(ctx.archiveRoot, 'email-phone.zip')
+  const outsidePath = join(ctx.archiveRoot, '..', 'email-phone.zip')
+  await Promise.all([writeFile(archivePath, archive), writeFile(outsidePath, archive)])
+  const phonePipeline = ctx.pipelines['phone-directory']
+  await assert.rejects(phonePipeline.configure({ serverPath: outsidePath }, { updatedBy: 'test' }),
+    error => error.code === 'server_file_path_not_allowed')
+  const configured = await phonePipeline.configure({ serverPath: archivePath }, { updatedBy: 'test' })
+  assert.deepEqual(configured.dataset.source, { rootId: 'email-phone-archive', relativePath: 'email-phone.zip', entry: 'phone_only.txt' })
   const email = await start(ctx, 'email-directory', 'emails.txt')
-  const phone = await start(ctx, 'phone-directory', 'phones.txt')
+  const phone = await phonePipeline.action({ action: 'start' }, { by: 'test' })
   assert.equal(await ctx.stores['twitter-user-email'].openVersion(), null)
 
   // While the e-mail dataset is locked by "a worker", a phone discard drops at once.
@@ -192,8 +209,7 @@ test('one worker runs datasets in turn; a discard elsewhere is not blocked by th
   holder.release()
 
   // The worker loop picks up the pending discard and the next version.
-  const second = await start(ctx, 'phone-directory', 'phones.txt').catch(error => error)
-  assert.equal(second.code, undefined, String(second.message))
+  const second = await phonePipeline.action({ action: 'start' }, { by: 'test' })
   const controller = new AbortController()
   const engines = ['twitter-user-email', 'email-directory', 'phone-directory'].map(key => engineFor(ctx, key))
   const worker = runDictionaryWorker({ pool: ctx.pool, engines, pollMs: 20, signal: controller.signal, logger: { log() {}, error() {} } })
@@ -206,7 +222,9 @@ test('one worker runs datasets in turn; a discard elsewhere is not blocked by th
   controller.abort()
   await worker
   assert.equal((await ctx.stores['email-directory'].version(email.id)).stage, 'discarded')
-  assert.equal((await ctx.stores['phone-directory'].version(second.id)).stage, 'ready')
+  const imported = await ctx.stores['phone-directory'].version(second.id)
+  assert.equal(imported.stage, 'ready')
+  assert.equal(Number(imported.unique_mappings), 2)
   const tables = versionTables(email.id, 4)
   assert.equal((await ctx.pool.query(`SELECT to_regclass('${tables.stage}') AS t`)).rows[0].t, null)
 })

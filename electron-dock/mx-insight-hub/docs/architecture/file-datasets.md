@@ -114,8 +114,31 @@
 
 ## 运维
 
-1. 把文件或 .zip 放到 Internal 的 `/shared_dir` 下（属组 10 可读，`chmod 644`），例如
-   `/shared_dir/imports/email-phone.zip`；期望指纹用 `sha256sum` 计算整个文件（.zip 就是整个压缩包）。
-2. 部署 Hub（含迁移 180 与 `mx-insight-hub-dictionary`）。
-3. 清洗任务计划 → 文件数据集 → 对应卡片 → 打开任务控制：核对路径与期望指纹 → 校验并保存 → 开启 → 待发布后发布。
-4. 服务授权：为调用者和 Key 明确授予数据域与查询权限后，在场景应用 → 文件数据集中演示。
+文件已放在配置的受控目录时，可直接粘贴它的真实绝对路径，例如
+`/shared_dir/imports/email-phone.zip`。Admin 和 dictionary 都需要能读取文件。
+
+若 Internal 上的文件在 `/data/shared-archives-20260909/email-phone.zip`，可以原地读取。
+先检查当前根目录配置，再在 Hub 的 `.env.internal` 中给原 JSON 对象增加
+`"email-phone-archive":"/data/shared-archives-20260909"`，保留所有原有 ID 和路径。
+
+```bash
+kubectl -n mx-insight-hub get configmap mx-insight-hub-config \
+  -o jsonpath='{.data.MX_INSIGHT_SERVER_FILE_ROOTS}{"\n"}'
+```
+
+在 Internal 的 `electron-dock/mx-insight-hub` 目录使用更新后的代码发布。它将该目录中的
+`email-phone.zip` 作为单个只读文件挂入 Admin 和 dictionary。该 ZIP 应是容器用户可读的普通文件，
+并且路径中不能含软链接。可以在同一台主机验证两个容器均可读取它：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+archive=/data/shared-archives-20260909/email-phone.zip
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- test -r "$archive"
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-dictionary -c dictionary -- test -r "$archive"
+```
+
+在「手机号库清洗计划」粘贴上述绝对路径，压缩包内文件填 `phone_only.txt`，点击「校验并保存」。
+也可清空绝对路径，填根目录 ID `email-phone-archive` 和相对路径 `email-phone.zip`。
+邮箱库使用同一 ZIP 中的 `email_only.txt`。期望指纹可用 `sha256sum` 对整个 ZIP 计算。
+「开启」才会创建清洗版本，完成核对后可手动发布。查询端需要相应的数据域和 Key 授权。
+如需换包，待当前清洗版本结束后再替换宿主文件并重新部署这两个 Pod，使单文件挂载指向新文件，再校验新版本。
