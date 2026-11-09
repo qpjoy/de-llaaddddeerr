@@ -49,6 +49,7 @@ export function dataAdmissionLane(method, pathname) {
   // Self-hosted engine jobs only enqueue or read stored state; the engine
   // itself runs in the Admin executor, outside any request.
   if (pathname.startsWith('/api/v1/data/wechat/self-hosted/')) return 'read'
+  if (pathname === '/api/v1/data/collect' || pathname.startsWith('/api/v1/data/collect/')) return 'read'
   // Media already has independent byte/concurrency budgets; do not occupy a
   // database execution slot for the duration of streaming an image.
   if (['/api/v1/data/posts/media', '/api/v1/data/ecommerce/products/media'].includes(pathname)) return null

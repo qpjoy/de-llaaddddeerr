@@ -351,6 +351,7 @@ export class MemorySelfHostedStore {
     this.jobs = new Map()
     this.batches = new Map()
     this.engineEvents = []
+    this.lastQueuedAt = 0
   }
 
   #engine(engineId) { return this.engines.get(engineId) || null }
@@ -395,7 +396,10 @@ export class MemorySelfHostedStore {
     const open = [...this.jobs.values()].filter(job => job.engineId === engineId && ['queued', 'running'].includes(job.status))
     assertCapacity({ queued: open.filter(job => job.status === 'queued').length,
       mine: open.filter(job => job.consumerId === owner.consumerId).length }, items.length, limits)
-    const now = new Date()
+    // Strictly increasing per submission, like clock_timestamp() in PG, so
+    // two submissions within one millisecond keep their order.
+    this.lastQueuedAt = Math.max(Date.now(), this.lastQueuedAt + 1)
+    const now = new Date(this.lastQueuedAt)
     const batch = kind === 'batch' ? { id: randomUUID(), engineId, consumerId: owner.consumerId, idempotencyKey, fingerprint,
       itemCount: items.length, createdAt: now.toISOString() } : null
     if (batch) this.batches.set(batch.id, batch)

@@ -103,6 +103,7 @@ import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs
 import { createPaymentReporting } from './payments/reporting.mjs'
 import { createRechargeService } from './payments/recharge.mjs'
 import { createWechatSelfHostedRuntime } from './self-hosted/runtime.mjs'
+import { createCollectRuntime } from './collect/runtime.mjs'
 import cluster from 'node:cluster'
 import { apiProcessCount, processShareOf, setApiProcessCount } from './core/process-share.mjs'
 import { superviseApiProcesses } from './core/api-processes.mjs'
@@ -781,6 +782,7 @@ export async function createRuntime(config = loadConfig()) {
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const peripherals = createPeripheralRuntime(config)
   const wechatSelfHosted = createWechatSelfHostedRuntime({ config, pool, ledger: store, hub: service })
+  const collect = createCollectRuntime({ config, pool, ledger: store, hub: service, legacy: { wechat: wechatSelfHosted.service } })
   const harborPortal = config.listenerMode === 'public' ? null : createHarborPortal({pool,store,profileFile:process.env.MX_INSIGHT_HARBOR_SSO_PROFILE,token:process.env.MX_INSIGHT_HARBOR_GATEWAY_TOKEN,tokenFile:process.env.MX_INSIGHT_HARBOR_GATEWAY_TOKEN_FILE,hubSettings:readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE)})
   const app = createApp({
     dataAdmission: new DataAdmission(config.dataAdmission),
@@ -792,6 +794,7 @@ export async function createRuntime(config = loadConfig()) {
     strategySearchRoutingStore,
     peripherals,
     wechatSelfHosted: wechatSelfHosted.service,
+    collect: collect.service,
     searchAdmissionDisposition: pool ? new SearchAdmissionDispositionService({ pool, apiKeyPepper: config.apiKeyPepper }) : null,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,
@@ -852,7 +855,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications, usageRollup, customerMessages, balanceMonitor, feishuAlerts, paymentReporting, recharge, peripherals, wechatSelfHosted,
+    notifications, usageRollup, customerMessages, balanceMonitor, feishuAlerts, paymentReporting, recharge, peripherals, wechatSelfHosted, collect,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -884,8 +887,10 @@ export async function start(config = loadConfig()) {
   runtime.recharge?.start?.()
   runtime.peripherals?.start()
   runtime.wechatSelfHosted.executor?.start()
+  runtime.collect.executor?.start()
   const close = async () => {
     await runtime.wechatSelfHosted.executor?.close()
+    await runtime.collect.executor?.close()
     await runtime.peripherals?.close()
     await runtime.paymentReporting?.close?.()
     await runtime.recharge?.close?.()

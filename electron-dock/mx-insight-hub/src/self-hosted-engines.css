@@ -1,0 +1,30 @@
+.mih-she { display: grid; gap: 16px; min-width: 0; }
+.mih-she .qp-table-wrap { max-width: 100%; overflow-x: auto; }
+.mih-she-totals .is-warning { background: rgba(234, 160, 40, .16); }
+.mih-she-list { padding: 0; overflow: hidden; }
+.mih-she-list tr[aria-selected="true"] td { background: var(--qp-surface-muted, rgba(59, 130, 246, .08)); }
+.mih-she-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; white-space: nowrap; background: rgba(127, 127, 127, .16); vertical-align: middle; }
+.mih-she-route { display: inline-block; margin: 0 6px 4px 0; font-size: 12px; }
+.mih-she-empty { padding: 16px; margin: 0; opacity: .75; }
+.mih-she-detail { display: grid; gap: 12px; padding: 16px; min-width: 0; }
+.mih-she-detail h2 { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
+.mih-she-detail h3 { margin: 8px 0 0; }
+.mih-she-legacy { display: grid; gap: 8px; }
+.mih-she-slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; padding: 0; margin: 0; list-style: none; }
+.mih-she-slots > li { display: grid; gap: 4px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127, 127, 127, .2); }
+.mih-she-slots > li p { margin: 0; }
+.mih-she-slots > li.is-busy { border-color: rgba(59, 130, 246, .45); background: rgba(59, 130, 246, .06); }
+.mih-she-slots > li.is-quarantined { border-color: rgba(234, 160, 40, .6); background: rgba(234, 160, 40, .1); }
+.mih-she-recover { display: grid; gap: 6px; margin-top: 4px; }
+.mih-she-routes { grid-column: 1 / -1; display: grid; gap: 4px; margin: 0; padding: 8px 12px; border: 1px solid rgba(127, 127, 127, .2); border-radius: 10px; }
+.mih-she-routes legend { padding: 0 4px; font-size: 13px; opacity: .8; }
+.mih-she-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.mih-she-facts dt { opacity: .7; }
+.mih-she-facts dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .mih-she-facts { grid-template-columns: minmax(0, 1fr); }
+}
+.mih-she .qp-table th, .mih-she .qp-table td { white-space: nowrap; }
+.mih-she .qp-table td code { white-space: nowrap; }
+.mih-she-subpanel { display: grid; gap: 6px; padding-top: 12px; border-top: 1px solid rgba(127, 127, 127, .2); }
+.mih-she-subpanel h3 { margin: 0; }

@@ -32,6 +32,8 @@ import { aggregateStream } from './data/aggregate-stream.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { fileDataset } from '../shared/file-datasets.mjs'
 import { retryAfterSeconds } from './self-hosted/wechat-contract.mjs'
+import { retryAfterSeconds as collectRetryAfterSeconds } from './collect/service.mjs'
+import { COLLECT } from '../shared/collect-engines.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
 import { formatBrowserExport } from './data/browser-export.mjs'
@@ -817,6 +819,7 @@ export function createApp({
   paymentReporting = null,
   peripherals = null,
   wechatSelfHosted = null,
+  collect = null,
   recharge = null,
   nightAllA = null,
   externalPlatformGateway = null,
@@ -951,6 +954,20 @@ export function createApp({
 
   function selfHostedHeaders(view, replay) {
     return { location: view.links.self, 'idempotent-replay': String(Boolean(replay)), ...selfHostedRetry(view.jobs || [view]) }
+  }
+
+  function requireCollect() {
+    if (!collect) throw new AppError(503, 'collect_unavailable', 'Collection engines are unavailable')
+    return collect
+  }
+
+  function collectRetry(views) {
+    const seconds = collectRetryAfterSeconds(views)
+    return seconds == null ? {} : { 'retry-after': String(seconds) }
+  }
+
+  function collectHeaders(view, replay) {
+    return { location: view.links.self, 'idempotent-replay': String(Boolean(replay)), ...collectRetry(view.jobs || [view]) }
   }
 
   // Usage for exactly the tenants a principal may see. An unscoped principal
@@ -3126,6 +3143,69 @@ export function createApp({
         if (params && request.method === 'GET') {
           requireSourceAdmin(principal)
           sendJson(response, 200, { data: await requireWechatSelfHosted().adminJob(params.id), requestId })
+          return
+        }
+      }
+      if (pathname === '/internal/v1/admin/collect' || pathname.startsWith('/internal/v1/admin/collect/')) {
+        requireSourceAdmin(principal)
+        const actor = principal?.memberId || principal?.kind || 'admin-token'
+        const engines = '/internal/v1/admin/collect/engines'
+        if (request.method === 'GET' && pathname === '/internal/v1/admin/collect/catalog') {
+          requireNoQuery(searchParams, 'collection catalog')
+          sendJson(response, 200, { data: requireCollect().adminCatalog(), requestId })
+          return
+        }
+        if (request.method === 'GET' && pathname === engines) {
+          requireNoQuery(searchParams, 'collection engines')
+          response.setHeader('Cache-Control', 'no-store')
+          sendJson(response, 200, { data: await requireCollect().adminEngines(), requestId })
+          return
+        }
+        if (request.method === 'POST' && pathname === engines) {
+          sendJson(response, 201, { data: await requireCollect().adminCreateEngine(await readJson(request, 16 * 1024), actor), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${engines}/:id/slots/:slot/recover`)
+        if (params && request.method === 'POST') {
+          sendJson(response, 200, { data: await requireCollect().adminRecoverSlot(params.id, params.slot, await readJson(request, 8 * 1024), actor), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${engines}/:id/recover`)
+        if (params && request.method === 'POST') {
+          sendJson(response, 200, { data: await requireCollect().adminRecoverEngine(params.id, await readJson(request, 8 * 1024), actor), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${engines}/:id/credential`)
+        if (params && request.method === 'PUT') {
+          response.setHeader('Cache-Control', 'no-store')
+          sendJson(response, 200, { data: await requireCollect().adminSetCredential(params.id, await readJson(request, 16 * 1024), actor), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${engines}/:id/egress`)
+        if (params && request.method === 'PUT') {
+          sendJson(response, 200, { data: await requireCollect().adminSetEgress(params.id, await readJson(request, 8 * 1024), actor), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${engines}/:id/probe`)
+        if (params && request.method === 'POST') {
+          sendJson(response, 200, { data: await requireCollect().adminProbe(params.id, await readJson(request, 8 * 1024)), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${engines}/:id`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'collection engine')
+          response.setHeader('Cache-Control', 'no-store')
+          sendJson(response, 200, { data: await requireCollect().adminEngine(params.id), requestId })
+          return
+        }
+        if (params && request.method === 'PUT') {
+          sendJson(response, 200, { data: await requireCollect().adminConfigureEngine(params.id, await readJson(request, 16 * 1024), actor), requestId })
+          return
+        }
+        params = routeMatch(pathname, '/internal/v1/admin/collect/jobs/:id')
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'collection job')
+          sendJson(response, 200, { data: await requireCollect().adminJob(params.id), requestId })
           return
         }
       }
@@ -6399,6 +6479,75 @@ export function createApp({
           requestId,
         })
         return
+      }
+      if (pathname.startsWith(`${COLLECT.apiPrefix}/`)) {
+        const prefix = COLLECT.apiPrefix
+        if (pathname === `${prefix}/capabilities` && request.method === 'GET') {
+          requireNoQuery(searchParams, 'collection capabilities')
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await requireCollect().capabilities(context), requestId })
+          return
+        }
+        if (pathname === `${prefix}/jobs` && request.method === 'POST') {
+          requireNoQuery(searchParams, 'collection job')
+          const context = await requirePublic(request)
+          const result = await requireCollect().submitJob(context, await readJson(request, 32 * 1024), request.headers['idempotency-key'])
+          sendJson(response, 202, { data: result.data, requestId }, collectHeaders(result.data, result.replay))
+          return
+        }
+        if (pathname === `${prefix}/jobs` && request.method === 'GET') {
+          const unsupported = [...searchParams.keys()].filter(key => !['limit', 'capability'].includes(key))
+          if (unsupported.length) throw new AppError(400, 'unsupported_fields', `Unsupported query fields: ${unsupported.join(', ')}`)
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await requireCollect().listJobs(context, { limit: searchParams.get('limit') ?? undefined,
+            capability: searchParams.get('capability') ?? null }), requestId })
+          return
+        }
+        if (pathname === `${prefix}/batches` && request.method === 'POST') {
+          requireNoQuery(searchParams, 'collection batch')
+          const context = await requirePublic(request)
+          const result = await requireCollect().submitBatch(context, await readJson(request, 512 * 1024), request.headers['idempotency-key'])
+          sendJson(response, 202, { data: result.data, requestId }, collectHeaders(result.data, result.replay))
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/jobs/:id/result`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'collection result')
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await requireCollect().getResult(context, params.id), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/jobs/:id/cancel`)
+        if (params && request.method === 'POST') {
+          requireNoQuery(searchParams, 'collection cancel')
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await requireCollect().cancelJob(context, params.id), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/jobs/:id`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'collection job')
+          const context = await requirePublic(request)
+          const data = await requireCollect().getJob(context, params.id)
+          sendJson(response, 200, { data, requestId }, collectRetry([data]))
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/batches/:id/result`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'collection batch result')
+          const context = await requirePublic(request)
+          const data = await requireCollect().getBatchResult(context, params.id)
+          sendJson(response, 200, { data, requestId }, data.complete ? {} : { 'retry-after': '10' })
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/batches/:id`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'collection batch')
+          const context = await requirePublic(request)
+          const data = await requireCollect().getBatch(context, params.id)
+          sendJson(response, 200, { data, requestId }, collectRetry(data.jobs))
+          return
+        }
       }
       if (pathname.startsWith(`${WECHAT_SELF_HOSTED.apiPrefix}/`)) {
         const prefix = WECHAT_SELF_HOSTED.apiPrefix

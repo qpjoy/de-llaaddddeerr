@@ -60,6 +60,7 @@ import { JUSTONE_OPERATION } from './contracts/justone.mjs'
 import { JUSTONE_RESOURCE_OPERATION_KEYS } from './contracts/justone-resources.mjs'
 import { SOCIAL_ACCOUNT_SEARCH_OPERATION } from './contracts/social-accounts.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
+import { COLLECT_CAPABILITY_KEYS } from '../shared/collect-engines.mjs'
 import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
@@ -318,13 +319,16 @@ const PUBLIC_CAPABILITIES = new Set([
   ...JUSTONE_RESOURCE_OPERATION_KEYS,
   SOCIAL_ACCOUNT_SEARCH_OPERATION,
   WECHAT_SELF_HOSTED.capability,
+  ...COLLECT_CAPABILITY_KEYS,
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])
 // Personal-data access is explicitly selected for each Key. Keep it out of
-// the automatic execution and managed-full profiles.
+// the automatic execution and managed-full profiles. Collection capabilities
+// are granted explicitly too: each one is enabled only after its integration
+// slot passes acceptance (spider_man 07), never by a deploy.
 const AUTOMATIC_BUSINESS_CAPABILITIES = [...PUBLIC_CAPABILITIES]
-  .filter(value => !value.includes('ingest') && !isExplicitOnlyKeyScope(value)).sort()
+  .filter(value => !value.includes('ingest') && !isExplicitOnlyKeyScope(value) && !COLLECT_CAPABILITY_KEYS.includes(value)).sort()
 // Shared by explicit Admin credentials and the deployment-managed full-access
 // profile. This contains business API scopes, never control-plane privileges.
 export function businessApiScopes(crawlerPlatforms = []) {

@@ -199,6 +199,7 @@ Canonical → outbox → 检索投影继续由 Hub 管理，不让上游同时�
 
 本轮交付的是可复用规范、校验器、两个 manifest、统一管理壳及 Night-All-A 操作流程。
 未来再建设独立 process runner、上传包审批、部署绑定和事件接入；不在 Hub Web 进程里执行任意上传代码。
+`/tmp/platforms` 交付包的分阶段接入计划（含独立 runner 设计）见 [spider_man/06](spider_man/06-platforms-integration-plan.md)。
 每加一家平台优先复用已验证适配器类型，保留其原始错误、成本和分页语义。
 
 参考材料：用户截图的交付约束、`/tmp/195` 实际包、Night-All-A 本地 API/manifest、

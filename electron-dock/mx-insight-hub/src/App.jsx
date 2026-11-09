@@ -6,6 +6,8 @@ import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { FILE_DATASET_NAV_DESCRIPTION, FILE_DATASET_NAV_LABEL, FILE_DATASET_NAV_SECTION, FILE_DATASET_PATHS, fileDataset } from '../shared/file-datasets.mjs'
 import { WechatSelfHostedPage } from './wechat-self-hosted.jsx'
+import { SelfHostedEnginesPage } from './self-hosted-engines.jsx'
+import { COLLECT } from '../shared/collect-engines.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { ProvisioningPage } from './pages-provisioning.jsx'
 import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
@@ -436,6 +438,7 @@ const ROUTES = [
   { path: '/database-connections', label: '数据库配置', description: '共享只读 PostgreSQL 连接', icon: Key, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DatabaseConnectionsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/provisioning', label: '批量开通', description: '价格草稿、授权与启用', icon: Globe, group: '策略控制', component: ProvisioningPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: COLLECT.path, label: COLLECT.label, description: COLLECT.description, icon: Graph, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SelfHostedEnginesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/external-platforms', label: '上游供应商', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-platforms', label: '数据平台', description: '平台目录与非搜索服务治理', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DataPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },

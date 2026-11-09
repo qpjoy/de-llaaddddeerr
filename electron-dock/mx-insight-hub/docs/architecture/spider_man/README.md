@@ -2,7 +2,7 @@
 
 **这是活文档。** 凡是新增或改动自建采集服务（Night-All、Night-All-A、Hub 自建引擎、事件交付），或改动它们的部署拓扑，都要同步更新本目录，并在文末「变更记录」追加一行。只看本目录，就应该能知道当前状态和目标形态。
 
-最后更新：2026-11-02。本目录记录的是设计与现状核对；标注「设计中」的部分**尚未实现、未部署**。
+最后更新：2026-11-09。本目录记录的是设计与现状核对；标注「设计中」的部分**尚未实现、未部署**。
 
 ## 1. 范围
 
@@ -17,6 +17,7 @@
 | Hub 事件中心 | Hub Public 的事件接口 + PG 事件日志 | 把任务终态和数据变化可靠地交付给 Delta、Java | 设计中 |
 | 下游 | Delta（po-infra）、罗盘 Java，都是 Internal 宿主机上的 Docker | 提交任务、消费事件 | 目前同步调 Hub；直连改造见[性能汇总第 5 节](../../operations/platform-performance-review-2026-10-22.md) |
 | 旁路采集 | Delta 自带的 spiders、直接调 Night-All 的控制台等 | 不经过 Hub 的采集入口 | 待盘点 |
+| 外部交付采集包 | `/tmp/platforms`，49 个目录的 `adapter.py` 包 | 按 Apify / Hub 原生 / 独立 runner 三种方式分阶段接入 Hub。Apify 是第三方付费服务，因为复用自建引擎的异步任务骨架，所以也放在本目录 | 设计中，见 [06](06-platforms-integration-plan.md) |
 
 ## 2. 总体结构
 
@@ -62,6 +63,8 @@ flowchart LR
 | [03 自建引擎](03-self-hosted-engines.md) | 通用引擎模型、单执行槽、结果判定；微信 `wechat_mp` 调查结论；下游合同；页面与地址配置 |
 | [04 准入、并发与全局资源](04-admission-and-concurrency.md) | 图 4 限速在多进程下的实际效果；多副本后的问题；全局信号量设计 |
 | [05 路线图、决策与待决事项](05-roadmap-and-decisions.md) | 决策记录、分阶段计划、待决问题、验收清单 |
+| [06 外部交付采集包接入计划](06-platforms-integration-plan.md) | `/tmp/platforms` 各包的分阶段接入顺序、每个平台的方向和技术实现、平台总表 |
+| [07 通用采集引擎](07-collect-engines.md) | 阶段 1 的骨架：schema `collect`、多执行槽并发、异步核对与租约、runner 合同、`/api/v1/data/collect/*`、管理台「自建引擎」页 |
 
 相关文档：
 
@@ -82,6 +85,8 @@ flowchart LR
 | 多节点 | 规划中，新服务器尚未采购 | S0 约定现在就执行，S1 等新机器到位 |
 | 全局准入信号量 | 设计中 | Public 多副本之前必须完成 |
 | LCY 供应商优先排队 | 已实现未部署：每进程优先队列 + 80% 预留 + PG 令牌桶等待，见 [04](04-admission-and-concurrency.md) | 发布 migration 172，先调好“管理”页供应商限额，再在开关里选“优先排队” |
+| 外部交付采集包接入（[06](06-platforms-integration-plan.md)） | 阶段 0–6 顺序已定；D17–D19 已确认。阶段 1、阶段 2（Apify 执行方式 + 2a 试点）已实现未部署 | 部署后在引擎页录入 Apify token 并探测（Q9），查清价格（Q10），再对 2a 做小量联网验收 |
+| 通用采集引擎（[07](07-collect-engines.md)） | 已实现未部署：migration 183、184，多执行槽，runner 和 apify 两种执行方式，collect 对外接口，管理台「自建引擎」页（原微信引擎也列在其中） | 发布 migration 183、184 和 Hub 镜像；部署后没有任何引擎，对现有接口无影响 |
 | Facebook 自建搜索（Night-All-A） | 已实现未部署：策略模式 `selfhosted`，全集群 PG 名额（默认同时 2 个、每分钟 12 次启动），见 [03](03-self-hosted-engines.md) 第 11 节 | 发布 migration 173 → Internal 上确认 Night-All-A 可达且 facebook-protocol 有有效登录会话 → 策略搜索管理里选「自建」 |
 
 ## 6. 维护约定
@@ -92,6 +97,10 @@ flowchart LR
 - **单次专题另起文档：** 事故复盘、审计详稿放在 `docs/operations` 或 `docs/architecture` 下单独成文，这里只链接并摘要结论。
 
 ## 7. 变更记录
+
+- 2026-11-09 阶段 2：Apify 执行方式已实现未部署（[07](07-collect-engines.md) 第 10 节）。启动用 `/v2/acts/{id}/runs`，固定版本，不传花费上限；运行 ID 落库后异步核对；数据集分页读取，完整性按总数判断；启动应答丢失或执行器失联都记为 unknown 并隔离执行槽，从不重提；截止时间请求中止，确认后才释放执行槽；成本记入任务，只在管理台显示。migration 184 把 apify 出口绑定到 7788 序列（探测缓存 5 分钟），其他绑定不动。凭据写入共享凭据库，只写不读。新增 Temu、Meta 广告库、Similarweb 三个候选能力项，不自动授权。没有用真实 token 调用 Apify。不涉及 MX-H2I、Launcher。
+- 2026-11-09 阶段 1：通用采集引擎已实现未部署（[07](07-collect-engines.md)）。新建 schema `collect`（migration 183），微信表不动；执行槽为行，派发用 SKIP LOCKED，加锁顺序统一为引擎 → 执行槽 → 任务；同一调用方的提交加锁，因此每个调用方的上限精确；异步任务进入 waiting 后由任一执行器核对，派发途中进程失联靠租约发现；结果单独存表。新增 `/api/v1/data/collect/*` 和管理台「数据接入与治理 → 自建引擎」页，原微信引擎嵌入其原有面板。能力项 `collect.app.details` 加入 PUBLIC_CAPABILITIES，但不自动授予 managed_full Key。另外把微信内存存储的提交时间改为严格递增，修复同一毫秒提交时顺序随机的问题。不涉及 MX-H2I、Launcher。
+- 2026-11-09：新增 [06 外部交付采集包接入计划](06-platforms-integration-plan.md)（设计中）。用户确认 D17–D19：Apify token 录入 Hub 凭据库（来源是 po-infra 旧爬虫里写死的 token，有效性未核实），先不做花费限制，海外出口走 System Proxy 的 7788 序列。只改了文档，没有代码、存储或 MX-H2I 变化。
 
 - 2026-11-02 后续：Twitter 的样本校准、完整 36 条归档解析、发布后路由检查和旧 URL 首屏验收均通过。usage d167ad9e-48b4-4668-bcd3-8b1d6ef2aeb0 返回 20 条，committed、一次成功计费 TikHub 调用、归档完整；hasMore=true 表示已购余量，不推定新归档也是 36 条。不重复探测、不自动续页。capabilities 的评论 ready 当前基于小红书，不能据此判断 Twitter；本次使用已有原生授权 Key 做 TikHub 预检。其余九个 JustOne 平台仍受余额阻塞；Reddit/快手待真实目标样本，Facebook 替代尚未登记。
 - 2026-11-02 目标查找：用户授权 Reddit/快手优先复用服务器记录、缺少时新采集。新增 Admin stdin 只读有界查找脚本，区分历史评论请求与原帖规范记录，正确区分快手 cid/photoId；服务器已找到 Reddit 历史请求与快手原帖，改用精确源 UUID 查询；20 项测试通过，待各一页评论采样，未新增供应商调用。

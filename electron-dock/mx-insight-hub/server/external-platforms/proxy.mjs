@@ -37,6 +37,8 @@ const PROVIDER_ROUTES = Object.freeze({
   tikhub: { origin: 'https://api.tikhub.io', probeUrl: 'https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes' },
   rapidapi: { origin: 'https://twitter-aio.p.rapidapi.com', probeUrl: 'https://twitter-aio.p.rapidapi.com/' },
   qixin: { origin: 'https://api.qixin.com', probeUrl: 'https://api.qixin.com/' },
+  // Collection engines of kind apify (spider_man 07, D19).
+  apify: { origin: 'https://api.apify.com', probeUrl: 'https://api.apify.com/v2/' },
 })
 function providerRoute(providerKey) {
   const route = Object.hasOwn(PROVIDER_ROUTES, providerKey) ? PROVIDER_ROUTES[providerKey] : null
@@ -271,6 +273,9 @@ export function createTikHubProxyFetch(store, options = {}) {
 }
 export function createRapidApiProxyFetch(store, options = {}) {
   return createProviderProxyFetch(store, { ...options, providerKey: 'rapidapi' })
+}
+export function createApifyProxyFetch(store, options = {}) {
+  return createProviderProxyFetch(store, { ...options, providerKey: 'apify' })
 }
 
 export function createQixinProxyFetch(store, { resolveEgressBase = async () => '', ...options } = {}) {
