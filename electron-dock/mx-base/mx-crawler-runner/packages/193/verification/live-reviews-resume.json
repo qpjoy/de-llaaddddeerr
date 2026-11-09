@@ -1,0 +1,2901 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "reviews",
+  "observed_at": "2026-09-12T17:20:37.409052+00:00",
+  "query": {
+    "app_id": "com.google.android.apps.translate",
+    "lang": "en",
+    "country": "us",
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "id": "d5dde2ca-dbb1-4fde-a693-d9171468668d",
+        "userName": "Cvn Zsf",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJRwkz4MbXC7NYeUMsy3GYsK7Q3BYvZhbdFlKpQHKZIYiFk2A=mo",
+        "date": "2026-08-30T22:32:22.667Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=d5dde2ca-dbb1-4fde-a693-d9171468668d",
+        "title": null,
+        "text": "the best app",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "d5fd2d0f-2dbc-4b3b-9e22-cde5dddc1257",
+        "userName": "Zaher Fayed",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUfZlz6Z9NJ7GYyu9-97izzQY-YTgGUPRQbyVlRS3kZHA-5auY",
+        "date": "2026-08-30T22:17:38.659Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=d5fd2d0f-2dbc-4b3b-9e22-cde5dddc1257",
+        "title": null,
+        "text": "Great application!!!",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "07a013c1-a46d-4d1d-a2e8-e64971f4dd9b",
+        "userName": "راجين من الله أعلي الفردوس",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVTFKKojbp09b4iEh7MTH7Tbti0vX1XkORA2d0SMy9s4elkEAz9",
+        "date": "2026-08-30T21:29:14.460Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=07a013c1-a46d-4d1d-a2e8-e64971f4dd9b",
+        "title": null,
+        "text": "اقترح عليكم بشدة ان تضعو عكس الكلمة في القاموس او معنى الكلمة المراد البحث عنها وان تضعو كلا من مصدر الكلمة وماضيها ومضارعها وتصريفها الثالث هاذا سيجدي نفعا حقا ويفيد جدا ان شاء الله تعالى",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "ec5f1f32-61ed-4cdf-8e18-3342e8338d70",
+        "userName": "Mr Taker",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocISPhf6qAWLL8XC9MqYWLye0_qiWtedSqkTpTBTf3YET00S7A=mo",
+        "date": "2026-08-30T20:57:10.782Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=ec5f1f32-61ed-4cdf-8e18-3342e8338d70",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "6fcae999-7ac4-4a2a-bc6b-a38a6c754c93",
+        "userName": "fiqr negne",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV6ERSuu6013nU7NIT2M7KmngVp7V1G6bK1fud_Iqu73Go_Pgc",
+        "date": "2026-08-30T20:32:06.210Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=6fcae999-7ac4-4a2a-bc6b-a38a6c754c93",
+        "title": null,
+        "text": "best app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.1.35.855527520.1-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "9ee922ae-4466-4a5f-b9ba-d6129e4fc343",
+        "userName": "Amara Nnamani",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIloGZhvYJkXrpv0iMTu879PkosxJQqQv3Ro4jWjRwHa3wHDg=mo",
+        "date": "2026-08-30T19:34:43.981Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=9ee922ae-4466-4a5f-b9ba-d6129e4fc343",
+        "title": null,
+        "text": "it good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.3.57.862261224.2-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "19c9138f-a044-4fe5-8fab-772b2b6929e6",
+        "userName": "wanda sharp",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLActEqlmAyN3JHEqcMgCSReYxaUsNdSCppQrnLAXmDmiSNLQ=mo",
+        "date": "2026-08-30T18:16:18.387Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=19c9138f-a044-4fe5-8fab-772b2b6929e6",
+        "title": null,
+        "text": "best for seniors",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "81e886f6-b755-4fbf-8efb-ea61e4768bcd",
+        "userName": "David Stam",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocL7TPXB4Syx33_7z-NtuZzbbE-E-f2zIeq8SxaRP5QVwv1-Dg=mo",
+        "date": "2026-08-30T17:39:39.340Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=81e886f6-b755-4fbf-8efb-ea61e4768bcd",
+        "title": null,
+        "text": "I have tried numerous apps. And this one is the best. Is it perfect? No. But you have to consider how much better it is compared to 3 or even 2 years ago. many of these \"bad reviews\" are from those dark ages. I can now have complete conversations with people who don't speak English. And they are so happy to be able to speak freely for the 1st time. That is priceless.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 2,
+        "criterias": []
+      },
+      {
+        "id": "7ed299aa-4e12-4189-a893-a93c4b45eae1",
+        "userName": "Suhail Saif",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVAzYYyavsJboZ7gfXt9X-UF6e5imQNivpzr1R1VOFtmr62W8H9",
+        "date": "2026-08-30T17:09:50.907Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=7ed299aa-4e12-4189-a893-a93c4b45eae1",
+        "title": null,
+        "text": "very nice 🙂",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "6ff3a076-b528-4b46-9ed9-bd7875a2621f",
+        "userName": "Emmanuella Luka",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLz6BtBzeIYp80M5__Nsds7w5azzI3LjXjE9JAoJIU7s44-Xg=mo",
+        "date": "2026-08-30T16:17:00.681Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=6ff3a076-b528-4b46-9ed9-bd7875a2621f",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 1
+          }
+        ]
+      },
+      {
+        "id": "df46a51f-c004-4cdd-a766-a93cf4a493c7",
+        "userName": "Naresh Jangra",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV0frfouZR8yHSd141mC6GN2ARETS8aDebaxU5K12rDS11YHuj88Q",
+        "date": "2026-08-30T16:13:57.320Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=df46a51f-c004-4cdd-a766-a93cf4a493c7",
+        "title": null,
+        "text": "Good 💯",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "24e8d4d1-ef1d-4e53-9e1e-c68a3ebb77b2",
+        "userName": "Poovarasan Poovarasan",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVKW_btMY1ZddK2TBPIF_lf-Ib4KlYsoIrQRS-teS-0wSAGflOi",
+        "date": "2026-08-30T14:42:02.809Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=24e8d4d1-ef1d-4e53-9e1e-c68a3ebb77b2",
+        "title": null,
+        "text": "good 😊",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "a68dadb0-55ee-4e61-ac8c-e35330af9728",
+        "userName": "Sona Moni",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKS7pdEmOWCFJlXqwx8t8NqO8joHZEWon9eIfbOaOfcVi-3_w=mo",
+        "date": "2026-08-30T14:29:35.764Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=a68dadb0-55ee-4e61-ac8c-e35330af9728",
+        "title": null,
+        "text": "very nice app for students",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "6a0ac6cb-2283-44f4-b2b9-53e8213d4a24",
+        "userName": "Mr. S S",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUtzrPDfD-YFrpoRManxCeKBnublRcyGJz_98Eik_yj9tVXaHa3",
+        "date": "2026-08-30T14:00:04.288Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=6a0ac6cb-2283-44f4-b2b9-53e8213d4a24",
+        "title": null,
+        "text": "can you please include Italian on beta conversation practice please. and not all Italian pronunciations are correct. some are way out.",
+        "replyDate": "2026-08-31T02:29:41.380Z",
+        "replyText": "Hi there. Thanks for the suggestion. We're always looking for ways to make the app more useful and your feedback is super helpful. We'll pass this along to our product team.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "3994839a-4c74-4402-b126-ef8a16c43200",
+        "userName": "Fernando Cruz",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV02zdFIqv6fegKmBTOPN7pHp5Ztg00Qj2hNHqOdj5HIlVC1QEuHA",
+        "date": "2026-08-30T13:22:17.386Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3994839a-4c74-4402-b126-ef8a16c43200",
+        "title": null,
+        "text": "Google is Google.",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "934b4ce4-273b-4cb5-958b-dff900e04226",
+        "userName": "Wilfried Sihombing",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXxjGhmjF3g2lmzJW7RM6D9OYnsciBP1Y3uHF_S6jJHXA_m42E",
+        "date": "2026-08-30T12:54:05.764Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=934b4ce4-273b-4cb5-958b-dff900e04226",
+        "title": null,
+        "text": "Good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "db21229d-19bd-48bb-a3b1-9407a696a03c",
+        "userName": "King Veer",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocL_ZpwkNTRc7w-MOaYElz4UrB--v-6FCzt4Mrg22m89CQNYOA=mo",
+        "date": "2026-08-30T12:32:32.484Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=db21229d-19bd-48bb-a3b1-9407a696a03c",
+        "title": null,
+        "text": "Please improve Punjabi (ਪੰਜਾਬੀ) in Google Translate. Fix translation accuracy and make everyday Punjabi more natural, including idioms and different dialects. Improve Punjabi pronunciation and Text-to-Speech so it sounds like a native speaker. Add Punjabi synonyms, meanings, definitions, and a richer vocabulary with regional words. Please also improve Punjabi support in advanced AI features.",
+        "replyDate": "2026-08-31T05:37:44.429Z",
+        "replyText": "Hi there. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 2,
+        "criterias": []
+      },
+      {
+        "id": "153fdf58-bab0-4ac4-970c-4c10cf7b839b",
+        "userName": "MICHAEL ASHBEE (GAME TIME 420)",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVMrUAZC58775dKmGpiCNaqoCmIvLgjtIKUXCki_jbUHPLswdp1",
+        "date": "2026-08-30T11:15:09.822Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=153fdf58-bab0-4ac4-970c-4c10cf7b839b",
+        "title": null,
+        "text": "Great working app that the developers have created, lovely work that has been acheived and ravealed to the community and society, such remarkable work well done. Success has been made. Great work in the making of the universe.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "07ea541f-570d-467e-84e3-4c3b3522fe18",
+        "userName": "Hamisu m salisu kbm",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXqXM9qL8vRtwAG_Ia-9C_a1wjVhoB3UCnxwhHXAx3b5r6A8TLzoA",
+        "date": "2026-08-30T11:09:09.537Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=07ea541f-570d-467e-84e3-4c3b3522fe18",
+        "title": null,
+        "text": "good bless you",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.29.62.956181792.2-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "ce57ac9e-c375-4812-ab9b-52bffa9abd8d",
+        "userName": "Alihle Vakele",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocI7Pg2sQ4NZVLxgKfJOsWvChw4FeidnqFMmimqGx1yGVqwt=mo",
+        "date": "2026-08-30T09:53:37.710Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=ce57ac9e-c375-4812-ab9b-52bffa9abd8d",
+        "title": null,
+        "text": "Very accurate simply the best",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "ad4c7e2f-6ea3-41f3-95b3-8e6cf5031d8d",
+        "userName": "Ratna Patil",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVbXJQqb6VwmIblgiGANN6nzNLo270xwpHWThtX2Z7p__yIQ8-Heg",
+        "date": "2026-08-30T08:34:40.995Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=ad4c7e2f-6ea3-41f3-95b3-8e6cf5031d8d",
+        "title": null,
+        "text": "very useful",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "3a01c9e9-3eba-4a85-b987-a9fe3b1d5ad3",
+        "userName": "Wajid Ali",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWWeSPcKKWluTjifbHq20muCQSapeLVnELN6P2FyzNAnZkD1oCE",
+        "date": "2026-08-30T08:10:06.523Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3a01c9e9-3eba-4a85-b987-a9fe3b1d5ad3",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "b05c2914-5275-4581-832f-db45dacb554d",
+        "userName": "Mike Lowe",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLXsYyH4w9k1qEV_v7Y_NaCprCDcA8n3zoaVq02HBmB2J-siA=mo",
+        "date": "2026-08-30T07:53:12.406Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=b05c2914-5275-4581-832f-db45dacb554d",
+        "title": null,
+        "text": "voice translation does not work offline. Apples version does.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "58678484-3cde-48c7-a4c8-847860b9aca1",
+        "userName": "Sandeep Sharma",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWEGlJVIRPCG8FYSeWALLm22qTGwZR75mDkTZEI7g5nN9UDMSWdbg",
+        "date": "2026-08-30T05:43:21.000Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=58678484-3cde-48c7-a4c8-847860b9aca1",
+        "title": null,
+        "text": "पहले से बेहतर है",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "533c15cd-4ac3-4c82-a265-ee3f5f40fc0d",
+        "userName": "Mujahir Alam",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIR_an9k1Uq1frMDvHiGlqlND26B6iy5H_ohneLJggKT82YrA=mo",
+        "date": "2026-08-30T05:37:12.208Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=533c15cd-4ac3-4c82-a265-ee3f5f40fc0d",
+        "title": null,
+        "text": "nice",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "03c5c5c2-6fe3-4fb0-b703-35a3ef4b8be1",
+        "userName": "Jefferson Eagley",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWhFtD0YsfbUmn5eOZbKYGiERKXXnIEIplhc-6uBWA-i81zOPRS4g",
+        "date": "2026-08-30T05:22:21.227Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=03c5c5c2-6fe3-4fb0-b703-35a3ef4b8be1",
+        "title": null,
+        "text": "Recent versions frequently abort or fail to listen when I need them the most.",
+        "replyDate": "2026-08-30T09:06:15.605Z",
+        "replyText": "Hi Jefferson. Let's try the troubleshooting steps in this guide: https://goo.gle/2rJSqBE. If the issue still persists, please create a post in the Google Translate Help Community to get help from our community of experts: goo.gle/2tkDc6j. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "15de75ae-a42f-4547-82a3-ca7d03200a84",
+        "userName": "Bigcruzz",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLK6Bc40Cn94V7m-pp_esqStyh8tnMOeNFoOLadLTxY6XhJaA=mo",
+        "date": "2026-08-30T05:13:00.619Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=15de75ae-a42f-4547-82a3-ca7d03200a84",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "5717e333-b3a0-44e3-98da-109f3f902de5",
+        "userName": "Oslyn Pompie",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJ3LuWArMrRjqgZwD5cIlktE25HYdrMA5uXR2h8OyNOyCz0_g=mo",
+        "date": "2026-08-29T21:27:12.472Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=5717e333-b3a0-44e3-98da-109f3f902de5",
+        "title": null,
+        "text": "excellent",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "77a2b46d-88b8-487c-b15d-213ba937f58e",
+        "userName": "Md Ahad Sheikh",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjX-eKQOd3BqmEQALFzDFvUSRZSobdlEuaR8K1BGj1r8MA0MI-CG",
+        "date": "2026-08-29T20:44:29.167Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=77a2b46d-88b8-487c-b15d-213ba937f58e",
+        "title": null,
+        "text": "good app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "0fa59040-8620-4d07-8881-e3f450382687",
+        "userName": "Brian Wood",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIy-DxXjRTMFiqbdBpfSuucKd-Enb6VK9waOPzYKKdQSLWPBQ=mo",
+        "date": "2026-08-29T19:43:15.657Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=0fa59040-8620-4d07-8881-e3f450382687",
+        "title": null,
+        "text": "Been using for a long time - works great &easy to use Great and easy to use",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "2174b710-920a-413f-a9a8-1c8344af2f61",
+        "userName": "Dennis Locklear",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWWC9524f-pxi5uf3C91WDNpT_sgdQ6yjLuuv5rshqMpwetgEc",
+        "date": "2026-08-29T19:10:45.397Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2174b710-920a-413f-a9a8-1c8344af2f61",
+        "title": null,
+        "text": "I USE THE TRANSLATOR ON SEVERAL OCCASIONS WITH MY MEXICAN FRIEND, IT IS EASY TO MANEUVER AND RESPONSE ADEQUATELY THE TRANSLATIONS EFFECTIVELY WITH VISIBLE AND CLARIFIED RESPONSES.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 2,
+        "criterias": []
+      },
+      {
+        "id": "0e7f7f37-2dbd-4df8-af56-3437941953a6",
+        "userName": "TALHA YT",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjW_S2JXW2WBu_As0i3aITKeoyOnNKpaCkjQfhA-rVHg2u8SfUg",
+        "date": "2026-08-29T18:25:33.318Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=0e7f7f37-2dbd-4df8-af56-3437941953a6",
+        "title": null,
+        "text": "very nice",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "e4389bcd-4041-480f-8056-fdb14f04de98",
+        "userName": "KKand BK",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWbXfdwSB3JmekqlkZgWrqO7CCoUVn47GNHw4ggjWDYbVAiX9Jj",
+        "date": "2026-08-29T16:41:34.992Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=e4389bcd-4041-480f-8056-fdb14f04de98",
+        "title": null,
+        "text": "nice app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "3fdc9fa5-3b74-4b89-aeb0-e1b5ac4aedb5",
+        "userName": "Robert Niezgodtka",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIXbB78Q6241x_3nixiEZWPWf_86ZjMRTVUU7eiFIEc4Ee8Zg=mo",
+        "date": "2026-08-29T15:52:18.134Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3fdc9fa5-3b74-4b89-aeb0-e1b5ac4aedb5",
+        "title": null,
+        "text": "Overall, I was extremely satisfied using this app for past several years, however since I have started studying Chinese I have noticed how inaccurate is pronunciation of some Chinese tones. Especially Third Tone (Falling-Rising / ˇ ): Dips low in pitch before curving back up (e.g., mǎ - horse or shuǐ - water etc.).It only seems to be an issue with one syllable translations as when those sounds are being used in a longer string of syllables or full sentences this error disappears. Please fix it",
+        "replyDate": "2026-08-30T09:01:29.923Z",
+        "replyText": "Hi Robert. Thanks for your review. We understand that speech recognition isn't perfect and are trying continuously to improve it. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 3,
+        "criterias": []
+      },
+      {
+        "id": "0003718e-1def-4cb4-ad7a-221b9e1fe458",
+        "userName": "Kheeru Majhi",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVkvKW8ZiHbZfaxITwMqCKXc0icKvnvOg7cxHYxlLeblEkUZwhKrA",
+        "date": "2026-08-29T15:01:41.767Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=0003718e-1def-4cb4-ad7a-221b9e1fe458",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "9953f427-3991-4176-bd34-cfc122b4a32a",
+        "userName": "Noni Nk",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLzxo5VR7KMOFXHbwAWMhJnZCiyv-0unBMl-R11_6m1O8S9Yw=mo",
+        "date": "2026-08-29T14:39:37.222Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=9953f427-3991-4176-bd34-cfc122b4a32a",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "0b42a8c0-1130-4215-be37-297a58e636d4",
+        "userName": "Brian Franks",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUdZR4uvLH4QfhImPiVLyi1umkDdfYThULMw7EwJZyUQRvWDQTdig",
+        "date": "2026-08-29T13:10:50.707Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=0b42a8c0-1130-4215-be37-297a58e636d4",
+        "title": null,
+        "text": "there when you need it",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.28.62.953449214.8-release",
+        "thumbsUp": 1,
+        "criterias": [
+          {
+            "criteria": "vaf_never_display_ads_experience",
+            "rating": null
+          },
+          {
+            "criteria": "vaf_never_display_ease_of_use",
+            "rating": null
+          }
+        ]
+      },
+      {
+        "id": "2110acde-dac9-4822-81e6-cd2e2bc47063",
+        "userName": "PRAVIN JAT",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjX-xQJJi_-RcP7UNLX4qiySREiWB7YmW0Dk3GZiOtAyoOrenaQK",
+        "date": "2026-08-29T12:55:11.875Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2110acde-dac9-4822-81e6-cd2e2bc47063",
+        "title": null,
+        "text": "Good 😊",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "f3f5165d-da88-485a-b00c-b3ee75793461",
+        "userName": "fatty saulboy9",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIjsUo89NgqFR_5CyjFZCmOZkK4P4gU0I-1S1xOouqI2Bap=mo",
+        "date": "2026-08-29T12:29:06.491Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=f3f5165d-da88-485a-b00c-b3ee75793461",
+        "title": null,
+        "text": "great",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "e0909699-5b45-4957-952d-4bc45552dc0e",
+        "userName": "Jeremy Awbrey",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKQt-K1ajXQwJ9qPteJ8q2Kf2Hkn73s6yJDiL1PH6qOSyh-qw=mo",
+        "date": "2026-08-29T12:16:37.537Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=e0909699-5b45-4957-952d-4bc45552dc0e",
+        "title": null,
+        "text": "If you are looking for accuracy, this app is not it. AI makes up half of the conversation which can lead to a very embarrassing situation. If I wanted to chat with AI, I would use an AI app. If this app would focus on accuracy instead of embellishments, it would be good. Even things I know what the person says is completely changed by AI after \"translation.\" The AI constantly acts like a runaway train and repeats words or phrases. \"right?right?right?right?right?right?right?right?right?\"",
+        "replyDate": "2026-08-30T08:58:55.224Z",
+        "replyText": "Hi Jeremy. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "c11758b1-d768-4648-b9b4-793529c99583",
+        "userName": "Suresh Kumar",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKJBmHf4M4hmT55wwvHauoMpcMdUBP4wphqJjsAH7MdWvIbKFiX=mo",
+        "date": "2026-08-29T12:14:47.989Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=c11758b1-d768-4648-b9b4-793529c99583",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "8e450b4c-428a-4fef-8497-9b40dc823c4c",
+        "userName": "Chithra",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIkcfw8GKvoMkn9unyzSRU3dx8iutM8t5yZKNctsLnORo-vvQ=mo",
+        "date": "2026-08-29T10:21:40.205Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=8e450b4c-428a-4fef-8497-9b40dc823c4c",
+        "title": null,
+        "text": "Nice translation but not perfect but it's fine 😄",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "9d4e0491-51bb-4121-890a-58684b651db3",
+        "userName": "Joe Mama",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWNyG_tgO9CJus2y8gmqdQJSQomDmtWMGIFE4sFwnsCY5rY_c4",
+        "date": "2026-08-29T09:47:19.881Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=9d4e0491-51bb-4121-890a-58684b651db3",
+        "title": null,
+        "text": "The overall syncing could stand some improvements, especially in the mic-to-audio feature (quintessential).",
+        "replyDate": "2026-08-30T08:58:05.936Z",
+        "replyText": "Hi Joe. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "8493db3e-43f3-4d74-9b10-4daf5ce921b7",
+        "userName": "Hossain Abeer",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjW8PoZVyVcxrw9T92NkHSlWBpK5OhApubKk8W39yU_oVhNqOAuy",
+        "date": "2026-08-29T09:40:59.416Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=8493db3e-43f3-4d74-9b10-4daf5ce921b7",
+        "title": null,
+        "text": "ruined. now the enter key no longer takes you to a new line",
+        "replyDate": "2026-08-30T08:57:39.709Z",
+        "replyText": "Hi Hossain. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "63c6a72a-3bae-4b84-b1b1-d1d34e467e79",
+        "userName": "Jason Freidman",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVYZ78nVew970U2spm98oFin04WwgS0JZa9NqBVPp_0bvu_VH3Q",
+        "date": "2026-08-29T09:33:09.461Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=63c6a72a-3bae-4b84-b1b1-d1d34e467e79",
+        "title": null,
+        "text": "works great!! docking a star because the buttons keep moving on the bottom. I mostly use it for camera translation so would prefer the middle center.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "c55c3e83-1d24-4050-a3e0-6e0ed11af2da",
+        "userName": "Imran Mazher",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjX7ZwH1SPnldR2vDu8Z_Js5ZwVudpqWGrbdWtUpV1IRHmrgAyc",
+        "date": "2026-08-29T09:21:59.730Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=c55c3e83-1d24-4050-a3e0-6e0ed11af2da",
+        "title": null,
+        "text": "its Best",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "e57c71b4-cc8c-46a7-afc3-d8965320e1f8",
+        "userName": "মোবারক শেখ",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVUFICkJ9BxEmPN6DkcBWFsGPTqY3Tpio-YKFfVRHXCZxY2LYU",
+        "date": "2026-08-29T07:43:47.535Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=e57c71b4-cc8c-46a7-afc3-d8965320e1f8",
+        "title": null,
+        "text": "মোবারক শেখ 👍🥰",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "a5fab0ad-b300-446a-a16b-b633d19ceed6",
+        "userName": "Israel Obijuru",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJFT9Vde_CDPJVLKK03plK5EpFyBpWKg56LVI5VzkysQ1_o6w=mo",
+        "date": "2026-08-29T07:16:23.467Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=a5fab0ad-b300-446a-a16b-b633d19ceed6",
+        "title": null,
+        "text": "Your app is becoming bugging vey badly. Refuses to translate, keeps showing loading even with strong internet connections its upsetting",
+        "replyDate": "2026-08-29T08:32:21.619Z",
+        "replyText": "Hi Israel. Let's try the troubleshooting steps in this guide: https://goo.gle/2rJSqBE. If the issue still persists, please create a post in the Google Translate Help Community to get help from our community of experts: goo.gle/2tkDc6j. Thanks.",
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "4fb66077-fd55-47a8-a5da-b7e7f848f865",
+        "userName": "Mr Ayan khan",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV9ahTx5kvjuBOW_Sh6LUaJ-EicOKdsp1OyXOnIJb14Cy_qG-L3",
+        "date": "2026-08-29T07:02:03.987Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=4fb66077-fd55-47a8-a5da-b7e7f848f865",
+        "title": null,
+        "text": "help fully in my daily rutain use app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "dc571863-6632-4419-8db5-7c54e399ceb3",
+        "userName": "Chidozie Malachy",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKQ3o711BDb-oSYZpMwCHspQbfgLEGKPfyMipkPdkKDR3Q2uw=mo",
+        "date": "2026-08-29T06:01:52.316Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=dc571863-6632-4419-8db5-7c54e399ceb3",
+        "title": null,
+        "text": "I can't translate right now",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "a5f4934b-302b-4538-a597-1ba53c8a6d31",
+        "userName": "V",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXHohqVWIsOUvJZCGC8Mz7xAerYZG8Z1Ox6kI24B3Di0P7E7kTO",
+        "date": "2026-08-29T05:39:38.881Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=a5f4934b-302b-4538-a597-1ba53c8a6d31",
+        "title": null,
+        "text": "Что то произошло с прилодением и оно так плохо переводит, с такими грубыми ошибками!",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "1b15adb0-d5ea-47cf-992b-d1cc4f8d7b66",
+        "userName": "Ronak Jahan",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLCXCA6OYY3TFW7L7aUsiZcqScQWhbrjKG2mdAnwJPu1iTTUg=mo",
+        "date": "2026-08-29T04:52:58.741Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=1b15adb0-d5ea-47cf-992b-d1cc4f8d7b66",
+        "title": null,
+        "text": "it's very helpful",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "dcb6afb4-8561-4eec-a527-5cd20d2d4ee1",
+        "userName": "than swe",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVa2iAS1QJHDHtBO_RzCqpBA_l4bV-HNJh0gwbPBMPvWQ_X_iE6",
+        "date": "2026-08-29T02:52:09.466Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=dcb6afb4-8561-4eec-a527-5cd20d2d4ee1",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "a472579c-5b70-4a9d-93db-fe911100aa0b",
+        "userName": "cody fuson",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJyXHP6hpu59teHeEctWMwNETAtnFVvkrut5Zya80U91gou9w=mo",
+        "date": "2026-08-28T21:21:05.614Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=a472579c-5b70-4a9d-93db-fe911100aa0b",
+        "title": null,
+        "text": "was a good app. got rid of detect language which made it absolutely worthless. and before the stupid ai decides to respond with the generic response I did send feedback moron",
+        "replyDate": "2026-08-29T08:27:53.220Z",
+        "replyText": "Hi Cody. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": null,
+        "thumbsUp": 1,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 1
+          }
+        ]
+      },
+      {
+        "id": "97325b75-fa03-4b18-a4b8-af1ad8d6e152",
+        "userName": "Imy",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXMXrdk5me4ojy8tbFxcWUKPO7LQRRI9VJZhfZuR3uaCQp3FhF19g",
+        "date": "2026-08-28T21:05:29.229Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=97325b75-fa03-4b18-a4b8-af1ad8d6e152",
+        "title": null,
+        "text": "don't know what happen from the last update, 9/10 times i write a word, it translate it in complitely no sense words, so deleting even only a last letter and rewriting again ,its translate right then",
+        "replyDate": "2026-08-29T08:21:46.230Z",
+        "replyText": "Hi Imy. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "1f773be1-ffee-406f-8efd-e213ec181c32",
+        "userName": "Sa'idu Ahmad",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWGrXGY9wv4BMThZK9aqUehLLGIZn_6XaF8vLiOwnyWTnbS8-A",
+        "date": "2026-08-28T20:28:38.451Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=1f773be1-ffee-406f-8efd-e213ec181c32",
+        "title": null,
+        "text": "very good.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 1
+          }
+        ]
+      },
+      {
+        "id": "ab7f4437-71fa-44e6-861a-68d5333dcdc0",
+        "userName": "Happy Hamburg",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocICwBmBu65mZTlznGEXYt4aftJJ9GTRcdxmnlN1cbkXq_svdg=mo",
+        "date": "2026-08-28T20:01:53.130Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=ab7f4437-71fa-44e6-861a-68d5333dcdc0",
+        "title": null,
+        "text": "I love this app with my entire life",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.28.62.953449214.8-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "35ccd455-36bd-4ae5-950c-c22c35662d80",
+        "userName": "Carlos Mijares",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWO-4j7QScyoFCeuDmqviHUBZyDlct53x0DbKXP4uFhyJI7PjA",
+        "date": "2026-08-28T16:41:04.191Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=35ccd455-36bd-4ae5-950c-c22c35662d80",
+        "title": null,
+        "text": "Is simple tool to translate fast something little. And also will help you to manage faster with people who don't speak your language",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "73fefad3-e112-4089-b452-8d0137e83109",
+        "userName": "Soumen Das",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXGJ6j69_HkbDDv0PdgwCAjErt4cgdJ2k2SMdytccRqQaFU9qU0",
+        "date": "2026-08-28T16:15:00.883Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=73fefad3-e112-4089-b452-8d0137e83109",
+        "title": null,
+        "text": "too much irritating this app, this is not a good app",
+        "replyDate": "2026-08-28T16:57:49.436Z",
+        "replyText": "Hi Soumen. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": null,
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "c8f11bc9-ca20-44df-9127-372a12c52253",
+        "userName": "MD EKRAMULLA",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUpgM7KAJjbRo47GvKHyz9-EWHjnCXRc8IzTFDdlVaszqer95S9",
+        "date": "2026-08-28T15:47:22.573Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=c8f11bc9-ca20-44df-9127-372a12c52253",
+        "title": null,
+        "text": "Excellent",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "b42ed0a3-0439-4bed-977a-24a26ea17213",
+        "userName": "Busak Vavaramu",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLME1LWLlwzmlUfI_FGBnI77nULhKwpgV85tJGg_97DWW5_JA=mo",
+        "date": "2026-08-28T15:46:43.693Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=b42ed0a3-0439-4bed-977a-24a26ea17213",
+        "title": null,
+        "text": "awesome excellent",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "4a459325-a0d2-4583-82eb-d07c68d827a4",
+        "userName": "gantalao elain",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXGmt_f_rwr0p1Xb87tVoM64NCzEY5jsjtrPk4R6dNvRo7CtSqC",
+        "date": "2026-08-28T15:29:41.206Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=4a459325-a0d2-4583-82eb-d07c68d827a4",
+        "title": null,
+        "text": "I enjoy this apps",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "947e9a82-0c52-4a04-8ea6-91b20eb88bdd",
+        "userName": "Bhupesh Sonwane",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUQTCYxNW4ECUcT0wfensic3jDYumWVZIJO-p7ow5QxTdnIDetb",
+        "date": "2026-08-28T14:44:16.825Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=947e9a82-0c52-4a04-8ea6-91b20eb88bdd",
+        "title": null,
+        "text": "good 👍",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "7c22cb1e-1bee-4901-937b-05b8bbddbc1f",
+        "userName": "Mb rahaman",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV0J-Ua3yGqpSiTHuX6b26qDqQkV-V46vRs4e2R1RQhPngfTg4",
+        "date": "2026-08-28T14:38:04.100Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=7c22cb1e-1bee-4901-937b-05b8bbddbc1f",
+        "title": null,
+        "text": "একসাথে অনেকগুলো ডিলিট বা পিন করতে অথবা ইচ্ছানুযায়ী নতুন ক্লিপ যোগ করতে \"Manage\" বাটনে চাপুন",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "97e9cedc-5843-471b-b4d9-10a75ed51135",
+        "userName": "P",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIftl3P9hreFq4A7FbPqgIVaoonSEejOmNuwlWHhkNiqjwFWYc=mo",
+        "date": "2026-08-28T14:32:05.617Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=97e9cedc-5843-471b-b4d9-10a75ed51135",
+        "title": null,
+        "text": "Edit: Yo the current version works fine again 👍 leaving my 2022 original one-star review here for legacy ||| Alright they borked the interface, as apps do, and they'll probably call us \"resistant to change\" for not going along with it. Time to find the last usable version in apk and block updates I guess. As for something constructive for those who will stay: please bring back Japanese kanji writing by hand? Like... cmon",
+        "replyDate": "2022-03-14T12:14:53.816Z",
+        "replyText": "Hi there. We'd like our users to have the best possible experience with Google Translate app. The product team is constantly working to improve Translate experience across all devices, Please submit your feedback directly with the product team: Open app - Tap Account Menu - Help & Feedback. Appreciate it!",
+        "version": "10.29.62.956181792.2-release",
+        "thumbsUp": 3,
+        "criterias": [
+          {
+            "criteria": "vaf_never_display_ease_of_use",
+            "rating": null
+          },
+          {
+            "criteria": "vaf_never_display_ads_experience",
+            "rating": null
+          }
+        ]
+      },
+      {
+        "id": "9416763e-c27d-4d38-819f-f7f70d0e70c9",
+        "userName": "Rose Vidovix",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXmrY5d5Wg4-5AT1CtKpoRGxJO9NHf3FyDAfDcKEHuYuNoE1ALgMw",
+        "date": "2026-08-28T14:08:33.555Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=9416763e-c27d-4d38-819f-f7f70d0e70c9",
+        "title": null,
+        "text": "Intrusive and inneficient therefore unreliable. It used to be much better but now it is \"reinterpreting\" my conversation and translating things that were not said or meant. If it is an important conversation, you need to retranslate everything to ensure accuracy. I no longer trust it therefore I'm looking for a different translation app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 3,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "16fc34b1-d590-4fc9-97ad-aad749c17d41",
+        "userName": "USMAN Gujjar",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocK38tcd5YUcwqDKkGNa1VkkRBt0mppohl-ipFciulLaiFSVcg=mo",
+        "date": "2026-08-28T13:45:41.904Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=16fc34b1-d590-4fc9-97ad-aad749c17d41",
+        "title": null,
+        "text": "very good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "902dd428-3828-4e5b-bf93-a7ed63ff69d2",
+        "userName": "TRIPURI MUSIC Official",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVgAkMcD42EWhLbHRvGow-bWfuErnwb54EFrmVHBsR2imei8VR7tg",
+        "date": "2026-08-28T13:28:37.185Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=902dd428-3828-4e5b-bf93-a7ed63ff69d2",
+        "title": null,
+        "text": "Make Kokborok language available features like Speech input, lens input 🙏and all languages translate correctly. Simply don't give updates that no use of it🙏🙏🙏",
+        "replyDate": "2024-09-05T14:08:12.294Z",
+        "replyText": "Hi there. Thanks for the suggestion. We're always looking for ways to make the app more useful and your feedback is super helpful. We'll pass this along to our product team.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "c677d6c9-6e6a-4652-81e7-50cc1158563c",
+        "userName": "ThankGod Samuel",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXOsy8mnUVtHHNWzc9gkl97Qk0YOpz0pB6GoKkWb9fIy7wR1aQ",
+        "date": "2026-08-28T13:11:52.721Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=c677d6c9-6e6a-4652-81e7-50cc1158563c",
+        "title": null,
+        "text": "excellent",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "d8824495-0309-4b8b-8eca-fd2b4fbf33ee",
+        "userName": "Sukhwinder Singh",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVwdsw2rtvs42_vqJqQ9WlVVl0PG_CnmITLRasHtY-KewTxNwPt",
+        "date": "2026-08-28T12:30:33.702Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=d8824495-0309-4b8b-8eca-fd2b4fbf33ee",
+        "title": null,
+        "text": "good Translate app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "1053c585-7ad1-4ebe-831e-a98673c8687b",
+        "userName": "Bitcoin Lord",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUdCP4Ln8Mv3k1MQDGT8P22YMCdJnTv1b3dy9-xMKvianxw4p8_",
+        "date": "2026-08-28T12:11:12.335Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=1053c585-7ad1-4ebe-831e-a98673c8687b",
+        "title": null,
+        "text": "Good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.17.48.914427315.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "e511cb91-dd64-415e-ac82-b2281c5ee655",
+        "userName": "Sushil Roy",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVyg4bIcWuR17bA4BX2-VppUgnJqvVRYTsm8xcRqq-usnkAqo0S",
+        "date": "2026-08-28T11:45:39.147Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=e511cb91-dd64-415e-ac82-b2281c5ee655",
+        "title": null,
+        "text": "good side",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "aaa4d6ec-96b2-417c-b3bc-6768e6401b31",
+        "userName": "Mdmai Nasara",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjU1fiWpAln0CRpacBpn5buCwyZZtTTp4VxmRZmmY75BnDYbceQ2",
+        "date": "2026-08-28T11:23:32.185Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=aaa4d6ec-96b2-417c-b3bc-6768e6401b31",
+        "title": null,
+        "text": "alhamdulillah 🎉",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "c4c2318f-4b70-425f-a86b-083205549b2b",
+        "userName": "Emmanuel fidelis",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLVKnd6XuRoeQpVhFdNuPiBvv6PXCn9jptbPeQKnC0rsRWbIQ=mo",
+        "date": "2026-08-28T11:20:58.641Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=c4c2318f-4b70-425f-a86b-083205549b2b",
+        "title": null,
+        "text": "my can't I update my translator",
+        "replyDate": "2026-08-28T16:58:45.716Z",
+        "replyText": "Hi Emmanuel. Try the steps in this guide to fix problems with updating the app: https://goo.gle/2tPy0rx. If issue persists, please try describing your issue in the Google Translate Help Community for further help: https://goo.gle/2tkDc6j. Appreciate it.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "587f73d3-0a95-4c8f-b384-f52c9f8768e8",
+        "userName": "Ashraf Ali",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocK32oSCwj98aW8Loa2CIe0gbjO-PJ4t54yuDkIAu-WfRsOyuQ=mo",
+        "date": "2026-08-28T06:44:08.741Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=587f73d3-0a95-4c8f-b384-f52c9f8768e8",
+        "title": null,
+        "text": "nice app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "fbceb60e-273f-41f1-9dda-7fe6c4d6afec",
+        "userName": "Sampathkumar C",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXIEYV0XkuIjkuoTGtmdEYr0BhWAOrYvPzIIYFWFaQQC49t1yYYHA",
+        "date": "2026-08-28T06:42:22.941Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=fbceb60e-273f-41f1-9dda-7fe6c4d6afec",
+        "title": null,
+        "text": "Thank you for taking our feedback and bringing back the legacy UI which is much more useful and intuitive.",
+        "replyDate": "2026-08-23T09:33:13.268Z",
+        "replyText": "Hi Sampathkumar. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "29477126-054d-41d8-a400-148f3fbc6c11",
+        "userName": "Growdoc Professer",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLM2cPvm9RasE7Hi9ofQTXV1A96BAIhv3qCBwoT8R88QeiqDg=mo",
+        "date": "2026-08-28T05:54:13.369Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=29477126-054d-41d8-a400-148f3fbc6c11",
+        "title": null,
+        "text": "not perfect but works well",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "f38b487e-7ac6-4f1c-a870-71d01db9c4fc",
+        "userName": "Ms. Baker",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUQr-FNPWcye8UHJOIZ5oBhp9O0W-0xOG4PKj8J5BLU7FAcEghR7Q",
+        "date": "2026-08-28T03:35:30.183Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=f38b487e-7ac6-4f1c-a870-71d01db9c4fc",
+        "title": null,
+        "text": "AI (Derogatory)",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 2,
+        "criterias": []
+      },
+      {
+        "id": "02805c4a-589d-4f37-b7ac-927f76e94757",
+        "userName": "KiÑG víÇ.TøR",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKRtSRdIeMVgoR_BxvwIS-xZyi4uvCPY9wQKGqMzXnz3W1Z6A=mo",
+        "date": "2026-08-28T03:17:50.537Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=02805c4a-589d-4f37-b7ac-927f76e94757",
+        "title": null,
+        "text": "enjoyable",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "801f63dc-a816-4ac4-8cb2-25bd35e185c1",
+        "userName": "Sahil khan",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLL0pP0tCU_LDO0AFi4GDEEitZcXan7GI37x4DyhJ_IUqgCpw=mo",
+        "date": "2026-08-28T03:13:03.514Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=801f63dc-a816-4ac4-8cb2-25bd35e185c1",
+        "title": null,
+        "text": "very nice",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.20.41.923213375.5-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "892278b7-ac81-44bf-84b1-cc7d9446e648",
+        "userName": "Ha Ha",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJWMoqz8M8S89P6M82WX_O9Ny4MhnlrPI8uYQH-p0OctZg4YMIt=mo",
+        "date": "2026-08-28T00:44:27.864Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=892278b7-ac81-44bf-84b1-cc7d9446e648",
+        "title": null,
+        "text": "why not let me change font size?",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 12,
+        "criterias": []
+      },
+      {
+        "id": "6cc0b086-20a0-4b42-9745-868838254d7a",
+        "userName": "chun wei",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjW3TPedLP4r0Fy1effufJ9ERRcyQXG_IJJRaiRBmSEpZIj1Qcn4",
+        "date": "2026-08-28T00:40:49.467Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=6cc0b086-20a0-4b42-9745-868838254d7a",
+        "title": null,
+        "text": "an awful experience that is when I switch input methods the keyboard doesn't appear accordingly , need one more time to click on the input zone .",
+        "replyDate": "2024-11-20T06:56:14.896Z",
+        "replyText": "Hi Chun. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 16,
+        "criterias": []
+      },
+      {
+        "id": "36195f9d-2831-4d5b-a301-e22b356dc316",
+        "userName": "Endurance Victor",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJSMBn7G173QQViDR6rWsTNFNBz_I74c5nF50fLwkMB5OEgPA=mo",
+        "date": "2026-08-27T23:00:11.194Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=36195f9d-2831-4d5b-a301-e22b356dc316",
+        "title": null,
+        "text": "this understand this app some time",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "2d0834d3-f6f9-4a31-b5e8-7fae01072a62",
+        "userName": "Arfendo Thomas",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVSZX_ydLmebpCpLg8Zxs6wTI2tggczG7f0yXWp_i3NmyDFork",
+        "date": "2026-08-27T22:12:51.383Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2d0834d3-f6f9-4a31-b5e8-7fae01072a62",
+        "title": null,
+        "text": "Nice Apps",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "23de5cce-6105-4ba2-848a-c76badd4e9c7",
+        "userName": "Mamul Chimmul",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXaoHtj8ODl5h1EL2vsRyvk6qoIyiT_GeYsBwpFcse04X7D2w",
+        "date": "2026-08-27T22:02:04.362Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=23de5cce-6105-4ba2-848a-c76badd4e9c7",
+        "title": null,
+        "text": "Translate sehari hari",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 1
+          }
+        ]
+      },
+      {
+        "id": "eb5f3da7-61e2-4b6d-bf12-27702a112f41",
+        "userName": "Ehab Saad",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJyoDAdyU0fLwg0vstDbo6WJeuCunZsJ-wSuh-golDzMy4DbQ=mo",
+        "date": "2026-08-27T17:40:03.475Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=eb5f3da7-61e2-4b6d-bf12-27702a112f41",
+        "title": null,
+        "text": "vary bad",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "d4bdb845-457e-467c-9ab9-2acd06c5d41d",
+        "userName": "Frank Mowasat",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIkejk8oCkUpkHOBJQGXYYhWngDS54osiKnejybNYyScDS7jQ=mo",
+        "date": "2026-08-27T17:39:46.874Z",
+        "score": 2,
+        "scoreText": "2",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=d4bdb845-457e-467c-9ab9-2acd06c5d41d",
+        "title": null,
+        "text": "This app is messed up now. Your favorites disappear randomly from the list. Don't rely on it.",
+        "replyDate": "2026-08-28T00:35:39.834Z",
+        "replyText": "Hi Frank. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "96c93ecc-2329-4015-bfb2-b1a8796f476f",
+        "userName": "David Alber",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIUce8QJiL1UzTz5qBVFD27MCIMBpPjAai9uxrKGR4TUpZQUA=mo",
+        "date": "2026-08-27T17:26:07.450Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=96c93ecc-2329-4015-bfb2-b1a8796f476f",
+        "title": null,
+        "text": "It's a magnificent app actually 💯 without I wouldn't pass the the English test😂",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "20e0fd21-0b6f-4dc1-ad3d-65c76d6f24b8",
+        "userName": "Daniel",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV0J7oBfnU-BHbUZw9oWH3GiFsAZABKZIPBd4tothCO1tF8fh7e",
+        "date": "2026-08-27T17:06:43.267Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=20e0fd21-0b6f-4dc1-ad3d-65c76d6f24b8",
+        "title": null,
+        "text": "The new layout with practice and lessons tiles taking up half the screen is nonsense!",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 2,
+        "criterias": [
+          {
+            "criteria": "vaf_camera",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_never_display_content_language",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_never_display_useful_notifications",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "6946bc4f-ca26-41db-99c4-a25468254fcc",
+        "userName": "Nandi Devi",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLw4hbi9izCky4RzSv1kahLKyvGMplAG5Awqkot7gZInOF8hQ=mo",
+        "date": "2026-08-27T17:02:05.701Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=6946bc4f-ca26-41db-99c4-a25468254fcc",
+        "title": null,
+        "text": "very helpful 👍🏻",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "164fc2fe-7954-459e-b338-64c031e97e63",
+        "userName": "Juliet Nwaigwe",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWhsLH5NAI3KkNWUWvBQdTp1vm6PXIOnt8-N4iYnPMyXR33U-6d",
+        "date": "2026-08-27T14:31:52.813Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=164fc2fe-7954-459e-b338-64c031e97e63",
+        "title": null,
+        "text": "thanks for this app words can't say it all about how accurate 🤣 it is thanks 🙏",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "14797ad7-47d3-4ec3-a187-f0fcf8eb495d",
+        "userName": "محمد رضا نعمت الهی",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJ1rgaCSFaN1zRAgY641zMt8zN8DjlXVrgwKRVBeYXj6t_uMg=mo",
+        "date": "2026-08-27T14:31:00.224Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=14797ad7-47d3-4ec3-a187-f0fcf8eb495d",
+        "title": null,
+        "text": "good app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "8e3ace73-ba56-4426-98cb-069dee23b4ab",
+        "userName": "Oump n",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjX-u7RZx-r-6hqYRqUGUuuXvt6SerJxK-8Yqf9Wqm9O-afYmA",
+        "date": "2026-08-27T14:18:13.370Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=8e3ace73-ba56-4426-98cb-069dee23b4ab",
+        "title": null,
+        "text": "When you will stop automatic inferring the subject, verb, and object in the output ?",
+        "replyDate": "2026-03-06T08:46:46.958Z",
+        "replyText": "Hi there. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 14,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_usability",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "004a27a1-fb9c-4bb8-9b72-9e049186c364",
+        "userName": "Nisha Malik",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV6vbK70m0t3FNuphKk_WvBWc5cEUtD6_4FDCPzfM5obxnSc38",
+        "date": "2026-08-27T13:59:12.738Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=004a27a1-fb9c-4bb8-9b72-9e049186c364",
+        "title": null,
+        "text": "nice 👍 app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 1
+          }
+        ]
+      },
+      {
+        "id": "602d487c-e04e-4522-956b-348092ed69ab",
+        "userName": "పైసా కోసం పోరాటం",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLQgf6OvJaPZHxfuztB7n_pjISSmZe3wfhqx4ZwKnD6HyDl9Axm=mo",
+        "date": "2026-08-27T10:55:15.360Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=602d487c-e04e-4522-956b-348092ed69ab",
+        "title": null,
+        "text": "Superb",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.29.62.956181792.2-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": null
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": null
+          },
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": null
+          }
+        ]
+      },
+      {
+        "id": "9a4f25ca-0be3-4ee3-915d-19c03e65c7c0",
+        "userName": "Abdul a",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJO4GCmzlALgWJuv05hvC5TyoIwwXfVirPQG_L2ISUEKC7lAA=mo",
+        "date": "2026-08-27T08:49:11.961Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=9a4f25ca-0be3-4ee3-915d-19c03e65c7c0",
+        "title": null,
+        "text": "oh, nice",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "a75b2c6f-a900-42e8-a2b3-0ca22a18b462",
+        "userName": "Francis Asare",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIss5W3DKkePeQcZ7zOPG7krzSAPAv8ufeI_hZvJmCTxhpQFno=mo",
+        "date": "2026-08-27T08:32:57.125Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=a75b2c6f-a900-42e8-a2b3-0ca22a18b462",
+        "title": null,
+        "text": "good work well done is so nice keep on moving thank you very much",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "d4a5ac31-6d1c-4686-8f7b-9c5fbdc8ad91",
+        "userName": "Mirza Mahafuj Islam",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjU0qpiu212MXYtZbr405ecRj9Ry1QgZ4BH8CPxjcTuZeLQnSQOI",
+        "date": "2026-08-27T07:57:57.622Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=d4a5ac31-6d1c-4686-8f7b-9c5fbdc8ad91",
+        "title": null,
+        "text": "Nice Google translate App",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "3875dc91-856a-4c4e-b3fe-664f0d39832f",
+        "userName": "faizan zafar",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWkHX-5dNQcrrYr2F_RV6LyF7WJRaUrnmvF-ddCTzXXbJm8lSQ",
+        "date": "2026-08-27T06:28:10.483Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3875dc91-856a-4c4e-b3fe-664f0d39832f",
+        "title": null,
+        "text": "I was learning korean using this app. it had working well. but after the update now pronunciation is not correct.",
+        "replyDate": "2026-08-27T09:56:56.389Z",
+        "replyText": "Hi Faizan. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "3698d5d3-13d1-415f-ad64-09cf63054adb",
+        "userName": "A Google user",
+        "userImage": "https://play-lh.googleusercontent.com/EGemoI2NTXmTsBVtJqk8jxF9rh8ApRWfsIMQSt2uE4OcpQqbFu7f7NbTK05lx80nuSijCz7sc3a277R67g",
+        "date": "2026-08-27T06:20:23.118Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3698d5d3-13d1-415f-ad64-09cf63054adb",
+        "title": null,
+        "text": "translate icon don't support color pallets option. not matching with phones theme. please update",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "6880d704-c3e9-47a6-93ee-003eecad1afd",
+        "userName": "Mi Mi",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUKOhm7pnU3QbdF46Tm4AQ51nDJpuiPDXr13aH3PcyJFH2qaUc",
+        "date": "2026-08-27T04:20:07.440Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=6880d704-c3e9-47a6-93ee-003eecad1afd",
+        "title": null,
+        "text": "I cannot download I want to download ok",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "3a531b2a-f0e9-47fa-b93f-74c46c087285",
+        "userName": "amir jz6",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXKFzgSV9sNKNn26pIst-dXDVmS__wNi9N-TT1dLEPi-TuJnCSz",
+        "date": "2026-08-27T03:41:08.323Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3a531b2a-f0e9-47fa-b93f-74c46c087285",
+        "title": null,
+        "text": "Nice",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "1dcd2e10-dacb-4362-9afe-20dd4dbc9dee",
+        "userName": "Rob C",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIaPyzuPx933VWAdpBLTHlWU7oma0wMHW94exP7O3ooADOKfg=mo",
+        "date": "2026-08-27T02:15:51.865Z",
+        "score": 2,
+        "scoreText": "2",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=1dcd2e10-dacb-4362-9afe-20dd4dbc9dee",
+        "title": null,
+        "text": "Only Works Online. Others have noted the same. If the language is downloaded, you can only type your phrase out. The Mic doesn't work. When it's online with an internet connection, then everything works. Not good for no signal areas or some air travel. Too bad. Hope this gets modified down the road to fully work offline.",
+        "replyDate": "2026-08-27T09:38:36.650Z",
+        "replyText": "Hi Rob. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 5,
+        "criterias": []
+      },
+      {
+        "id": "7e062a55-ac9b-40a0-a21c-f5e948bf5d23",
+        "userName": "Anil",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVZz98nlW1xNSuv-c5ZLvus2LHFTqnQLej1wEgrsNfc4Y2Jykk",
+        "date": "2026-08-27T02:08:04.888Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=7e062a55-ac9b-40a0-a21c-f5e948bf5d23",
+        "title": null,
+        "text": "improve",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "74d08350-ffe1-457a-8272-49fb71fdd53c",
+        "userName": "Grant",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJuqWzgVjkxk989rbjtPeDGZ3cROqsyV6whVLypHLRysMMDEQ=mo",
+        "date": "2026-08-27T00:04:14.760Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=74d08350-ffe1-457a-8272-49fb71fdd53c",
+        "title": null,
+        "text": "this is amazing! I've had it for two years and this new practice feature is AMAZING! It personalizes your goal and you can add multiple goals! it actually teaches you to listen in the conversation and to speak! though I hope they will add where you can practice writing in the language. overall the BEST translator",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 2,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_frequency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 2
+          }
+        ]
+      },
+      {
+        "id": "78efb823-20a7-4ca2-8d3a-512af1abb28e",
+        "userName": "Ghulam Muh U Din",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWtiEDROiW8qWYnQMQRupUB3pNcbh6YUDcpGU_Qou8TSoU-de0",
+        "date": "2026-08-26T22:20:10.528Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=78efb823-20a7-4ca2-8d3a-512af1abb28e",
+        "title": null,
+        "text": "Please add proper Roman Urdu / Urdu offline dictionary and full translation support. Urdu is spoken by millions of users globally",
+        "replyDate": "2026-08-26T22:53:56.541Z",
+        "replyText": "Hi Ghulam. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "93383911-93ff-4849-bbde-059a76a9b8a6",
+        "userName": "Ramkumar Tandan",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKgge1s4Ox05g4Zskt08F8uIz5C3mOE_1EohVjfFKvhH5ZsEw=mo",
+        "date": "2026-08-26T22:15:00.607Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=93383911-93ff-4849-bbde-059a76a9b8a6",
+        "title": null,
+        "text": "Very helpful for me",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "bfc5c2a7-4dcd-42b0-84b7-c909354fb632",
+        "userName": "Lavnish",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocIlKvvyPaV6JtGq2A8lAvDisQwrnEMDCfsmYoGvGCBgh0HecA=mo",
+        "date": "2026-08-26T21:06:18.470Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=bfc5c2a7-4dcd-42b0-84b7-c909354fb632",
+        "title": null,
+        "text": "without this not possible to intract",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "3c24380d-f4f9-4ccf-9457-3739f3a934e1",
+        "userName": "Chikwendu Maxwell chinelo",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKLJFdc-EYaTrqzMDGbueS3R6B9lXdhmeShcEAraWtzJ1-6GQ=mo",
+        "date": "2026-08-26T20:58:09.636Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3c24380d-f4f9-4ccf-9457-3739f3a934e1",
+        "title": null,
+        "text": "I have not used it yet but I believe it will work well ❤️‍🩹",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.22.37.928447121.0-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "91e30e25-77ae-4428-9cc8-b806e7acd97f",
+        "userName": "Ugbem smith",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJPdaIw0ptsxkpO-yL_GzJIFO8uzAUwRdND4wj9kjpWXeqBGg=mo",
+        "date": "2026-08-26T20:49:29.958Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=91e30e25-77ae-4428-9cc8-b806e7acd97f",
+        "title": null,
+        "text": "Very good",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": null
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": null
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": null
+          }
+        ]
+      },
+      {
+        "id": "93268afc-f155-4a70-89c3-df005af3a829",
+        "userName": "Nick Columb",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKvytrX3pUvxNlystm1YvRNzPvV_ShqJWB810B-JKPpWHtnbQ=mo",
+        "date": "2026-08-26T18:45:53.824Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=93268afc-f155-4a70-89c3-df005af3a829",
+        "title": null,
+        "text": "doesn't work anymore. no definitions of each word that is being translated, so no way to differentiate between homonyms",
+        "replyDate": "2026-08-26T19:02:53.357Z",
+        "replyText": "Hi Nick. Let's try the troubleshooting steps in this guide: https://goo.gle/2rJSqBE. If the issue still persists, please create a post in the Google Translate Help Community to get help from our community of experts: goo.gle/2tkDc6j. Thanks.",
+        "version": null,
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "7cb5cccd-8e89-4230-8357-9991369ffaef",
+        "userName": "Shoaib Khan",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUkjck6fA6iWuJD3aojRxHsxM-XzJhMPl28XIJou-Jhiyj7h8A",
+        "date": "2026-08-26T18:37:27.670Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=7cb5cccd-8e89-4230-8357-9991369ffaef",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.25.51.941482215.4-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "485204ba-7189-453d-8490-bf26cf90391f",
+        "userName": "LPeng",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUWcrfiQK8l5CksqhW-8q3v_2HA59Eb7Lrv5jB5D3G2Q8YQjKZywA",
+        "date": "2026-08-26T17:55:58.104Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=485204ba-7189-453d-8490-bf26cf90391f",
+        "title": null,
+        "text": "80% accuracy",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 1
+          }
+        ]
+      },
+      {
+        "id": "b8ec0ee2-2ebc-4e2b-b21a-a5a9271130c3",
+        "userName": "Nikhil Soni (Writer nikhil soni)",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVyYynr-0uka0a2HLPZ79vnA9S3d3i2e23HrlfqRZRjFGZ6l-90Nw",
+        "date": "2026-08-26T17:47:11.611Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=b8ec0ee2-2ebc-4e2b-b21a-a5a9271130c3",
+        "title": null,
+        "text": "A horrible update in the new Google Translate Interface and working. The previous app was a lot better than the present update.",
+        "replyDate": "2026-08-26T18:15:46.833Z",
+        "replyText": "Hi Nikhil. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "2a05f650-1305-4576-8caa-0d3b56ca8cdd",
+        "userName": "mc l",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXBj-pHAvSxy7kn-X6JPkPq_QbxRLxNz87_jgtvtZd0-juUAXY",
+        "date": "2026-08-26T17:32:53.114Z",
+        "score": 2,
+        "scoreText": "2",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2a05f650-1305-4576-8caa-0d3b56ca8cdd",
+        "title": null,
+        "text": "keyboard translate problem",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "57641670-784e-4302-bb5a-82d25d0e9b1c",
+        "userName": "Solid Snake",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXEkDwQYl6X6-a4vHR_XWCn5TFLfVItSVAkWXm2qmTkad8zs-w",
+        "date": "2026-08-26T16:30:20.273Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=57641670-784e-4302-bb5a-82d25d0e9b1c",
+        "title": null,
+        "text": "great",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_stability",
+            "rating": 1
+          }
+        ]
+      },
+      {
+        "id": "a7423396-48b6-4556-971d-f0ad491888ce",
+        "userName": "Kumudu Lakshani",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJmBeM9MhwBeFmL2rUTnSSdckSy3Xpagyuba7qYpJl6QtlYAw=mo",
+        "date": "2026-08-26T16:29:59.944Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=a7423396-48b6-4556-971d-f0ad491888ce",
+        "title": null,
+        "text": "supar🥰🥰🥰🥰",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "cdb21d12-2257-41c8-85bc-1470a6d5e4f0",
+        "userName": "Michael Furama",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXlbj0_XzGHBIHWpZTP6XHwmBUN0663zUqjNps3RfpSI-cwrQXX",
+        "date": "2026-08-26T16:16:38.862Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=cdb21d12-2257-41c8-85bc-1470a6d5e4f0",
+        "title": null,
+        "text": "What the hell happened? After the latest update, my image reader language stuck in english, which what I need is Indonesian, and it suddenly reading Indonesian with weird english accent, please fix this immediately 🤦🏻‍♂️🤦🏻‍♂️",
+        "replyDate": "2026-08-26T17:38:10.335Z",
+        "replyText": "Hi Michael. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 2,
+        "criterias": []
+      },
+      {
+        "id": "b2806186-c231-4d02-9382-cceaa2e22a3b",
+        "userName": "Prateek Kumar",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVE3XOqa_PcxVwzPw3T_oRGuqUK4aY6HpSWCaySF2pTb62Y_hnr",
+        "date": "2026-08-26T16:14:34.519Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=b2806186-c231-4d02-9382-cceaa2e22a3b",
+        "title": null,
+        "text": "I get a lot of help from this, if I don't understand some things then I take help from this.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "c0dd7e27-2e65-42fa-9f50-86f4bedec237",
+        "userName": "Dave Stanley",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKykk5SKWztcsd55H78A8y0fYuHpf2nS3n84sFfxXKT5c723w=mo",
+        "date": "2026-08-26T16:11:28.548Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=c0dd7e27-2e65-42fa-9f50-86f4bedec237",
+        "title": null,
+        "text": "amazing experience ⭐",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "247c3eb5-dceb-4b2f-8ee4-56ddf0f2260a",
+        "userName": "Kingakubuilozeruuwa Gaddafi",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocLT-dejvU48vNtlyZb3vPl00LX_PBdMq288x3g2XpRKGDrJqw=mo",
+        "date": "2026-08-26T15:30:01.179Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=247c3eb5-dceb-4b2f-8ee4-56ddf0f2260a",
+        "title": null,
+        "text": "nice app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.28.62.953449214.8-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "8f59e692-f1f9-495b-9cfa-2e55f9d422b8",
+        "userName": "Cdhdxs Ccecc",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV8DAyGPCTUvdZ6HgC2fnSeXKf2YsvF2MiPIbFtnDzC40m-uTU",
+        "date": "2026-08-26T15:02:33.406Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=8f59e692-f1f9-495b-9cfa-2e55f9d422b8",
+        "title": null,
+        "text": "nice performance 👏",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "d19fa7fe-a29e-4a8e-a6b8-18cf0fb5e135",
+        "userName": "Hossain Comilla",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUTe3hLz2lqWQ3xov80AOvWsvrwG-OjVmidB9MARnanEQkOENRj",
+        "date": "2026-08-26T14:56:15.352Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=d19fa7fe-a29e-4a8e-a6b8-18cf0fb5e135",
+        "title": null,
+        "text": "so grate",
+        "replyDate": null,
+        "replyText": null,
+        "version": "9.16.17.799522718.4-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "0a85e906-e7c5-4d01-9980-788df2c827e6",
+        "userName": "Debajit Kherkatary",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVrDr76WrFtNOMc0u2jj6FkbJgl6eTDMnCxLE33HI_skMjHm7dh",
+        "date": "2026-08-26T14:19:41.877Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=0a85e906-e7c5-4d01-9980-788df2c827e6",
+        "title": null,
+        "text": "(⭐⭐⭐⭐⭐) Absolutely amazing app! A huge thank you to the Google team for creating such a beautiful and incredibly useful app! I love that it’s completely ad-free. The voice recognition is top-notch—it detects every single word accurately, even when speaking in a low voice or whisper. Truly impressive work! Keep it up!",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "494494ff-1726-4ac4-b9d7-5822ef92d6e8",
+        "userName": "Atma Ram",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVhl7K7UuVgf3MRsOHnTb-KotiQmc9OmldwErsHYVTjsvwHIf7h",
+        "date": "2026-08-26T14:17:48.752Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=494494ff-1726-4ac4-b9d7-5822ef92d6e8",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "b030acad-f1d8-4e88-95a8-d8bbace6305f",
+        "userName": "Kolos Fodor",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjX6r4PNcBKdb6rzgSn20UjmoHCz0O8Nt45liFT4LMiXYdJ3hbHZ",
+        "date": "2026-08-26T13:16:04.963Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=b030acad-f1d8-4e88-95a8-d8bbace6305f",
+        "title": null,
+        "text": "Google Translate ripoff",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "27561f50-75f9-4fcd-aa55-b2be8df0b77c",
+        "userName": "Erik Jakob Andersen",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJJUOe1ztTwnpcGyer9sIewlqaq0N9bR1qP_vekUZ5Ye-rM=mo",
+        "date": "2026-08-26T13:14:47.200Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=27561f50-75f9-4fcd-aa55-b2be8df0b77c",
+        "title": null,
+        "text": "Doing good",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "9ba21203-b85c-4a71-8465-32b38abe4db4",
+        "userName": "Rohit Kumar",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjXCII09rq15BKrq3eN2I5ch08UmLhg_3Cxm-F7PWomPGxpipzQ",
+        "date": "2026-08-26T12:38:55.591Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=9ba21203-b85c-4a71-8465-32b38abe4db4",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.23.29.934758792.2-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "2bf8edea-0f57-49c4-b6b9-dff16f9f57fc",
+        "userName": "Ahmad Hassan",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWks5lWiTFHyehYL_NjreaO0j_ESbV-1e-5rvVbXZa2YI-igP4",
+        "date": "2026-08-26T10:19:31.814Z",
+        "score": 2,
+        "scoreText": "2",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2bf8edea-0f57-49c4-b6b9-dff16f9f57fc",
+        "title": null,
+        "text": "No 🙂‍↔️ internet connection offline 🙂‍↔️",
+        "replyDate": "2026-08-26T12:35:05.920Z",
+        "replyText": "Hi Ahmad. We're sorry to hear about your experience. Could you please describe the issue you're experiencing in the Google Translate Help Community so we can investigate further: https://goo.gle/2tkDc6j? Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "609cde6b-de51-4303-8bd1-f9994cd9863e",
+        "userName": "Iosif Simon",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWtTM4SEi7ng9azpf6S0RVxOCEgmENHHEWBm8boJI8vEK8eWosa",
+        "date": "2026-08-26T09:32:55.911Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=609cde6b-de51-4303-8bd1-f9994cd9863e",
+        "title": null,
+        "text": "2026 and still so stupid",
+        "replyDate": "2026-08-26T09:55:33.376Z",
+        "replyText": "Hi Iosif. We're sorry to hear about your experience. Could you please describe the issue you're experiencing in the Google Translate Help Community so we can investigate further: https://goo.gle/2tkDc6j? Thanks.",
+        "version": "10.31.78.965777312.7-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "5964f13e-5889-4708-99c3-302e033fbc94",
+        "userName": "Kishan Qw Qw z",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWhYAbecFRiirpCxhP-KcPKUUO2uKNd71ZoVqMEFuwyfsMyoig",
+        "date": "2026-08-26T08:56:13.243Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=5964f13e-5889-4708-99c3-302e033fbc94",
+        "title": null,
+        "text": "this is amazing for learning any language. very good ui clean and smooth app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "2dd5d88b-221a-4605-b456-43d54b775d4d",
+        "userName": "Ngozikachukwu Ify",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKY8CYuw97P0JlKeqJZKOJHPM4dpkW66umjgjSkEFzXmj5smA=mo",
+        "date": "2026-08-26T08:45:31.107Z",
+        "score": 2,
+        "scoreText": "2",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2dd5d88b-221a-4605-b456-43d54b775d4d",
+        "title": null,
+        "text": "It is a good app but why does it not do speak out for most African languages 😕. That's the reason I don't like the app fully.You guys should stop trying to terminate African 🌍 language. Even not teaching the system others people languages why should I rate you for your app which refuses to teach me my language 🤔. 😒🙄😮‍💨. so will you people do about that.",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 2,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 3
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "2efff532-26dd-4096-b113-c70610769b31",
+        "userName": "Noob gaming YT",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUowSTD-WEL6PRa4j6zhax0CtTJNePV2UUdXPFzjoxkSk5mrMN9",
+        "date": "2026-08-26T08:40:57.888Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2efff532-26dd-4096-b113-c70610769b31",
+        "title": null,
+        "text": "Excellent app",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "aae3488e-38bf-4795-9389-0d1f86a2f42f",
+        "userName": "Yusuph Azizi",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjUrGbOP6x5KY-rzFpwHA25n1RoeXJXaFLLBBFN5hFGnDqWNZd4t",
+        "date": "2026-08-26T08:07:37.939Z",
+        "score": 4,
+        "scoreText": "4",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=aae3488e-38bf-4795-9389-0d1f86a2f42f",
+        "title": null,
+        "text": "cool but there are many mistake in translating wich may lead conflict it transalte differently but there are people who are mistyping so you can upgrade this app ao it can try to give exlpaination relating to the word thay was being mistyped",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "2b0eb215-3733-4a2b-a6b8-6ed4ff3613b5",
+        "userName": "Deva Pandian",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWzK4zDmPqJvTqGSInAWcElCvff0IwFOIFx4aJfHcnTS0dEQjR8",
+        "date": "2026-08-26T08:00:18.193Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=2b0eb215-3733-4a2b-a6b8-6ed4ff3613b5",
+        "title": null,
+        "text": "Poor update! Earlier we got synonyms for a word with explanation too. But now nothing is showing.",
+        "replyDate": "2023-10-12T17:41:34.543Z",
+        "replyText": "Hi Deva. We're sorry to hear about your experience. Could you please describe the issue you're experiencing in the Google Translate Help Community so we can investigate further: https://goo.gle/2tkDc6j? Thanks.",
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 2,
+        "criterias": []
+      },
+      {
+        "id": "736f698f-ebcc-4636-be78-761c308036f4",
+        "userName": "Zargham Zahid",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKnEUqA0RrA4YDH1llal-axhzwSeFauyz3Zo9tqWu2PmpD1tA=mo",
+        "date": "2026-08-26T07:45:48.742Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=736f698f-ebcc-4636-be78-761c308036f4",
+        "title": null,
+        "text": "best",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.30.62.961914158.8-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "3724cfb6-14e3-4961-a5e3-cdf11b0870d3",
+        "userName": "Matthew Vercoe",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjX-vFfLrfR5-IWOYN0XQO3OIJyMXR_dTKyHIyVBdueuv9M5JZU",
+        "date": "2026-08-26T07:43:07.168Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3724cfb6-14e3-4961-a5e3-cdf11b0870d3",
+        "title": null,
+        "text": "I like the app but for some reason I can use the ten ten button in the Japanese keyboard on my phone whilst translating a work from Japanese to English た　　to 　　だ　　button It stopped working recently and now I am trying to translate the word with a Japanese dictionary. please help",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "b179ee34-4583-4d6c-9bc9-32dd6e478d5a",
+        "userName": "A K",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJG9KsVaJoJJKec8K2FnQHDvcgY4LcSCAJTrFijY5W6iOJngQ=mo",
+        "date": "2026-08-26T07:41:59.588Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=b179ee34-4583-4d6c-9bc9-32dd6e478d5a",
+        "title": null,
+        "text": "ok",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_performance",
+            "rating": 1
+          },
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": null
+          }
+        ]
+      },
+      {
+        "id": "448c182c-f3cb-42eb-851f-407f16a3114d",
+        "userName": "Joseph Oghogho",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKcBGw1_WE_zUETML8bFK6AB4zyYwwBaMgmrNYDj1KKxwvkDw=mo",
+        "date": "2026-08-26T07:25:25.600Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=448c182c-f3cb-42eb-851f-407f16a3114d",
+        "title": null,
+        "text": "good and amazing",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_ads_intrusiveness",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_battery_efficiency",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "c46347db-7841-4082-ad17-098bba4fa972",
+        "userName": "A V",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjU7YbIGBRlZgzJmtIZBLi9YjcjTVQgyInX220h7iJA3ao76UXTZPQ",
+        "date": "2026-08-26T06:21:25.729Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=c46347db-7841-4082-ad17-098bba4fa972",
+        "title": null,
+        "text": "it needs AI and a fresh look",
+        "replyDate": "2026-08-26T09:57:48.181Z",
+        "replyText": "Hi there. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "cdb81992-4d21-46b6-ab16-b34c507649b8",
+        "userName": "ANIEKEME EDEM",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWoUtOW4wz0KqnUUU89sq6DJYvaafpXDJB7jj5-FY0Eyalz2zdB",
+        "date": "2026-08-26T06:09:12.816Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=cdb81992-4d21-46b6-ab16-b34c507649b8",
+        "title": null,
+        "text": "great application",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "8212c760-3854-4cd3-a895-c26dd76b1ac3",
+        "userName": "Nana Talal",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVU7UdMBmR-rW10uvmCZs7Fxyaax2DaeL-ONIaxGpkBkkHFbwQ",
+        "date": "2026-08-26T03:17:23.860Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=8212c760-3854-4cd3-a895-c26dd76b1ac3",
+        "title": null,
+        "text": "صار يعلق و يكتب كلام انا ما كتبته ويحرف من عنده",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "3c184eb4-70af-4809-8936-e66198b5da77",
+        "userName": "Ffg ggg",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocJQccaQnt_JaGIZwgIR9YvomVY1L3Isf0V8jMXMw7t9fpKz1A=mo",
+        "date": "2026-08-26T02:32:46.712Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3c184eb4-70af-4809-8936-e66198b5da77",
+        "title": null,
+        "text": "This Translation App is Trusted and Very Helpful In Our Life.This App Translated Any Language To Any Language. Try It Now This Is Free And No Paid. A New Feature Add in There Is Practice It Is Very Helpful to Speak Another Language. No More Today. Thanks Google Translete And Also Thanks Google",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "33a0afe5-606d-4d9a-a0e8-de246438a015",
+        "userName": "Walter Lasky",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjW4_I91GcKc-oFOtXhLv934YKfAaC93UeNIKmKe4hqiO3xk7PX0",
+        "date": "2026-08-25T23:14:20.894Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=33a0afe5-606d-4d9a-a0e8-de246438a015",
+        "title": null,
+        "text": "useful",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.30.62.961914158.8-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "181e7974-ba1f-4ab2-9b9f-093f0defeea8",
+        "userName": "DR muhammad Bashir Sherzad",
+        "userImage": "https://play-lh.googleusercontent.com/a/ACg8ocKEaKA3natsdoFyPw9auf3O6l493HOjKZZpfc2re1pPbuE8Aa8=mo",
+        "date": "2026-08-25T19:23:49.808Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=181e7974-ba1f-4ab2-9b9f-093f0defeea8",
+        "title": null,
+        "text": "good",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "0e228054-80cc-4987-b4ce-23248f80fd7d",
+        "userName": "Amanda",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWVe7c-YKOknEw_l57Vyda4UKZeb3Kcy4RKz7os6-y26I4BxF58",
+        "date": "2026-08-25T18:56:08.285Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=0e228054-80cc-4987-b4ce-23248f80fd7d",
+        "title": null,
+        "text": "AI integration is a game changer here!",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "3a3e8d3d-e66e-491f-80eb-241f76a3a108",
+        "userName": "Firdeus Kress",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjWbi6MarqpUn4XjHXPGsgxYI8l6F542kUPKV0WDyg118JUJln5hhQ",
+        "date": "2026-08-25T18:50:26.714Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=3a3e8d3d-e66e-491f-80eb-241f76a3a108",
+        "title": null,
+        "text": "thanks for everything",
+        "replyDate": null,
+        "replyText": null,
+        "version": null,
+        "thumbsUp": 0,
+        "criterias": []
+      },
+      {
+        "id": "a5c33eaf-38d9-4f7f-a8a4-4d9b1545407a",
+        "userName": "Linda Duckworth",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjULJXW8e3oLnzrbfv_8p3-9wsrBhxCD1g1JXre6rg8VHlKQD1VX",
+        "date": "2026-08-25T17:46:28.493Z",
+        "score": 3,
+        "scoreText": "3",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=a5c33eaf-38d9-4f7f-a8a4-4d9b1545407a",
+        "title": null,
+        "text": "I had complained about the English to Italian translation acting more like a literary editor than a translator. I now realise I was on the advanced setting (don't know how that happened) so have reverted to Classic, which I hope will do the job less officiously.",
+        "replyDate": "2026-08-24T12:37:39.923Z",
+        "replyText": "Hi Linda. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.31.78.964684200.6-release",
+        "thumbsUp": 2,
+        "criterias": [
+          {
+            "criteria": "vaf_app_quality_battery_heat",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_ads_presence",
+            "rating": 2
+          },
+          {
+            "criteria": "vaf_app_quality_visual_appeal",
+            "rating": 3
+          }
+        ]
+      },
+      {
+        "id": "27c6fb3b-616f-4536-9b9c-38c4651522c9",
+        "userName": "Phoolchand Mallah",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjV01bkvGIr5pCZ0JHwG2X01CI9r5bHarLCgKrwX0QAZcxrHoiWk",
+        "date": "2026-08-25T17:38:10.462Z",
+        "score": 5,
+        "scoreText": "5",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=27c6fb3b-616f-4536-9b9c-38c4651522c9",
+        "title": null,
+        "text": "Google Translate is a very useful and easy-to-use app. Translating text, voice, and photos in different languages is quite convenient. Using the camera to quickly understand a board or written text is very useful. You can download an offline language translation and translate without the internet. The speech and voice translation feature is also useful. While translations are sometimes less accurate in long sentences or conversations, it's still a great app for",
+        "replyDate": null,
+        "replyText": null,
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 1,
+        "criterias": []
+      },
+      {
+        "id": "4afb013e-b4dc-44d3-b706-700492a5101b",
+        "userName": "Pradipta Hore",
+        "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjX2xFuatr41KnUPa0VD1mEnyUaW3sbWJgWocKCsiydKqELmBXh_sg",
+        "date": "2026-08-25T17:31:00.893Z",
+        "score": 1,
+        "scoreText": "1",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&reviewId=4afb013e-b4dc-44d3-b706-700492a5101b",
+        "title": null,
+        "text": "It is too good and user friendly but the updated app is just 3rd class 😔😔 when i use and gave a wrong spelling but its doesn't correct but old version is so much good 😊",
+        "replyDate": "2026-08-25T18:14:41.840Z",
+        "replyText": "Hi Pradipta. We'd like our users to have the best possible experience with the Google Translate app. We'll share your feedback with our product team. Thanks.",
+        "version": "10.32.66.968464732.6-release",
+        "thumbsUp": 0,
+        "criterias": []
+      }
+    ],
+    "next_page_token": "Ct8BItYBAXtFU-tOCkLpAQjFza8WSoml3buDEcShjgibKmvDPKFmInE3nQoq1Qf5n22iV_3ywKkiSMV7CIP_h6zIaHJfR20VgcUlkSojoPeMoLplsOVYgGPnIlK-KrL8Mxj0NajI4_nuui0h7CShgRSr7BxqheMl086KfYxmH2LFgzd3eUNm3Cc39pmfnwR_Wdw84rOS4dNDOMOXLto0Gr0qQCZL8T-aE8AKMAWW5RNCNkpZZ4Wq_a5KYjZe271jdARCPVZ9KRS006goG1r8JH6trv5oDGC6dn4wryinkpbVBg",
+    "has_more": true
+  },
+  "warnings": [
+    "Only the requested review pages were collected; use next_page_token with the same app, language, country and sort to continue."
+  ],
+  "error": null,
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-fad5b7da39804291b0e8d9a67d350061",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=qnKhOb&f.sid=-697906427155521722&bl=boq_playuiserver_20190903.08_p0&hl=en&gl=us&authuser&soc-app=121&soc-platform=1&soc-device=1&_reqid=1065213"
+  ]
+}

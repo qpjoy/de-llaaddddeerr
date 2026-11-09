@@ -1,0 +1,108 @@
+{
+  "id": 104,
+  "target": "https://kick.com/mxddy?clip=clip_01GYXVB5Y8PWAPWCWMSBCFB05X",
+  "observed_at": "2026-09-10T16:39:19.560704+00:00",
+  "python": "3.13.3",
+  "live_data_verified": true,
+  "status": "success",
+  "capabilities_verified": [
+    "video_metadata",
+    "media_url"
+  ],
+  "data": {
+    "id": "clip_01GYXVB5Y8PWAPWCWMSBCFB05X",
+    "formats": [
+      {
+        "url": "https://clips.kick.com/clips/5x/clip_01GYXVB5Y8PWAPWCWMSBCFB05X/a058765b-5da1-4f82-8861-4ee27c0af7cd.mp4",
+        "protocol": "https",
+        "ext": "mp4",
+        "video_ext": "mp4",
+        "audio_ext": "none",
+        "vbr": null,
+        "abr": null,
+        "tbr": null,
+        "resolution": null,
+        "dynamic_range": "SDR",
+        "aspect_ratio": null,
+        "filesize_approx": null,
+        "cookies": "__cf_bm=o2WWIXhRLHQ0D8ySuT9fUjeI4Jv_nvoc6IrZP88VWoE-1789058362.6531744-1.0.1.1-mfcDObbcslvavBUfwP3klcLQ8nMHK5k3HgXaZu8RQm2mu8NJpPZslvpzAJ3F2WHw30hRTB9qOJetjr7ToEkTUDxw03XqvJFupcQsNWEIKMTe4HMTSzj8FM82asa19SBU; Domain=.kick.com; Path=/; Secure; Expires=1789060162; _cfuvid=yodaR7v8d2fRaxqUKv34V2WX.gNnquuuF8E6sb9sLKE-1789058362.6531744-1.0.1.1-Sxx3FY.Ax9XHCIPlkaaklZXZ4Qf20zYm9YqBBVJ0hEw; Domain=.kick.com; Path=/; Secure",
+        "http_headers": {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-us,en;q=0.5",
+          "Sec-Fetch-Mode": "navigate"
+        },
+        "format_id": "0",
+        "format": "0 - unknown"
+      }
+    ],
+    "title": "Maddy detains Abd D:",
+    "channel": "mxddy",
+    "channel_id": "133789",
+    "uploader": "AbdCreates",
+    "uploader_id": "3309077",
+    "thumbnail": "https://clips.kick.com/clips/5x/clip_01GYXVB5Y8PWAPWCWMSBCFB05X/a058765b-5da1-4f82-8861-4ee27c0af7cd-thumbnail.jpeg",
+    "duration": 35.0,
+    "categories": [
+      "VALORANT"
+    ],
+    "timestamp": 1682481453,
+    "view_count": 1660,
+    "like_count": 0,
+    "age_limit": 18,
+    "webpage_url": "https://kick.com/mxddy?clip=clip_01GYXVB5Y8PWAPWCWMSBCFB05X",
+    "original_url": "https://kick.com/mxddy?clip=clip_01GYXVB5Y8PWAPWCWMSBCFB05X",
+    "webpage_url_basename": "mxddy",
+    "webpage_url_domain": "kick.com",
+    "extractor": "kick:clips",
+    "extractor_key": "KickClip",
+    "playlist": null,
+    "playlist_index": null,
+    "thumbnails": [
+      {
+        "url": "https://clips.kick.com/clips/5x/clip_01GYXVB5Y8PWAPWCWMSBCFB05X/a058765b-5da1-4f82-8861-4ee27c0af7cd-thumbnail.jpeg",
+        "id": "0"
+      }
+    ],
+    "display_id": "clip_01GYXVB5Y8PWAPWCWMSBCFB05X",
+    "fulltitle": "Maddy detains Abd D:",
+    "duration_string": "35",
+    "upload_date": "20230426",
+    "release_year": null,
+    "requested_subtitles": null,
+    "_has_drm": null,
+    "epoch": 1789058363,
+    "url": "https://clips.kick.com/clips/5x/clip_01GYXVB5Y8PWAPWCWMSBCFB05X/a058765b-5da1-4f82-8861-4ee27c0af7cd.mp4",
+    "protocol": "https",
+    "ext": "mp4",
+    "video_ext": "mp4",
+    "audio_ext": "none",
+    "vbr": null,
+    "abr": null,
+    "tbr": null,
+    "resolution": null,
+    "dynamic_range": "SDR",
+    "aspect_ratio": null,
+    "filesize_approx": null,
+    "cookies": "__cf_bm=o2WWIXhRLHQ0D8ySuT9fUjeI4Jv_nvoc6IrZP88VWoE-1789058362.6531744-1.0.1.1-mfcDObbcslvavBUfwP3klcLQ8nMHK5k3HgXaZu8RQm2mu8NJpPZslvpzAJ3F2WHw30hRTB9qOJetjr7ToEkTUDxw03XqvJFupcQsNWEIKMTe4HMTSzj8FM82asa19SBU; Domain=.kick.com; Path=/; Secure; Expires=1789060162; _cfuvid=yodaR7v8d2fRaxqUKv34V2WX.gNnquuuF8E6sb9sLKE-1789058362.6531744-1.0.1.1-Sxx3FY.Ax9XHCIPlkaaklZXZ4Qf20zYm9YqBBVJ0hEw; Domain=.kick.com; Path=/; Secure",
+    "http_headers": {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-us,en;q=0.5",
+      "Sec-Fetch-Mode": "navigate"
+    },
+    "format_id": "0",
+    "format": "0 - unknown",
+    "_type": "video",
+    "_version": {
+      "version": "2026.08.19",
+      "current_git_head": null,
+      "release_git_head": "594bd50c2c78ac432f81600d309fdc4e0a92d82c",
+      "repository": "yt-dlp/yt-dlp"
+    }
+  },
+  "limits": [
+    "media was not downloaded",
+    "comments/chat/channel enumeration not verified"
+  ]
+}

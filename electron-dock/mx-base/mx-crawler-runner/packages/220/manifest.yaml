@@ -1,0 +1,104 @@
+manifest_version: '1.0'
+project_id: '220'
+source_id: '220'
+name: Apple Podcasts
+target_platform: Apple Podcasts
+languages:
+- Python
+runtime:
+  python: '>=3.11'
+  optional_tools: FFmpeg with libopus; only format=opus
+entrypoint:
+  file: adapter.py
+  callable: invoke
+  native: main.py
+  python: audiosource_220.invoke
+  async: audiosource_220.invoke_async
+  input: 'stdin: one UTF-8 JSON object, <=1MiB'
+  output: 'stdout: one JSON object'
+  logs: stderr
+  concurrency: one active operation per run_dir
+upstream:
+  repository: https://github.com/yinhao0214/AudioSpider
+  commit: cbc055436b71fa3f3882bedc95b65bad4dec2553
+  license: MIT
+capabilities:
+- 美国区默认的播客关键词搜索、分类榜单和单集采集
+- bounded RSS enclosure parsing (internal only)
+- optional resumable download
+- optional Opus conversion
+credentials:
+  required: false
+  environment: []
+dependency_files:
+- requirements.txt
+- requirements.lock
+- pyproject.toml
+request_schema:
+  type: object
+  required:
+  - operation
+  - params
+  additionalProperties: false
+  properties:
+    operation:
+      enum:
+      - discover
+      - collect
+      - list_records
+      - download
+      - stats
+    params:
+      type: object
+      required:
+      - run_dir
+operations:
+  discover:
+    modes:
+    - search
+    - charts
+    parameters:
+      keyword: search 模式必填，1–200 字符
+      country: 默认 us，两位小写地区代码
+      genre_id: charts 模式必填分类 ID，如 1318
+      mode: search（默认）或 charts
+    limit: default10,1..200
+  collect:
+    collection_ids: optional IDs returned by discover
+    refresh: false by default; true revisits known feeds
+    feed_limit: default5,1..50
+    episodes_per_feed: default10,1..200
+  list_records:
+    record_ids: optional ID list
+    status: optional pending/downloading/done/failed
+    limit: default20,1..1000
+    offset: default0
+  download:
+    record_ids: optional ID list; otherwise pending
+    retry_failed: true selects failed instead of pending when IDs absent
+    limit: default1,1..100
+    format: original(default)|opus
+    max_file_bytes: default104857600,max2147483648
+    ffmpeg_path: optional executable path
+    conversion_timeout: default120s,max600s
+  stats: {}
+common_parameters:
+  run_dir: required caller-owned path outside installed package
+  concurrency: default2,1..16
+  request_timeout: default30s,1..120
+  total_timeout: default180s (download600s),1..3600
+response_schema:
+  schema_version: '1.0'
+  project_id: '220'
+  source_id: '220'
+  operation: string|null
+  observed_at: UTC ISO8601
+  status: success|no_data|partial|unknown|error
+  result:
+    items: collection/episode/download records by operation
+    errors: per-item structured errors
+    warnings: string[]
+    stats: collection and download counts
+    pagination: list_records only
+  error: null or {code,message}
+verification: See acceptance; offline tests never imply live source coverage

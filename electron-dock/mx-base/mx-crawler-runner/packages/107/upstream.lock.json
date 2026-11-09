@@ -1,0 +1,74 @@
+{
+  "id": 107,
+  "platform": "WordPress.com",
+  "slug": "wordpress_com",
+  "repo": "bohdanbobrowski/blog2epub",
+  "kind": "采集器候选，输出需适配",
+  "capability": "针对 wordpress.com 博客采集正文，部分站点可带评论，生成 EPUB",
+  "limits": "原生输出为 EPUB，尚需适配业务 JSON；不是 WordPress.com REST SDK；作者、页面及外链字段需逐项验证。",
+  "observed_at": "2026-09-10T16:27:34.611021+00:00",
+  "path": "domain_sources/platforms/107/upstream/bohdanbobrowski__blog2epub",
+  "origin": "https://github.com/bohdanbobrowski/blog2epub.git",
+  "commit": "97ab6fe30793623ad5e1eafcffb1609b20842a33",
+  "commit_date": "2025-11-27T21:04:58+01:00",
+  "commit_subject": "AppImage",
+  "clean": true,
+  "tracked_files": 130,
+  "pull_status": "cloned",
+  "live_data_verified": true,
+  "github_metadata": {
+    "full_name": "bohdanbobrowski/blog2epub",
+    "default_branch": "master",
+    "archived": false,
+    "pushed_at": "2026-08-09T20:15:01Z",
+    "language": "Python",
+    "license": {
+      "key": "mit",
+      "name": "MIT License",
+      "spdx_id": "MIT",
+      "url": "https://api.github.com/licenses/mit",
+      "node_id": "MDc6TGljZW5zZTEz"
+    }
+  },
+  "verification": {
+    "id": 107,
+    "observed_at": "2026-09-10T16:30:35.389875+00:00",
+    "live_data_verified": false,
+    "evidence": [
+      {
+        "file": "blog2epub/crawlers/wordpress.py",
+        "tokens": [
+          "class WordpressCrawler"
+        ],
+        "sha256": "6439fd3ac05b582d58af1d7c4ad9332ca92d3a049ad78efa4143d50acc856610"
+      },
+      {
+        "file": "blog2epub/blog2epub_main.py",
+        "tokens": [
+          ".wordpress.com"
+        ],
+        "sha256": "49531dd991fa34da7db42508a78eba222bab9fab0a12e66652136b5f6227c95b"
+      }
+    ],
+    "source_checks_passed": true
+  },
+  "live_validation": {
+    "id": 107,
+    "platform": "WordPress.com",
+    "slug": "wordpress_com",
+    "repo": "bohdanbobrowski/blog2epub",
+    "commit": "97ab6fe30793623ad5e1eafcffb1609b20842a33",
+    "status": "success",
+    "label": "已取得真实数据（限下列能力）",
+    "live_data_verified": true,
+    "note": "成功采集 WordPress.com 博客中的 1 个页面和 1 篇文章；HTML 包含额外页面内容，需清洗；结构化作者和评论未验收。",
+    "capabilities_verified": [
+      "blog_content",
+      "page_content"
+    ],
+    "evidence": "domain_sources/platforms/107/validation/live-reviewed.json",
+    "observed_at": "2026-09-10T16:41:47.359658+00:00",
+    "target": "https://19thcentury.wordpress.com",
+    "coverage_action": "preserve_status_append_note"
+  }
+}

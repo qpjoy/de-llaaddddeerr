@@ -1,0 +1,4 @@
+{
+  "url": "https://www.25pp.com/xiazai/566489/",
+  "error": "HTTPSConnectionPool(host='www.25pp.com', port=443): Max retries exceeded with url: /xiazai/566489/ (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1028)')))"
+}

@@ -1,0 +1,116 @@
+manifest_version: '1.0'
+project_id: '98'
+source_id: '98'
+name: Snapchat Spotlight
+target_platform: Snapchat Spotlight
+languages:
+- Python
+runtime:
+  python: '>=3.11'
+  additional: 无新增运行工具
+entrypoint:
+  file: adapter.py
+  callable: invoke
+  command:
+  - python
+  - adapter.py
+  input: 'stdin: one UTF-8 JSON object'
+  output: 'stdout: one JSON object'
+  logs: stderr; existing log files retained
+  concurrency: one adapter process per request
+dependency_files:
+- pyproject.toml
+- requirements.lock.txt
+- upstream.lock.json
+credentials:
+  required: false
+  environment: []
+  notes: 当前入口使用公开数据；具体访问限制和原生凭据配置见 README.legacy.md。
+verification:
+  adapter: 见 ADAPTER_VERIFICATION.json；与实时取数状态分开
+  live: 未在本次整理中重新联网验收
+  limits: 已有范围及历史验收记录见 README.legacy.md；本次不扩展采集能力。
+request_schema:
+  type: object
+  required:
+  - operation
+  properties:
+    operation:
+      enum:
+      - collect
+    params:
+      type: object
+      description: 参数结构按 operations 对应项校验；省略等价于空对象。
+  additionalProperties: false
+response_schema:
+  type: object
+  required:
+  - schema_version
+  - project_id
+  - source_id
+  - operation
+  - observed_at
+  - status
+  - result
+  - error
+  properties:
+    schema_version:
+      const: '1.0'
+    project_id:
+      type: string
+    source_id:
+      type: string
+    operation:
+      type:
+      - string
+      - 'null'
+    observed_at:
+      type: string
+      format: date-time
+    status:
+      enum:
+      - success
+      - no_data
+      - partial
+      - unknown
+      - error
+      - stopped
+    result:
+      type:
+      - object
+      - array
+      - 'null'
+      description: 原 SDK 完整 JSON 结果，保留来源、观察时间、告警、分页和错误；详见 README.legacy.md。
+    error:
+      type:
+      - object
+      - 'null'
+      properties:
+        code:
+          type: string
+  additionalProperties: false
+operations:
+  collect:
+    implemented: true
+    sdk: mingxi_source_98.collect
+    input_schema:
+      type: object
+      properties:
+        target:
+          type: string
+          description: 原 SDK 类型：str
+        work_dir:
+          type: string
+          description: 原 SDK 类型：str | Path
+          default: data
+        timeout:
+          type: number
+          description: 原 SDK 类型：float
+          default: 110
+      required:
+      - target
+      additionalProperties: false
+    result_description: 保留原始 JSON；细项字段、分页和限制见 README.legacy.md。
+    live_verification: 参见历史验收；本次未联网复测
+capabilities:
+- 指定 Spotlight 视频元数据和媒体链接

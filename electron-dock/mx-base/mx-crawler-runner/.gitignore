@@ -1,0 +1,9 @@
+# Installed environments and runtime data; the image rebuilds them from the
+# reviewed lock files (scripts/install-packages.mjs).
+.venvs/
+packages/*/.venv
+packages/*/.runtime/
+packages/*/data/
+__pycache__/
+*.pyc
+.data/

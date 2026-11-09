@@ -1,0 +1,88 @@
+{
+  "id": 98,
+  "target": "https://www.snapchat.com/spotlight/W7_EDlXWTBiXAEEniNoMPwAAYZGtpbXFpZnZqAZUFGkyWAZUFGkx8AAAAAQ",
+  "observed_at": "2026-09-10T16:41:24.226062+00:00",
+  "python": "3.13.3",
+  "live_data_verified": true,
+  "status": "success",
+  "capabilities_verified": [
+    "video_metadata",
+    "media_url"
+  ],
+  "data": {
+    "id": "W7_EDlXWTBiXAEEniNoMPwAAYZGtpbXFpZnZqAZUFGkyWAZUFGkx8AAAAAQ",
+    "ext": "mp4",
+    "title": "Spotlight Snap",
+    "description": "Grate expectationsfeat. Digby Webster #cooking #veggies #cooking #chefs #bussin #spotlight #snapchat #fyp",
+    "timestamp": 1739547364.476,
+    "view_count": 20421,
+    "repost_count": 521,
+    "url": "https://cf-st.sc-cdn.net/d/0lcJiZMBjbs3c6VeuWFKK.27.IRZXSOY?mo=GpIBGgkyAQRIAlAuYAFaEFNwb3RsaWdodFNoYXJpbmeiAW0IGxJcCloI-5nfASABSk8KSnImIiFmLCUdWSEYGh4daxsfGiBMHyQjJiAbdzYtLSUrIC4wJiYpKTEmIyIqHiqCATUvJlMgIBweIhdqOEYyPDg-ND09NlUociIYEPQDaAIiCxIAKgdJUlpYU09ZkAOAnQI%3D&uc=46",
+    "width": 540,
+    "height": 960,
+    "duration": 36.48,
+    "thumbnail": "https://cf-st.sc-cdn.net/d/0lcJiZMBjbs3c6VeuWFKK.256.IRZXSOY?mo=GkMaCTIBBEgCUC5gAVoQRGZMYXJnZVRodW1ibmFpbKIBEAiAAiILEgAqB0lSWlhTT1miARAImgoiCxIAKgdJUlpYU09Z&uc=46",
+    "uploader": "getdownwithsand",
+    "uploader_url": "https://www.snapchat.com/@getdownwithsand",
+    "tags": [
+      "#snapchat",
+      "#spotlight",
+      "#fyp",
+      "#cooking",
+      "#veggies",
+      "#chefs",
+      "#bussin"
+    ],
+    "webpage_url": "https://www.snapchat.com/spotlight/W7_EDlXWTBiXAEEniNoMPwAAYZGtpbXFpZnZqAZUFGkyWAZUFGkx8AAAAAQ",
+    "original_url": "https://www.snapchat.com/spotlight/W7_EDlXWTBiXAEEniNoMPwAAYZGtpbXFpZnZqAZUFGkyWAZUFGkx8AAAAAQ",
+    "webpage_url_basename": "W7_EDlXWTBiXAEEniNoMPwAAYZGtpbXFpZnZqAZUFGkyWAZUFGkx8AAAAAQ",
+    "webpage_url_domain": "snapchat.com",
+    "extractor": "SnapchatSpotlight",
+    "extractor_key": "SnapchatSpotlight",
+    "playlist": null,
+    "playlist_index": null,
+    "thumbnails": [
+      {
+        "url": "https://cf-st.sc-cdn.net/d/0lcJiZMBjbs3c6VeuWFKK.256.IRZXSOY?mo=GkMaCTIBBEgCUC5gAVoQRGZMYXJnZVRodW1ibmFpbKIBEAiAAiILEgAqB0lSWlhTT1miARAImgoiCxIAKgdJUlpYU09Z&uc=46",
+        "id": "0"
+      }
+    ],
+    "display_id": "W7_EDlXWTBiXAEEniNoMPwAAYZGtpbXFpZnZqAZUFGkyWAZUFGkx8AAAAAQ",
+    "fulltitle": "Spotlight Snap",
+    "duration_string": "36",
+    "upload_date": "20250214",
+    "release_year": null,
+    "requested_subtitles": null,
+    "_has_drm": null,
+    "protocol": "https",
+    "video_ext": "mp4",
+    "audio_ext": "none",
+    "vbr": null,
+    "abr": null,
+    "tbr": null,
+    "resolution": "540x960",
+    "dynamic_range": "SDR",
+    "aspect_ratio": 0.56,
+    "filesize_approx": null,
+    "http_headers": {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-us,en;q=0.5",
+      "Sec-Fetch-Mode": "navigate"
+    },
+    "format_id": "0",
+    "format": "0 - 540x960",
+    "epoch": 1789058488,
+    "_type": "video",
+    "_version": {
+      "version": "2026.08.19",
+      "current_git_head": null,
+      "release_git_head": "594bd50c2c78ac432f81600d309fdc4e0a92d82c",
+      "repository": "yt-dlp/yt-dlp"
+    }
+  },
+  "limits": [
+    "media was not downloaded",
+    "comments/chat/channel enumeration not verified"
+  ]
+}

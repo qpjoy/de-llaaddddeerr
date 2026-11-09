@@ -1,0 +1,107 @@
+{
+  "project_id": "94",
+  "observed_at": "2026-09-15T02:15:00.857419+00:00",
+  "kind": "adapter_reorganization_offline",
+  "isolated_copy": true,
+  "live_queries_performed": false,
+  "checks": [
+    {
+      "check": "create_environment",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.12,
+      "detail": "passed"
+    },
+    {
+      "check": "locked_dependencies",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.86,
+      "detail": "passed"
+    },
+    {
+      "check": "project_install",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.72,
+      "detail": "passed"
+    },
+    {
+      "check": "local_upstream_install",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 9.66,
+      "detail": "passed"
+    },
+    {
+      "check": "sdk_import",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.13,
+      "detail": "passed"
+    },
+    {
+      "check": "upstream_import",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.12,
+      "detail": "passed"
+    },
+    {
+      "check": "pip_check",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.35,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_help",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.06,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_contract_final",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "all_sdk_bindings_import",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "actual_sdk_offline_path",
+      "passed": true,
+      "status": "error",
+      "exit_code": 1
+    }
+  ],
+  "offline_sample": {
+    "schema_version": "1.0",
+    "project_id": "94",
+    "source_id": "94",
+    "operation": "collect",
+    "observed_at": "2026-09-15T02:19:16.541201+00:00",
+    "status": "error",
+    "result": {
+      "id": 94,
+      "target": "not-a-url",
+      "observed_at": "2026-09-15T02:19:16.524410+00:00",
+      "live_data_verified": false,
+      "status": "failed",
+      "error_type": "ValueError",
+      "error": "target must be a complete public HTTP(S) URL"
+    },
+    "error": {
+      "code": "SOURCE_ERROR"
+    }
+  },
+  "adapter_sha256": "1e29f716697280f7ae60e527c2e5e5bd9cfe6d98b40063b59d8b51fed6ce94c5",
+  "manifest_sha256": "ebc83ba06273ca4f78f037e205f90e8d4651b39980b686c978b16fd36e1226e1",
+  "passed": true,
+  "final_checked_at": "2026-09-15T02:19:16.558100+00:00"
+}

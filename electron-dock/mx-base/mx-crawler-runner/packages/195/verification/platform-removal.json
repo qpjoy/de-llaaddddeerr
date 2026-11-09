@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-12",
+  "status": "completed",
+  "removed_platform_ids": [
+    194,
+    218
+  ],
+  "retained_app_market_ids": [
+    195,
+    197,
+    198,
+    216,
+    217,
+    219
+  ],
+  "reason": "User requested removal of platforms observed timing out, retaining normal platforms.",
+  "workbook": "G:\\data_tongbu\\明悉科技-数据源表.xlsx",
+  "backup": "G:\\data_tongbu\\backups\\明悉科技-数据源表_移除超时平台前_20260912_183559.xlsx",
+  "workbook_before_sha256": "1de0702eb9bd08dbe602d59fecdd05aff77d7453c52639a5f74d26406b8f86ef",
+  "workbook_after_sha256": "a4e6128396590ae0b9e149c94b553ed79b9b6747e6bff49d3bed4f658bc6673d",
+  "sheets_updated": [
+    "数据表",
+    "数据表1"
+  ],
+  "other_cells_verified_unchanged": 5052,
+  "styles_and_validation_rules_preserved": true,
+  "rows_194_and_218_retained": true,
+  "new_live_queries": false,
+  "retained_code_hashes_verified": true,
+  "document_links_verified": true,
+  "retained_live_evidence_verified": true
+}

@@ -1,0 +1,60 @@
+{
+  "market": "yingyonghui",
+  "mode": "detail-package-list",
+  "value": "com.tencent.mobileqq",
+  "history": false,
+  "observed_at": "2026-09-12T10:01:54.413736+00:00",
+  "items": [
+    {
+      "collection": "yingyonghui",
+      "unique_fields": [
+        "packageName",
+        "versionCode"
+      ],
+      "payload": {
+        "_meta": {
+          "market": "yingyonghui",
+          "mode": "detail-package-list",
+          "input_value": "com.tencent.mobileqq",
+          "record_type": "detail"
+        }
+      }
+    },
+    {
+      "market": "yingyonghui",
+      "mode": "detail-package-list",
+      "input_value": "com.tencent.mobileqq",
+      "success": 1,
+      "error": null
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "url": "https://mobile.appchina.com/market/api",
+      "status": 200,
+      "input": "com.tencent.mobileqq",
+      "body": "{}"
+    }
+  ],
+  "stats": {
+    "start_time": "2026-09-12 10:01:54.641150+00:00",
+    "scheduler/enqueued/memory": 1,
+    "scheduler/enqueued": 1,
+    "scheduler/dequeued/memory": 1,
+    "scheduler/dequeued": 1,
+    "downloader/request_count": 1,
+    "downloader/request_method_count/POST": 1,
+    "downloader/request_bytes": 827,
+    "downloader/response_count": 1,
+    "downloader/response_status_count/200": 1,
+    "downloader/response_bytes": 132,
+    "response_received_count": 1,
+    "item_scraped_count": 2,
+    "elapsed_time_seconds": 2.849152,
+    "finish_time": "2026-09-12 10:01:57.490302+00:00",
+    "finish_reason": "finished",
+    "responses_per_minute": 30.0,
+    "items_per_minute": 60.0
+  }
+}

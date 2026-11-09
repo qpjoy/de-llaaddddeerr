@@ -1,0 +1,85 @@
+{
+  "market": "baidu",
+  "mode": "package-list",
+  "value": "com.tencent.mobileqq",
+  "history": false,
+  "observed_at": "2026-09-12T10:01:49.475287+00:00",
+  "items": [
+    {
+      "collection": "baidu",
+      "unique_fields": [
+        "package",
+        "versioncode"
+      ],
+      "payload": {
+        "adv_item": "source+natural@pos+1@bid+0@ctr+0.000000@trans+@keyword+@app_rcv+",
+        "all_download": "22.2亿下载",
+        "appdistrans": "{\"trans_data\":\"{\\\"adv_flag\\\":2,\\\"rank\\\":1,\\\"pid\\\":1858121943,\\\"docid\\\":5015764872,\\\"ad_source\\\":\\\"natural\\\",\\\"packagename\\\":\\\"com.tencent.mobileqq\\\",\\\"appname\\\":\\\"QQ\\\",\\\"query\\\":\\\"\\\",\\\"req_type\\\":5,\\\"from\\\":\\\"client_detail\\\",\\\"search_id\\\":\\\"0000000000000000\\\",\\\"eid_str\\\":\\\"1231210#1980\\\",\\\"rewrite_sid\\\":\\\"0000000000000000\\\",\\\"boardid\\\":0}\"}",
+        "cateid": 304000,
+        "catename": "",
+        "ccrc": 0,
+        "display_count_fmt": "37.9万",
+        "display_score_in_5": "4.0",
+        "docid": 5015764872,
+        "download_inner": "https://gdown.baidu.com/appcenter/pkg/upload/5a9cf6b3bbdb7c2f8e02f5883c9eed47?prodid=1",
+        "f": "",
+        "groupid": 5000751235,
+        "icon": "http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa5447c5cdb454c77935ce3fa2293d1ed.png&refer=www.baidu.com&app=2007&size=b150,150&fmt=auto?sec=1789207311&t=90fa243db8ba77c26d8e8e9692dc720a",
+        "manual_short_brief": "QQ9全新上线，一起轻松做自己",
+        "md5": "5a9cf6b3bbdb7c2f8e02f5883c9eed47",
+        "package": "com.tencent.mobileqq",
+        "packageid": 1858121943,
+        "popu_index": 80,
+        "record_num": "粤B2-20090059-1622A",
+        "size": "396M",
+        "sname": "QQ",
+        "source": "",
+        "type": "0",
+        "versioncode": 15730,
+        "versionname": "9.3.50",
+        "_meta": {
+          "market": "baidu",
+          "mode": "package-list",
+          "input_value": "com.tencent.mobileqq",
+          "record_type": "detail"
+        }
+      }
+    },
+    {
+      "market": "baidu",
+      "mode": "package-list",
+      "input_value": "com.tencent.mobileqq",
+      "success": 1,
+      "error": null
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "url": "https://appc.baidu.com/uiserver?part=main&action=detail&pname=com.tencent.mobileqq",
+      "status": 200,
+      "input": "com.tencent.mobileqq",
+      "body": "{\"error_no\":0,\"message\":\"\",\"result\":{\"data\":{\"type\":2048,\"data\":{\"appinfo\":{\"adv_item\":\"source+natural@pos+1@bid+0@ctr+0.000000@trans+@keyword+@app_rcv+\",\"all_download\":\"22.2亿下载\",\"appdistrans\":\"{\\\"trans_data\\\":\\\"{\\\\\\\"adv_flag\\\\\\\":2,\\\\\\\"rank\\\\\\\":1,\\\\\\\"pid\\\\\\\":1858121943,\\\\\\\"docid\\\\\\\":5015764872,\\\\\\\"ad_source\\\\\\\":\\\\\\\"natural\\\\\\\",\\\\\\\"packagename\\\\\\\":\\\\\\\"com.tencent.mobileqq\\\\\\\",\\\\\\\"appname\\\\\\\":\\\\\\\"QQ\\\\\\\",\\\\\\\"query\\\\\\\":\\\\\\\"\\\\\\\",\\\\\\\"req_type\\\\\\\":5,\\\\\\\"from\\\\\\\":\\\\\\\"client_detail\\\\\\\",\\\\\\\"search_id\\\\\\\":\\\\\\\"0000000000000000\\\\\\\",\\\\\\\"eid_str\\\\\\\":\\\\\\\"1231210#1980\\\\\\\",\\\\\\\"rewrite_sid\\\\\\\":\\\\\\\"0000000000000000\\\\\\\",\\\\\\\"boardid\\\\\\\":0}\\\"}\",\"cateid\":304000,\"catename\":\"\",\"ccrc\":0,\"display_count_fmt\":\"37.9万\",\"display_score_in_5\":\"4.0\",\"docid\":5015764872,\"download_inner\":\"https://gdown.baidu.com/appcenter/pkg/upload/5a9cf6b3bbdb7c2f8e02f5883c9eed47?prodid=1\",\"f\":\"\",\"groupid\":5000751235,\"icon\":\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa5447c5cdb454c77935ce3fa2293d1ed.png\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b150,150\\u0026fmt=auto?sec=1789207311\\u0026t=90fa243db8ba77c26d8e8e9692dc720a\",\"manual_short_brief\":\"QQ9全新上线，一起轻松做自己\",\"md5\":\"5a9cf6b3bbdb7c2f8e02f5883c9eed47\",\"package\":\"com.tencent.mobileqq\",\"packageid\":1858121943,\"popu_index\":80,\"record_num\":\"粤B2-20090059-1622A\",\"size\":\"396M\",\"sname\":\"QQ\",\"source\":\"\",\"type\":\"0\",\"versioncode\":15730,\"versionname\":\"9.3.50\"},\"list\":[{\"type\":2020,\"data\":{\"list\":[{\"type\":2022,\"data\":{\"videoinfo\":{},\"label_jump\":{},\"rankinfo\":{},\"try_play_state\":0,\"display_score\":79,\"display_count\":378559}},{\"type\":1002,\"data\":{\"list\":[{\"type\":2024,\"data\":{\"title\":\"介绍\",\"f\":\"intro@pid+1858121943\",\"list\":[{\"datatype\":5070,\"itemdata\":{\"screenshots\":[\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2F3f8045a3d7b48fd327f9e5183da29617.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b240,360\\u0026fmt=auto?sec=1789207311\\u0026t=68addf6a30a31ac4e91cff550e9a7279\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2F2ea9009708b8eea9c9bf4094cd85de09.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b240,360\\u0026fmt=auto?sec=1789207311\\u0026t=2f3f309a827d481ddcfa4cf160dcd89f\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa6edf2f7f6fe7a8e8c4d77831b9e33ad.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b240,360\\u0026fmt=auto?sec=1789207311\\u0026t=f7c1ba344351084176a632322e77756b\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa885cffedb9e063c988e9dca533c2012.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b240,360\\u0026fmt=auto?sec=1789207311\\u0026t=99b05dff2a3d4a3f7337ee2e0889cc3d\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2F68f4128a4c58d9db92779de1ad2d4022.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b240,360\\u0026fmt=auto?sec=1789207311\\u0026t=bf9f3943423847c6226966dd35e51c9e\"],\"screenshots_large\":[\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2F3f8045a3d7b48fd327f9e5183da29617.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b480,720\\u0026fmt=auto?sec=1789207311\\u0026t=6fc398d057aade12277114c38433f9c0\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2F2ea9009708b8eea9c9bf4094cd85de09.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b480,720\\u0026fmt=auto?sec=1789207311\\u0026t=a1e1c287973c1b5fbd8773c4d3c818ae\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa6edf2f7f6fe7a8e8c4d77831b9e33ad.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b480,720\\u0026fmt=auto?sec=1789207311\\u0026t=a9766360b9b7ecda7d75e639d6d5d45a\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa885cffedb9e063c988e9dca533c2012.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b480,720\\u0026fmt=auto?sec=1789207311\\u0026t=99d855bfa06e3ecd172cfe8edb0ee37e\",\"http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2F68f4128a4c58d9db92779de1ad2d4022.jpg\\u0026refer=www.baidu.com\\u0026app=2007\\u0026size=b480,720\\u0026fmt=auto?sec=1789207311\\u0026t=a0dabd52b32bbf0e78a74998a64c6a92\"],\"brief\":\"在QQ，轻松社交\\n- [聊天消息]随时随地好友和群消息；\\n- [语音通话]、[视频聊天]和亲友自在畅聊；\\n- [文件传输]手机电脑多端互传，轻松便捷。\\n\\n在QQ，轻松生活\\n- [空间动态]快速获知好友动态，随时分享生活；\\n- [移动支付]话费充值、转账收款、网购一应俱全；\\n- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。\\n\\n在QQ，轻松娱乐\\n- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；\\n- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。\\n\\nQQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。\\n\\n\\n-----联系我们-----\\n如在使用过程中遇到任何问题，请联系我们：\\n- 在线帮助：进入QQ设置 -\\u003e 关于QQ -\\u003e 帮助与反馈\\n- 客服热线：4006 700 700（服务时间：8:00 - 23:00）\\n\\n*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间\",\"apptags\":null,\"changelog\":\"本次更新：\\n- QQ闪传文件有效期新增支持90天/180天；\\n- QQ闪传支持添加或删除已分享的文件，灵活调整分享内容。\\n\\n近期更新：\\n- 宠物功能上线，支持多种养宠互动玩法，解锁社交新体验；\\n- 输入状态个性装扮上线，让好友等待回复的时刻也变得有趣；\\n- 进群特效全新升级，款式更多元，呈现更自然，字色更护眼；\\n- QQ秀生成效果升级，提升形象还原度。上线展柜功能，可收藏精选形象。\",\"labels\":null,\"permission_type\":[\"访问精确位置（基于GPS和网络）\",\"访问大致位置信息（基于网络进行定位）\",\"更改WLAN状态\",\"允许接受WLAN多播\",\"更改网络连接\",\"完全的网络访问权限\",\"与蓝牙设备配对\",\"查看WLAN状态\",\"查看网络状态\",\"写入外部存储\",\"写入数据\",\"添加联系人\",\"读取联系人\",\"添加或修改日历\",\"更改音频设置\",\"拍摄照片和视频\",\"录音\",\"闪光灯\",\"控制震动\",\"修改系统设置\",\"更改用户界面设置\",\"对正在运行的应用重新排序\",\"检索当前运行的应用程序\",\"让应用程序始终运行\",\"结束后台进程\",\"结束后台进程\",\"访问蓝牙设置\",\"读取系统日志文件\",\"防止手机休眠\",\"写入同步设置\",\"读取同步设置\",\"开机启动\",\"展开/收拢状态栏\",\"停用屏幕锁定\"],\"permission_guide\":[\"允许应用根据GPS或网络来源（例如基站和WLN网络）获取您的位置信息。您的手机必须支持并开启这些位置信息服务，应用才能使用这些服务。这可能会增加耗电量\",\"允许应用根据网络来源（例如基站和 WLAN 网络）获取您的位置信息。您的手机必须支持并开启这些位置信息服务，此应用才能使用这些服务\",\"允许应用程序连接到WLAN接入点以及与WLAN接入点断开连接，并对配置的WLAN网络进行更改\",\"允许应用程序使用多播地址接收发送到WLAN网络上所有设备（而不仅仅是您的手机）的数据包\",\"允许该应用更改网络连接的状态\",\"允许该应用创建网络套接字和使用自定义网络协议。浏览器和其他某些应用提供了向互联网发送数据的途径，因此应用无需该权限即可向互联网发送数据\",\"允许该应用查看手机上的蓝牙配置，以及与配对设备建立连接或接受其连接请求\",\"允许程序访问WLAN网络状态信息\",\"允许应用程序查看所有网络的状态。例如存在和连接的网络\",\"允许程序写入外部存储，如SD卡上写文件\",\"允许一个程序写入但不读取所有者数据\",\"允许应用程序修改存储在手机上的联系人的数据，包括您与特定联系人的通话、发送电子邮件\",\"允许应用读取您手机上存储的联系人的相关数据，包括您通过打电话、发送电子邮件或以其他方式与特定个人通信的频率。此权限可让应用保存您的联系人数据，而恶意应用可能会在您不知情的情况下分享联系人数据\",\"允许应用在手机上添加、移除或更改日历日程。应用可能会以日历所有者的身份发送消息，或在不通知所有者的情况下更改日程\",\"允许应用程序修改全局音频设置，例如音量和用于输出的扬声器\",\"允许访问摄像头进行拍照或录制视频\",\"允许该应用使用麦克风录制音频\",\"允许访问闪光灯\",\"允许应用控制振动设备\",\"允许应用程序修改系统的设置数据\",\"允许应用程序更改当前配置，例如语言设置或整体的字体大小\",\"允许应用将任务移动到前台和后台。该应用可能不经您的命令自行执行此操作\",\"允许应用检索近期和当前运行的任务信息。此权限可让该应用了解设备上使用了哪些应用\",\"允许应用程序使其自身的某些部分在内存中始终运行。这会限制其他应用程序的可用内存，从而降低手机的速度\",\"允许应用结束其他应用的后台进程。此权限可导致其他应用停止运行\",\"允许应用程序结束其他应用程序的后台进程。这可能会导致其他应用程序停止运行\",\"允许应用配置本地蓝牙手机，并允许其查找远程设备且与之配对\",\"允许程序读取底层系统日志文件\",\"允许该应用阻止手机进入休眠状态\",\"允许应用程序修改帐户的同步设置。例如，这可用于启用人员应用程序与帐户的同步。\",\"允许应用程序读取帐户的同步设置。例如，这可以确定应用程序是否与帐户同步\",\"允许应用在系统完成引引导后立即自动启动。这样可能会延长手机的启动时间，并允许应用始终运行，从而导致手机总体运行速度减慢。\",\"允许应用程序展开或收起状态栏\",\"允许应用程序禁用密钥锁和任何相关的密码安全性。例如，当接到来电时，手机会禁用钥匙锁，然后在通话结束后重新启用钥匙锁\"],\"record_num\":\"粤B2-20090059-1622A\",\"developer_name\":\"深圳市腾讯计算机系统有限公司\",\"version_name\":\"9.3.50\",\"build_time\":\"2026年8月24日\",\"update_time\":\"2026年9月2日\",\"privacy_url\":\"http://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62\",\"spectacle\":\"\",\"app_record_subject\":\"深圳市腾讯计算机系统有限公司\"},\"page\":{\"type\":\"app_detail.intro\",\"docid\":5015764872,\"pid\":1858121943,\"pkg\":\"com.tencent.mobileqq\",\"sname\":\"QQ\"}},{\"datatype\":1001,\"itemdata\":{\"title\":\"\",\"f\":\"detail@intro@pid+1858121943\",\"dataurl\":\"uiserver?action=detail\\u0026docid=5015764872\\u0026part=intro\"}},{\"datatype\":5072,\"itemdata\":{},\"page\":{\"type\":\"app_detail.main\",\"docid\":5015764872,\"pid\":1858121943,\"pkg\":\"com.tencent.mobileqq\",\"sname\":\"QQ\"}}],\"footview_visible\":false,\"filterinstalled\":0}},{\"type\":2027,\"data\":{\"package\":\"com.tencent.mobileqq\",\"packageid\":1858121943,\"groupid\":5000751235,\"docid\":5015764872,\"sname\":\"QQ\",\"versionname\":\"9.3.50\",\"icon\":\"\",\"title\":\"评论\",\"f\":\"comment@detail@pid+1858121943\",\"dataurl\":\"uiserver?action=detail\\u0026docid=5015764872\\u0026part=comment\",\"comment_tag_display\":\"\",\"groupids\":null}},{\"type\":2030,\"data\":{\"title\":\"推荐\",\"f\":\"detail@pid+1858121943@recommend\",\"dataurl\":\"uiserver?action=detail\\u0026docid=5015764872\\u0026part=recommend\",\"footview_visible\":false,\"filterinstalled\":0}}]},\"page\":{\"type\":\"app_detail.main\",\"docid\":5015764872,\"pid\":1858121943,\"pkg\":\"com.tencent.mobileqq\",\"sname\":\"QQ\"}}]}},{\"type\":2021,\"data\":{\"shareurl\":\"https://mobile.baidu.com/item?docid=5015764872\\u0026source=s1001\",\"feedback_appchannel\":0}},{\"type\":2023,\"data\":{\"unable_download\":0,\"download_jumppage_index\":2,\"is_from_mission\":0,\"download_immediatly\":0},\"page\":{\"type\":\"app_detail.main\",\"docid\":5015764872,\"pid\":1858121943,\"pkg\":\"com.tencent.mobileqq\",\"sname\":\"QQ\"}}]},\"page\":{\"type\":\"app_detail.main\",\"docid\":5015764872,\"pid\":1858121943,\"pkg\":\"com.tencent.mobileqq\",\"sname\":\"QQ\"}},\"page\":{\"type\":\"app_detail.main\",\"docid\":5015764872,\"pid\":1858121943,\"pkg\":\"com.tencent.mobileqq\",\"sname\":\"QQ\"}},\"logid\":\"9683629070281651282\"}"
+    }
+  ],
+  "stats": {
+    "start_time": "2026-09-12 10:01:49.718486+00:00",
+    "scheduler/enqueued/memory": 1,
+    "scheduler/enqueued": 1,
+    "scheduler/dequeued/memory": 1,
+    "scheduler/dequeued": 1,
+    "downloader/request_count": 1,
+    "downloader/request_method_count/GET": 1,
+    "downloader/request_bytes": 274,
+    "downloader/response_count": 1,
+    "downloader/response_status_count/200": 1,
+    "downloader/response_bytes": 12815,
+    "response_received_count": 1,
+    "item_scraped_count": 2,
+    "elapsed_time_seconds": 0.508966,
+    "finish_time": "2026-09-12 10:01:50.227452+00:00",
+    "finish_reason": "finished",
+    "responses_per_minute": null,
+    "items_per_minute": null
+  }
+}

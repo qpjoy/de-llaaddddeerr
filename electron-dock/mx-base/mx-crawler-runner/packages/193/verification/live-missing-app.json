@@ -1,0 +1,40 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "app",
+  "observed_at": "2026-09-12T17:20:41.338292+00:00",
+  "query": {
+    "app_id": "com.mingxi.nonexistent.acceptance.sample",
+    "lang": "en",
+    "country": "us",
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "error",
+  "data": {
+    "items": [],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [],
+  "error": {
+    "code": "SOURCE_ERROR",
+    "message": "App not found (404)"
+  },
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-d9529f60bfa8439cb43c9bb4b5ddc501",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 0,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/store/apps/details?id=com.mingxi.nonexistent.acceptance.sample&hl=en&gl=us"
+  ]
+}

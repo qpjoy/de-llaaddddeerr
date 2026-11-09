@@ -1,0 +1,21 @@
+{
+  "python": "3.13.3",
+  "packages": [
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "yt-dlp",
+      "version": "2026.8.19"
+    }
+  ],
+  "install": {
+    "id": 104,
+    "slug": "kick",
+    "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+    "python": "G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\kick\\venv\\Scripts\\python.exe",
+    "observed_at": "2026-09-10T16:38:08.1959174Z",
+    "exit_code": 0
+  }
+}

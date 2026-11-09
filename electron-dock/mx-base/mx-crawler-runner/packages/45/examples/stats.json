@@ -1,0 +1,6 @@
+{
+  "operation": "stats",
+  "params": {
+    "run_dir": "./runtime/45"
+  }
+}

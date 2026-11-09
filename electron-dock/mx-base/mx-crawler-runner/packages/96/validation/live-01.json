@@ -1,0 +1,11 @@
+{
+  "id": 96,
+  "target": "https://medium.com/@sarperavci/two-million-hackthebox-write-up-7433944c2efa",
+  "observed_at": "2026-09-10T16:39:13.911267+00:00",
+  "python": "3.13.3",
+  "live_data_verified": false,
+  "status": "failed",
+  "error_type": "ModuleNotFoundError",
+  "error": "No module named 'ua_generator'",
+  "traceback": "Traceback (most recent call last):\n  File \"G:\\data_tongbu\\domain_sources\\research\\rows_093_107\\live_probe.py\", line 137, in main\n    result = probe(args.id, args.target, args.output.parent)\n  File \"G:\\data_tongbu\\domain_sources\\research\\rows_093_107\\live_probe.py\", line 55, in probe\n    from medium_scraper import RequestsRequestSender, MediumMarkdownParser\n  File \"G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\medium\\venv\\Lib\\site-packages\\medium_scraper\\__init__.py\", line 2, in <module>\n    from .request_sender.base import RequestSender\n  File \"G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\medium\\venv\\Lib\\site-packages\\medium_scraper\\request_sender\\__init__.py\", line 2, in <module>\n    from .requests_sender import RequestsRequestSender\n  File \"G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\medium\\venv\\Lib\\site-packages\\medium_scraper\\request_sender\\requests_sender.py\", line 10, in <module>\n    import ua_generator\nModuleNotFoundError: No module named 'ua_generator'\n"
+}

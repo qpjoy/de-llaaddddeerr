@@ -1,0 +1,170 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "similar",
+  "observed_at": "2026-09-12T17:20:30.253092+00:00",
+  "query": {
+    "app_id": "com.google.android.apps.translate",
+    "lang": "en",
+    "country": "us",
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "title": "Google Gemini",
+        "appId": "com.google.android.apps.bard",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.bard",
+        "icon": "https://play-lh.googleusercontent.com/C64IqPWyFoCZzXVxXVl0Y6mliiNlG_sZJsqul-SBvk9ZL0wJHlU0Eho2wvsBHhho0FT5XQtH55RVGerIwXF_MA",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "From your morning commute to late-night deep dives, Google Gemini is your personal, proactive and powerful AI assistant.<br><br>WHY USERS LOVE GEMINI<br>• Our latest models, Gemini 3.6 and Gemini Omni, unlock a new world of productivity and creativity.<br>• Talk things out with Gemini Live: Brainstorm in real time or share your screen/camera to discuss exactly what you see.<br>• Instead of a wall of text, you get carefully crafted responses with interleaved images, timelines, and interactive visuals.<br>• Get more personalized help by connecting your favorite Google apps like Gmail, Calendar, Google Photos, YouTube, and Search. <br>• Upload documents, spreadsheets, photos, videos, and more to get answers, summaries, and insights about your content.<br><br>BRING YOUR CREATIVE IDEAS TO LIFE<br>• Generate and edit photos with Nano Banana 2: Apply camera and lighting controls, create mockups by blending multiple images, design posters with sharp text, and effortlessly build diagrams. Then, resize as needed.<br>• Turn your ideas into cinematic videos with Gemini Omni for Google AI Plus, Pro, Ultra, and Workspace users.<br>• Create custom soundtracks for any moment with Lyria 3.<br><br>BOOST YOUR PRODUCTIVITY<br>• Research with NotebookLM: Get deeper, more relevant responses that are grounded in the sources in your notebook<br>• Study help and exam prep made easy: Upload your class notes to generate custom practice quizzes and interactive visuals.<br>• Turn a simple prompt into a prototype: Build web pages, games, or dashboards. You can even convert your files into a podcast-style overview to listen to while you&#39;re on the move.<br><br>UNLOCK MORE WHEN YOU UPGRADE<br>Level up your Gemini app experience by upgrading to the Google AI Plus, Pro, or Ultra plans, helping you tackle more complex tasks and projects. <br><br>Review the Gemini Apps Privacy Notice: g.co/gemini/privacynotice.<br><br>If you opt in to the Gemini app, it will replace your Google Assistant as the primary assistant on the phone. Some Google Assistant voice features aren&#39;t available through the Gemini app yet. You can switch back to Google Assistant in settings.",
+        "scoreText": "4.6",
+        "score": 4.5849833
+      },
+      {
+        "title": "YouTube TV: Live TV & more",
+        "appId": "com.google.android.apps.youtube.unplugged",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.youtube.unplugged",
+        "icon": "https://play-lh.googleusercontent.com/BBn7cxpTAs4Mv40FpUFRTV1QtB1QSfKJv79seHd86_t7SoTQR_cj5lewhpvC5nQuneiam_G08ZNY8qvcjE-6Fg",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "YouTube TV is now the exclusive home of NFL Sunday Ticket. Watch every out-of-market Sunday game* on your TV and supported devices. Learn more: https://yt.be/nflsundayticket<br><br>Watch cable-free live TV. Download to watch &amp; record live TV from 100+ networks, including local sports &amp; news, as part of your monthly membership. Cancel anytime.<br><br>+Cable-free live TV. No cable box required.<br>+Stream major broadcast and cable networks, including CBS, FOX, NBC, NFL Network, HGTV, TNT, and more, including your local sports &amp; news channels.<br>+Watch on your smartphone, tablet, computer, and TV<br>+Cloud DVR without DVR storage space limits. Each recording will be stored for 9 months.<br>+6 YouTube TV accounts per household. Everyone gets their own login, recommendations and DVR.<br>+Monthly pay-as-you-go membership; cancel anytime.<br><br>Over 100 networks are available in YouTube TV:<br><br>BROADCAST<br>CBS, FOX, NBC, NFL Network, PBS, and more<br><br>SPORTS<br>CBS Sports Network, NBC Sports RSN (regional), NFL Network, Golf Channel, SEC Network, and more<br><br>ENTERTAINMENT &amp; LIFESTYLE<br>Animal Planet, BET, Bravo, Cheddar, CMT, Comedy Central, Comet, Cozi TV, Decades, Discovery, Discovery Turbo, E!, Food Network, Investigation Discovery, HGTV, MTV, Oxygen, Paramount Network, Pop, Smithsonian Channel, SyFy, TBS, TCM, TLC, TNT, Travel Channel, TruTV, TV Land, USA, VH1, YouTube Originals, and more<br><br>NEWS<br>Cheddar Big News, CNBC, CNN, HLN, MSNBC, and more<br><br>KIDS<br>Cartoon Network, Nickelodeon, and PBS Kids<br><br><br>Availability:<br>YouTube TV is available nationwide in the United States.<br><br>For more information, please visit our Help Center.<br><br>Your membership will automatically continue for as long as you choose to remain a member. Your membership is a month-to-month subscription that begins at sign up. You can easily cancel anytime, online, 24 hours a day. There are no long-term contracts or cancellation fees.<br><br>Subscriptions automatically renew unless auto-renew is turned off at least 24-hours before the end of the current period. Account will be charged for renewal within 24-hours prior to the end of the current period.<br><br>Subscriptions may be managed by the user and auto-renewal may be turned off by going to the user&#39;s Account Settings on the device.<br><br>Terms of service: tv.youtube.com/tv/terms<br>Paid terms of service: tv.youtube.com/tv/paidterms<br>Privacy policy: tv.youtube.com/tv/privacy<br><br>Enjoy cable-free live tv now!<br><br>*Commercial use excluded. Locally broadcast Fox and CBS games, Sunday Night Football on NBC, select digital-only games and international games excluded from NFL Sunday Ticket.",
+        "scoreText": "3.8",
+        "score": 3.788048
+      },
+      {
+        "title": "Gemini Notebook",
+        "appId": "com.google.android.apps.labs.language.tailwind",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.labs.language.tailwind",
+        "icon": "https://play-lh.googleusercontent.com/gQAp2_D_utKEdDI4Nr6_We5DAl2y7kPzoBKo8IE36rSDZyM_R5emL_t9zG4wHop8iMbFHzDVMlYKNTNSnzPCVw",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Turn complexity into clarity with Gemini Notebook, your brain’s new best friend. Join the millions of students, creators, researchers, professionals, CEOs, and more who are saving time, getting stuff done, and learning in new ways.<br><br>“One of the most compelling and completely flabbergasting demonstrations of AI’s potential yet.” – The Wall Street Journal<br><br>Now, with the Gemini Notebook app, you can create and access notebooks, ask questions whenever you think of them, and listen to your podcast-style Audio Overviews on the go with background playback and offline support.<br><br>📚 UPLOAD SOURCES<br>Upload all your long and complex PDFs, websites, YouTube videos, or text into a notebook.<br><br>💬 INSIGHTS YOU CAN TRUST<br>Gemini Notebook becomes an expert on your sources, summarizing them and making interesting connections. Then, you can ask it questions about, well, anything — and you can trust the answers, since your sources are cited in-line.<br><br>🎧 LEARN ON YOUR TERMS<br>Long blocks of text not your preferred way to learn? Transform what you uploaded into something more your speed, like a podcast-style audio discussion with two engaging AI hosts. You can even join the show to ask questions or steer the conversation in a different direction.",
+        "scoreText": "4.8",
+        "score": 4.7529798
+      },
+      {
+        "title": "Google Authenticator",
+        "appId": "com.google.android.apps.authenticator2",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.authenticator2",
+        "icon": "https://play-lh.googleusercontent.com/4qyuLCJkVpVfoIeu6b0ld6LkKzPHHby9ZilLbxhUZLK4f64o65oHGW-ZsuVe3LAWDVuIZpkQISmmVvA4-qnofw",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Google Authenticator adds an extra layer of security to your online accounts by adding a second step of verification when you sign in. This means that in addition to your password, you&#39;ll also need to enter a code that is generated by the Google Authenticator app on your phone.  The verification code can be generated by the Google Authenticator app on your phone, even if you don&#39;t have a network or cellular connection.  <br>* Sync your Authenticator codes to your Google Account and across your devices. This way, you can always access them even if you lose your phone. <br>* Set up your Authenticator accounts automatically with a QR code. This is quick and easy, and it helps to ensure that your codes are set up correctly. <br>* Support for multiple accounts. You can use the Authenticator app to manage multiple accounts, so you don&#39;t have to switch between apps every time you need to sign in. <br>* Support for time-based and counter-based code generation. You can choose the type of code generation that best suits your needs. <br>* Transfer accounts between devices with a QR code. This is a convenient way to move your accounts to a new device. <br>* To use Google Authenticator with Google, you need to enable 2-Step Verification on your Google Account. To get started visit http://www.google.com/2step  Permission notice: Camera: Needed to add accounts using QR codes",
+        "scoreText": "3.9",
+        "score": 3.8556397
+      },
+      {
+        "title": "Google Docs",
+        "appId": "com.google.android.apps.docs.editors.docs",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.docs.editors.docs",
+        "icon": "https://play-lh.googleusercontent.com/fzQ8TFqWZQ34NVL5veaXOFtymoGSVqI5YisBw3sgl6mc0AMKAGgKw5st2YMiSzTanSWbCDrmLipI7bD_epry",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Create, edit, and collaborate with others on documents from your Android phone or tablet with the Google Docs app. <br><br>Work together in real time<br>• Share documents with your team<br>• Edit, comment, and add action items in real time<br><br>Create anywhere, anytime—even offline<br>• Capture spontaneous ideas on the fly<br>• Get things done, even on the go, with offline mode<br>• Save time and add polish with easy-to-use templates<br><br>Edit and share multiple file types<br>• Open a variety of files, including Microsoft Word files, right in Google Docs<br>• Frictionless collaboration, no matter which application your teammates use<br>• Convert and export files seamlessly<br><br>Google Docs is part of Google Workspace: where teams of any size can chat, create, and collaborate.<br>Google Workspace paid subscribers have access to additional Google Docs features, including:<br>• Use Gemini in Docs to quickly draft and edit content<br>• Draft outlines, blog posts, briefs, and more on the go<br>• Create unique images to customize your documents<br>• Improve your writing with AI-powered suggestions<br><br>Learn more about Google Docs: https://workspace.google.com/products/docs/<br><br>Follow us for more:<br>• X: https://x.com/googleworkspace<br>• Linkedin: https://www.linkedin.com/showcase/googleworkspace<br>• Facebook: https://www.facebook.com/googleworkspace",
+        "scoreText": "4.7",
+        "score": 4.7276163
+      },
+      {
+        "title": "Google Wallet",
+        "appId": "com.google.android.apps.walletnfcrel",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.walletnfcrel",
+        "icon": "https://play-lh.googleusercontent.com/zd5pb7c2r_TXGBPSQyNN_Kq_WzsjhEqX8sdyl0CkEAjshnbscd71SmLPh1L_xVCcckP2LOC2ZpB1n23Q8NuRvA",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Google Wallet gives you fast, secure access to your everyday essentials. Tap to pay everywhere Google Pay is accepted, board a flight, go to a movie, and more –  all with just your phone. Keep everything protected in one place, no matter where you go.<br><br>CONVENIENT<br><br>Get what you need fast<br>+ Three quick ways for accessing your everyday essentials: use your phone’s quick settings for fast access, open the Wallet app from your homescreen or use Google Assistant when your hands are busy.<br><br>Access Google Wallet from your Wear OS watch<br>+ Get instant access to Wallet on the Wear OS main watch face with complications.<br><br>Carry cards, tickets, passes, and more<br>+ Catch a train, see a concert, or earn rewards at your favorite stores  with a digital wallet that carries more<br>+ [US Only] Unlock the world around you with a digital wallet that carries your drivers license and digital car keys<br><br>What you need, right when you need it<br>+ Your Wallet can suggest what you need, right when you need it. Get a notification for your boarding pass on the day of travel, so you’ll never have to fumble in your bag again.<br><br>HELPFUL<br><br>Keep track of receipts<br>+ Easily find transaction details in Wallet, including smart details like location pulled from Google Maps<br><br>Seamless integration across Google<br>+ Sync your Wallet to keep your Calendar and Assistant up to date with the latest info like flight updates and event notifications<br>+ Shop smarter by seeing your point balances and loyalty benefits in Maps, Shopping, and more<br><br>Get started in a snap<br>+ Set up is seamless with the ability to import cards, transit passes, loyalty cards and more that you’ve saved on Gmail.<br><br>Stay in the know on the go<br>+ Make boarding flights a breeze with the latest information pulled from Google Search. Google Wallet can keep you posted on gate changes or unexpected flight delays.<br><br>SAFE &amp; PRIVATE<br><br>A secure way to carry it all<br>+ Security and privacy are built into every part of Google Wallet to keep all your essentials protected.<br><br>Android security you can count on<br>+ Keep your data and essentials secure with advanced Android security features like 2-Step Verification, Find My Phone, and remotely erasing data.<br><br>Tap to pay keeps your card secure<br>ALT: + When you tap to pay with your Android phone, Google Pay doesn’t share your real credit card number with the business, so your payment info stays safe.<br><br>You’re in control of your data<br>+ Easy to use privacy controls allow you to opt-in to sharing information across Google products for a tailored experience.<br><br>Google Wallet is available on all Android phones (Pie 9.0+), Wear OS and Fitbit devices.<br>Not all features are available for supervised accounts. Learn more about Wallet for supervised accounts here: https://support.google.com/wallet?p=about_wallet_supervised.<br>Still have questions? Head over to support.google.com/wallet.",
+        "scoreText": "4.4",
+        "score": 4.3511014
+      },
+      {
+        "title": "Google Translate",
+        "appId": "com.google.android.apps.translate",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate",
+        "icon": "https://play-lh.googleusercontent.com/muIZuJn9awFB9XWa4g0aiqFxHbgAFVVfHVQrEmos46v29NfyZX5z1n1ZYBjH3Zvg80Dm90TI2ZdQZMr2cLMcCg",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "• Text translation: Translate between 108 languages by typing<br>• Tap to Translate: Copy text in any app and tap the Google Translate icon to translate (all languages)<br>• Offline: Translate with no internet connection (59 languages)<br>• Instant camera translation: Translate text in images instantly by just pointing your camera (94 languages)<br>• Photos: Take or import photos for higher quality translations (90 languages)<br>• Conversations: Translate bilingual conversations on the fly (70 languages)<br>• Handwriting: Draw text characters instead of typing (96 languages)<br>• Phrasebook: Star and save translated words and phrases for future reference (all languages)<br>• Cross-device syncing: Login to sync phrasebook between app and desktop<br>• Transcribe: Continuously translate someone speaking a different language in near real-time (8 languages)<br><br>Translations between the following languages are supported:<br>Afrikaans, Albanian, Amharic, Arabic, Armenian, Assamese, Aymara, Azerbaijani, Bambara, Basque, Belarusian, Bengali, Bhojpuri, Bosnian, Bulgarian, Catalan, Cebuano, Chichewa, Chinese (Simplified), Chinese (Traditional), Corsican, Croatian, Czech, Danish, Dhivehi, Dogri, Dutch, English, Esperanto, Estonian, Ewe, Filipino, Finnish, French, Frisian, Galician, Georgian, German, Greek, Guarani, Gujarati, Haitian Creole, Hausa, Hawaiian, Hebrew, Hindi, Hmong, Hungarian, Icelandic, Igbo, Ilocano, Indonesian, Irish, Italian, Japanese, Javanese, Kannada, Kazakh, Khmer, Kinyarwanda, Konkani, Korean, Krio, Kurdish (Kurmanji), Kurdish (Sorani), Kyrgyz, Lao, Latin, Latvian, Lingala, Lithuanian, Luganda, Luxembourgish, Macedonian, Maithili, Malagasy, Malay, Malayalam, Maltese, Maori, Marathi, Meiteilon (Manipuri), Mizo, Mongolian, Myanmar (Burmese), Nepali, Norwegian, Odia (Oriya), Oromo, Pashto, Persian, Polish, Portuguese, Punjabi, Quechua, Romanian, Russian, Samoan, Sanskrit, Scots Gaelic, Sepedi, Serbian, Sesotho, Shona, Sindhi, Sinhala, Slovak, Slovenian, Somali, Spanish, Sundanese, Swahili, Swedish, Tajik, Tamil, Tatar, Telugu, Thai, Tigrinya, Tsonga, Turkish, Turkmen, Twi, Ukrainian, Urdu, Uyghur, Uzbek, Vietnamese, Welsh, Xhosa, Yiddish, Yoruba, Zulu<br><br>Permissions Notice<br>Google Translate may ask for the following optional permissions*:<br>• Microphone for speech translation<br>• Camera for translating text via the camera<br>• External storage for downloading offline translation data<br>• Contacts for setup and management of your account<br><br>*Note: The app may be used even if optional permissions are not granted.",
+        "scoreText": "4.3",
+        "score": 4.2638636
+      },
+      {
+        "title": "YouTube Kids",
+        "appId": "com.google.android.apps.youtube.kids",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.youtube.kids",
+        "icon": "https://play-lh.googleusercontent.com/XmNSJLiwxfeoGwofbTZ37le-jDNAdZmHbVo7un7y2g-d-A3iD0LKUm1FMAgdURw8PFEiFh4Vv14u7q_nvET-",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Inspire your kids to uncover their unique interests<br>Help your kids explore video content they love and parents trust, in an app made just for kids. With easy navigation tools and a suite of features, you can help your kids spend time online uncovering new interests, unleashing their imagination, and building their confidence in their own unique world.<br><br>Help your kids grow at their own pace<br>Your kids are unique, so they should only see content they&#39;re ready to explore. Decide what videos will help them make the most of their time online, then personalize individual profiles using custom content filters as they grow.<br><br>- Help your youngest kids learn their ABCs, nurture their curiosity, and more in the Preschool mode.<br>- Expand your kids interests to songs, cartoons, or DIY crafts in Younger mode.<br>- Give your older kids the freedom to search popular music and gaming videos in Older mode.<br>- Or hand-pick the videos, channels, and collections your kids can see in Approved Content Only mode.<br><br>Rewatch videos and bond over favorites<br>Quickly find your kids’ favorite videos and the content you’ve shared with them in the Watch it Again tab.<br><br>Shape your kids’ viewing experience with Parental Controls<br>Parental Control features help you limit what your kids watch and better guide their viewing experience. Our blocking process aims to help keep videos on YouTube Kids family-friendly and safe – but each family&#39;s preferences are unique. Don&#39;t like a video or channel, or see inappropriate content? Flag it for our team to review.<br><br>Set a screen-time limit<br>Encourage your kids to take a break in between exploring content. Use the Timer feature to freeze the app when screen time is up so your kids can apply their new skills to the real world.<br><br>See important information<br>- Parental setup is needed to ensure the best experience for your family.<br>- Kids may see commercial content from YouTube creators that are not paid ads.<br>- See The Privacy Notice for Google Accounts managed with Family Link for information on our privacy practices for signing in with a Google Account.<br>- If your kids use the app without signing in with their Google Account, the YouTube Kids Privacy Notice applies.",
+        "scoreText": "4.2",
+        "score": 4.189087
+      },
+      {
+        "title": "YouTube",
+        "appId": "com.google.android.youtube",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.youtube",
+        "icon": "https://play-lh.googleusercontent.com/QNmuZQc9I6Zbe3mWnSr0hycnENqGFCI5p3yE29Hkxtf22T0IWS6zTrpxULLyyjWpB7ONAXDsDQXnXcVWokl3eg",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Get the official YouTube app on Android phones and tablets. See what the world is watching -- from the hottest music videos to what’s popular in gaming, fashion, beauty, news, learning and more. Subscribe to channels you love, create content of your own, share with friends, and watch on any device.<br><br>Watch and subscribe <br>● Browse personal recommendations on Home<br>● See the latest from your favorite channels in Subscriptions <br>● Look up videos you’ve watched, liked, and saved for later in Library <br><br>Explore different topics, what’s popular, and on the rise (available in select countries)<br>● Stay up to date on what’s popular in music, gaming, beauty, news, learning and more<br>● See what’s trending on YouTube and around the world on Explore<br>● Learn about the coolest Creators, Gamers, and Artists on the Rise (available in select countries)<br><br>Connect with the YouTube community<br>● Keep up with your favorites creators with Posts, Stories, Premieres, and Live streams<br>● Join the conversation with comments and interact with creators and other community members<br><br>Create content from your mobile device<br>● Create or upload your own videos directly in the app <br>● Engage with your audience in real time with live streaming right from the app<br><br>Find the experience that fits you and your family (available in select countries)<br>● Every family has their own approach to online video. Learn about your options: the YouTube Kids app or a new parent supervised experience on YouTube at youtube.com/myfamily<br><br>Support creators you love with channel memberships (available in select countries)<br>● Join channels that offer paid monthly memberships and support their work<br>● Get access to exclusive perks from the channel &amp; become part of their members community<br>● Stand out in comments and live chats with a loyalty badge next to your username<br><br>Upgrade to YouTube Premium (available in select countries)<br>● Watch videos uninterrupted by ads, while using other apps, or when the screen is locked<br>● Save videos for when you really need them – like when you’re on a plane or commuting<br>● Get access to YouTube Music Premium as part of your benefits",
+        "scoreText": "3.8",
+        "score": 3.8413482
+      },
+      {
+        "title": "Google Classroom",
+        "appId": "com.google.android.apps.classroom",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.classroom",
+        "icon": "https://play-lh.googleusercontent.com/PNYNq4kPt-oJMEJb91DUYgsjMl9Ubx5KHP5c1UglZJd8FQWv0xvRL3mZdTvicuhaF0yQm00lV7RN0eAxUbkvQw",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Classroom makes it easy for learners and instructors to connect—inside and outside of schools. Classroom saves time and paper, and makes it easy to create classes, distribute assignments, communicate, and stay organized.<br><br>There are many benefits to using Classroom:<br>• Easy to set up – Teachers can add students directly or share a code with their class to join. It takes just minutes to set up.<br>• Saves time – The simple, paperless assignment workflow allows teachers to create, review and mark assignments quickly, all in one place.<br>• Improves organization – Students can see all of their assignments on an assignments page, and all class materials (e.g., documents, photos, and videos) are automatically filed into folders in Google Drive.<br>• Enhances communication – Classroom allows teachers to send announcements and start class discussions instantly. Students can share resources with each other or provide answers to questions on the stream.<br>• Secure – Like the rest of Google Workspace for Education services, Classroom contains no ads, never uses your content or student data for advertising purposes.<br><br><br>Permissions Notice:<br>Camera: Needed to allow the user to take photos or videos and post them to Classroom.<br>Storage: Needed to allow the user to attach photos, videos, and local files to Classroom. It&#39;s also needed to enable offline support.<br>Accounts: Needed to allow the user to choose which account to use in Classroom.",
+        "scoreText": "2.8",
+        "score": 2.8286917
+      }
+    ],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [],
+  "error": null,
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-b50d052512cb43a8826fd0f3e43eaf2f",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 3,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/store/apps/details?id=com.google.android.apps.translate&hl=en&gl=us",
+    "https://play.google.com/store/apps/dev?id=5700313618786177705&gl=us&hl=en",
+    "https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=qnKhOb&f.sid=-697906427155521722&bl=boq_playuiserver_20190903.08_p0&hl=en&gl=us&authuser&soc-app=121&soc-platform=1&soc-device=1&_reqid=1065213"
+  ]
+}

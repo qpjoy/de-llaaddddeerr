@@ -1,0 +1,36 @@
+{
+  "market": "360",
+  "mode": "package-list",
+  "value": "com.tencent.mobileqq",
+  "history": false,
+  "observed_at": "2026-09-12T10:01:49.497048+00:00",
+  "items": [
+    {
+      "market": "360",
+      "mode": "package-list",
+      "input_value": "com.tencent.mobileqq",
+      "success": 0,
+      "error": "detail: [<twisted.python.failure.Failure twisted.internet.error.ConnectionLost: Connection to the other side was lost in a non-clean fashion: Connection lost.>]"
+    }
+  ],
+  "errors": [],
+  "responses": [],
+  "stats": {
+    "start_time": "2026-09-12 10:01:49.734634+00:00",
+    "scheduler/enqueued/memory": 1,
+    "scheduler/enqueued": 1,
+    "scheduler/dequeued/memory": 1,
+    "scheduler/dequeued": 1,
+    "downloader/request_count": 1,
+    "downloader/request_method_count/GET": 1,
+    "downloader/request_bytes": 263,
+    "downloader/exception_count": 1,
+    "downloader/exception_type_count/twisted.web._newclient.ResponseNeverReceived": 1,
+    "item_scraped_count": 1,
+    "elapsed_time_seconds": 0.188151,
+    "finish_time": "2026-09-12 10:01:49.922785+00:00",
+    "finish_reason": "finished",
+    "responses_per_minute": null,
+    "items_per_minute": null
+  }
+}

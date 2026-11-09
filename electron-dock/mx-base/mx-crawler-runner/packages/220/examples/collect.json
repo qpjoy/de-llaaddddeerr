@@ -1,0 +1,8 @@
+{
+  "operation": "collect",
+  "params": {
+    "run_dir": "./runtime/220",
+    "feed_limit": 3,
+    "episodes_per_feed": 5
+  }
+}

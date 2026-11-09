@@ -1,0 +1,70 @@
+{
+  "id": 98,
+  "platform": "Snapchat Spotlight",
+  "slug": "snapchat_spotlight",
+  "repo": "yt-dlp/yt-dlp",
+  "kind": "提取器候选",
+  "capability": "指定公开 Spotlight 链接的视频元数据及发布者线索",
+  "limits": "单条 URL 提取为主；不承诺全站搜索、完整账号枚举或评论。",
+  "observed_at": "2026-09-10T16:27:27.582028+00:00",
+  "path": "domain_sources/platforms/98/upstream/yt-dlp__yt-dlp",
+  "origin": "https://github.com/yt-dlp/yt-dlp.git",
+  "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+  "commit_date": "2026-08-30T15:58:45+02:00",
+  "commit_subject": "[utils] `devalue`: Improve binary type parsing (#16934)",
+  "clean": true,
+  "tracked_files": 1239,
+  "pull_status": "cloned",
+  "live_data_verified": true,
+  "github_metadata": {
+    "full_name": "yt-dlp/yt-dlp",
+    "default_branch": "master",
+    "archived": false,
+    "pushed_at": "2026-08-30T13:58:45Z",
+    "language": "Python",
+    "license": {
+      "key": "unlicense",
+      "name": "The Unlicense",
+      "spdx_id": "Unlicense",
+      "url": "https://api.github.com/licenses/unlicense",
+      "node_id": "MDc6TGljZW5zZTE1"
+    }
+  },
+  "verification": {
+    "id": 98,
+    "observed_at": "2026-09-10T16:30:25.921759+00:00",
+    "live_data_verified": false,
+    "evidence": [
+      {
+        "file": "yt_dlp/extractor/snapchat.py",
+        "tokens": [
+          "class SnapchatSpotlightIE"
+        ],
+        "sha256": "ad60b571a8a680d00e6090bd1e956c47860bad017d18295561c22db3e5080d6e"
+      }
+    ],
+    "offline_cli_extractors": [
+      "SnapchatSpotlight"
+    ],
+    "source_checks_passed": true
+  },
+  "live_validation": {
+    "id": 98,
+    "platform": "Snapchat Spotlight",
+    "slug": "snapchat_spotlight",
+    "repo": "yt-dlp/yt-dlp",
+    "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+    "status": "success",
+    "label": "已取得真实数据（限下列能力）",
+    "live_data_verified": true,
+    "note": "换用当前公开链接后，成功取得 Spotlight 视频、媒体链接和发布者账号线索；旧测试链接 404。仅验收单条 URL。",
+    "capabilities_verified": [
+      "video_metadata",
+      "media_url"
+    ],
+    "evidence": "domain_sources/platforms/98/validation/live-02.json",
+    "observed_at": "2026-09-10T16:41:24.226062+00:00",
+    "target": "https://www.snapchat.com/spotlight/W7_EDlXWTBiXAEEniNoMPwAAYZGtpbXFpZnZqAZUFGkyWAZUFGkx8AAAAAQ",
+    "coverage_action": "mark_covered"
+  }
+}

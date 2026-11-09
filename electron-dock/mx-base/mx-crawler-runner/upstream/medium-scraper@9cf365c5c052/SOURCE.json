@@ -1,0 +1,14 @@
+{
+  "name": "medium-scraper",
+  "repo": "sarperavci/medium-scraper",
+  "origin": "https://github.com/sarperavci/medium-scraper.git",
+  "commit": "9cf365c5c052074e41e1dbde6a7618e89dee9db2",
+  "commitDate": "2025-11-14T22:41:34+03:00",
+  "license": "MIT",
+  "paths": [
+    "medium_scraper",
+    "LICENSE"
+  ],
+  "deliveredBy": "package 96",
+  "scrubbed": []
+}

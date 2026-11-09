@@ -1,0 +1,12 @@
+# Verified runtime dependencies on Windows / Python 3.13.3
+# Install the pinned local upstream separately with --no-deps.
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.1
+curl_cffi==0.16.3
+markdownify==1.2.3
+pycparser==3.0
+six==1.17.0
+soupsieve==2.9.2
+typing_extensions==4.16.0
+ua-generator==2.1.4

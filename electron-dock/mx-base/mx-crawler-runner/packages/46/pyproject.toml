@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "audiosource-46"
+version = "1.0.0"
+description = "Standalone AudioSpider source: 喜马拉雅"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+dependencies = ["aiohttp==3.13.1", "aiofiles==25.1.0", "lxml==6.1.1"]
+[project.scripts]
+audiosource-46 = "audiosource_46.client:cli"
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.setuptools.package-data]
+audiosource_46 = ["*.json"]

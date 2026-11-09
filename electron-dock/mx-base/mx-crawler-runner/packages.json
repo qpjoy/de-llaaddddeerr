@@ -1,0 +1,374 @@
+{
+  "catalogVersion": 1,
+  "upstreams": {
+    "yt-dlp@bbc809a1161d": {
+      "repo": "yt-dlp/yt-dlp",
+      "root": "upstream/yt-dlp@bbc809a1161d",
+      "sha256": "fb32f1287a1ec2b1b64a821769f0f8e0ad768ce161fc88c0cf493bb44d10a1eb"
+    },
+    "gallery-dl@2adf2a8e0041": {
+      "repo": "mikf/gallery-dl",
+      "root": "upstream/gallery-dl@2adf2a8e0041",
+      "sha256": "c08e7a9e6f41ccfa50e09529949e8308bfdb00dcbb32f8e2600964eb1b412dd8"
+    },
+    "medium-scraper@9cf365c5c052": {
+      "repo": "sarperavci/medium-scraper",
+      "root": "upstream/medium-scraper@9cf365c5c052",
+      "sha256": "1ea35ef31e1adc449aa2b6260777837e16a1fa6c93b75c5432e61fdbe8741461"
+    },
+    "substack-api@714f4e564786": {
+      "repo": "NHagar/substack_api",
+      "root": "upstream/substack-api@714f4e564786",
+      "sha256": "8d831fd32336522a6f94cb7b275417841a22c6bada62d3fa917a1665535e92fc"
+    },
+    "blog2epub@97ab6fe30793": {
+      "repo": "bohdanbobrowski/blog2epub",
+      "root": "upstream/blog2epub@97ab6fe30793",
+      "sha256": "c29017f6c7b0853b0eaea6f9ac2fd5ad851e3fed931478b80141d19fb167ffa8"
+    }
+  },
+  "packages": {
+    "market-195": {
+      "packageId": "195",
+      "label": "小米应用商店",
+      "root": "packages/195",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "sha256": "d064a21ee5c58fce72ad8f6f5d88a2c06e9435098222be8dca96ddc09c4c6dde"
+    },
+    "market-197": {
+      "packageId": "197",
+      "label": "vivo 应用商店",
+      "root": "packages/197",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "sha256": "0a570e0bda091c9310e84624228c5c4de79c9cd3160f11cd724aeb2a1f58f8c6"
+    },
+    "market-198": {
+      "packageId": "198",
+      "label": "应用宝",
+      "root": "packages/198",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "sha256": "e01ceca86f806f68ee8ec0dd4e514d95e8d11b9d4e75bd9fd7c92eb3f6e05626"
+    },
+    "market-216": {
+      "packageId": "216",
+      "label": "百度手机助手",
+      "root": "packages/216",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "sha256": "07a28230aba42a8215cb054a6c83a6e54e934a17c77676ba8d81bf052a8c70b6"
+    },
+    "market-217": {
+      "packageId": "217",
+      "label": "联想应用商店",
+      "root": "packages/217",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "sha256": "743dde8c5aa19ab8b8bbe9ccb0dba477a3e1c84cd7772ae597b369ede2dd838e"
+    },
+    "market-219": {
+      "packageId": "219",
+      "label": "豌豆荚",
+      "root": "packages/219",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "sha256": "7971ce677d4976342128c85dbe28a2fb82f8e165334a33f591415615bd2b9d37"
+    },
+    "market-193": {
+      "packageId": "193",
+      "label": "Google Play",
+      "root": "packages/193",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "app",
+        "search",
+        "reviews",
+        "list",
+        "developer",
+        "suggest",
+        "similar",
+        "permissions",
+        "datasafety"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work",
+        "runtime_dir": "runtime"
+      },
+      "reserved": [
+        "proxy",
+        "node_path"
+      ],
+      "sha256": "96e0a0eb8e8496ec6b0f40d728bf646bfe56c4fe771e1be03e936da0b2d03516"
+    },
+    "pinterest-94": {
+      "packageId": "94",
+      "label": "Pinterest",
+      "root": "packages/94",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "upstreams": [
+        "gallery-dl@2adf2a8e0041"
+      ],
+      "sha256": "396fb63f84fd94b4eda5885f8b7ac181734e5f4c10639b907aa91d657ca3cdb4"
+    },
+    "medium-96": {
+      "packageId": "96",
+      "label": "Medium",
+      "root": "packages/96",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "upstreams": [
+        "medium-scraper@9cf365c5c052"
+      ],
+      "sha256": "8c5c3243409c5eea0a39a5da34fe9eb9206e1ae7ba53c7929698f43e07a373b4"
+    },
+    "snapchat-98": {
+      "packageId": "98",
+      "label": "Snapchat Spotlight",
+      "root": "packages/98",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "upstreams": [
+        "yt-dlp@bbc809a1161d"
+      ],
+      "sha256": "5d834d7ec1f03e0f39040c872abf075153e7359066d3042be62989af87670603"
+    },
+    "dailymotion-101": {
+      "packageId": "101",
+      "label": "Dailymotion",
+      "root": "packages/101",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "upstreams": [
+        "yt-dlp@bbc809a1161d"
+      ],
+      "sha256": "529222ee223745d748617acc438714a61267ef8e9218695e7724f862722a9932"
+    },
+    "kick-104": {
+      "packageId": "104",
+      "label": "Kick",
+      "root": "packages/104",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "upstreams": [
+        "yt-dlp@bbc809a1161d"
+      ],
+      "sha256": "3347f5c42992f8d92eb165893bf586ed78413af538b0a05dbfdd0d25b9694b84"
+    },
+    "substack-105": {
+      "packageId": "105",
+      "label": "Substack",
+      "root": "packages/105",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "upstreams": [
+        "substack-api@714f4e564786"
+      ],
+      "sha256": "fd0ae2270839e279ec7aa01b0286e97d854de6b125fb579a3e36b02eb25f15ab"
+    },
+    "wordpress-107": {
+      "packageId": "107",
+      "label": "WordPress.com",
+      "root": "packages/107",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "work_dir": "work"
+      },
+      "reserved": [],
+      "upstreams": [
+        "blog2epub@97ab6fe30793"
+      ],
+      "sha256": "3b67dad664309e72c42746132ae1d1a33202bfe2b76e8e451236cf163a5c512f",
+      "requirements": "overrides/107/requirements.linux.txt"
+    },
+    "xiaoyuzhou-45": {
+      "packageId": "45",
+      "label": "小宇宙",
+      "root": "packages/45",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "discover",
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "run_dir": "work"
+      },
+      "reserved": [
+        "ffmpeg_path"
+      ],
+      "requirements": "packages/45/requirements.lock",
+      "tests": "test_contract.py",
+      "sha256": "e7ff4c8dc0f78e90da435044db631600583c5e806222e123ebc3627eed0bc500"
+    },
+    "ximalaya-46": {
+      "packageId": "46",
+      "label": "喜马拉雅",
+      "root": "packages/46",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "discover",
+        "collect"
+      ],
+      "proxy": "never",
+      "inject": {
+        "run_dir": "work"
+      },
+      "reserved": [
+        "ffmpeg_path"
+      ],
+      "requirements": "packages/46/requirements.lock",
+      "tests": "test_contract.py",
+      "sha256": "2f17aa379d9616c507f1d06afc9436a24f769b48a50307db38cdcae4fc85cace"
+    },
+    "applepodcasts-220": {
+      "packageId": "220",
+      "label": "Apple Podcasts",
+      "root": "packages/220",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "discover",
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "run_dir": "work"
+      },
+      "reserved": [
+        "ffmpeg_path"
+      ],
+      "requirements": "packages/220/requirements.lock",
+      "tests": "test_contract.py",
+      "sha256": "9b65ed0f2a1347ea41f01b8460467a9d48dc47cd1d76e5cf5384203ad3165d55"
+    },
+    "librivox-222": {
+      "packageId": "222",
+      "label": "LibriVox",
+      "root": "packages/222",
+      "interpreter": "python",
+      "entry": "adapter.py",
+      "operations": [
+        "discover",
+        "collect"
+      ],
+      "proxy": "allowed",
+      "inject": {
+        "run_dir": "work"
+      },
+      "reserved": [
+        "ffmpeg_path"
+      ],
+      "requirements": "packages/222/requirements.lock",
+      "tests": "test_contract.py",
+      "sha256": "2931980692ba9015a6161dff0d52ecb76e3f9aa19ca723fcde7179e1f17667ee"
+    }
+  }
+}

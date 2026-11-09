@@ -1,0 +1,111 @@
+isolated virtualenv
+
+
+
+locked dependencies
+Looking in links: g:\data_tongbu\data\audio_domestic\wheels
+Processing g:\data_tongbu\data\audio_domestic\wheels\aiofiles-25.1.0-py3-none-any.whl (from -r requirements.lock (line 2))
+Processing g:\data_tongbu\data\audio_domestic\wheels\aiohappyeyeballs-2.6.1-py3-none-any.whl (from -r requirements.lock (line 3))
+Processing g:\data_tongbu\data\audio_domestic\wheels\aiohttp-3.13.1-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 4))
+Processing g:\data_tongbu\data\audio_domestic\wheels\aiosignal-1.4.0-py3-none-any.whl (from -r requirements.lock (line 5))
+Processing g:\data_tongbu\data\audio_domestic\wheels\attrs-25.3.0-py3-none-any.whl (from -r requirements.lock (line 6))
+Processing g:\data_tongbu\data\audio_domestic\wheels\beautifulsoup4-4.14.3-py3-none-any.whl (from -r requirements.lock (line 7))
+Processing g:\data_tongbu\data\audio_domestic\wheels\brotli-1.2.0-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 8))
+Processing g:\data_tongbu\data\audio_domestic\wheels\certifi-2026.5.20-py3-none-any.whl (from -r requirements.lock (line 9))
+Processing g:\data_tongbu\data\audio_domestic\wheels\charset_normalizer-3.4.2-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 10))
+Processing g:\data_tongbu\data\audio_domestic\wheels\fake_useragent-2.2.0-py3-none-any.whl (from -r requirements.lock (line 11))
+Processing g:\data_tongbu\data\audio_domestic\wheels\frozenlist-1.8.0-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 12))
+Processing g:\data_tongbu\data\audio_domestic\wheels\idna-3.18-py3-none-any.whl (from -r requirements.lock (line 13))
+Processing g:\data_tongbu\data\audio_domestic\wheels\lxml-6.1.1-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 14))
+Processing g:\data_tongbu\data\audio_domestic\wheels\multidict-6.7.0-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 15))
+Processing g:\data_tongbu\data\audio_domestic\wheels\propcache-0.4.1-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 16))
+Processing g:\data_tongbu\data\audio_domestic\wheels\requests-2.32.5-py3-none-any.whl (from -r requirements.lock (line 17))
+Processing g:\data_tongbu\data\audio_domestic\wheels\setuptools-80.9.0-py3-none-any.whl (from -r requirements.lock (line 18))
+Processing g:\data_tongbu\data\audio_domestic\wheels\soupsieve-2.7-py3-none-any.whl (from -r requirements.lock (line 19))
+Processing g:\data_tongbu\data\audio_domestic\wheels\typing_extensions-4.15.0-py3-none-any.whl (from -r requirements.lock (line 20))
+Processing g:\data_tongbu\data\audio_domestic\wheels\urllib3-2.4.0-py3-none-any.whl (from -r requirements.lock (line 21))
+Processing g:\data_tongbu\data\audio_domestic\wheels\yarl-1.22.0-cp313-cp313-win_amd64.whl (from -r requirements.lock (line 22))
+Installing collected packages: brotli, urllib3, typing-extensions, soupsieve, setuptools, propcache, multidict, lxml, idna, frozenlist, fake-useragent, charset-normalizer, certifi, attrs, aiohappyeyeballs, aiofiles, yarl, requests, beautifulsoup4, aiosignal, aiohttp
+Successfully installed aiofiles-25.1.0 aiohappyeyeballs-2.6.1 aiohttp-3.13.1 aiosignal-1.4.0 attrs-25.3.0 beautifulsoup4-4.14.3 brotli-1.2.0 certifi-2026.5.20 charset-normalizer-3.4.2 fake-useragent-2.2.0 frozenlist-1.8.0 idna-3.18 lxml-6.1.1 multidict-6.7.0 propcache-0.4.1 requests-2.32.5 setuptools-80.9.0 soupsieve-2.7 typing-extensions-4.15.0 urllib3-2.4.0 yarl-1.22.0
+
+
+
+standalone install
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple/
+Processing g:\data_tongbu\data\audio_domestic\verification\45\project
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: audiosource-45
+  Building wheel for audiosource-45 (pyproject.toml): started
+  Building wheel for audiosource-45 (pyproject.toml): finished with status 'done'
+  Created wheel for audiosource-45: filename=audiosource_45-1.0.0-py3-none-any.whl size=25882 sha256=441eff0c79bf6f426f8b04d0967fc518bb0734559ccb9b6493cc4f680520d096
+  Stored in directory: C:\Users\dudumen\AppData\Local\Temp\pip-ephem-wheel-cache-f2o9_tbt\wheels\53\83\4f\326a8233f227de4d48c393fe460170f83cb184569e2373db90
+Successfully built audiosource-45
+Installing collected packages: audiosource-45
+Successfully installed audiosource-45-1.0.0
+
+
+
+dependency consistency
+No broken requirements found.
+
+
+
+isolated installed import
+G:\data_tongbu\data\audio_domestic\verification\45\venv\Lib\site-packages\audiosource_45\__init__.py
+
+
+
+offline regression tests
+
+test_416_requires_exact_total (test_contract.DownloadTests.test_416_requires_exact_total) ... ok
+test_changed_url_does_not_resume_old_partial (test_contract.DownloadTests.test_changed_url_does_not_resume_old_partial) ... ok
+test_conversion_failure_retains_original (test_contract.DownloadTests.test_conversion_failure_retains_original) ... ok
+test_full_download_and_hash (test_contract.DownloadTests.test_full_download_and_hash) ... ok
+test_html_is_not_saved_as_audio (test_contract.DownloadTests.test_html_is_not_saved_as_audio) ... ok
+test_ignored_range_restarts_not_appends (test_contract.DownloadTests.test_ignored_range_restarts_not_appends) ... ok
+test_mismatched_206_does_not_append (test_contract.DownloadTests.test_mismatched_206_does_not_append) ... ok
+test_pipeline_commits_complete_file_and_manifest (test_contract.DownloadTests.test_pipeline_commits_complete_file_and_manifest) ... ok
+test_range_206_exact_offset (test_contract.DownloadTests.test_range_206_exact_offset) ... ok
+test_short_transfer_is_not_complete (test_contract.DownloadTests.test_short_transfer_is_not_complete) ... ok
+test_size_cap_known_and_chunked (test_contract.DownloadTests.test_size_cap_known_and_chunked) ... ok
+test_cli_stdout_contains_one_json_document (test_contract.SdkTests.test_cli_stdout_contains_one_json_document) ... ok
+test_discover_collect_list_refresh_dedup (test_contract.SdkTests.test_discover_collect_list_refresh_dedup) ... ok
+test_invalid_inputs_no_runtime_side_effects (test_contract.SdkTests.test_invalid_inputs_no_runtime_side_effects) ... ok
+test_network_failure_not_no_data_and_collection_retryable (test_contract.SdkTests.test_network_failure_not_no_data_and_collection_retryable) ... ok
+test_overall_timeout_reports_unknown (test_contract.SdkTests.test_overall_timeout_reports_unknown) ... ok
+test_unconfigured_ffmpeg_is_explicit (test_contract.SdkTests.test_unconfigured_ffmpeg_is_explicit) ... ok
+test_xm_api_paid_and_mismatched_tracks_fail (test_contract.SourceTests.test_xm_api_paid_and_mismatched_tracks_fail) ... ok
+test_xm_grouped_seeds_https_and_size (test_contract.SourceTests.test_xm_grouped_seeds_https_and_size) ... ok
+test_xm_neighbor_scope_and_budget (test_contract.SourceTests.test_xm_neighbor_scope_and_budget) ... ok
+test_xyz_empty_episode_list_is_valid_no_data (test_contract.SourceTests.test_xyz_empty_episode_list_is_valid_no_data) ... ok
+test_xyz_identity_and_private_url_rejected (test_contract.SourceTests.test_xyz_identity_and_private_url_rejected) ... ok
+test_xyz_malformed_and_access_pages_are_errors (test_contract.SourceTests.test_xyz_malformed_and_access_pages_are_errors) ... ok
+test_xyz_paid_episode_does_not_discard_public (test_contract.SourceTests.test_xyz_paid_episode_does_not_discard_public) ... ok
+test_xyz_single_episode_scope (test_contract.SourceTests.test_xyz_single_episode_scope) ... ok
+test_xyz_structured_json_preserves_chinese_and_pairs (test_contract.SourceTests.test_xyz_structured_json_preserves_chinese_and_pairs) ... ok
+test_connection_isolation_and_owner_binding (test_contract.StoreTests.test_connection_isolation_and_owner_binding) ... ok
+test_failed_feed_is_retryable (test_contract.StoreTests.test_failed_feed_is_retryable) ... ok
+test_incremental_deduplication_and_date_backfill (test_contract.StoreTests.test_incremental_deduplication_and_date_backfill) ... ok
+test_url_duplicate_returns_stored_id_and_guid_refreshes_url (test_contract.StoreTests.test_url_duplicate_returns_stored_id_and_guid_refreshes_url) ... ok
+test_writer_lock_blocks_second_operation (test_contract.StoreTests.test_writer_lock_blocks_second_operation) ... ok
+
+----------------------------------------------------------------------
+Ran 31 tests in 1.610s
+
+OK
+
+
+Python example
+{"schema_version": "1.0", "project_id": "45", "source_id": "45", "operation": "stats", "observed_at": "2026-09-18T10:37:27.321914+00:00", "status": "success", "result": {"source_id": "45", "platform": "小宇宙", "observed_at": "2026-09-18T10:37:27.321914+00:00", "items": [], "errors": [], "warnings": [], "stats": {"collections": 0, "parsed_collections": 0, "records": 0, "downloads": {}}, "pagination": null}, "error": null}
+
+
+
+installed module CLI
+{"schema_version": "1.0", "project_id": "45", "source_id": "45", "operation": "stats", "observed_at": "2026-09-18T10:37:27.622064+00:00", "status": "success", "result": {"source_id": "45", "platform": "小宇宙", "observed_at": "2026-09-18T10:37:27.622064+00:00", "items": [], "errors": [], "warnings": [], "stats": {"collections": 0, "parsed_collections": 0, "records": 0, "downloads": {}}, "pagination": null}, "error": null}
+
+
+
+installed console CLI
+{"schema_version": "1.0", "project_id": "45", "source_id": "45", "operation": "stats", "observed_at": "2026-09-18T10:37:28.027081+00:00", "status": "success", "result": {"source_id": "45", "platform": "小宇宙", "observed_at": "2026-09-18T10:37:28.027081+00:00", "items": [], "errors": [], "warnings": [], "stats": {"collections": 0, "parsed_collections": 0, "records": 0, "downloads": {}}, "pagination": null}, "error": null}
+

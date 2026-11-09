@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "audiosource-222"
+version = "1.0.0"
+description = "Standalone AudioSpider source: LibriVox"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+dependencies = ["aiohttp==3.13.1", "aiofiles==25.1.0", "lxml==6.1.1"]
+[project.scripts]
+audiosource-222 = "audiosource_222.client:cli"
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.setuptools.package-data]
+audiosource_222 = ["*.json"]

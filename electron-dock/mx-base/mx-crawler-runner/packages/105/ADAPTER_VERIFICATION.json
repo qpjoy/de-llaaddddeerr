@@ -1,0 +1,122 @@
+{
+  "project_id": "105",
+  "observed_at": "2026-09-15T02:15:53.198775+00:00",
+  "kind": "adapter_reorganization_offline",
+  "isolated_copy": true,
+  "live_queries_performed": false,
+  "checks": [
+    {
+      "check": "create_environment",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.32,
+      "detail": "passed"
+    },
+    {
+      "check": "locked_dependencies",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.24,
+      "detail": "passed"
+    },
+    {
+      "check": "project_install",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.93,
+      "detail": "passed"
+    },
+    {
+      "check": "sdk_import",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.12,
+      "detail": "passed"
+    },
+    {
+      "check": "pip_check",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.32,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_help",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.06,
+      "detail": "passed"
+    },
+    {
+      "check": "upstream_install_with_git_verified",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "pip_check_after_copy_fix",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_contract_final",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "all_sdk_bindings_import",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "actual_sdk_offline_path",
+      "passed": true,
+      "status": "error",
+      "exit_code": 1
+    }
+  ],
+  "initial_attempts": [
+    {
+      "check": "local_upstream_install",
+      "passed": false,
+      "exit_code": 1,
+      "seconds": 7.78,
+      "detail": "tegration\\version_inference.py\", line 125, in infer_version_with_config\n          _version_missing(config, tool=env.tool_names[0])\n          ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n        File \"C:\\Users\\dudumen\\AppData\\Local\\Temp\\pip-build-env-6onn3f8s\\overlay\\Lib\\site-packages\\vcs_versioning\\_get_version_impl.py\", line 263, in _version_missing\n          raise LookupError(error_msg)\n      LookupError: setuptools-scm was unable to detect version for G:\\data_tongbu\\data\\adapter_standardization\\checks\\105\\project\\upstream\\NHagar__substack_api.\n      \n      Make sure you're either building from a fully intact git repository or PyPI tarballs. Most other sources (such as GitHub's tarballs, a git checkout without the .git folder) don't contain the necessary metadata and will not work.\n      \n      For example, if you're using pip, instead of https://github.com/user/proj/archive/master.zip use git+https://github.com/user/proj.git#egg=proj\n      \n      Alternatively, set the version with the environment variable SETUPTOOLS_SCM_PRETEND_VERSION_FOR_${NORMALIZED_DIST_NAME} as described in https://setuptools-scm.readthedocs.io/en/latest/config/\n      [end of output]\n  \n  note: This error originates from a subprocess, and is likely not a problem with pip.\nerror: subprocess-exited-with-error\n\n× Getting requirements to build wheel did not run successfully.\n│ exit code: 1\n╰─> See above for output.\n\nnote: This error originates from a subprocess, and is likely not a problem with pip.\n"
+    },
+    {
+      "check": "upstream_import",
+      "passed": false,
+      "exit_code": 1,
+      "seconds": 0.05,
+      "detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import substack_api\nModuleNotFoundError: No module named 'substack_api'\n"
+    }
+  ],
+  "copy_requirement": "Preserve upstream/NHagar__substack_api/.git. Initial copy omitted it; restored identical metadata and install passed.",
+  "offline_sample": {
+    "schema_version": "1.0",
+    "project_id": "105",
+    "source_id": "105",
+    "operation": "collect",
+    "observed_at": "2026-09-15T02:19:18.836115+00:00",
+    "status": "error",
+    "result": {
+      "id": 105,
+      "target": "not-a-url",
+      "observed_at": "2026-09-15T02:19:18.821371+00:00",
+      "live_data_verified": false,
+      "status": "failed",
+      "error_type": "ValueError",
+      "error": "target must be a complete public HTTP(S) URL"
+    },
+    "error": {
+      "code": "SOURCE_ERROR"
+    }
+  },
+  "adapter_sha256": "636144b0cfbd32f4334341578dbe2cac4b7f6e3a2ca11f8caae9210f68e08d7a",
+  "manifest_sha256": "d004c8377e414029a618ee4fc0935ef07d189ce0c42736d913a21c3335c14581",
+  "passed": true,
+  "final_checked_at": "2026-09-15T02:19:18.853078+00:00"
+}

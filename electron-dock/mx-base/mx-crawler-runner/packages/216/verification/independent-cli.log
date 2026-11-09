@@ -1,0 +1,24 @@
+usage: main.py [-h] [--input-kind {package,pid,docid}] [--history]
+               [--history-limit HISTORY_LIMIT] [--concurrency CONCURRENCY]
+               [--timeout TIMEOUT] [--request-timeout REQUEST_TIMEOUT]
+               [--delay DELAY] [--max-requests MAX_REQUESTS]
+               [--work-dir WORK_DIR] [--output OUTPUT]
+               inputs [inputs ...]
+
+baidu application metadata collector
+
+positional arguments:
+  inputs                Explicit package names or numeric market identifiers
+
+options:
+  -h, --help            show this help message and exit
+  --input-kind {package,pid,docid}
+  --history
+  --history-limit HISTORY_LIMIT
+  --concurrency CONCURRENCY
+  --timeout TIMEOUT
+  --request-timeout REQUEST_TIMEOUT
+  --delay DELAY
+  --max-requests MAX_REQUESTS
+  --work-dir WORK_DIR
+  --output OUTPUT

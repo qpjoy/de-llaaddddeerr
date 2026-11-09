@@ -1,0 +1,307 @@
+{
+  "market": "yingyonghui",
+  "mode": "detail-id-list",
+  "value": "7320596",
+  "history": false,
+  "observed_at": "2026-09-12T10:03:10.724805+00:00",
+  "items": [
+    {
+      "collection": "yingyonghui",
+      "unique_fields": [
+        "packageName",
+        "versionCode"
+      ],
+      "payload": {
+        "id": 7320596,
+        "blockId": 23715,
+        "name": "QQ",
+        "en_name": "",
+        "categoryId": 308,
+        "categoryName": "社交网络",
+        "shortDesc": "手机QQ，只想与你更接近",
+        "shorDesc": "QQ9全新上线，一起轻松做自己",
+        "description": "QQ9 轻松做自己\r\n\r\n在QQ，轻松社交\r\n- [聊天消息]随时随地好友和群消息；\r\n- [语音通话]、[视频聊天]和亲友自在畅聊；\r\n- [文件传输]手机电脑多端互传，轻松便捷。\r\n\r\n在QQ，轻松生活\r\n- [空间动态]快速获知好友动态，随时分享生活；\r\n- [移动支付]话费充值、转账收款、网购一应俱全；\r\n- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。\r\n\r\n在QQ，轻松娱乐\r\n- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；\r\n- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。\r\n\r\nQQ9将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。\r\n\r\n\r\n-----联系我们-----\r\n如在使用过程中遇到任何问题，请联系我们：\r\n- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈\r\n- 客服热线：4006 700 700（服务时间：8:00 - 23:00）\r\n\r\n*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+        "updateMsg": "本次更新:\r\n- QQ表情新增AI定制，表情潮流由我创造；\r\n- 优化若干性能和体验问题，聊Q更顺畅。\r\n\r\n近期更新:\r\n- 空间说说新增AI配文，助你表达创意无限；\r\n- 频道发现页新增品类板块，探索丰富兴趣社区更便捷；\r\n- Q群管家指令支持快速复制，多群管理一键搞定；\r\n- QQ图片文件支持批量发送99张，好友分享，高效便捷。",
+        "lastUpdate": "2026-09-09",
+        "lastUpdateShow": "3天前更新",
+        "createTime": "2025-04-16",
+        "developer": "",
+        "notice": {
+          "id": 0,
+          "noticeType": 0,
+          "blockId": 0,
+          "noticeTitle": "风险提示",
+          "noticeText": "为保障您的权益，请注意：\n①谨慎填写个人资料，避免泄露身份证号、住址等敏感信息；\n②警惕陌生人的金钱交易请求，切勿轻信高收益理财、转账返利等话术；\n③遇到骚扰/不良信息请立即屏蔽举报；\n④未成年人使用时建议开启家长监护模式；\n⑤合理控制使用时长，注意保护视力。平台将持续加强APP安全审核，与您共建清朗网络空间。",
+          "style": 0,
+          "actionType": null,
+          "actionProps": null,
+          "actionText": null,
+          "createTime": null,
+          "packageName": null,
+          "actionPropsPageTitle": null,
+          "actionPropsPageDetail": null,
+          "editor": {
+            "userId": 854757,
+            "userName": "YYH@85475781728",
+            "nickName": "产品君",
+            "profileImageUrl": "http://userimg.yingyonghui.com/head/57/1509437616006/854757.png-thumb",
+            "accountType": "YYH_ACCOUNT",
+            "deviceName": "MI 3"
+          },
+          "appNoticeIgnore": true
+        },
+        "size": 314884942,
+        "versionCode": 9558,
+        "versionName": "9.1.65",
+        "sdkVersion": 23,
+        "packageName": "com.tencent.mobileqq",
+        "pubkeyHash": "9034b12055fb9a45a9db8844fd2ddf380924e82f1c0acdce4d5a7fffd38725c8f594143f2525db73d19ca20bf40805010c5c5e24a7c02c21994b278909a7f919",
+        "marketName": "appchina",
+        "iconUrl": "http://static.yingyonghui.com/is/7320/7320596/256i.webp",
+        "apkUrl": "http://mobile.d.appchina.com/McDonald/e/7320596/0/0/0/1789207393493/package_9558.1789207393493",
+        "apkUrlHost": "mobile.d.appchina.com",
+        "apkYunUrl": null,
+        "xpkId": 0,
+        "etag": null,
+        "sizeExtracted": 0,
+        "officialType": 1,
+        "googleAuth": 0,
+        "bannerImg": null,
+        "likeTimes": 18595,
+        "dislikeTimes": 6837,
+        "likePercentage": "73%好评(25432人)",
+        "commentCount": 0,
+        "downloadCount": 110633630,
+        "downloadCountShow": "",
+        "properties": [
+          {
+            "需要联网": 1
+          },
+          {
+            "中文": 0
+          },
+          {
+            "安全": 0
+          }
+        ],
+        "adScanStatusList": [],
+        "expenseType": "",
+        "networkType": "需要联网",
+        "googleType": "",
+        "language": "中文",
+        "virusScanStatus": 1,
+        "adsScanStatus": -1,
+        "md5": "1ebf853717a2b029488f654cb5791203",
+        "activityCount": 0,
+        "commentActivityCount": 0,
+        "userId": 329107,
+        "guideUrl": null,
+        "permissions": [
+          "android.permission.ACCESS_COARSE_LOCATION",
+          "android.permission.ACCESS_FINE_LOCATION",
+          "android.permission.ACCESS_NETWORK_STATE",
+          "android.permission.ACCESS_WIFI_STATE",
+          "android.permission.AUTHENTICATE_ACCOUNTS",
+          "android.permission.BLUETOOTH",
+          "android.permission.BLUETOOTH_ADMIN",
+          "android.permission.CAMERA",
+          "android.permission.CHANGE_CONFIGURATION",
+          "android.permission.CHANGE_NETWORK_STATE",
+          "android.permission.CHANGE_WIFI_MULTICAST_STATE",
+          "android.permission.CHANGE_WIFI_STATE",
+          "android.permission.DISABLE_KEYGUARD",
+          "android.permission.EXPAND_STATUS_BAR",
+          "android.permission.FLASHLIGHT",
+          "android.permission.GET_ACCOUNTS",
+          "android.permission.GET_TASKS",
+          "android.permission.INTERNET",
+          "android.permission.MANAGE_ACCOUNTS",
+          "android.permission.MODIFY_AUDIO_SETTINGS",
+          "android.permission.PERSISTENT_ACTIVITY",
+          "android.permission.READ_CALENDAR",
+          "android.permission.READ_CONTACTS",
+          "android.permission.READ_LOGS",
+          "android.permission.READ_SYNC_SETTINGS",
+          "android.permission.RECEIVE_BOOT_COMPLETED",
+          "android.permission.RECORD_AUDIO",
+          "android.permission.REORDER_TASKS",
+          "android.permission.RESTART_PACKAGES",
+          "android.permission.SYSTEM_ALERT_WINDOW",
+          "android.permission.VIBRATE",
+          "android.permission.WAKE_LOCK",
+          "android.permission.WRITE_CALENDAR",
+          "android.permission.WRITE_CONTACTS",
+          "android.permission.WRITE_EXTERNAL_STORAGE",
+          "android.permission.WRITE_OWNER_DATA",
+          "android.permission.WRITE_SETTINGS",
+          "android.permission.WRITE_SYNC_SETTINGS"
+        ],
+        "snapshotUrls": [
+          "http://static.yingyonghui.com/screenshots/7320/7320596_0.jpg",
+          "http://static.yingyonghui.com/screenshots/7320/7320596_1.jpg",
+          "http://static.yingyonghui.com/screenshots/7320/7320596_2.jpg",
+          "http://static.yingyonghui.com/screenshots/7320/7320596_3.jpg",
+          "http://static.yingyonghui.com/screenshots/7320/7320596_4.jpg"
+        ],
+        "tags": [
+          {
+            "id": 446,
+            "name": "QQ",
+            "description": "QQ以及与QQ相关的辅助/强化/美化工具。",
+            "status": 0
+          },
+          {
+            "id": 387,
+            "name": "综合社交",
+            "description": "大而全的社交应用，拥有各种社交功能。一个应用在打上此标签时，同时还能打这个应用比较突出的社交功能标签，如【即时通讯】、【社交圈】。",
+            "status": 0
+          },
+          {
+            "id": 597,
+            "name": "腾讯制造",
+            "description": "",
+            "status": 0
+          },
+          {
+            "id": 388,
+            "name": "即时通讯",
+            "description": "",
+            "status": 0
+          },
+          {
+            "id": 389,
+            "name": "社交圈",
+            "description": "与数量较少的朋友聚集在一起的社交功能，如微信的朋友圈。",
+            "status": 0
+          },
+          {
+            "id": 805,
+            "name": "社交通讯",
+            "description": "",
+            "status": 0
+          }
+        ],
+        "tagProperties": [
+          {
+            "id": 496,
+            "name": "精品",
+            "description": "有相当质量水准，值得你向小伙伴们推荐的精品游戏或软件。",
+            "status": 0
+          }
+        ],
+        "editorTags": [],
+        "category": {
+          "id": 40106,
+          "name": "社交通讯",
+          "description": "QQ、微信、微博、电话短信、通讯录、网络电话"
+        },
+        "closed": false,
+        "closedLeftTime": "",
+        "closedReason": "",
+        "offShelf": false,
+        "hasSource": false,
+        "openServiceDetail": null,
+        "cnaacCertify": false,
+        "gamePlayRankThree": null,
+        "closeDownload": false,
+        "prePublish": false,
+        "reservationUrl": null,
+        "closeDownloadTips": null,
+        "wantplayCount": 0,
+        "wantplayRank": 0,
+        "isWhiteList": 0,
+        "redActivity": null,
+        "group": {
+          "id": 7,
+          "name": "挖掘好应用",
+          "introduction": "不用找蓝翔 好应用这里强",
+          "iconUrl": "http://image.yingyonghui.com/market/group/7_218473_icon.png",
+          "iconUrlLarge": "http://image.yingyonghui.com/market/group/7_510062_largeicon.png",
+          "commentCount": 183971
+        },
+        "newProperties": [
+          {
+            "id": 2,
+            "name": "需要联网",
+            "color": 1,
+            "desc": "需要联网才能使用哦"
+          },
+          {
+            "id": 3,
+            "name": "中文",
+            "color": 0,
+            "desc": "中文使用毫无障碍"
+          }
+        ],
+        "relatedNewsArticle": null,
+        "appDetailConfig": null,
+        "price": 0,
+        "playTopTime": 6157920000,
+        "categoryRank": 2,
+        "isBeta": 0,
+        "level": 3,
+        "isToday": 0,
+        "topic": null,
+        "isGame": 0,
+        "appBetaRecord": null,
+        "videoUrl": null,
+        "appBean": 0,
+        "incompatible": true,
+        "developerId": 231808,
+        "developerName": "深圳市腾讯计算机系统有限公司",
+        "privacyUrl": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+        "downloadLimit": 0,
+        "topicId": null,
+        "appActivityList": null,
+        "filings": "粤B2-20090059-1622A",
+        "hasCloudGame": false,
+        "cloudGameInfo": null,
+        "xpk": false,
+        "_meta": {
+          "market": "yingyonghui",
+          "mode": "detail-id-list",
+          "input_value": "7320596",
+          "record_type": "detail"
+        }
+      }
+    },
+    {
+      "market": "yingyonghui",
+      "mode": "detail-id-list",
+      "input_value": "7320596",
+      "success": 1,
+      "error": null
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "url": "https://mobile.appchina.com/market/api",
+      "status": 200,
+      "input": "7320596",
+      "body": "{\"id\":7320596,\"blockId\":23715,\"name\":\"QQ\",\"en_name\":\"\",\"categoryId\":308,\"categoryName\":\"社交网络\",\"shortDesc\":\"手机QQ，只想与你更接近\",\"shorDesc\":\"QQ9全新上线，一起轻松做自己\",\"description\":\"QQ9 轻松做自己\\r\\n\\r\\n在QQ，轻松社交\\r\\n- [聊天消息]随时随地好友和群消息；\\r\\n- [语音通话]、[视频聊天]和亲友自在畅聊；\\r\\n- [文件传输]手机电脑多端互传，轻松便捷。\\r\\n\\r\\n在QQ，轻松生活\\r\\n- [空间动态]快速获知好友动态，随时分享生活；\\r\\n- [移动支付]话费充值、转账收款、网购一应俱全；\\r\\n- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。\\r\\n\\r\\n在QQ，轻松娱乐\\r\\n- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；\\r\\n- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。\\r\\n\\r\\nQQ9将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。\\r\\n\\r\\n\\r\\n-----联系我们-----\\r\\n如在使用过程中遇到任何问题，请联系我们：\\r\\n- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈\\r\\n- 客服热线：4006 700 700（服务时间：8:00 - 23:00）\\r\\n\\r\\n*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间\",\"updateMsg\":\"本次更新:\\r\\n- QQ表情新增AI定制，表情潮流由我创造；\\r\\n- 优化若干性能和体验问题，聊Q更顺畅。\\r\\n\\r\\n近期更新:\\r\\n- 空间说说新增AI配文，助你表达创意无限；\\r\\n- 频道发现页新增品类板块，探索丰富兴趣社区更便捷；\\r\\n- Q群管家指令支持快速复制，多群管理一键搞定；\\r\\n- QQ图片文件支持批量发送99张，好友分享，高效便捷。\",\"lastUpdate\":\"2026-09-09\",\"lastUpdateShow\":\"3天前更新\",\"createTime\":\"2025-04-16\",\"developer\":\"\",\"notice\":{\"id\":0,\"noticeType\":0,\"blockId\":0,\"noticeTitle\":\"风险提示\",\"noticeText\":\"为保障您的权益，请注意：\\n①谨慎填写个人资料，避免泄露身份证号、住址等敏感信息；\\n②警惕陌生人的金钱交易请求，切勿轻信高收益理财、转账返利等话术；\\n③遇到骚扰/不良信息请立即屏蔽举报；\\n④未成年人使用时建议开启家长监护模式；\\n⑤合理控制使用时长，注意保护视力。平台将持续加强APP安全审核，与您共建清朗网络空间。\",\"style\":0,\"actionType\":null,\"actionProps\":null,\"actionText\":null,\"createTime\":null,\"packageName\":null,\"actionPropsPageTitle\":null,\"actionPropsPageDetail\":null,\"editor\":{\"userId\":854757,\"userName\":\"YYH@85475781728\",\"nickName\":\"产品君\",\"profileImageUrl\":\"http://userimg.yingyonghui.com/head/57/1509437616006/854757.png-thumb\",\"accountType\":\"YYH_ACCOUNT\",\"deviceName\":\"MI 3\"},\"appNoticeIgnore\":true},\"size\":314884942,\"versionCode\":9558,\"versionName\":\"9.1.65\",\"sdkVersion\":23,\"packageName\":\"com.tencent.mobileqq\",\"pubkeyHash\":\"9034b12055fb9a45a9db8844fd2ddf380924e82f1c0acdce4d5a7fffd38725c8f594143f2525db73d19ca20bf40805010c5c5e24a7c02c21994b278909a7f919\",\"marketName\":\"appchina\",\"iconUrl\":\"http://static.yingyonghui.com/is/7320/7320596/256i.webp\",\"apkUrl\":\"http://mobile.d.appchina.com/McDonald/e/7320596/0/0/0/1789207393493/package_9558.1789207393493\",\"apkUrlHost\":\"mobile.d.appchina.com\",\"apkYunUrl\":null,\"xpkId\":0,\"etag\":null,\"sizeExtracted\":0,\"officialType\":1,\"googleAuth\":0,\"bannerImg\":null,\"likeTimes\":18595,\"dislikeTimes\":6837,\"likePercentage\":\"73%好评(25432人)\",\"commentCount\":0,\"downloadCount\":110633630,\"downloadCountShow\":\"\",\"properties\":[{\"需要联网\":1},{\"中文\":0},{\"安全\":0}],\"adScanStatusList\":[],\"expenseType\":\"\",\"networkType\":\"需要联网\",\"googleType\":\"\",\"language\":\"中文\",\"virusScanStatus\":1,\"adsScanStatus\":-1,\"md5\":\"1ebf853717a2b029488f654cb5791203\",\"activityCount\":0,\"commentActivityCount\":0,\"userId\":329107,\"guideUrl\":null,\"permissions\":[\"android.permission.ACCESS_COARSE_LOCATION\",\"android.permission.ACCESS_FINE_LOCATION\",\"android.permission.ACCESS_NETWORK_STATE\",\"android.permission.ACCESS_WIFI_STATE\",\"android.permission.AUTHENTICATE_ACCOUNTS\",\"android.permission.BLUETOOTH\",\"android.permission.BLUETOOTH_ADMIN\",\"android.permission.CAMERA\",\"android.permission.CHANGE_CONFIGURATION\",\"android.permission.CHANGE_NETWORK_STATE\",\"android.permission.CHANGE_WIFI_MULTICAST_STATE\",\"android.permission.CHANGE_WIFI_STATE\",\"android.permission.DISABLE_KEYGUARD\",\"android.permission.EXPAND_STATUS_BAR\",\"android.permission.FLASHLIGHT\",\"android.permission.GET_ACCOUNTS\",\"android.permission.GET_TASKS\",\"android.permission.INTERNET\",\"android.permission.MANAGE_ACCOUNTS\",\"android.permission.MODIFY_AUDIO_SETTINGS\",\"android.permission.PERSISTENT_ACTIVITY\",\"android.permission.READ_CALENDAR\",\"android.permission.READ_CONTACTS\",\"android.permission.READ_LOGS\",\"android.permission.READ_SYNC_SETTINGS\",\"android.permission.RECEIVE_BOOT_COMPLETED\",\"android.permission.RECORD_AUDIO\",\"android.permission.REORDER_TASKS\",\"android.permission.RESTART_PACKAGES\",\"android.permission.SYSTEM_ALERT_WINDOW\",\"android.permission.VIBRATE\",\"android.permission.WAKE_LOCK\",\"android.permission.WRITE_CALENDAR\",\"android.permission.WRITE_CONTACTS\",\"android.permission.WRITE_EXTERNAL_STORAGE\",\"android.permission.WRITE_OWNER_DATA\",\"android.permission.WRITE_SETTINGS\",\"android.permission.WRITE_SYNC_SETTINGS\"],\"snapshotUrls\":[\"http://static.yingyonghui.com/screenshots/7320/7320596_0.jpg\",\"http://static.yingyonghui.com/screenshots/7320/7320596_1.jpg\",\"http://static.yingyonghui.com/screenshots/7320/7320596_2.jpg\",\"http://static.yingyonghui.com/screenshots/7320/7320596_3.jpg\",\"http://static.yingyonghui.com/screenshots/7320/7320596_4.jpg\"],\"tags\":[{\"id\":446,\"name\":\"QQ\",\"description\":\"QQ以及与QQ相关的辅助/强化/美化工具。\",\"status\":0},{\"id\":387,\"name\":\"综合社交\",\"description\":\"大而全的社交应用，拥有各种社交功能。一个应用在打上此标签时，同时还能打这个应用比较突出的社交功能标签，如【即时通讯】、【社交圈】。\",\"status\":0},{\"id\":597,\"name\":\"腾讯制造\",\"description\":\"\",\"status\":0},{\"id\":388,\"name\":\"即时通讯\",\"description\":\"\",\"status\":0},{\"id\":389,\"name\":\"社交圈\",\"description\":\"与数量较少的朋友聚集在一起的社交功能，如微信的朋友圈。\",\"status\":0},{\"id\":805,\"name\":\"社交通讯\",\"description\":\"\",\"status\":0}],\"tagProperties\":[{\"id\":496,\"name\":\"精品\",\"description\":\"有相当质量水准，值得你向小伙伴们推荐的精品游戏或软件。\",\"status\":0}],\"editorTags\":[],\"category\":{\"id\":40106,\"name\":\"社交通讯\",\"description\":\"QQ、微信、微博、电话短信、通讯录、网络电话\"},\"closed\":false,\"closedLeftTime\":\"\",\"closedReason\":\"\",\"offShelf\":false,\"hasSource\":false,\"openServiceDetail\":null,\"cnaacCertify\":false,\"gamePlayRankThree\":null,\"closeDownload\":false,\"prePublish\":false,\"reservationUrl\":null,\"closeDownloadTips\":null,\"wantplayCount\":0,\"wantplayRank\":0,\"isWhiteList\":0,\"redActivity\":null,\"group\":{\"id\":7,\"name\":\"挖掘好应用\",\"introduction\":\"不用找蓝翔 好应用这里强\",\"iconUrl\":\"http://image.yingyonghui.com/market/group/7_218473_icon.png\",\"iconUrlLarge\":\"http://image.yingyonghui.com/market/group/7_510062_largeicon.png\",\"commentCount\":183971},\"newProperties\":[{\"id\":2,\"name\":\"需要联网\",\"color\":1,\"desc\":\"需要联网才能使用哦\"},{\"id\":3,\"name\":\"中文\",\"color\":0,\"desc\":\"中文使用毫无障碍\"}],\"relatedNewsArticle\":null,\"appDetailConfig\":null,\"price\":0,\"playTopTime\":6157920000,\"categoryRank\":2,\"isBeta\":0,\"level\":3,\"isToday\":0,\"topic\":null,\"isGame\":0,\"appBetaRecord\":null,\"videoUrl\":null,\"appBean\":0,\"incompatible\":true,\"developerId\":231808,\"developerName\":\"深圳市腾讯计算机系统有限公司\",\"privacyUrl\":\"https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62\",\"downloadLimit\":0,\"topicId\":null,\"appActivityList\":null,\"filings\":\"粤B2-20090059-1622A\",\"hasCloudGame\":false,\"cloudGameInfo\":null,\"xpk\":false}"
+    }
+  ],
+  "stats": {
+    "start_time": "2026-09-12 10:03:10.981376+00:00",
+    "scheduler/enqueued/memory": 1,
+    "scheduler/enqueued": 1,
+    "scheduler/dequeued/memory": 1,
+    "scheduler/dequeued": 1,
+    "downloader/request_count": 1,
+    "downloader/request_method_count/POST": 1,
+    "downloader/request_bytes": 813,
+    "downloader/response_count": 1,
+    "downloader/response_status_count/200": 1,
+    "downloader/response_bytes": 4201,
+    "httpcompression/response_bytes": 7902,
+    "httpcompression/response_count": 1,
+    "response_received_count": 1,
+    "item_scraped_count": 2,
+    "elapsed_time_seconds": 1.678128,
+    "finish_time": "2026-09-12 10:03:12.659504+00:00",
+    "finish_reason": "finished",
+    "responses_per_minute": 60.0,
+    "items_per_minute": 120.0
+  }
+}

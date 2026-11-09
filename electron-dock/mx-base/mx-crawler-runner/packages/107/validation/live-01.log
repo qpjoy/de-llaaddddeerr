@@ -1,0 +1,8 @@
+Starting wordpress crawler
+Analysing sitemaps
+Found 152 articles to crawl.
+Downloading....[K
+1. About this blog
+Downloading........[K
+2. The History Of The Bed: From Horse Hair To Now. How Have They Changed?
+{"id": 107, "target": "https://19thcentury.wordpress.com", "observed_at": "2026-09-10T16:41:47.359658+00:00", "python": "3.13.3", "live_data_verified": false, "status": "needs_result_review", "capabilities_verified": []}

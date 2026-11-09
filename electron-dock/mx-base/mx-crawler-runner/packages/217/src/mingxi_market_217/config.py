@@ -1,0 +1,4 @@
+MARKET='lenovo'
+SOURCE_ID=217
+INPUT_KINDS=['package']
+HISTORY_KINDS=[]

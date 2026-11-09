@@ -1,0 +1,383 @@
+{
+  "source_row_id": 195,
+  "provider": "halifox/app_market_crawler",
+  "platform": "xiaomi",
+  "observed_at": "2026-09-12T10:19:09.623833+00:00",
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "input_value": "1359",
+        "record_type": "detail",
+        "source_url": "https://m.app.mi.com/detailapi/1359",
+        "app": {
+          "package": "com.tencent.mobileqq",
+          "app_id": "1359",
+          "name": "QQ",
+          "version": "9.3.55",
+          "version_code": "15900",
+          "developer": "深圳市腾讯计算机系统有限公司",
+          "rating": "8",
+          "privacy_policy_url": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "updated_at": "2026-09-09",
+          "icon_url": "http://file.market.xiaomi.com/thumbnail/PNG/l114/AppStore/072725ca573700292b92e636ec126f51ba4429a50",
+          "download_url": "https://m.app.mi.com/download/1359"
+        },
+        "raw": {
+          "filePath": "http://file.market.xiaomi.com/thumbnail/",
+          "relatedApp": null,
+          "appScreenshot": [
+            "http://file.market.xiaomi.com/thumbnail/jpeg/l395/AppStore/0af6d7596da5d466885955ca9a5ac24e63490a57e",
+            "http://file.market.xiaomi.com/thumbnail/jpeg/l395/AppStore/05d639a9263f94a3fa5a0fd1b5b68a33505dd138e",
+            "http://file.market.xiaomi.com/thumbnail/jpeg/l395/AppStore/057634cb90ba946d3acd63bc70fa56c999c644fb1",
+            "http://file.market.xiaomi.com/thumbnail/jpeg/l395/AppStore/0e766c01b469a4cd39818e47844bf7f68c9db6adf",
+            "http://file.market.xiaomi.com/thumbnail/jpeg/l395/AppStore/0143f68dfc7e14732893c2f95597d8ba41305d905"
+          ],
+          "permissionIds": [
+            {
+              "summary": "访问大概位置",
+              "description": "允许应用访问大概位置"
+            },
+            {
+              "summary": "精确位置权限",
+              "description": "允许应用访问精确位置。"
+            },
+            {
+              "summary": "查看网络状态",
+              "description": "允许应用程序查看所有网络的状态。"
+            },
+            {
+              "summary": "开关WLAN",
+              "description": "允许应用开启或关闭WLAN"
+            },
+            {
+              "summary": "作为帐户身份验证程序",
+              "description": "允许应用程序使用 AccountManager 的帐户身份验证程序功能，包括创建帐户以及获取和设置其密码。"
+            },
+            {
+              "summary": "开关蓝牙",
+              "description": "允许应用开启或关闭蓝牙"
+            },
+            {
+              "summary": "蓝牙管理",
+              "description": "允许应用程序配置本地蓝牙手机，以及发现远程设备并与其配对。"
+            },
+            {
+              "summary": "拍摄照片和视频",
+              "description": "允许应用拍摄照片或录制视频"
+            },
+            {
+              "summary": "更改用户界面设置",
+              "description": "允许应用程序更改当前配置，例如语言设置或整体的字体大小。"
+            },
+            {
+              "summary": "更改网络连接性",
+              "description": "允许应用程序更改网络连接的状态。"
+            },
+            {
+              "summary": "允许接收 Wi-Fi 多播",
+              "description": "允许应用程序接收并非直接向您的设备发送的数据包。这样在查找附近提供的服务时很有用。这种操作所耗电量大于非多播模式。"
+            },
+            {
+              "summary": "更改 Wi-Fi 状态",
+              "description": "允许应用程序连接到 Wi-Fi 接入点以及与 Wi-Fi 接入点断开连接，并对配置的 Wi-Fi 网络进行更改。"
+            },
+            {
+              "summary": "完全的互联网访问权限",
+              "description": "允许应用程序创建网络套接字。"
+            },
+            {
+              "summary": "停用键锁",
+              "description": "允许应用程序停用键锁和任何关联的密码安全设置。例如，在手机上接听电话时停用键锁，在通话结束后重新启用键锁。"
+            },
+            {
+              "summary": "展开/收拢状态栏",
+              "description": "允许应用程序展开或收拢状态栏。"
+            },
+            {
+              "summary": "控制闪光灯",
+              "description": "允许应用程序控制闪光灯。"
+            },
+            {
+              "summary": "检索当前运行的应用程序",
+              "description": "允许应用程序检索有关当前和最近运行的任务的信息。恶意应用程序可借此发现有关其他应用程序的保密信息。"
+            },
+            {
+              "summary": "结束后台进程",
+              "description": "无论内存资源是否紧张，都允许应用程序结束其他应用程序的后台进程。"
+            },
+            {
+              "summary": "结束后台进程",
+              "description": "无论内存资源是否紧张，都允许应用程序结束其他应用程序的后台进程。"
+            },
+            {
+              "summary": "管理帐户列表",
+              "description": "允许应用程序执行添加、删除帐户及删除其密码之类的操作。"
+            },
+            {
+              "summary": "控制媒体音量",
+              "description": "允许应用调整媒体音量"
+            },
+            {
+              "summary": "使用NFC",
+              "description": "允许应用使用NFC"
+            },
+            {
+              "summary": "让应用程序始终运行",
+              "description": "允许应用程序部分持续运行，这样系统便不能将其用于其他应用程序。"
+            },
+            {
+              "summary": "读取联系人",
+              "description": "允许应用读取联系人信息"
+            },
+            {
+              "summary": "查阅敏感日志数据",
+              "description": "允许应用程序从系统的各个日志文件中读取信息。这样，应用程序就可以发现关于您手机使用情况的一般信息，其中可能包含个人信息或私密信息。"
+            },
+            {
+              "summary": "读取同步设置",
+              "description": "允许应用程序读取同步设置，例如是否为“联系人”启用同步。"
+            },
+            {
+              "summary": "开机时自动启动",
+              "description": "允许应用程序在系统完成启动后即自行启动。这样会延长手机的启动时间，而且如果应用程序一直运行，会降低手机的整体速度。"
+            },
+            {
+              "summary": "录音",
+              "description": "允许应用程序访问录音路径。"
+            },
+            {
+              "summary": "对正在运行的应用程序重新排序",
+              "description": "允许应用程序将任务移至前端和后台。恶意应用程序可借此强行进入前端，而不受您的控制。"
+            },
+            {
+              "summary": "写入文件与文档",
+              "description": "允许应用写入手机上的照片及文件"
+            },
+            {
+              "summary": "以悬浮窗的形式显示",
+              "description": "允许应用在任何界面显示悬浮窗"
+            },
+            {
+              "summary": "控制振动器",
+              "description": "允许应用程序控制振动器。"
+            },
+            {
+              "summary": "防止手机休眠",
+              "description": "允许应用程序防止手机进入休眠状态。"
+            },
+            {
+              "summary": "添加/修改日历活动",
+              "description": "允许应用程序发送活动邀请，允许添加、删除和更改在设备上的活动"
+            },
+            {
+              "summary": "修改联系人",
+              "description": "允许应用写入/删除联系人信息"
+            },
+            {
+              "summary": "修改系统设置项",
+              "description": "允许应用修改系统设置情况"
+            },
+            {
+              "summary": "写入同步设置",
+              "description": "允许应用程序修改同步设置，例如是否为“联系人”启用同步。"
+            },
+            {
+              "summary": "读取文件与文档",
+              "description": "允许应用读取手机上的照片及文件"
+            },
+            {
+              "summary": "添加桌面快捷方式",
+              "description": "允许应用自行添加桌面快捷方式"
+            },
+            {
+              "summary": "android.permission.USE_FULL_SCREEN_INTENT",
+              "description": "以 Build.VERSION_CODES.Q为目标且想要使用通知全屏意图"
+            },
+            {
+              "summary": "android.permission.USE_FINGERPRINT",
+              "description": "允许应用使用指纹硬件。"
+            },
+            {
+              "summary": "android.permission.USE_EXACT_ALARM",
+              "description": "允许应用使用精确警报，但无需向用户请求此权限"
+            },
+            {
+              "summary": "android.permission.SCHEDULE_EXACT_ALARM",
+              "description": "允许应用程序使用精确的警报 API。"
+            },
+            {
+              "summary": "android.permission.REQUEST_INSTALL_PACKAGES",
+              "description": "允许应用程序请求安装包。"
+            },
+            {
+              "summary": "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+              "description": "允许应用程序从用户通过权限提示选择的外部存储读取图像视频"
+            },
+            {
+              "summary": "android.permission.READ_MEDIA_VIDEO",
+              "description": "允许应用程序从外部存储读取视频文件。"
+            },
+            {
+              "summary": "android.permission.READ_MEDIA_IMAGES",
+              "description": "允许应用程序从外部存储读取图像文件。"
+            },
+            {
+              "summary": "android.permission.READ_MEDIA_AUDIO",
+              "description": "允许应用程序从外部存储读取音频文件。"
+            },
+            {
+              "summary": "android.permission.QUERY_ALL_PACKAGES",
+              "description": "允许查询设备上的任何普通应用程序，无论清单声明如何。"
+            },
+            {
+              "summary": "android.permission.POST_NOTIFICATIONS",
+              "description": "允许应用发布通知"
+            },
+            {
+              "summary": "从您的媒体收藏中读取位置信息",
+              "description": "允许应用程序访问保存在用户共享集合中的任何地理位置。"
+            },
+            {
+              "summary": "android.permission.NEARBY_WIFI_DEVICES",
+              "description": "需要能够通过 Wi-Fi 发布广告和连接到附近的设备。"
+            },
+            {
+              "summary": "识别身体活动",
+              "description": "允许应用程序识别身体活动。"
+            },
+            {
+              "summary": "android.permission.BLUETOOTH_ADVERTISE",
+              "description": "需要能够向附近的蓝牙设备做广告。"
+            },
+            {
+              "summary": "连接到配对的蓝牙设备",
+              "description": "需要能够连接到配对的蓝牙设备。API级别31引入"
+            },
+            {
+              "summary": "android.permission.BLUETOOTH_SCAN",
+              "description": "是一个用于允许 Android 应用程序扫描周围的蓝牙设备的权限。"
+            },
+            {
+              "summary": "android.permission.DETECT_SCREEN_CAPTURE",
+              "description": "允许应用程序在尝试对其窗口进行屏幕捕获时得到通知。"
+            },
+            {
+              "summary": "运行前台服务",
+              "description": "允许常规应用程序使用 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.FOREGROUND_SERVICE_CAMERA",
+              "description": "允许常规应用类型为“camera”的 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+              "description": "允许类型为“dataSync”的 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.FOREGROUND_SERVICE_LOCATION",
+              "description": "允许类型为“location”的 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+              "description": "允许类型为“mediaPlayback”的 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
+              "description": "允许类型为“mediaProjection”的 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+              "description": "允许类型为“microphone”的 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+              "description": "允许类型为“specialUse”的 Service.startForeground。"
+            },
+            {
+              "summary": "android.permission.HIGH_SAMPLING_RATE_SENSORS",
+              "description": "允许应用访问采样率大于 200 Hz 的传感器数据。"
+            }
+          ],
+          "appMap": {
+            "privacyUrl": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+            "keywords": null,
+            "displayName": "QQ",
+            "icon": "http://file.market.xiaomi.com/thumbnail/PNG/l114/AppStore/072725ca573700292b92e636ec126f51ba4429a50",
+            "changeLog": "本次更新：<br />- QQ闪传文件有效期新增支持90天/180天；<br />- QQ闪传支持添加或删除已分享的文件，灵活调整分享内容。<br /><br />近期更新：<br />- 宠物功能上线，支持多种养宠互动玩法，解锁社交新体验；<br />- 输入状态个性装扮上线，让好友等待回复的时刻也变得有趣；<br />- 进群特效全新升级，款式更多元，呈现更自然，字色更护眼；<br />- QQ秀生成效果升级，提升形象还原度。上线展柜功能，可收藏精选形象。",
+            "description": "在QQ，轻松社交\n- [聊天消息]随时随地好友和群消息；\n- [语音通话]、[视频聊天]和亲友自在畅聊；\n- [文件传输]手机电脑多端...",
+            "versionName": "9.3.55",
+            "categoryName": "聊天社交",
+            "vcode": "15900",
+            "ratingScore": "8",
+            "commentCounts": "135764",
+            "oriIntroduction": "在QQ，轻松社交\n- [聊天消息]随时随地好友和群消息；\n- [语音通话]、[视频聊天]和亲友自在畅聊；\n- [文件传输]手机电脑多端互传，轻松便捷。\n\n在QQ，轻松生活\n- [空间动态]快速获知好友动态，随时分享生活；\n- [移动支付]话费充值、转账收款、网购一应俱全；\n- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。\n\n在QQ，轻松娱乐\n- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；\n- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。\n\nQQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。\n\n\n-----联系我们-----\n如在使用过程中遇到任何问题，请联系我们：\n- 在线帮助：进入QQ设置 -&gt; 关于QQ -&gt; 帮助与反馈\n- 客服热线：4006 700 700（服务时间：8:00 - 23:00）\n\n*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+            "web": "http://im.qq.com/",
+            "appId": "1359",
+            "id": "1359",
+            "apkSize": 380592,
+            "packageName": "com.tencent.mobileqq",
+            "introduction": "在QQ，轻松社交<br />- [聊天消息]随时随地好友和群消息；<br />- [语音通话]、[视频聊天]和亲友自在畅聊；<br />- [文件传输]手机电脑多端互传，轻松便捷。<br /><br />在QQ，轻松生活<br />- [空间动态]快速获知好友动态，随时分享生活；<br />- [移动支付]话费充值、转账收款、网购一应俱全；<br />- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。<br /><br />在QQ，轻松娱乐<br />- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；<br />- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。<br /><br />QQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。<br /><br /><br />-----联系我们-----<br />如在使用过程中遇到任何问题，请联系我们：<br />- 在线帮助：进入QQ设置 -&gt; 关于QQ -&gt; 帮助与反馈<br />- 客服热线：4006 700 700（服务时间：8:00 - 23:00）<br /><br />*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+            "allowDownload": null,
+            "uploadtime": "2026-09-09",
+            "appRater": "8",
+            "suitableType": "0",
+            "isCloudGame": false,
+            "vname": "9.3.55",
+            "size": "371.67",
+            "publisherName": "深圳市腾讯计算机系统有限公司",
+            "categoryUrl": "2",
+            "queryParam": "id=com.tencent.mobileqq&ref=appstore.mobile_download&nonce=-4561080635824735438%3A29820139&appClientId=2882303761517485445&appSignature=9ceaZTrem-7hv18ttWfJ_JLnDjelf9Vvj_M_KvB4MEs",
+            "support": "手机",
+            "categoryId": "2"
+          },
+          "id": "1359",
+          "vcode": "15900",
+          "download": "https://m.app.mi.com/download/1359",
+          "_meta": {
+            "market": "xiaomi",
+            "mode": "id-list",
+            "input_value": "1359",
+            "record_type": "detail"
+          }
+        }
+      }
+    ],
+    "outcomes": [
+      {
+        "input_value": "1359",
+        "status": "success"
+      }
+    ],
+    "native_outcomes": [
+      {
+        "market": "xiaomi",
+        "mode": "id-list",
+        "input_value": "1359",
+        "success": 1,
+        "error": null
+      }
+    ],
+    "errors": [],
+    "rejected": [],
+    "http": [
+      {
+        "url": "https://m.app.mi.com/detailapi/1359",
+        "status": 200,
+        "input_value": "1359"
+      }
+    ]
+  },
+  "warnings": [],
+  "error": null,
+  "stats": {
+    "requests": 1,
+    "responses": 1,
+    "finish_reason": "finished"
+  },
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\\independent\\195\\data\\run-6243586299454a8abc53dbb516e8aad4",
+    "returncode": 0,
+    "timed_out": false
+  }
+}

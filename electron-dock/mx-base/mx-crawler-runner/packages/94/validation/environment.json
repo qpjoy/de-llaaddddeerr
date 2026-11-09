@@ -1,0 +1,41 @@
+{
+  "python": "3.13.3",
+  "packages": [
+    {
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.5.1"
+    },
+    {
+      "name": "gallery_dl",
+      "version": "1.32.11"
+    },
+    {
+      "name": "idna",
+      "version": "3.19"
+    },
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "requests",
+      "version": "2.34.2"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.7.0"
+    }
+  ],
+  "install": {
+    "id": 94,
+    "slug": "pinterest",
+    "commit": "2adf2a8e0041ec55afdcc2211fd5c7ca239a9352",
+    "python": "G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\pinterest\\venv\\Scripts\\python.exe",
+    "observed_at": "2026-09-10T16:36:49.8230785Z",
+    "exit_code": 0
+  }
+}

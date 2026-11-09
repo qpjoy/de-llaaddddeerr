@@ -1,0 +1,11 @@
+{
+  "name": "mingxi-google-play-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "google-play-scraper": "file:vendor/google-play-scraper",
+    "https-proxy-agent": "7.0.6"
+  }
+}

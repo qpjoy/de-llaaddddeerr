@@ -1,0 +1,12 @@
+test_empty_and_echo_payloads_are_rejected (test_client.Tests.test_empty_and_echo_payloads_are_rejected) ... ok
+test_invalid_inputs_do_not_spawn_a_process (test_client.Tests.test_invalid_inputs_do_not_spawn_a_process) ... ok
+test_mapped_record_requires_identity_name_and_version (test_client.Tests.test_mapped_record_requires_identity_name_and_version) ... ok
+test_repeated_calls_use_distinct_run_directories (test_client.Tests.test_repeated_calls_use_distinct_run_directories) ... ok
+test_request_limit (test_client.Tests.test_request_limit) ... ok
+test_timeout_preserves_completed_records (test_client.Tests.test_timeout_preserves_completed_records) ... ok
+test_unsupported_history_is_explicit (test_client.Tests.test_unsupported_history_is_explicit) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.262s
+
+OK

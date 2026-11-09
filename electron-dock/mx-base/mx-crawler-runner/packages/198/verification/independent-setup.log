@@ -1,0 +1,112 @@
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple/
+Processing g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\independent\198
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting attrs==26.1.0 (from -r requirements.lock.txt (line 1))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl (67 kB)
+Collecting Automat==25.4.16 (from -r requirements.lock.txt (line 2))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/02/ff/1175b0b7371e46244032d43a56862d0af455823b5280a50c63d99cc50f18/automat-25.4.16-py3-none-any.whl (42 kB)
+Collecting certifi==2026.7.22 (from -r requirements.lock.txt (line 3))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl (136 kB)
+Collecting cffi==2.1.1 (from -r requirements.lock.txt (line 4))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/60/a6/8b149b2c3f2e11aaa1618ef64500b45f50f22c57a977a4dff1aff1f91042/cffi-2.1.1-cp313-cp313-win_amd64.whl (185 kB)
+Collecting charset-normalizer==3.5.1 (from -r requirements.lock.txt (line 5))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/8a/33/56d97ade41c8db611e727168c52ae46c9224c362ec28d4b65d7e9869e8da/charset_normalizer-3.5.1-cp313-cp313-win_amd64.whl (199 kB)
+Collecting constantly==23.10.4 (from -r requirements.lock.txt (line 6))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/b8/40/c199d095151addf69efdb4b9ca3a4f20f70e20508d6222bffb9b76f58573/constantly-23.10.4-py3-none-any.whl (13 kB)
+Collecting cryptography==50.0.1 (from -r requirements.lock.txt (line 7))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/42/8b/cb12b1b60c91b074ca6bf0fdd59aa8f10d8bc5f73af8faece86ef0421b37/cryptography-50.0.1-cp311-abi3-win_amd64.whl (3.8 MB)
+Collecting cssselect==1.5.0 (from -r requirements.lock.txt (line 8))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/60/e9/6734502f67533a752ea8b1c8f7f227c94eecf300252ba8bf23e3e59d8a36/cssselect-1.5.0-py3-none-any.whl (20 kB)
+Collecting defusedxml==0.7.1 (from -r requirements.lock.txt (line 9))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl (25 kB)
+Collecting filelock==3.32.6 (from -r requirements.lock.txt (line 10))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/cc/06/4f138f618dbea66803291274f228f01daf29f306fe8b96bc30dab765df75/filelock-3.32.6-py3-none-any.whl (100 kB)
+Collecting hyperlink==21.0.0 (from -r requirements.lock.txt (line 11))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/6e/aa/8caf6a0a3e62863cbb9dab27135660acba46903b703e224f14f447e57934/hyperlink-21.0.0-py2.py3-none-any.whl (74 kB)
+Collecting idna==3.19 (from -r requirements.lock.txt (line 12))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl (68 kB)
+Collecting Incremental==24.11.0 (from -r requirements.lock.txt (line 13))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/1d/55/0f4df2a44053867ea9cbea73fc588b03c55605cd695cee0a3d86f0029cb2/incremental-24.11.0-py3-none-any.whl (21 kB)
+Collecting itemadapter==0.13.1 (from -r requirements.lock.txt (line 14))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/db/a6/48805cef65b13644f1c23545dc525a7051581c84f5227efb1cd9a8ac9b02/itemadapter-0.13.1-py3-none-any.whl (18 kB)
+Collecting itemloaders==1.4.0 (from -r requirements.lock.txt (line 15))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/ac/71/d9cd0e4c6a4aace991009fc47362ce9251be0fbcf2b6c533f918b31854d5/itemloaders-1.4.0-py3-none-any.whl (12 kB)
+Collecting jmespath==1.1.0 (from -r requirements.lock.txt (line 16))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl (20 kB)
+Collecting json5==0.12.1 (from -r requirements.lock.txt (line 17))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/85/e2/05328bd2621be49a6fed9e3030b1e51a2d04537d3f816d211b9cc53c5262/json5-0.12.1-py3-none-any.whl (36 kB)
+Collecting lxml==6.1.3 (from -r requirements.lock.txt (line 18))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/c0/28/e46a7702bd95e9043291f7c3539b6184cba66f96cea9936f20939b284eeb/lxml-6.1.3-cp313-cp313-win_amd64.whl (4.0 MB)
+Collecting packaging==26.3 (from -r requirements.lock.txt (line 19))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl (129 kB)
+Collecting parsel==1.11.0 (from -r requirements.lock.txt (line 20))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/08/23/4e0dae5e5bee14aea26dba003a682e621563451a20f751ed985810f818b6/parsel-1.11.0-py3-none-any.whl (14 kB)
+Collecting Protego==0.6.2 (from -r requirements.lock.txt (line 21))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/61/10/cbd3c06603bb8b3e0e871df24ee793a6e3b53d8c4cc8763f1b8b936649aa/protego-0.6.2-py3-none-any.whl (10 kB)
+Collecting pycparser==3.0 (from -r requirements.lock.txt (line 22))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl (48 kB)
+Collecting PyDispatcher==2.0.7 (from -r requirements.lock.txt (line 23))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/66/0e/9ee7bc0b48ec45d93b302fa2d787830dca4dc454d31a237faa5815995988/PyDispatcher-2.0.7-py3-none-any.whl (12 kB)
+Collecting pyOpenSSL==26.4.0 (from -r requirements.lock.txt (line 24))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/51/ad/2cf6d3fa2fae5c79e1ed9960c0d42badd0f94d81dd12b50604cdc839e648/pyopenssl-26.4.0-py3-none-any.whl (56 kB)
+Collecting queuelib==1.10.0 (from -r requirements.lock.txt (line 25))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/bc/78/715c431c72ab296e1d4540e9dbbbc78f086bed3cdb04fc68fb32c6232d0b/queuelib-1.10.0-py3-none-any.whl (16 kB)
+Collecting requests==2.34.2 (from -r requirements.lock.txt (line 26))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl (73 kB)
+Collecting requests-file==3.0.1 (from -r requirements.lock.txt (line 27))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/e1/d5/de8f089119205a09da657ed4784c584ede8381a0ce6821212a6d4ca47054/requests_file-3.0.1-py2.py3-none-any.whl (4.5 kB)
+Collecting Scrapy==2.13.3 (from -r requirements.lock.txt (line 28))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/53/cb/474b56910b9fb823298008444790a6d5fb9c8dfb936101136932d586287a/scrapy-2.13.3-py3-none-any.whl (321 kB)
+Collecting service-identity==26.1.0 (from -r requirements.lock.txt (line 29))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/93/eb/2433e1af4ff903499144de4846569fb3300b816179ae99a03c2f011b666a/service_identity-26.1.0-py3-none-any.whl (11 kB)
+Collecting tldextract==5.3.2 (from -r requirements.lock.txt (line 30))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/4a/3b/930310b274dfe3b9a4fe64ef8b24e5faf376c9a6f94bba6fc6e438058598/tldextract-5.3.2-py3-none-any.whl (106 kB)
+Collecting Twisted==25.5.0 (from -r requirements.lock.txt (line 31))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/eb/66/ab7efd8941f0bc7b2bd555b0f0471bff77df4c88e0cc31120c82737fec77/twisted-25.5.0-py3-none-any.whl (3.2 MB)
+Collecting typing_extensions==4.16.0 (from -r requirements.lock.txt (line 32))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+Collecting urllib3==2.7.0 (from -r requirements.lock.txt (line 33))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl (131 kB)
+Collecting w3lib==2.4.1 (from -r requirements.lock.txt (line 34))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/66/c3/f8b216cbd742e5b84c40f045204c764ccb7524d2aeab021054ec69446b0a/w3lib-2.4.1-py3-none-any.whl (21 kB)
+Collecting xmltodict==1.0.2 (from -r requirements.lock.txt (line 35))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/c0/20/69a0e6058bc5ea74892d089d64dfc3a62ba78917ec5e2cfa70f7c92ba3a5/xmltodict-1.0.2-py3-none-any.whl (13 kB)
+Collecting zope.interface==8.6 (from -r requirements.lock.txt (line 36))
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/0c/7a/96f177daba3f9d9d69d42659ae6c602c76b1d725e7dddff08ed49d9d02af/zope_interface-8.6-cp313-cp313-win_amd64.whl (214 kB)
+Building wheels for collected packages: mingxi-market-198
+  Building wheel for mingxi-market-198 (pyproject.toml): started
+  Building wheel for mingxi-market-198 (pyproject.toml): finished with status 'done'
+  Created wheel for mingxi-market-198: filename=mingxi_market_198-0.1.0-py3-none-any.whl size=26879 sha256=4d1738c4113de88b3ce1e2bfa3a428cc5340644a183fd3a96557bb1d04ca3e2c
+  Stored in directory: C:\Users\dudumen\AppData\Local\Temp\pip-ephem-wheel-cache-fmexv8bx\wheels\e6\a5\26\2db263dfce1ebda35a5c35bdcb5c4f3678a75d1da9d37fa742
+Successfully built mingxi-market-198
+Installing collected packages: PyDispatcher, zope.interface, xmltodict, w3lib, urllib3, typing_extensions, queuelib, pycparser, Protego, packaging, lxml, json5, jmespath, itemadapter, idna, filelock, defusedxml, cssselect, constantly, charset-normalizer, certifi, Automat, attrs, requests, parsel, Incremental, hyperlink, cffi, Twisted, requests-file, itemloaders, cryptography, tldextract, service-identity, pyOpenSSL, Scrapy, mingxi-market-198
+Successfully installed Automat-25.4.16 Incremental-24.11.0 Protego-0.6.2 PyDispatcher-2.0.7 Scrapy-2.13.3 Twisted-25.5.0 attrs-26.1.0 certifi-2026.7.22 cffi-2.1.1 charset-normalizer-3.5.1 constantly-23.10.4 cryptography-50.0.1 cssselect-1.5.0 defusedxml-0.7.1 filelock-3.32.6 hyperlink-21.0.0 idna-3.19 itemadapter-0.13.1 itemloaders-1.4.0 jmespath-1.1.0 json5-0.12.1 lxml-6.1.3 mingxi-market-198-0.1.0 packaging-26.3 parsel-1.11.0 pyOpenSSL-26.4.0 pycparser-3.0 queuelib-1.10.0 requests-2.34.2 requests-file-3.0.1 service-identity-26.1.0 tldextract-5.3.2 typing_extensions-4.16.0 urllib3-2.7.0 w3lib-2.4.1 xmltodict-1.0.2 zope.interface-8.6
+usage: main.py [-h] [--input-kind {package}] [--history]
+               [--history-limit HISTORY_LIMIT] [--concurrency CONCURRENCY]
+               [--timeout TIMEOUT] [--request-timeout REQUEST_TIMEOUT]
+               [--delay DELAY] [--max-requests MAX_REQUESTS]
+               [--work-dir WORK_DIR] [--output OUTPUT]
+               inputs [inputs ...]
+
+yingyongbao application metadata collector
+
+positional arguments:
+  inputs                Explicit package names or numeric market identifiers
+
+options:
+  -h, --help            show this help message and exit
+  --input-kind {package}
+  --history
+  --history-limit HISTORY_LIMIT
+  --concurrency CONCURRENCY
+  --timeout TIMEOUT
+  --request-timeout REQUEST_TIMEOUT
+  --delay DELAY
+  --max-requests MAX_REQUESTS
+  --work-dir WORK_DIR
+  --output OUTPUT

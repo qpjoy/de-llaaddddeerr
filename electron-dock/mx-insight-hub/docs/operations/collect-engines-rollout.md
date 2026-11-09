@@ -26,8 +26,8 @@
    - runner 的交付包和上游库（`packages/`、`upstream/`，约 2,000 个文件）必须完整拉到。拉取后在 runner 目录执行 `node scripts/lock-packages.mjs`，应输出 23 行 `ok`，否则不要继续。
 2. **身份和工具**：在 Hub 节点上用 root 执行；需要 Node ≥ 22.18、Docker（带 buildx）、ctr、kubectl、openssl、curl。
 3. **构建网络**：
-   - Hub deploy 照常带 `MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788`。它会创建一个只走代理的 buildx builder，runner 的构建会复用同一个 builder（按名称 `mx-insight-buildproxy-<哈希>`）。
-   - 所以先部署 Hub，再部署 runner，两次的代理地址要相同。
+   - Hub 部署带 `PROXY=127.0.0.1:7788` 时，会创建一个只走代理的 buildx builder。runner 的构建复用同一个 builder（名称 `mx-insight-buildproxy-<哈希>`，按规范化后的代理地址计算）。
+   - 所以先部署 Hub，再部署 runner，两次都用 `PROXY=127.0.0.1:7788`。runner 脚本和统一入口一样，会把它规范成 `http://127.0.0.1:7788`。
    - 如果设置过 `MX_INSIGHT_BUILDX_BUILDER`，runner 找不到这个 builder，构建时会明确报错。
 4. **磁盘**：
    - runner 镜像约 0.7 GB；构建缓存另需 1–2 GB。
@@ -38,13 +38,20 @@
 
 ## 3. 第一步：发布 Hub（含 migration 183–187）
 
-在服务器 `electron-dock/mx-insight-hub` 目录：
+在服务器 `electron-dock` 目录，用平常的统一入口：
 
 ```bash
-MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
-  MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 \
-  bash scripts/manage.sh ops internal-production deploy
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-insight-hub
 ```
+
+**统一入口做了什么**（`scripts/manage.py`）：
+
+- 把 `PROXY` 规范成 `MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788`，并固定 `MX_INSIGHT_SYNC_LAUNCHER=0`、`MX_SMOKE_DATA=0`；
+- 取部署锁，等宿主 PostgreSQL 和 HanLP 就绪；
+- 执行 `mx-insight-hub/scripts/manage.sh ops internal-production deploy`，migration 183–187 在这一步执行；
+- 结束后执行一次 `db apply`。
+
+它和 [`mx-insight.deploy.md`](../../mx-insight.deploy.md) 里直接调用项目脚本的命令等价，但**不会部署 runner**，runner 见下一步。
 
 **迁移在做什么：**
 
@@ -64,11 +71,20 @@ node scripts/collect-acceptance.mjs plan
 
 ## 4. 第二步：部署 runner
 
+在 `electron-dock` 目录用统一入口：
+
 ```bash
-cd ../mx-base/mx-crawler-runner
-node scripts/lock-packages.mjs            # 23 行 ok
-MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/deploy.sh all
+(cd mx-base/mx-crawler-runner && node scripts/lock-packages.mjs)   # 23 行 ok
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-crawler-runner
 ```
+
+**统一入口做了什么：**
+
+- 先做同样的集群检查和部署锁；
+- 把 `PROXY` 规范成和 Hub 那一步相同的地址；
+- 调用 runner 的 `scripts/manage.sh deploy`，也就是 `scripts/deploy.sh all`。在 runner 目录直接执行 `PROXY=127.0.0.1:7788 bash scripts/deploy.sh all` 效果一样。
+
+**什么时候需要重跑**：runner 不属于 `deploy all`，日常的 Hub 发布也不会重建或重启它。只有 runner 自己的代码或交付包变了，才需要重跑这一步。
 
 `all` 依次执行以下几步：
 
@@ -88,7 +104,7 @@ MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/deploy.sh all
 
 ## 5. 第三步：建引擎、录入凭据、探测
 
-回到 Hub 目录：
+进入 Hub 目录（`electron-dock/mx-insight-hub`）：
 
 ```bash
 node scripts/collect-acceptance.mjs apply          # 创建缺少的标准引擎，全部停用；已有的不改

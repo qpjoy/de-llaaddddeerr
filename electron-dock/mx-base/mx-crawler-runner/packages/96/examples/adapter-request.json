@@ -1,0 +1,6 @@
+{
+  "operation": "collect",
+  "params": {
+    "target": "https://medium.com/@author/article-id"
+  }
+}

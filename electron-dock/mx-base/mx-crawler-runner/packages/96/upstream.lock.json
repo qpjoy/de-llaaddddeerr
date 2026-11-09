@@ -1,0 +1,73 @@
+{
+  "id": 96,
+  "platform": "Medium",
+  "slug": "medium",
+  "repo": "sarperavci/medium-scraper",
+  "kind": "采集器候选",
+  "capability": "公开文章发现、文章信息及 HTML 转 Markdown；提供 Python 库与 CLI",
+  "limits": "采用直接请求模式即可，不强制使用付费代理 API；评论、完整作者图谱及付费正文不计入已验证能力。",
+  "observed_at": "2026-09-10T16:27:24.921534+00:00",
+  "path": "domain_sources/platforms/96/upstream/sarperavci__medium-scraper",
+  "origin": "https://github.com/sarperavci/medium-scraper.git",
+  "commit": "9cf365c5c052074e41e1dbde6a7618e89dee9db2",
+  "commit_date": "2025-11-14T22:41:34+03:00",
+  "commit_subject": "Add ThorData section to README",
+  "clean": true,
+  "tracked_files": 42,
+  "pull_status": "cloned",
+  "live_data_verified": true,
+  "github_metadata": {
+    "full_name": "sarperavci/medium-scraper",
+    "default_branch": "main",
+    "archived": false,
+    "pushed_at": "2025-11-14T19:41:37Z",
+    "language": "Python",
+    "license": {
+      "key": "mit",
+      "name": "MIT License",
+      "spdx_id": "MIT",
+      "url": "https://api.github.com/licenses/mit",
+      "node_id": "MDc6TGljZW5zZTEz"
+    }
+  },
+  "verification": {
+    "id": 96,
+    "observed_at": "2026-09-10T16:30:25.274314+00:00",
+    "live_data_verified": false,
+    "evidence": [
+      {
+        "file": "medium_scraper/explorer/medium_explorer.py",
+        "tokens": [
+          "class MediumExplorer"
+        ],
+        "sha256": "4ed78dff617f1b9fef3fa6a8ba254ceac3c658847262076dc5cf447a28c14537"
+      },
+      {
+        "file": "medium_scraper/parser/medium_parser.py",
+        "tokens": [
+          "class MediumMarkdownParser"
+        ],
+        "sha256": "f1e6ad420e263579d54e906a1798eb8879ed8a7739f798594ab2e4a4368cb27d"
+      }
+    ],
+    "source_checks_passed": true
+  },
+  "live_validation": {
+    "id": 96,
+    "platform": "Medium",
+    "slug": "medium",
+    "repo": "sarperavci/medium-scraper",
+    "commit": "9cf365c5c052074e41e1dbde6a7618e89dee9db2",
+    "status": "success",
+    "label": "已取得真实数据（限下列能力）",
+    "live_data_verified": true,
+    "note": "补装 ua-generator 后，成功读取公开文章并转换为 Markdown；搜索、作者、出版物、评论未验收。",
+    "capabilities_verified": [
+      "public_article_markdown"
+    ],
+    "evidence": "domain_sources/platforms/96/validation/live-02.json",
+    "observed_at": "2026-09-10T16:40:37.733405+00:00",
+    "target": "https://medium.com/@sarperavci/two-million-hackthebox-write-up-7433944c2efa",
+    "coverage_action": "preserve_status_append_note"
+  }
+}

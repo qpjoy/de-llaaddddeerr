@@ -1,0 +1,1 @@
+{"id": 105, "target": "https://www.oneusefulthing.org", "observed_at": "2026-09-10T16:39:20.340460+00:00", "python": "3.13.3", "live_data_verified": true, "status": "success", "capabilities_verified": ["newsletter_posts", "post_metadata", "post_content"], "limits": ["comments and author profile not verified", "content may be a public preview"]}

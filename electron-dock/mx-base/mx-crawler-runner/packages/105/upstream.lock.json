@@ -1,0 +1,77 @@
+{
+  "id": 105,
+  "platform": "Substack",
+  "slug": "substack",
+  "repo": "NHagar/substack_api",
+  "kind": "SDK 候选",
+  "capability": "Newsletter 文章、文章元数据/内容、作者和用户信息",
+  "limits": "非官方接口可能变化；订阅内容需要有权访问的会话；评论支持需另行验收。保留原表已有覆盖标记。",
+  "observed_at": "2026-09-10T16:27:32.296286+00:00",
+  "path": "domain_sources/platforms/105/upstream/NHagar__substack_api",
+  "origin": "https://github.com/NHagar/substack_api.git",
+  "commit": "714f4e564786af97a076595fd6bf5942dccc42a2",
+  "commit_date": "2026-05-29T08:56:17-05:00",
+  "commit_subject": "Merge pull request #22 from NHagar/codex/fix-dependabot-alerts",
+  "clean": true,
+  "tracked_files": 43,
+  "pull_status": "cloned",
+  "live_data_verified": true,
+  "github_metadata": {
+    "full_name": "NHagar/substack_api",
+    "default_branch": "master",
+    "archived": false,
+    "pushed_at": "2026-05-29T13:59:07Z",
+    "language": "Python",
+    "license": {
+      "key": "mit",
+      "name": "MIT License",
+      "spdx_id": "MIT",
+      "url": "https://api.github.com/licenses/mit",
+      "node_id": "MDc6TGljZW5zZTEz"
+    }
+  },
+  "verification": {
+    "id": 105,
+    "observed_at": "2026-09-10T16:30:34.766345+00:00",
+    "live_data_verified": false,
+    "evidence": [
+      {
+        "file": "substack_api/newsletter.py",
+        "tokens": [
+          "class Newsletter",
+          "def get_posts("
+        ],
+        "sha256": "5e6a57f3e4083c3dfcf9a9141f30742cc5a3d3ef45a18b3be67a5e4966ef3b33"
+      },
+      {
+        "file": "substack_api/post.py",
+        "tokens": [
+          "def get_metadata(",
+          "def get_content("
+        ],
+        "sha256": "93be625e7c40102285bc8cf200f4f77e36de97a74cd98272b2cb3cd99b0bb0ba"
+      }
+    ],
+    "source_checks_passed": true
+  },
+  "live_validation": {
+    "id": 105,
+    "platform": "Substack",
+    "slug": "substack",
+    "repo": "NHagar/substack_api",
+    "commit": "714f4e564786af97a076595fd6bf5942dccc42a2",
+    "status": "success",
+    "label": "已取得真实数据（限下列能力）",
+    "live_data_verified": true,
+    "note": "成功读取 One Useful Thing 的 2 篇文章元数据及第一篇的公开正文；评论、完整作者资料未验收。",
+    "capabilities_verified": [
+      "newsletter_posts",
+      "post_metadata",
+      "post_content"
+    ],
+    "evidence": "domain_sources/platforms/105/validation/live-01.json",
+    "observed_at": "2026-09-10T16:39:20.340460+00:00",
+    "target": "https://www.oneusefulthing.org",
+    "coverage_action": "preserve_status_append_note"
+  }
+}

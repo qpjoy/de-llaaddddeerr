@@ -1,0 +1,78 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "list",
+  "observed_at": "2026-09-12T17:20:23.406906+00:00",
+  "query": {
+    "lang": "en",
+    "country": "us",
+    "num": 3,
+    "max_pages": 1,
+    "sort": "newest",
+    "category": "TOOLS",
+    "collection": "TOP_FREE"
+  },
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "title": "Volume Control Sound Launcher",
+        "appId": "com.soundcontroller.loudspeaker.volume.manager.android",
+        "url": "https://play.google.com/store/apps/details?id=com.soundcontroller.loudspeaker.volume.manager.android",
+        "icon": "https://play-lh.googleusercontent.com/vxaA3YWsjgqrBTjjrVL7QV_cOQjMg-728iGgJuYk8n2fyD1uejY15wQoBBgMygcbaexDhwq1Z8cjaqlD2X3t",
+        "developer": "AtomApplications",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Do you sometimes wish your phone’s volume controls were easier to manage?<br><br>Please note: As a launcher app, the layout of your home screen may change after install. Don’t worry, all your apps are still on your phone – they just may be in a different location. To learn more, please visit our FAQ section: https://phonevolumecontrol.com/#faq<br><br>With a launcher app, you get the added benefits of:<br><br>🚀 One-swipe access<br>Quickly adjust your device’s volume with just one swipe from your home screen!<br><br>📱 Home screen widget<br>See the time, weather, and more, conveniently on your home screen with our customized widget.<br><br>🖼️ Wallpaper<br>Personalize your home or lock screen with a wide selection of beautiful themed wallpapers.<br><br>🔍 Multi-touchpoint search<br>Apps and web search has never been easier. Search for installed apps or the web (powered by Google or Yahoo!) from multiple access points.<br><br>With Volume Control Sound Launcher, every sound – from your favorite songs to morning alarms – feels just right. This launcher app gives you quick access to the tools you need for a smoother and more personalized sound experience.<br><br>This launcher app puts all your essential volume settings just one swipe away, making it easy to adjust volume, fine-tune your sound, and enjoy better control throughout the day. Whether you want a simple volume control, clearer calls, or more balanced media sound, everything is easier to manage in one place.<br><br>Whether you’re enjoying music, watching videos, gaming, or taking calls, Volume Control Sound Launcher helps you create a more balanced and satisfying listening experience that fits your lifestyle. Use it as a sound settings tool for everyday phone use, to make music louder, or as a practical tool when you need faster access to your sound settings.<br><br>Here’s why you’ll love this free app:<br><br>Easily adjust volume for music, videos, calls, alarms, and notifications<br><br>Manage all system sounds quickly from one convenient location<br><br>Use smart controls designed for comfortable daily listening and better clarity<br><br>Convenient access to all your volume settings in one place<br><br>Who is it suitable for?<br>This free launcher app is ideal for anyone who values convenience and clarity in their daily phone use. Whether you’re relaxing with music, taking an important call, or waking up to an alarm.<br><br>Download Volume Control Sound Launcher now and enjoy better control over your audio.<br><br>Please write to us should you have any queries or comments about the app, including recommendations for new features. Also, please note that you can uninstall it at any time.<br><br>You give your consent to install Volume Control Sound Launcher from the Google Play™ Store by clicking the button above. You also agree to this app’s Terms and Conditions &amp; Privacy Policy.<br><br>Google Play is a trademark of Google LLC. Use of it here does not imply any affiliation with or endorsement by Google LLC.<br><br>Yahoo is a registered trademark of Apollo Global Management, Inc.<br><br>For questions or feedback, reach out to us through our contact form: https://phonevolumecontrol.com/contact-us<br><br>Terms of Service: https://phonevolumecontrol.com/terms-of-service<br>Privacy Policy: https://phonevolumecontrol.com/privacy-policy",
+        "scoreText": "4.5",
+        "score": 4.525064
+      },
+      {
+        "title": "Document Viewer - PDF Reader",
+        "appId": "com.perfinly.philatex.documentviewer_filemanager",
+        "url": "https://play.google.com/store/apps/details?id=com.perfinly.philatex.documentviewer_filemanager",
+        "icon": "https://play-lh.googleusercontent.com/YDMOeXPuHK8l1rrWiLdjc0hZjeVEbI2gOjYf9xJjs8DaUjGPYC2LlSr2L06IB1F0UYrrBb-mpeWvzjCw3EfXQw",
+        "developer": "HKG Retails Private Limited",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Read and organise everything on your phone with Document Viewer - File Manager. Open PDF, Word, Excel and PowerPoint files without waiting, browse by category, and recover space — no account, no uploads, no tracking.<br><br>OPEN AND READ<br>- View PDF files with quick page turns and zoom that stays sharp at any level.<br>- Word (.doc/.docx), Excel (.xls/.xlsx) and PowerPoint (.ppt/.pptx) open straight inside the app.<br>- TXT files are read with smart charset handling so nothing looks garbled.<br>- There is no hand-off — tap a file and it opens right away.<br><br>MANAGE EVERY FILE<br>- Files are organised by kind, from photos and videos to documents, archives and downloads.<br>- Each category shows a live file count and its total size.<br>- Multi-select and remove clutter in one go — always with a confirm step first.<br>- The app plays your media too: a photo viewer, a video player and a music player.<br>- Open an .apk and the standard Android install screen appears.<br><br>TOOLS FOR YOUR FILES<br>- Image tools rotate, crop and compress photos right inside the app.<br>- Export to PDF turns images into a shareable PDF in a couple of taps.<br>- File details show size, path, dates and, for photos, resolution and EXIF.<br><br>PRIVATE BY DESIGN<br>- The app has no ads, no trackers and asks for no account.<br>- Nothing is uploaded — every file stays on your device.<br>- Rendering happens right on your phone with a compact built-in engine.",
+        "scoreText": "4.9",
+        "score": 4.9206347
+      },
+      {
+        "title": "Cleanup: Phone Storage Cleaner",
+        "appId": "com.storage.androidcleaner",
+        "url": "https://play.google.com/store/apps/details?id=com.storage.androidcleaner",
+        "icon": "https://play-lh.googleusercontent.com/ch_hRY59cDYlQrI-Utveqytsnu3rsMbhWeZWnX8AFLj4nW-CqA0BGl8EFxkk4Lz8DzEorfag343uFRgVPWCQ",
+        "developer": "Deep Flow Apps",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "<b>✨ Clean Up Your Phone and Free Up Space Easily</b><br><br>Is your phone storage full again? Reclaim gigabytes of space in under 60 seconds. Photos and videos can quickly take up valuable space — but Cleanup makes it simple to organize and optimize your device safely.<br><br>With smart tools for photo cleanup and video compression, you can reclaim storage in just a few taps.<br><br><b>🧹 Smart Cleaning and Storage Optimization</b><br><br>Cleanup is an all-in-one phone cleaner that helps you keep your device organized without losing what matters.<br><br>It analyzes your storage, finds unnecessary clutter, and helps you free up space intelligently.<br><br><b>📸 Focus on What Matters – Clean Duplicate Photos</b><br><br>No more scrolling through endless galleries. Cleanup automatically detects and removes duplicate and similar photos in seconds.<br><br>Its smart AI selects the best shots, so you can clear your gallery safely and keep only the photos you truly want.<br><br>With Cleanup, you can:<br><br>✅ Instantly detect and delete duplicate photos<br>🔍 Identify and remove similar screenshots and lookalike videos<br>🗜️ Compress large videos while keeping high quality<br>🚀 Enjoy more available storage space and smoother performance<br><br><b>👆 Swipe to Keep or Delete</b><br><br>Manage your photos, videos, and files easily with a simple swipe.<br><br>Choose what stays and what goes to maintain an organized phone that’s clear, simple, and clutter-free.<br><br><b>🎥 Video Compression Made Simple</b><br><br>Running low on storage because of large videos?<br><br>Cleanup’s video compressor reduces file sizes without sacrificing quality — saving gigabytes of space while preserving your favorite moments.<br><br><b>🛡️ Safe, Smart, and Easy to Use</b><br><br>Cleanup is designed for everyone — simple, intuitive, and safe.<br><br>Enjoy a clean, organized phone and optimized storage without worrying about losing what’s important.<br><br><b>📱 Download Cleanup today and discover the easiest way to clean, organize, and optimize your phone.</b><br><br>Privacy Policy: https://static.cleanup.photos/privacy.html<br><br>Terms and Conditions: https://static.cleanup.photos/terms-conditions.html",
+        "scoreText": "4.4",
+        "score": 4.408551
+      }
+    ],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [],
+  "error": null,
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-75389fbb4a4243ec8a2ca693a48584eb",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=vyAe2&source-path=%2Fstore%2Fapps&f.sid=-4178618388443751758&bl=boq_playuiserver_20220612.08_p0&authuser=0&soc-app=121&soc-platform=1&soc-device=1&_reqid=82003&rt=c&hl=en&gl=us"
+  ]
+}

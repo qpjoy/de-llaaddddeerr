@@ -1,0 +1,53 @@
+{
+  "verification_type": "local reuse of previously downloaded and hash-verified audio",
+  "new_live_network_request": false,
+  "request": {
+    "operation": "download",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "record_ids": [
+        "05a38da8a62e3479d05d8780"
+      ],
+      "total_timeout": 30,
+      "max_file_bytes": 10485760
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "download",
+    "observed_at": "2026-09-18T10:06:56.108245+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T10:06:56.108245+00:00",
+      "items": [
+        {
+          "id": "05a38da8a62e3479d05d8780",
+          "status": "done",
+          "local_path": "G:\\data_tongbu\\data\\audio_runs\\220\\downloads\\05a38da8a62e3479d05d8780.mp3",
+          "bytes": 970419,
+          "sha256": "57737b3cc800c7b8032e13db0176fc615f9d76af0af4395f6b6c13b153b8b35b",
+          "duplicate_of": null,
+          "conversion": null
+        }
+      ],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 6,
+        "parsed_collections": 4,
+        "records": 18,
+        "downloads": {
+          "done": 1,
+          "failed": 2,
+          "pending": 15
+        }
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

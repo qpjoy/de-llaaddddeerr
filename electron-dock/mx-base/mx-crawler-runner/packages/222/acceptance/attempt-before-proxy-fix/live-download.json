@@ -1,0 +1,53 @@
+{
+  "label": "download",
+  "request": {
+    "operation": "download",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\222",
+      "record_ids": [
+        "f495783f2b4483ee88eca590"
+      ],
+      "limit": 1,
+      "request_timeout": 120,
+      "total_timeout": 600,
+      "max_file_bytes": 104857600
+    }
+  },
+  "exit_code": 1,
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "222",
+    "source_id": "222",
+    "operation": "download",
+    "observed_at": "2026-09-18T09:51:51.746010+00:00",
+    "status": "error",
+    "result": {
+      "source_id": "222",
+      "platform": "LibriVox",
+      "observed_at": "2026-09-18T09:51:51.746010+00:00",
+      "items": [],
+      "errors": [
+        {
+          "id": "f495783f2b4483ee88eca590",
+          "code": "NETWORK_ERROR",
+          "message": "HTTP connection or response transfer failed"
+        }
+      ],
+      "warnings": [],
+      "stats": {
+        "collections": 3,
+        "parsed_collections": 3,
+        "records": 15,
+        "downloads": {
+          "failed": 1,
+          "pending": 14
+        }
+      },
+      "pagination": null
+    },
+    "error": {
+      "code": "SOURCE_FAILED",
+      "message": "See result.errors for individual failures"
+    }
+  }
+}

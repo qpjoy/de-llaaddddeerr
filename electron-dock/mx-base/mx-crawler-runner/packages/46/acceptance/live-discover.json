@@ -1,0 +1,54 @@
+{
+  "request": {
+    "operation": "discover",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\46",
+      "total_timeout": 60,
+      "request_timeout": 20,
+      "limit": 1
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "46",
+    "source_id": "46",
+    "operation": "discover",
+    "observed_at": "2026-09-18T10:38:09.636515+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "46",
+      "platform": "喜马拉雅",
+      "observed_at": "2026-09-18T10:38:09.636515+00:00",
+      "items": [
+        {
+          "id": "81f2a1871fd626355048fa4f",
+          "upstream_id": "277141",
+          "title": "小宝磨耳朵的绘本音频",
+          "author": "我是柯妈",
+          "language": "zh",
+          "genres": [],
+          "feed_url": "https://www.ximalaya.com/album/277141",
+          "collection_url": "https://www.ximalaya.com/album/277141",
+          "observed_at": "2026-09-18T10:38:10.291641+00:00",
+          "raw": {
+            "seed_track_ids": [
+              "3558286"
+            ]
+          }
+        }
+      ],
+      "errors": [],
+      "warnings": [
+        "Discovery is bounded; collection count is not proof of complete platform coverage"
+      ],
+      "stats": {
+        "collections": 1,
+        "parsed_collections": 0,
+        "records": 0,
+        "downloads": {}
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

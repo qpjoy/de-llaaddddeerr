@@ -1,0 +1,61 @@
+{
+  "python": "3.13.3",
+  "packages": [
+    {
+      "name": "beautifulsoup4",
+      "version": "4.15.0"
+    },
+    {
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1"
+    },
+    {
+      "name": "curl_cffi",
+      "version": "0.16.3"
+    },
+    {
+      "name": "markdownify",
+      "version": "1.2.3"
+    },
+    {
+      "name": "medium-scraper",
+      "version": "0.1.1"
+    },
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "pycparser",
+      "version": "3.0"
+    },
+    {
+      "name": "six",
+      "version": "1.17.0"
+    },
+    {
+      "name": "soupsieve",
+      "version": "2.9.2"
+    },
+    {
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    },
+    {
+      "name": "ua-generator",
+      "version": "2.1.4"
+    }
+  ],
+  "install": {
+    "id": 96,
+    "slug": "medium",
+    "commit": "9cf365c5c052074e41e1dbde6a7618e89dee9db2",
+    "python": "G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\medium\\venv\\Scripts\\python.exe",
+    "observed_at": "2026-09-10T16:36:28.3520475Z",
+    "exit_code": 0
+  }
+}

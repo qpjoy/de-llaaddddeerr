@@ -1,0 +1,99 @@
+{
+  "project_id": "193",
+  "observed_at": "2026-09-15T02:16:34.830713+00:00",
+  "kind": "adapter_reorganization_offline",
+  "isolated_copy": true,
+  "live_queries_performed": false,
+  "checks": [
+    {
+      "check": "create_environment",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.15,
+      "detail": "passed"
+    },
+    {
+      "check": "locked_dependencies",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.18,
+      "detail": "passed"
+    },
+    {
+      "check": "project_install",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 7.29,
+      "detail": "passed"
+    },
+    {
+      "check": "sdk_import",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.11,
+      "detail": "passed"
+    },
+    {
+      "check": "pip_check",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.34,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_help",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.16,
+      "detail": "passed"
+    },
+    {
+      "check": "node_syntax",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.12,
+      "detail": "passed"
+    },
+    {
+      "check": "node_runtime_install",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.76,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_contract_final",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "all_sdk_bindings_import",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "actual_sdk_offline_path",
+      "passed": true,
+      "status": "error",
+      "exit_code": 1
+    }
+  ],
+  "offline_sample": {
+    "schema_version": "1.0",
+    "project_id": "193",
+    "source_id": "193",
+    "operation": "app",
+    "observed_at": "2026-09-15T02:19:19.639354+00:00",
+    "status": "error",
+    "result": null,
+    "error": {
+      "code": "INVALID_PARAMS"
+    }
+  },
+  "adapter_sha256": "a21290a920416d41970885b54ecd7ac3943a413d2f657643a4fa30aaffd38cc8",
+  "manifest_sha256": "193ecce5644214b7ed0c994f32afaa553f866ebe7dc6cca893a9dc50eed35f16",
+  "passed": true,
+  "final_checked_at": "2026-09-15T02:19:19.652348+00:00"
+}

@@ -1,0 +1,100 @@
+manifest_version: '1.0'
+project_id: '45'
+source_id: '45'
+name: 小宇宙
+target_platform: 小宇宙
+languages:
+- Python
+runtime:
+  python: '>=3.11'
+  optional_tools: FFmpeg with libopus; only format=opus
+entrypoint:
+  file: adapter.py
+  callable: invoke
+  native: main.py
+  python: audiosource_45.invoke
+  async: audiosource_45.invoke_async
+  input: 'stdin: one UTF-8 JSON object, <=1MiB'
+  output: 'stdout: one JSON object'
+  logs: stderr
+  concurrency: one active operation per run_dir
+upstream:
+  repository: https://github.com/yinhao0214/AudioSpider
+  commit: cbc055436b71fa3f3882bedc95b65bad4dec2553
+  license: MIT
+capabilities:
+- 公开节目/单集页面及音频 URL
+- incremental local SQLite records
+- optional original audio download
+- optional Opus conversion
+credentials:
+  required: false
+  environment: []
+dependency_files:
+- requirements.txt
+- requirements.lock
+- pyproject.toml
+request_schema:
+  type: object
+  required:
+  - operation
+  - params
+  additionalProperties: false
+  properties:
+    operation:
+      enum:
+      - discover
+      - collect
+      - list_records
+      - download
+      - stats
+    params:
+      type: object
+      required:
+      - run_dir
+operations:
+  discover:
+    parameters:
+      podcast_ids: 1..limit unique lowercase 24-hex IDs; default known sample
+      episode_ids: optional 1..limit unique 24-hex IDs; mutually exclusive with podcast_ids
+      limit: default10,1..20; upper bound on supplied IDs, not full platform enumeration
+  collect:
+    collection_ids: optional IDs returned by discover
+    refresh: false by default; true revisits known feeds
+    feed_limit: default5,1..50
+    episodes_per_feed: default10,1..50; page-visible episodes or seed samples
+  list_records:
+    record_ids: optional ID list
+    status: optional pending/downloading/done/failed
+    limit: default20,1..1000
+    offset: default0
+  download:
+    record_ids: optional ID list; otherwise pending
+    retry_failed: true selects failed instead of pending when IDs absent
+    limit: default1,1..100
+    format: original(default)|opus
+    max_file_bytes: default104857600,max2147483648
+    ffmpeg_path: optional executable path
+    conversion_timeout: default120s,max600s
+  stats: {}
+common_parameters:
+  run_dir: required caller-owned path outside installed package
+  concurrency: default2,1..4
+  request_timeout: default30s,1..120
+  total_timeout: default180s (download600s),1..3600
+  request_interval: default2s,0.5..30s between sequential seed/neighbor requests
+response_schema:
+  schema_version: '1.0'
+  project_id: '45'
+  source_id: '45'
+  operation: string|null
+  observed_at: UTC ISO8601
+  status: success|no_data|partial|unknown|error
+  result:
+    items: collection/episode/download records by operation
+    errors: per-item structured errors
+    warnings: string[]; page/seed scope is not complete historical coverage
+    stats: collection and download counts
+    pagination: list_records only
+  error: null or {code,message}
+verification: See acceptance; offline tests never imply live source coverage

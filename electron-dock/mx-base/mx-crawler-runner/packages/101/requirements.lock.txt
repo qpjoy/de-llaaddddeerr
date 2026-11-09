@@ -1,0 +1,6 @@
+# Verified runtime dependencies on Windows / Python 3.13.3
+# Install the pinned local upstream separately with --no-deps.
+certifi==2026.7.22
+cffi==2.1.1
+curl_cffi==0.16.3
+pycparser==3.0

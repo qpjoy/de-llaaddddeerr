@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/yinhao0214/AudioSpider",
+  "commit": "cbc055436b71fa3f3882bedc95b65bad4dec2553",
+  "files": {
+    ".gitignore": "3b09bcbf759c4dc42fcdc0e0452e5bb014d45b2028fc12634dcbeebb42ee491f",
+    "LICENSE": "6fd5b15cbb1645bf691b1ea7327d0d92e78d7acfbfe5643011c3e55f643fb559",
+    "README.md": "820e0f49960ab3db9757454ba2a2f1043fd9fc59936da6c4b0a46ef77ecf028b",
+    "anti_crawler.py": "5910f7625d11edfe2b48b26650515a79a42329185d6c35d873efe9277a18c986",
+    "collect.py": "8fad29bdf020bdb1d687631edc365d20176b7b98932e3bb83c4edd58238bc5cf",
+    "config.py": "0b2505f7f7f4412dbd10c8f9aa42d60d2436515bb2be0737c3a45ae26f0c4e6b",
+    "convert_audio.py": "4d543116907023a711a8f489e703a54281553201d77eedb80b605cbf5e190174",
+    "db_viewer.py": "9ae6294b727d1112e5d871e3f2df3efd2caf3df480dc8f1e02efdbd83517a858",
+    "discover.py": "f6e761f46bfa55282b4287b0cbcbbc34bf7ae2440450608ff74ba8a056117169",
+    "download_zh_podcast.sh": "1eed60c1c1683b3a55626a2faa047192d3acf335640f41add3f2a77aa1496803",
+    "downloader.py": "b4989ffff0c5feea8fba6d8619e4ff2d7e528af3fcea5f57f5d20ca5a864f758",
+    "main.py": "40a10261c4943dd9369f299ef5b7699d66b0ace03b4cb721218551a63162af2c",
+    "opus_to_wav.py": "bf35aa8690d5cd1e68f7b3ff08548744b109e727c97d8051e1987862e51bccbd",
+    "requirements.txt": "b26e303568a83008dc8f781cc72a352c101db94216e71dd10b51a5c1a5a828ba",
+    "spiders/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "spiders/base.py": "c01fb1d80addba0f80fac4ae298efa23e446259159b34d4efc1032ada3bbbb2e",
+    "spiders/bilibili.py": "5f0e6b20c4f891e2fb735daa9dc24db9452cbd38a427a62e252652150bb28536",
+    "spiders/librivox.py": "1ba53abf4544621c164f4df9d54a0d3fa24de1ba0b17c6b7ecbcaa6968cedd53",
+    "spiders/podcast_rss.py": "751f9e9e10b42c3837a15ced9c5716919c8f914f40b5118de583710a4ab09e5e",
+    "spiders/xiaoyuzhou.py": "ddf09a7d0ac564e4104dc8604574a8b4362bd67c0a092c45a05ce63ea20061a5",
+    "spiders/ximalaya.py": "1379eebbb31b1791e1a174b3cc3fb8d6e9cb2cda1729d51fa40607e2e5d8a82a",
+    "storage.py": "a9e77eadada35ab949355d41fdfba1df6c238dc1736e7d49a3be661da472b743"
+  }
+}

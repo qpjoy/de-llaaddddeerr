@@ -1,0 +1,42 @@
+{
+  "python": "3.13.3",
+  "packages": [
+    {
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.5.1"
+    },
+    {
+      "name": "idna",
+      "version": "3.19"
+    },
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "requests",
+      "version": "2.34.2"
+    },
+    {
+      "name": "substack-api",
+      "version": "1.3.0"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.7.0"
+    }
+  ],
+  "install": {
+    "id": 105,
+    "slug": "substack",
+    "commit": "714f4e564786af97a076595fd6bf5942dccc42a2",
+    "python": "G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\substack\\venv\\Scripts\\python.exe",
+    "observed_at": "2026-09-10T16:36:03.0464274Z",
+    "exit_code": 0,
+    "source_build_method": "local_git_checkout_with_scm_metadata"
+  }
+}

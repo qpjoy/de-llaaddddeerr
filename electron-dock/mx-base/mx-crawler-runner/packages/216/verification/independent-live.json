@@ -1,0 +1,95 @@
+{
+  "source_row_id": 216,
+  "provider": "halifox/app_market_crawler",
+  "platform": "baidu",
+  "observed_at": "2026-09-12T10:19:44.409976+00:00",
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "input_value": "com.tencent.mobileqq",
+        "record_type": "detail",
+        "source_url": "https://appc.baidu.com/uiserver?part=main&action=detail&pname=com.tencent.mobileqq",
+        "app": {
+          "package": "com.tencent.mobileqq",
+          "app_id": 1858121943,
+          "name": "QQ",
+          "version": "9.3.50",
+          "version_code": 15730,
+          "rating": "4.0",
+          "download_url": "https://gdown.baidu.com/appcenter/pkg/upload/5a9cf6b3bbdb7c2f8e02f5883c9eed47?prodid=1",
+          "icon_url": "http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa5447c5cdb454c77935ce3fa2293d1ed.png&refer=www.baidu.com&app=2007&size=b150,150&fmt=auto?sec=1789208385&t=cdc9ee8afbc0a10bfb5ba5fca2c81cc5"
+        },
+        "raw": {
+          "adv_item": "source+natural@pos+1@bid+0@ctr+0.000000@trans+@keyword+@app_rcv+",
+          "all_download": "22.2亿下载",
+          "appdistrans": "{\"trans_data\":\"{\\\"adv_flag\\\":2,\\\"rank\\\":1,\\\"pid\\\":1858121943,\\\"docid\\\":5015764872,\\\"ad_source\\\":\\\"natural\\\",\\\"packagename\\\":\\\"com.tencent.mobileqq\\\",\\\"appname\\\":\\\"QQ\\\",\\\"query\\\":\\\"\\\",\\\"req_type\\\":5,\\\"from\\\":\\\"client_detail\\\",\\\"search_id\\\":\\\"0000000000000000\\\",\\\"eid_str\\\":\\\"1610\\\",\\\"rewrite_sid\\\":\\\"0000000000000000\\\",\\\"boardid\\\":0}\"}",
+          "cateid": 304000,
+          "catename": "",
+          "ccrc": 0,
+          "display_count_fmt": "37.9万",
+          "display_score_in_5": "4.0",
+          "docid": 5015764872,
+          "download_inner": "https://gdown.baidu.com/appcenter/pkg/upload/5a9cf6b3bbdb7c2f8e02f5883c9eed47?prodid=1",
+          "f": "",
+          "groupid": 5000751235,
+          "icon": "http://gimg0.baidu.com/gimg/src=https%3A%2F%2Fapp-center.cdn.bcebos.com%2Fappcenter%2Fsts%2Fpcfile%2F646948909%2Fa5447c5cdb454c77935ce3fa2293d1ed.png&refer=www.baidu.com&app=2007&size=b150,150&fmt=auto?sec=1789208385&t=cdc9ee8afbc0a10bfb5ba5fca2c81cc5",
+          "manual_short_brief": "QQ9全新上线，一起轻松做自己",
+          "md5": "5a9cf6b3bbdb7c2f8e02f5883c9eed47",
+          "package": "com.tencent.mobileqq",
+          "packageid": 1858121943,
+          "popu_index": 80,
+          "record_num": "粤B2-20090059-1622A",
+          "size": "396M",
+          "sname": "QQ",
+          "source": "",
+          "type": "0",
+          "versioncode": 15730,
+          "versionname": "9.3.50",
+          "_meta": {
+            "market": "baidu",
+            "mode": "package-list",
+            "input_value": "com.tencent.mobileqq",
+            "record_type": "detail"
+          }
+        }
+      }
+    ],
+    "outcomes": [
+      {
+        "input_value": "com.tencent.mobileqq",
+        "status": "success"
+      }
+    ],
+    "native_outcomes": [
+      {
+        "market": "baidu",
+        "mode": "package-list",
+        "input_value": "com.tencent.mobileqq",
+        "success": 1,
+        "error": null
+      }
+    ],
+    "errors": [],
+    "rejected": [],
+    "http": [
+      {
+        "url": "https://appc.baidu.com/uiserver?part=main&action=detail&pname=com.tencent.mobileqq",
+        "status": 200,
+        "input_value": "com.tencent.mobileqq"
+      }
+    ]
+  },
+  "warnings": [],
+  "error": null,
+  "stats": {
+    "requests": 1,
+    "responses": 1,
+    "finish_reason": "finished"
+  },
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\\independent\\216\\data\\run-4321180ebfbe4e9897e39cf432d1d892",
+    "returncode": 0,
+    "timed_out": false
+  }
+}

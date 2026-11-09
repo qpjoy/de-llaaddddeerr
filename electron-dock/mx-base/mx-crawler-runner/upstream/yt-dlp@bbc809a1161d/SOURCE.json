@@ -1,0 +1,61 @@
+{
+  "name": "yt-dlp",
+  "repo": "yt-dlp/yt-dlp",
+  "origin": "https://github.com/yt-dlp/yt-dlp.git",
+  "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+  "commitDate": "2026-08-30T15:58:45+02:00",
+  "license": "Unlicense",
+  "paths": [
+    "yt_dlp",
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.txt"
+  ],
+  "deliveredBy": "package 98",
+  "scrubbed": [
+    {
+      "file": "yt_dlp/extractor/cybrary.py",
+      "line": 12,
+      "kind": "google_api_key"
+    },
+    {
+      "file": "yt_dlp/extractor/googledrive.py",
+      "line": 143,
+      "kind": "google_api_key"
+    },
+    {
+      "file": "yt_dlp/extractor/scrippsnetworks.py",
+      "line": 49,
+      "kind": "aws_secret"
+    },
+    {
+      "file": "yt_dlp/extractor/shahid.py",
+      "line": 20,
+      "kind": "aws_secret"
+    },
+    {
+      "file": "yt_dlp/extractor/shahid.py",
+      "line": 39,
+      "kind": "aws_access_key_id"
+    },
+    {
+      "file": "yt_dlp/extractor/shahid.py",
+      "line": 40,
+      "kind": "aws_secret"
+    },
+    {
+      "file": "yt_dlp/extractor/stacommu.py",
+      "line": 15,
+      "kind": "google_api_key"
+    },
+    {
+      "file": "yt_dlp/extractor/stacommu.py",
+      "line": 177,
+      "kind": "google_api_key"
+    },
+    {
+      "file": "yt_dlp/extractor/wrestleuniverse.py",
+      "line": 32,
+      "kind": "google_api_key"
+    }
+  ]
+}

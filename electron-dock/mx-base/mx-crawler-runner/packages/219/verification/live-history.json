@@ -1,0 +1,220 @@
+{
+  "source_row_id": 219,
+  "provider": "halifox/app_market_crawler",
+  "platform": "wandoujia",
+  "observed_at": "2026-09-12T10:10:56.173480+00:00",
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "input_value": "566489",
+        "record_type": "detail",
+        "source_url": "https://www.wandoujia.com/apps/566489",
+        "app": {
+          "package": "com.tencent.mobileqq",
+          "app_id": "566489",
+          "name": "QQ",
+          "version": "9.3.55",
+          "version_code": "15900",
+          "developer": "腾讯科技（深圳）有限公司",
+          "privacy_policy_url": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "download_url": null,
+          "updated_at": "",
+          "icon_url": "https://android-artworks.25pp.com/fs08/2026/09/03/1/110_6e21c46c40e9a25236ea07675cd3a367_con_130x130.png"
+        },
+        "raw": {
+          "data_pn": "com.tencent.mobileqq",
+          "app_id": "566489",
+          "apk_id": "207531942",
+          "name": "QQ",
+          "version": "9.3.55",
+          "versionCode": "15900",
+          "updateTime": "",
+          "iconUrl": "https://android-artworks.25pp.com/fs08/2026/09/03/1/110_6e21c46c40e9a25236ea07675cd3a367_con_130x130.png",
+          "downloads": null,
+          "screenshots": [
+            "https://android-screenimgs.25pp.com/fs08/2026/09/03/10/110_b3e79979413957893daab56460c005e3_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/09/03/7/110_eb7da362687583bbdf9d538e2c113853_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/09/03/10/110_65ef6a72b7c9e449f7ac227376366ac1_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/09/03/4/110_cebab00808a87ab86340a5bdb3f1a50d_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/09/03/4/110_4704a6cc178dc75b26210d5907394b3e_234x360.jpg"
+          ],
+          "updateNotes": "本次更新：- QQ闪传文件有效期新增支持90天/180天；- QQ闪传支持添加或删除已分享的文件，灵活调整分享内容。近期更新：- 宠物功能上线，支持多种养宠互动玩法，解锁社交新体验；- 输入状态个性装扮上线，让好友等待回复的时刻也变得有趣；- 进群特效全新升级，款式更多元，呈现更自然，字色更护眼；- QQ秀生成效果升级，提升形象还原度。上线展柜功能，可收藏精选形象。",
+          "introduction": "在QQ，轻松社交- [聊天消息]随时随地好友和群消息；- [语音通话]、[视频聊天]和亲友自在畅聊；- [文件传输]手机电脑多端互传，轻松便捷。在QQ，轻松生活- [空间动态]快速获知好友动态，随时分享生活；- [移动支付]话费充值、转账收款、网购一应俱全；- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。在QQ，轻松娱乐- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。QQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。-----联系我们-----如在使用过程中遇到任何问题，请联系我们：- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈- 客服热线：4006 700 700（服务时间：8:00 - 23:00）*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+          "size": "371.67MB",
+          "categories": [
+            "通讯社交",
+            "聊天",
+            "交友"
+          ],
+          "osRequirement": "Android 6.0 以上",
+          "developer": "腾讯科技（深圳）有限公司",
+          "privacyPolicyUrl": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "_meta": {
+            "market": "wandoujia",
+            "mode": "id-list",
+            "input_value": "566489",
+            "record_type": "detail"
+          }
+        }
+      },
+      {
+        "input_value": "566489",
+        "record_type": "history",
+        "source_url": "https://www.wandoujia.com/apps/566489/history_v15730",
+        "app": {
+          "package": "com.tencent.mobileqq",
+          "app_id": "566489",
+          "name": "QQ",
+          "version": "9.3.50",
+          "version_code": "15730",
+          "developer": "腾讯科技（深圳）有限公司",
+          "privacy_policy_url": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "download_url": "https://android-apps.pp.cn/fs08/2026/08/25/5/110_95ebc1f9b9b07afffd0f66b0df33aec3.apk?yingid=web_space&packageid=207489747&md5=d174faf60c834751509b51bc072ec4f5&minSDK=23&size=415609052&shortMd5=b0fdb8fe9ee20dc54e12e9da352af51d&crc32=1641270820&did=4a725944486df1ea23642e1e389f165a&nrd=0",
+          "updated_at": "",
+          "icon_url": "https://android-artworks.25pp.com/fs08/2026/08/25/4/110_ac9af5a1373782d056e712da9f9ffaa8_con_130x130.png"
+        },
+        "raw": {
+          "data_pn": "com.tencent.mobileqq",
+          "app_id": "566489",
+          "apk_id": "207489747",
+          "name": "QQ",
+          "version": "9.3.50",
+          "versionCode": "15730",
+          "updateTime": "",
+          "iconUrl": "https://android-artworks.25pp.com/fs08/2026/08/25/4/110_ac9af5a1373782d056e712da9f9ffaa8_con_130x130.png",
+          "downloads": "https://android-apps.pp.cn/fs08/2026/08/25/5/110_95ebc1f9b9b07afffd0f66b0df33aec3.apk?yingid=web_space&packageid=207489747&md5=d174faf60c834751509b51bc072ec4f5&minSDK=23&size=415609052&shortMd5=b0fdb8fe9ee20dc54e12e9da352af51d&crc32=1641270820&did=4a725944486df1ea23642e1e389f165a&nrd=0",
+          "screenshots": [
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/0/110_63571a25067f5902b6826330b698f238_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/3/110_3fc3eb9f2df2f24a86044131063e3db8_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/6/110_fcda4f06de8633e5ba544dd0fc7fca61_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/6/110_db8f12e0ecff9b4de24c52f6fe4eb3b5_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/1/110_8038582dd763da0166b2fe5fd8cb3361_234x360.jpg"
+          ],
+          "updateNotes": "在QQ，轻松社交- [聊天消息]随时随地好友和群消息；- [语音通话]、[视频聊天]和亲友自在畅聊；- [文件传输]手机电脑多端互传，轻松便捷。在QQ，轻松生活- [空间动态]快速获知好友动态，随时分享生活；- [移动支付]话费充值、转账收款、网购一应俱全；- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。在QQ，轻松娱乐- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。QQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。-----联系我们-----如在使用过程中遇到任何问题，请联系我们：- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈- 客服热线：4006 700 700（服务时间：8:00 - 23:00）*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+          "introduction": "近期更新：- 宠物玩法上线，支持多种养宠互动玩法，解锁社交新体验；- 输入状态个性装扮上线，让好友等待回复的时刻也变得有趣；- 进群特效全新升级，款式更多元，呈现更自然，字色更护眼；- QQ秀生成效果升级，提升形象还原度。上线展柜功能，可收藏精选形象；- QQ闪传图片视频支持画廊模式，还可一键将闪传内容分享至空间说说，或批量转存至空间相册；- QQ闪传支持创建公告，分享时可添加文件说明等内容。",
+          "size": "396.36MB",
+          "categories": [
+            "通讯社交",
+            "聊天",
+            "交友"
+          ],
+          "osRequirement": "Android 6.0 以上",
+          "developer": "腾讯科技（深圳）有限公司",
+          "privacyPolicyUrl": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "_meta": {
+            "market": "wandoujia",
+            "mode": "id-list",
+            "input_value": "566489",
+            "record_type": "history"
+          }
+        }
+      },
+      {
+        "input_value": "566489",
+        "record_type": "history",
+        "source_url": "https://www.wandoujia.com/apps/566489/history_v15730",
+        "app": {
+          "package": "com.tencent.mobileqq",
+          "app_id": "566489",
+          "name": "QQ",
+          "version": "9.3.50",
+          "version_code": "15730",
+          "developer": "腾讯科技（深圳）有限公司",
+          "privacy_policy_url": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "download_url": "https://android-apps.pp.cn/fs08/2026/08/25/5/110_95ebc1f9b9b07afffd0f66b0df33aec3.apk?yingid=web_space&packageid=207489747&md5=d174faf60c834751509b51bc072ec4f5&minSDK=23&size=415609052&shortMd5=b0fdb8fe9ee20dc54e12e9da352af51d&crc32=1641270820&did=4a725944486df1ea23642e1e389f165a&nrd=0",
+          "updated_at": "",
+          "icon_url": "https://android-artworks.25pp.com/fs08/2026/08/25/4/110_ac9af5a1373782d056e712da9f9ffaa8_con_130x130.png"
+        },
+        "raw": {
+          "data_pn": "com.tencent.mobileqq",
+          "app_id": "566489",
+          "apk_id": "207489747",
+          "name": "QQ",
+          "version": "9.3.50",
+          "versionCode": "15730",
+          "updateTime": "",
+          "iconUrl": "https://android-artworks.25pp.com/fs08/2026/08/25/4/110_ac9af5a1373782d056e712da9f9ffaa8_con_130x130.png",
+          "downloads": "https://android-apps.pp.cn/fs08/2026/08/25/5/110_95ebc1f9b9b07afffd0f66b0df33aec3.apk?yingid=web_space&packageid=207489747&md5=d174faf60c834751509b51bc072ec4f5&minSDK=23&size=415609052&shortMd5=b0fdb8fe9ee20dc54e12e9da352af51d&crc32=1641270820&did=4a725944486df1ea23642e1e389f165a&nrd=0",
+          "screenshots": [
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/0/110_63571a25067f5902b6826330b698f238_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/3/110_3fc3eb9f2df2f24a86044131063e3db8_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/6/110_fcda4f06de8633e5ba544dd0fc7fca61_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/6/110_db8f12e0ecff9b4de24c52f6fe4eb3b5_234x360.jpg",
+            "https://android-screenimgs.25pp.com/fs08/2026/08/25/1/110_8038582dd763da0166b2fe5fd8cb3361_234x360.jpg"
+          ],
+          "updateNotes": "在QQ，轻松社交- [聊天消息]随时随地好友和群消息；- [语音通话]、[视频聊天]和亲友自在畅聊；- [文件传输]手机电脑多端互传，轻松便捷。在QQ，轻松生活- [空间动态]快速获知好友动态，随时分享生活；- [移动支付]话费充值、转账收款、网购一应俱全；- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。在QQ，轻松娱乐- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。QQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。-----联系我们-----如在使用过程中遇到任何问题，请联系我们：- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈- 客服热线：4006 700 700（服务时间：8:00 - 23:00）*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+          "introduction": "近期更新：- 宠物玩法上线，支持多种养宠互动玩法，解锁社交新体验；- 输入状态个性装扮上线，让好友等待回复的时刻也变得有趣；- 进群特效全新升级，款式更多元，呈现更自然，字色更护眼；- QQ秀生成效果升级，提升形象还原度。上线展柜功能，可收藏精选形象；- QQ闪传图片视频支持画廊模式，还可一键将闪传内容分享至空间说说，或批量转存至空间相册；- QQ闪传支持创建公告，分享时可添加文件说明等内容。",
+          "size": "396.36MB",
+          "categories": [
+            "通讯社交",
+            "聊天",
+            "交友"
+          ],
+          "osRequirement": "Android 6.0 以上",
+          "developer": "腾讯科技（深圳）有限公司",
+          "privacyPolicyUrl": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "_meta": {
+            "market": "wandoujia",
+            "mode": "id-list",
+            "input_value": "566489",
+            "record_type": "history"
+          }
+        }
+      }
+    ],
+    "outcomes": [
+      {
+        "input_value": "566489",
+        "status": "success"
+      }
+    ],
+    "native_outcomes": [
+      {
+        "market": "wandoujia",
+        "mode": "id-list",
+        "input_value": "566489",
+        "success": 1,
+        "error": null
+      }
+    ],
+    "errors": [],
+    "rejected": [],
+    "http": [
+      {
+        "url": "https://www.wandoujia.com/apps/566489",
+        "status": 200,
+        "input_value": "566489"
+      },
+      {
+        "url": "https://www.wandoujia.com/apps/566489/history",
+        "status": 200,
+        "input_value": "566489"
+      },
+      {
+        "url": "https://www.wandoujia.com/apps/566489/history_v15730",
+        "status": 200,
+        "input_value": "566489"
+      },
+      {
+        "url": "https://www.wandoujia.com/apps/566489/history_v15730",
+        "status": 200,
+        "input_value": "566489"
+      }
+    ]
+  },
+  "warnings": [
+    "History is a bounded sample, not a complete version archive."
+  ],
+  "error": null,
+  "stats": {
+    "requests": 4,
+    "responses": 4,
+    "finish_reason": "finished"
+  },
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\\runtime-219\\run-e1759711a0904ab08c5c39afed4b4724",
+    "returncode": 0,
+    "timed_out": false
+  }
+}

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mingxi-google-play"
+version = "0.1.0"
+description = "Independent Python interface for Google Play public data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = []
+
+[project.scripts]
+mingxi-google-play = "mingxi_google_play.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mingxi_google_play = ["node/*.json", "node/*.mjs", "node/vendor/google-play-scraper/*", "node/vendor/google-play-scraper/lib/*.js", "node/vendor/google-play-scraper/lib/utils/*.js"]

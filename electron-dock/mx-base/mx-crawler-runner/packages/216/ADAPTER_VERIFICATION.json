@@ -1,0 +1,85 @@
+{
+  "project_id": "216",
+  "observed_at": "2026-09-15T02:17:25.678450+00:00",
+  "kind": "adapter_reorganization_offline",
+  "isolated_copy": true,
+  "live_queries_performed": false,
+  "checks": [
+    {
+      "check": "create_environment",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.38,
+      "detail": "passed"
+    },
+    {
+      "check": "locked_dependencies",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 21.81,
+      "detail": "passed"
+    },
+    {
+      "check": "project_install",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 8.02,
+      "detail": "passed"
+    },
+    {
+      "check": "sdk_import",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.06,
+      "detail": "passed"
+    },
+    {
+      "check": "pip_check",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.44,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_help",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.06,
+      "detail": "passed"
+    },
+    {
+      "check": "adapter_contract_final",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "all_sdk_bindings_import",
+      "passed": true,
+      "exit_code": 0,
+      "detail": "passed"
+    },
+    {
+      "check": "actual_sdk_offline_path",
+      "passed": true,
+      "status": "error",
+      "exit_code": 1
+    }
+  ],
+  "offline_sample": {
+    "schema_version": "1.0",
+    "project_id": "216",
+    "source_id": "216",
+    "operation": "collect",
+    "observed_at": "2026-09-15T02:19:20.249225+00:00",
+    "status": "error",
+    "result": null,
+    "error": {
+      "code": "INVALID_PARAMS"
+    }
+  },
+  "adapter_sha256": "40c85f85d8014343a74e31b86d638157cf821e78c9765bbfb244b16037e14ae0",
+  "manifest_sha256": "174bfcb4065c7ea562cc17527ab8ad8e0c1f4a63b6c72292458d8b7eee847bac",
+  "passed": true,
+  "final_checked_at": "2026-09-15T02:19:20.258282+00:00"
+}

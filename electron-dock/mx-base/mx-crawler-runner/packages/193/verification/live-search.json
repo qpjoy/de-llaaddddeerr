@@ -1,0 +1,81 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "search",
+  "observed_at": "2026-09-12T17:20:16.400572+00:00",
+  "query": {
+    "term": "Google Translate",
+    "lang": "en",
+    "country": "us",
+    "num": 3,
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "title": "Google Translate",
+        "appId": "com.google.android.apps.translate",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.translate",
+        "icon": "https://play-lh.googleusercontent.com/muIZuJn9awFB9XWa4g0aiqFxHbgAFVVfHVQrEmos46v29NfyZX5z1n1ZYBjH3Zvg80Dm90TI2ZdQZMr2cLMcCg",
+        "developer": "Google LLC",
+        "developerId": "5700313618786177705",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "The world is closer than ever with over 100 languages",
+        "scoreText": "4.3",
+        "score": 4.2638636
+      },
+      {
+        "title": "Translate AI - Live Translator",
+        "appId": "co.appnation.aivoicetranslator",
+        "url": "https://play.google.com/store/apps/details?id=co.appnation.aivoicetranslator",
+        "icon": "https://play-lh.googleusercontent.com/9OPCj_Y8IEmxsuEltRy_KVGH0a2c9omLTJds5zvx7NI-5nnWIql_s4wJOh1uQq-SVwlwBn4GLi28LfoAeKoT",
+        "developer": "HEYOS",
+        "developerId": "HEYOS",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Translate text, voice, and camera content in English, Spanish, French, German, Japanese, Chinese, Korean, Arabic, and 143+ languages.<br><br>Break language barriers with Translate AI - Live Translator, your all-in-one AI translator for text, voice, camera, photo, live conversations, and more.<br><br>Whether you&#39;re traveling, working internationally, studying, or communicating across languages, Translate AI delivers fast, natural translations powered by advanced AI models for accurate, context-aware results.<br><br>▶ How can I translate live conversations instantly?<br>Have natural two-way conversations with real-time AI voice translation. Speak, listen, and communicate effortlessly in 143+ languages; perfect for travel, meetings, and everyday conversations.<br><br>▶ How can I translate photos and live camera content?<br>Snap a photo or point your camera to translate menus, signs, documents, labels, and other printed text instantly. Use Photo Translator for captured images or Camera Translator for live translation in real time.<br><br>▶ How can I translate text via translator keyboard?<br>Translate while you type with a real-time translator keyboard. Use it in chat apps, email, browsers, and social media. Instantly output translated text and improve writing with built-in grammar correction.<br><br>▶ How many languages does Translate AI support?<br>Translate AI supports 143+ languages for text, voice, camera, and live conversations, including English, Spanish, Chinese, Japanese, French, German, Korean, Arabic, Italian, Portuguese, Russian, Turkish, and many more.<br><br>▶ How do I translate text in seconds?<br>Translate messages, emails, documents, websites, and more with fast, accurate AI-powered text translation.<br><br>▶ Can I translate content from other apps?<br>Translate supported content instantly using the Share Extension without leaving your current app.<br><br>▶ Can I use earbuds for live translation?<br>Use compatible earbuds for seamless hands-free live translation during conversations, meetings, and travel. Listen to translated speech naturally while speaking face to face.<br><br>▶ Can I customize translated speech?<br>Choose different voices, adjust speaking speed, and personalize text-to-speech playback for a more natural listening experience.<br><br>BUILT FOR TRAVEL &amp; EVERYDAY COMMUNICATION<br><br>▶ How can Photo Translator help while traveling?<br>Use Photo Translator to translate menus, signs, tickets, labels, and travel documents in seconds. Snap a photo whenever you need quick, clear translations on the go.<br><br>▶ Can I translate without internet?<br>Download languages and use Offline Translator whenever you&#39;re offline. Perfect for flights, international travel, and areas with limited connectivity.<br><br>EXTRA FEATURES<br><br>▶ PDF &amp; Document Translator<br>Translate complete PDFs and documents while preserving readability.<br><br>▶ Video Subtitle Generator<br>Generate subtitles automatically from spoken audio and make your videos more accessible.<br><br>WHY CHOOSE TRANSLATE AI?<br><br>• AI Translator for Text &amp; Voice<br>• Live Camera &amp; Photo Translator<br>• Live Conversation Translator<br>• Hands-Free Translation with Earbuds<br>• Translator Keyboard with Grammar Correction<br>• Offline Translator for Travel<br>• Share Extension<br>• PDF &amp; Document Translator<br>• Video Subtitle Generator<br><br>PERFECT FOR<br><br> • Travel<br> • Business<br> • Language learning<br> • Daily conversations<br><br>Download Translate AI - Live Translator today.<br><br>SUBSCRIPTION<br><br>Some features require a Premium subscription. Payment will be charged to your Google Play account upon confirmation of purchase. Subscriptions renew automatically unless canceled before the end of the current billing period. You can manage or cancel your subscription anytime through your Google Play account settings. Any unused portion of a free trial, if offered, will be forfeited upon purchasing a subscription.<br><br>NEED HELP?<br><br>Questions or feedback? We&#39;d love to hear from you.<br><br>Contact Us:  https://heyos.co/contact<br>Privacy Policy: https://heyos.co/privacy<br>Terms of Use: https://heyos.co/terms-of-use",
+        "scoreText": "4.7",
+        "score": 4.6846714
+      },
+      {
+        "title": "Microsoft Translator",
+        "appId": "com.microsoft.translator",
+        "url": "https://play.google.com/store/apps/details?id=com.microsoft.translator",
+        "icon": "https://play-lh.googleusercontent.com/XlNAPG1rLYea512qWHiiFLAa__PPxICmdxn3HgzML1OL3GuySiNSkOua1rGP_SoNVOzuXPkR1SBShWqRL7Xy1Pc",
+        "developer": "Microsoft Corporation",
+        "developerId": "Microsoft Corporation",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Break language barriers instantly with Microsoft Translator.<br> <br>Translate text, speech, and images in over 100 languages — for free. Whether you&#39;re traveling, navigating daily life, or working across languages, Microsoft Translator helps you communicate quickly and confidently.<br> <br>Key features:<br>• Translate text in 100+ languages<br>• Real-time speech translation<br>• Translate text in images<br><br>Note: The multi-device conversation feature has been retired.<br> <br>With a simple, intuitive interface and high-quality translations, Microsoft Translator makes it easy to connect with people anywhere in the world.<br> <br>Get started today and communicate without limits. Explore supported languages at https://aka.ms/applanguages",
+        "scoreText": "4.3",
+        "score": 4.286945
+      }
+    ],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [],
+  "error": null,
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-e0a657b505464cf492f6c469982c0d12",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/store/search?c=apps&q=Google%20Translate&hl=en&gl=us&price=0"
+  ]
+}

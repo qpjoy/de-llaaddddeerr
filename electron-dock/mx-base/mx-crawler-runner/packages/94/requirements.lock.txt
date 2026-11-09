@@ -1,0 +1,7 @@
+# Verified runtime dependencies on Windows / Python 3.13.3
+# Install the pinned local upstream separately with --no-deps.
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.19
+requests==2.34.2
+urllib3==2.7.0

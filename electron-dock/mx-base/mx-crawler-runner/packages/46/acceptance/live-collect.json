@@ -1,0 +1,74 @@
+{
+  "request": {
+    "operation": "collect",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\46",
+      "total_timeout": 60,
+      "request_timeout": 20,
+      "collection_ids": [
+        "81f2a1871fd626355048fa4f"
+      ],
+      "feed_limit": 1,
+      "episodes_per_feed": 3
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "46",
+    "source_id": "46",
+    "operation": "collect",
+    "observed_at": "2026-09-18T10:38:10.634944+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "46",
+      "platform": "喜马拉雅",
+      "observed_at": "2026-09-18T10:38:10.634944+00:00",
+      "items": [
+        {
+          "url": "https://aod.cos.tx.xmcdn.com/group4/M08/F7/E0/wKgDtFQGVL_Sd9wuAA-ufjckNZ0418.mp3",
+          "source": "ximalaya",
+          "title": "the apple pie tree",
+          "file_format": "mp3",
+          "file_size": 0,
+          "duration": 171,
+          "language": "zh",
+          "category": "儿童",
+          "speaker": "小宝磨耳朵的绘本音频",
+          "status": "pending",
+          "local_path": "",
+          "content_hash": "",
+          "published_at": "2014-09-02T23:42:33+00:00",
+          "discovered_at": "2026-09-18T10:38:11.187914+00:00",
+          "downloaded_at": "",
+          "upstream_item_id": "3558286",
+          "id": "6d4c882dfe4db20d37c92468",
+          "collection_id": "81f2a1871fd626355048fa4f",
+          "collection_title": "小宝磨耳朵的绘本音频",
+          "feed_url": "https://www.ximalaya.com/album/277141",
+          "collection_url": "https://www.ximalaya.com/album/277141",
+          "author": "我是柯妈",
+          "original_audio_url": "http://aod.cos.tx.xmcdn.com/group4/M08/F7/E0/wKgDtFQGVL_Sd9wuAA-ufjckNZ0418.mp3",
+          "upstream_declared_size": 523299,
+          "page_url": "https://www.ximalaya.com/sound/3558286",
+          "play_count": 160,
+          "availability": "public_non_paid"
+        }
+      ],
+      "errors": [],
+      "warnings": [
+        "Seed/neighbor sampling is bounded and does not enumerate the complete album or platform"
+      ],
+      "stats": {
+        "collections": 1,
+        "parsed_collections": 1,
+        "records": 1,
+        "downloads": {
+          "pending": 1
+        }
+      },
+      "pagination": null,
+      "new_records": 1
+    },
+    "error": null
+  }
+}

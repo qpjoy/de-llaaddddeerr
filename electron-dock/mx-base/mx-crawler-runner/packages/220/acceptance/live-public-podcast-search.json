@@ -1,0 +1,95 @@
+{
+  "request": {
+    "operation": "discover",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "keyword": "Short Poetry Collection LibriVox",
+      "country": "us",
+      "limit": 1
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "discover",
+    "observed_at": "2026-09-18T09:56:41.202149+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T09:56:41.202149+00:00",
+      "items": [
+        {
+          "id": "aa54946854f5b9cd5be9ccc3",
+          "upstream_id": "724035639",
+          "title": "Short Poetry Collection 002 by Various",
+          "author": "LibriVox",
+          "feed_url": "https://librivox.org/rss/249",
+          "language": "",
+          "genres": [
+            "Books",
+            "Podcasts",
+            "Arts"
+          ],
+          "observed_at": "2026-09-18T09:56:41.958352+00:00",
+          "raw": {
+            "wrapperType": "track",
+            "kind": "podcast",
+            "collectionId": 724035639,
+            "trackId": 724035639,
+            "artistName": "LibriVox",
+            "collectionName": "Short Poetry Collection 002 by Various",
+            "trackName": "Short Poetry Collection 002 by Various",
+            "collectionCensoredName": "Short Poetry Collection 002 by Various",
+            "trackCensoredName": "Short Poetry Collection 002 by Various",
+            "collectionViewUrl": "https://podcasts.apple.com/us/podcast/short-poetry-collection-002-by-various/id724035639?uo=4",
+            "feedUrl": "https://librivox.org/rss/249",
+            "trackViewUrl": "https://podcasts.apple.com/us/podcast/short-poetry-collection-002-by-various/id724035639?uo=4",
+            "artworkUrl30": "https://is1-ssl.mzstatic.com/image/thumb/Features/v4/5f/88/96/5f8896e9-9be5-529a-af14-cc807367568a/mza_1382744875394257421.png/30x30bb.jpg",
+            "artworkUrl60": "https://is1-ssl.mzstatic.com/image/thumb/Features/v4/5f/88/96/5f8896e9-9be5-529a-af14-cc807367568a/mza_1382744875394257421.png/60x60bb.jpg",
+            "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Features/v4/5f/88/96/5f8896e9-9be5-529a-af14-cc807367568a/mza_1382744875394257421.png/100x100bb.jpg",
+            "collectionPrice": 0.0,
+            "trackPrice": 0.0,
+            "collectionHdPrice": 0,
+            "releaseDate": "2021-11-14T20:08:00Z",
+            "collectionExplicitness": "notExplicit",
+            "trackExplicitness": "notExplicit",
+            "trackCount": 22,
+            "trackTimeMillis": 121,
+            "country": "USA",
+            "currency": "USD",
+            "primaryGenreName": "Books",
+            "artworkUrl600": "https://is1-ssl.mzstatic.com/image/thumb/Features/v4/5f/88/96/5f8896e9-9be5-529a-af14-cc807367568a/mza_1382744875394257421.png/600x600bb.jpg",
+            "genreIds": [
+              "1482",
+              "26",
+              "1301"
+            ],
+            "genres": [
+              "Books",
+              "Podcasts",
+              "Arts"
+            ]
+          }
+        }
+      ],
+      "errors": [],
+      "warnings": [
+        "Discovery is bounded; collection count is not proof of complete platform coverage"
+      ],
+      "stats": {
+        "collections": 6,
+        "parsed_collections": 3,
+        "records": 15,
+        "downloads": {
+          "failed": 2,
+          "pending": 13
+        }
+      },
+      "pagination": null
+    },
+    "error": null
+  },
+  "exit_code": 0
+}

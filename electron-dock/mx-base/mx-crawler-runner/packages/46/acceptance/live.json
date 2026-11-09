@@ -1,0 +1,59 @@
+{
+  "source_id": "46",
+  "observed_at": "2026-09-18T10:38:20.091605+00:00",
+  "real_requests_performed": true,
+  "verified_capabilities": [
+    "seed_discovery",
+    "audio_metadata",
+    "bounded_same_album_neighbors",
+    "original_audio_download"
+  ],
+  "pending_capabilities": [
+    "opus_conversion_missing_ffmpeg"
+  ],
+  "checks": [
+    {
+      "label": "discover",
+      "status": "success",
+      "count": 1,
+      "error": null,
+      "item_errors": []
+    },
+    {
+      "label": "collect",
+      "status": "success",
+      "count": 1,
+      "error": null,
+      "item_errors": []
+    },
+    {
+      "label": "list",
+      "status": "success",
+      "count": 1,
+      "error": null,
+      "item_errors": []
+    },
+    {
+      "label": "refresh",
+      "status": "success",
+      "count": 1,
+      "error": null,
+      "item_errors": []
+    },
+    {
+      "label": "neighbors",
+      "status": "success",
+      "count": 3,
+      "error": null,
+      "item_errors": []
+    },
+    {
+      "label": "download",
+      "status": "success",
+      "count": 1,
+      "error": null,
+      "item_errors": []
+    }
+  ],
+  "live_status": "passed"
+}

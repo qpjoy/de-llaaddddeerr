@@ -1,0 +1,74 @@
+{
+  "source_id": "45",
+  "observed_at": "2026-09-18T10:37:28.056113+00:00",
+  "offline_status": "passed",
+  "environment": {
+    "system": "win32",
+    "python": "3.13.3",
+    "isolated_install": true,
+    "copied_project": true
+  },
+  "checks": [
+    {
+      "name": "isolated virtualenv",
+      "exit_code": 0
+    },
+    {
+      "name": "locked dependencies",
+      "exit_code": 0
+    },
+    {
+      "name": "standalone install",
+      "exit_code": 0
+    },
+    {
+      "name": "dependency consistency",
+      "exit_code": 0
+    },
+    {
+      "name": "isolated installed import",
+      "exit_code": 0
+    },
+    {
+      "name": "offline regression tests",
+      "exit_code": 0
+    },
+    {
+      "name": "Python example",
+      "exit_code": 0
+    },
+    {
+      "name": "installed module CLI",
+      "exit_code": 0
+    },
+    {
+      "name": "installed console CLI",
+      "exit_code": 0
+    }
+  ],
+  "live_results": "See live.json; these tests use synthetic responses only",
+  "source_hashes": {
+    "adapter.py": "7bf3e841e1b5402176e2f8988b5d2eee1fd5c7e6ba5e28aff7c1921da12be2f3",
+    "main.py": "7bf3e841e1b5402176e2f8988b5d2eee1fd5c7e6ba5e28aff7c1921da12be2f3",
+    "pyproject.toml": "7e1986d1deaedcae919df5af2c7e808a44a34cfd16dfb69ffe201297fb91afe4",
+    "requirements.lock": "9d71054c6ca0befe501082a5f16aa2e954868c83fd0eaef57a897b0804fa24af",
+    "examples/call.py": "bf84f44a0cf31cca4c0b77ea36bc1c152555bc1aadb741908f1db6669fd9bf46",
+    "examples/collect.json": "8ce13629de2d3b0709275109bd89985716c4c5531d66b802b1ceb252e77dfecc",
+    "examples/discover.json": "644fa38f9fb3b9b6f15fe99f14501eb663b0faa93a7be435ace42b2c940709b1",
+    "examples/download.json": "10c60a4ea3ca22d664e04f48f2d4692a19f65b49428990febaf1c5b8dfffe65f",
+    "examples/episode.json": "225545b11218e5b219769e2cebba2cc60b401cbe76e81e7aca311e3b683637b3",
+    "examples/list.json": "7476d9424bf6acc6ccce4c8697878f4ca2c8607a66f964def4a08dc27fece59e",
+    "examples/refresh.json": "2aef1d5dc09f8f6db10adee83be8b0407244c86cb6e8a801e73395c74b910a32",
+    "examples/stats.json": "9013a625528f2e71beb1c2814603ee7a4531c29fd6fc174e06ea885c9ec8e765",
+    "scripts/verify.py": "92642f710a4e6b425a3ce4d1d0851e21527890da9d1ba5c9a7e59612220a70bf",
+    "tests/test_contract.py": "b65d63d01c0c7b32fd2dee8ce54262ef5a158de8a5f02b66ebfcee1014f539c1",
+    "src/audiosource_45/client.py": "b4603c3ceca13fd8a192aeeef36c3def301502d1eb43ecc069a2466c57868ff4",
+    "src/audiosource_45/downloads.py": "39f90a230a074713982b4f3f69f33f39f3650a39096e3d588d18c459510f78c7",
+    "src/audiosource_45/platform.json": "916835e6d4b9a2ad26efcd8da44391bde71654d08ff9c72563af6f36cc4dedd4",
+    "src/audiosource_45/providers.py": "f29a16bf7541b6e9bd5ce58ea9c7c616d6a47fb887e0cae7b4ae3827b50fa6a0",
+    "src/audiosource_45/runtime.py": "f70996ea33d85878a566910a1f6ca22b9897abea820bfcd40ae8f8b59a0876f6",
+    "src/audiosource_45/upstream_types.py": "5d9b7bbde45b66339ed3df56451c0c4c79358d9ac4254b84adc09bb49f61b791",
+    "src/audiosource_45/__init__.py": "30cccfa25d63f974777b9c7ee6a7cc8696336c8d4f969102526da39c2a90670d",
+    "src/audiosource_45/__main__.py": "23d380f93ff70af8ba8c81ba7d747c817b29372ecd8b8bc51e9a3db06bf7b6be"
+  }
+}

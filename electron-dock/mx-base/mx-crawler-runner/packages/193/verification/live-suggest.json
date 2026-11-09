@@ -1,0 +1,43 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "suggest",
+  "observed_at": "2026-09-12T17:20:26.305990+00:00",
+  "query": {
+    "term": "translate",
+    "lang": "en",
+    "country": "us",
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "success",
+  "data": {
+    "items": [
+      "translate",
+      "translate on screen",
+      "translate english to spanish",
+      "translator app",
+      "translate ai"
+    ],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [],
+  "error": null,
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-f7f28dea65984e30847fdbf06182fa31",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=IJ4APc&f.sid=-697906427155521722&bl=boq_playuiserver_20190903.08_p0&hl=en&gl=us&authuser&soc-app=121&soc-platform=1&soc-device=1&_reqid=1065213"
+  ]
+}

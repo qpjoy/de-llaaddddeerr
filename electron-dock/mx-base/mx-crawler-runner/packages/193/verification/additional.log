@@ -1,0 +1,4 @@
+reviews-two-pages success 300 None
+reviews-resume success 150 None
+reviews-request-limit partial 150 {'code': 'REQUEST_LIMIT', 'message': 'Error requesting Google Play:REQUEST_LIMIT: configured request budget reached'}
+missing-app error 0 {'code': 'SOURCE_ERROR', 'message': 'App not found (404)'}

@@ -1,0 +1,52 @@
+{
+  "verification_type": "local reuse of previously downloaded and hash-verified audio",
+  "new_live_network_request": false,
+  "request": {
+    "operation": "download",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\222",
+      "record_ids": [
+        "f495783f2b4483ee88eca590"
+      ],
+      "total_timeout": 30,
+      "max_file_bytes": 10485760
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "222",
+    "source_id": "222",
+    "operation": "download",
+    "observed_at": "2026-09-18T10:06:56.429191+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "222",
+      "platform": "LibriVox",
+      "observed_at": "2026-09-18T10:06:56.429191+00:00",
+      "items": [
+        {
+          "id": "f495783f2b4483ee88eca590",
+          "status": "done",
+          "local_path": "G:\\data_tongbu\\data\\audio_runs\\222\\downloads\\f495783f2b4483ee88eca590.mp3",
+          "bytes": 4351918,
+          "sha256": "b8d1963799b5ccdcab305314335408fb422759f5c018dd13c2f017faf7bd4815",
+          "duplicate_of": null,
+          "conversion": null
+        }
+      ],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 3,
+        "parsed_collections": 3,
+        "records": 15,
+        "downloads": {
+          "done": 1,
+          "pending": 14
+        }
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

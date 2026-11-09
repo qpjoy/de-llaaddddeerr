@@ -1,0 +1,4 @@
+MARKET='xiaomi'
+SOURCE_ID=195
+INPUT_KINDS=['id']
+HISTORY_KINDS=[]

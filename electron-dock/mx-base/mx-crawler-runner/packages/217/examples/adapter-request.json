@@ -1,0 +1,9 @@
+{
+  "operation": "collect",
+  "params": {
+    "inputs": [
+      "com.tencent.mm"
+    ],
+    "input_kind": "package"
+  }
+}

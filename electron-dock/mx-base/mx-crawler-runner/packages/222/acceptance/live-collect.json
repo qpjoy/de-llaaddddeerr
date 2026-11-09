@@ -1,0 +1,42 @@
+{
+  "label": "collect",
+  "request": {
+    "operation": "collect",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\222",
+      "feed_limit": 3,
+      "episodes_per_feed": 5,
+      "request_timeout": 45,
+      "total_timeout": 180
+    }
+  },
+  "exit_code": 0,
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "222",
+    "source_id": "222",
+    "operation": "collect",
+    "observed_at": "2026-09-18T09:55:01.705620+00:00",
+    "status": "no_data",
+    "result": {
+      "source_id": "222",
+      "platform": "LibriVox",
+      "observed_at": "2026-09-18T09:55:01.705620+00:00",
+      "items": [],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 3,
+        "parsed_collections": 3,
+        "records": 15,
+        "downloads": {
+          "failed": 1,
+          "pending": 14
+        }
+      },
+      "pagination": null,
+      "new_records": 0
+    },
+    "error": null
+  }
+}

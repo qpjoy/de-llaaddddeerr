@@ -1,0 +1,267 @@
+# -*- coding: utf-8 -*-
+
+# Copyright 2018-2026 Mike Fährmann
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 as
+# published by the Free Software Foundation.
+
+"""Extractors for https://www.smugmug.com/"""
+
+from .common import Extractor, Message
+from .. import text, oauth
+
+BASE_PATTERN = (
+    r"(?:smugmug:(?!album:)(?:https?://)?([^/]+)|"
+    r"(?:https?://)?([\w-]+)\.smugmug\.com)")
+
+
+class SmugmugExtractor(Extractor):
+    """Base class for smugmug extractors"""
+    category = "smugmug"
+    filename_fmt = ("{category}_{User[NickName]:?/_/}"
+                    "{Image[UploadKey]}_{Image[ImageKey]}.{extension}")
+    empty_user = {
+        "Uri": "",
+        "ResponseLevel": "Public",
+        "Name": "",
+        "NickName": "",
+        "QuickShare": False,
+        "RefTag": "",
+        "ViewPassHint": "",
+        "WebUri": "",
+        "Uris": None,
+    }
+
+    def _init(self):
+        self.api = SmugmugAPI(self)
+        self.videos = self.config("videos", True)
+        self.session = self.api.session
+
+    def _select_format(self, image):
+        details = image["Uris"]["ImageSizeDetails"]
+        media = None
+
+        if self.videos and image["IsVideo"]:
+            fltr = "VideoSize"
+        elif "ImageSizeOriginal" in details:
+            media = details["ImageSizeOriginal"]
+        else:
+            fltr = "ImageSize"
+
+        if not media:
+            sizes = filter(lambda s: s[0].startswith(fltr), details.items())
+            media = max(sizes, key=lambda s: s[1]["Width"])[1]
+        del image["Uris"]
+
+        for key in ("Url", "Width", "Height", "MD5", "Size", "Watermarked",
+                    "Bitrate", "Duration"):
+            if key in media:
+                image[key] = media[key]
+        return image["Url"]
+
+
+class SmugmugAlbumExtractor(SmugmugExtractor):
+    """Extractor for smugmug albums"""
+    subcategory = "album"
+    directory_fmt = ("{category}", "{User[NickName]}", "{Album[Name]}")
+    archive_fmt = "a_{Album[AlbumKey]}_{Image[ImageKey]}"
+    pattern = r"smugmug:album:([^:]+)$"
+    example = "smugmug:album:ID"
+
+    def __init__(self, match):
+        SmugmugExtractor.__init__(self, match)
+        self.album_id = match[1]
+
+    def items(self):
+        album = self.api.album(self.album_id, "User")
+        user = album["Uris"].get("User") or self.empty_user.copy()
+
+        del user["Uris"]
+        del album["Uris"]
+        data = {"Album": album, "User": user}
+
+        yield Message.Directory, "", data
+
+        for image in self.api.album_images(self.album_id, "ImageSizeDetails"):
+            url = self._select_format(image)
+            data["Image"] = image
+            yield Message.Url, url, text.nameext_from_url(url, data)
+
+
+class SmugmugImageExtractor(SmugmugExtractor):
+    """Extractor for individual smugmug images"""
+    subcategory = "image"
+    archive_fmt = "{Image[ImageKey]}"
+    pattern = BASE_PATTERN + r"(?:/[^/?#]+)+/i-([^/?#-]+)"
+    example = "https://USER.smugmug.com/PATH/i-ID"
+
+    def __init__(self, match):
+        SmugmugExtractor.__init__(self, match)
+        self.image_id = match[3]
+
+    def items(self):
+        image = self.api.image(self.image_id, "ImageSizeDetails")
+        url = self._select_format(image)
+
+        data = {"Image": image}
+        text.nameext_from_url(url, data)
+
+        yield Message.Directory, "", data
+        yield Message.Url, url, data
+
+
+class SmugmugPathExtractor(SmugmugExtractor):
+    """Extractor for smugmug albums from URL paths and users"""
+    subcategory = "path"
+    pattern = BASE_PATTERN + r"((?:/[^/?#a-fh-mo-z][^/?#]*)*)/?$"
+    example = "https://USER.smugmug.com/PATH"
+
+    def __init__(self, match):
+        SmugmugExtractor.__init__(self, match)
+        self.domain, self.user, self.path = match.groups()
+
+    def items(self):
+        if not self.user:
+            self.user = self.api.site_user(self.domain)["NickName"]
+
+        if self.path:
+            if self.path.startswith("/gallery/n-"):
+                node = self.api.node(self.path[11:])
+            else:
+                data = self.api.user_urlpathlookup(self.user, self.path)
+                node = data["Uris"]["Node"]
+
+            if node["Type"] == "Album":
+                nodes = (node,)
+            elif node["Type"] == "Folder":
+                nodes = self.album_nodes(node)
+            else:
+                nodes = ()
+
+            for node in nodes:
+                album_id = node["Uris"]["Album"].rpartition("/")[2]
+                node["_extractor"] = SmugmugAlbumExtractor
+                yield Message.Queue, "smugmug:album:" + album_id, node
+
+        else:
+            for album in self.api.user_albums(self.user):
+                uri = "smugmug:album:" + album["AlbumKey"]
+                album["_extractor"] = SmugmugAlbumExtractor
+                yield Message.Queue, uri, album
+
+    def album_nodes(self, root):
+        """Yield all descendant album nodes of 'root'"""
+        for node in self.api.node_children(root["NodeID"]):
+            if node["Type"] == "Album":
+                yield node
+            elif node["Type"] == "Folder":
+                yield from self.album_nodes(node)
+
+
+class SmugmugAPI(oauth.OAuth1API):
+    """Minimal interface for the smugmug API v2"""
+    API_DOMAIN = "api.smugmug.com"
+    API_KEY = "RCVHDGjcbc4Fhzq4qzqLdZmvwmwB6LM2"
+    API_SECRET = ("jGrdndvJqhTx8XSNs7TFTSSthhZHq92d"
+                  "dMpbpDpkDVNM7TDgnvLFMtfB5Mg5kH73")
+    HEADERS = {"Accept": "application/json"}
+
+    def album(self, album_id, expands=None):
+        return self._expansion("album/" + album_id, expands)
+
+    def image(self, image_id, expands=None):
+        return self._expansion("image/" + image_id, expands)
+
+    def node(self, node_id, expands=None):
+        return self._expansion("node/" + node_id, expands)
+
+    def user(self, username, expands=None):
+        return self._expansion("user/" + username, expands)
+
+    def album_images(self, album_id, expands=None):
+        return self._pagination("album/" + album_id + "!images", expands)
+
+    def node_children(self, node_id, expands=None):
+        return self._pagination("node/" + node_id + "!children", expands)
+
+    def user_albums(self, username, expands=None):
+        return self._pagination("user/" + username + "!albums", expands)
+
+    def site_user(self, domain):
+        return self._call("!siteuser", domain=domain)["Response"]["User"]
+
+    def user_urlpathlookup(self, username, path):
+        endpoint = "user/" + username + "!urlpathlookup"
+        params = {"urlpath": path}
+        return self._expansion(endpoint, "Node", params)
+
+    def _call(self, endpoint, params=None, domain=API_DOMAIN):
+        url = f"https://{domain}/api/v2/{endpoint}"
+        params = params or {}
+        if self.api_key:
+            params["APIKey"] = self.api_key
+        params["_verbosity"] = "1"
+
+        response = self.request(url, params=params, headers=self.HEADERS)
+        try:
+            data = response.json()
+        except ValueError:
+            raise self.exc.NotFoundError(self.extractor.__class__.subcategory)
+
+        if 200 <= data["Code"] < 400:
+            return data
+        if data["Code"] == 404:
+            raise self.exc.NotFoundError(self.extractor.__class__.subcategory)
+        if data["Code"] == 429:
+            raise self.exc.AbortExtraction("Rate limit reached")
+        self.log.debug(data)
+        raise self.exc.AbortExtraction("API request failed")
+
+    def _expansion(self, endpoint, expands, params=None):
+        endpoint = self._extend(endpoint, expands)
+        result = self._apply_expansions(self._call(endpoint, params), expands)
+        if not result:
+            raise self.exc.NotFoundError()
+        return result[0]
+
+    def _pagination(self, endpoint, expands=None):
+        endpoint = self._extend(endpoint, expands)
+        params = {"start": 1, "count": 100}
+
+        while True:
+            data = self._call(endpoint, params)
+            yield from self._apply_expansions(data, expands)
+
+            if "NextPage" not in data["Response"]["Pages"]:
+                return
+            params["start"] += params["count"]
+
+    def _extend(self, endpoint, expands):
+        if expands:
+            endpoint += "?_expand=" + expands
+        return endpoint
+
+    def _apply_expansions(self, data, expands):
+
+        def unwrap(response):
+            locator = response["Locator"]
+            return response[locator] if locator in response else []
+
+        objs = unwrap(data["Response"])
+        if not isinstance(objs, list):
+            objs = (objs,)
+
+        if "Expansions" in data:
+            expansions = data["Expansions"]
+            expands = expands.split(",")
+
+            for obj in objs:
+                uris = obj["Uris"]
+
+                for name in expands:
+                    if name in uris:
+                        uri = uris[name]
+                        uris[name] = unwrap(expansions[uri])
+
+        return objs

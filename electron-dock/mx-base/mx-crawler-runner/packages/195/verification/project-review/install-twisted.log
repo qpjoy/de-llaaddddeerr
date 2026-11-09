@@ -1,0 +1,21 @@
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple/
+Collecting Twisted==25.5.0
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/eb/66/ab7efd8941f0bc7b2bd555b0f0471bff77df4c88e0cc31120c82737fec77/twisted-25.5.0-py3-none-any.whl (3.2 MB)
+Requirement already satisfied: attrs>=22.2.0 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from Twisted==25.5.0) (26.1.0)
+Requirement already satisfied: automat>=24.8.0 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from Twisted==25.5.0) (25.4.16)
+Requirement already satisfied: constantly>=15.1 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from Twisted==25.5.0) (23.10.4)
+Requirement already satisfied: hyperlink>=17.1.1 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from Twisted==25.5.0) (21.0.0)
+Requirement already satisfied: incremental>=24.7.0 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from Twisted==25.5.0) (24.11.0)
+Requirement already satisfied: typing-extensions>=4.2.0 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from Twisted==25.5.0) (4.16.0)
+Requirement already satisfied: zope-interface>=5 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from Twisted==25.5.0) (8.6)
+Requirement already satisfied: idna>=2.5 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from hyperlink>=17.1.1->Twisted==25.5.0) (3.19)
+Requirement already satisfied: packaging>=17.0 in g:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\lib\site-packages (from incremental>=24.7.0->Twisted==25.5.0) (26.3)
+Installing collected packages: Twisted
+  Attempting uninstall: Twisted
+    Found existing installation: Twisted 26.4.0
+    Uninstalling Twisted-26.4.0:
+      Successfully uninstalled Twisted-26.4.0
+Successfully installed Twisted-25.5.0
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: G:\data_tongbu\data\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\venv\Scripts\python.exe -m pip install --upgrade pip

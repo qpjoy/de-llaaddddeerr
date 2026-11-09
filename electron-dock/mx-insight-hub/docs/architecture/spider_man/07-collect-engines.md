@@ -542,6 +542,11 @@
   - 不构建、不安装这些上游，运行时把目录接在包源码后面加进 `PYTHONPATH`。
   - `packages.json` 里每个上游都登记了 sha256。上游被改动后，只有用到它的包会变成不可用（`upstream_mismatch:<id>`）。
   - 重新取上游用 `scripts/vendor-upstream.mjs`，它会核对 checkout 的 HEAD 是否就是审核过的 commit。
+  - **凭据清理（2026-11-10）**：上游的部分 extractor 硬编码了第三方凭据，GitHub 推送保护会拦下来。
+    - 清掉的有 12 处：yt-dlp 中 Shahid 和 Scripps 的 AWS 密钥，gallery-dl 中 Pixiv 的 client secret，以及 7 个公开的 Google API key（Blogger、Tenor、Google Drive 等）。
+    - 涉及的 extractor 我们都不调用。`scripts/scrub-upstream.mjs` 把这些字面量清空并在行尾标注，清单记进各上游的 `SOURCE.json`；`vendor-upstream.mjs` 在计算哈希之前自动执行这一步。
+    - 我们实际用到的 Dailymotion 公开 client 凭据保留不动。
+    - 清理后 yt-dlp 的 1752 个、gallery-dl 的 920 个 extractor 都能正常加载，联网实测结果与清理前一致。
 - **WordPress 的依赖**：107 的 lock 里有 Kivy、pywin32、pyjnius 等 GUI、Windows 和 Android 专用包，在 Linux 上装不上；采集路径也从不导入它们（只有 `blog2epub_gui.py` 用）。所以单独用 `overrides/107/requirements.linux.txt`：只删掉这 15 个包，其余版本一个不改。文件头写明了删掉的清单。
 - **Python 3.13**：Substack 的上游要求 Python ≥ 3.12，交付方所有包都是在 3.13.3 上验收的，所以镜像从 3.11 改成 `python:3.13-slim-bookworm`。本机用 uv 自带的 3.13，第 12 节的 7 个包也在 3.13 上重新跑过离线测试。
 - **安装时的导入检查**：交付包自带的离线测试会 mock 掉 SDK，测不到上游库，所以 `install-packages` 还会用该包的 Python 环境 import 一遍每个上游。lock 里缺依赖时，在构建阶段就会失败。

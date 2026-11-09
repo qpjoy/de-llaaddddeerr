@@ -1,0 +1,215 @@
+{
+  "label": "charts",
+  "request": {
+    "operation": "discover",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "mode": "charts",
+      "genre_id": 1318,
+      "country": "us",
+      "limit": 3
+    }
+  },
+  "exit_code": 0,
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "discover",
+    "observed_at": "2026-09-18T09:55:07.997502+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T09:55:07.997502+00:00",
+      "items": [
+        {
+          "id": "29e1910c292dcea8b9379a1c",
+          "upstream_id": "1502871393",
+          "title": "All-In with Chamath, Jason, Sacks & Friedberg",
+          "author": "All-In Podcast, LLC",
+          "feed_url": "https://rss.libsyn.com/shows/254861/destinations/1928300.xml",
+          "language": "",
+          "genres": [
+            "Technology",
+            "Podcasts",
+            "Business",
+            "Entrepreneurship"
+          ],
+          "observed_at": "2026-09-18T09:55:09.132982+00:00",
+          "raw": {
+            "wrapperType": "track",
+            "kind": "podcast",
+            "collectionId": 1502871393,
+            "trackId": 1502871393,
+            "artistName": "All-In Podcast, LLC",
+            "collectionName": "All-In with Chamath, Jason, Sacks & Friedberg",
+            "trackName": "All-In with Chamath, Jason, Sacks & Friedberg",
+            "collectionCensoredName": "All-In with Chamath, Jason, Sacks & Friedberg",
+            "trackCensoredName": "All-In with Chamath, Jason, Sacks & Friedberg",
+            "collectionViewUrl": "https://podcasts.apple.com/us/podcast/all-in-with-chamath-jason-sacks-friedberg/id1502871393?uo=4",
+            "feedUrl": "https://rss.libsyn.com/shows/254861/destinations/1928300.xml",
+            "trackViewUrl": "https://podcasts.apple.com/us/podcast/all-in-with-chamath-jason-sacks-friedberg/id1502871393?uo=4",
+            "artworkUrl30": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts124/v4/c7/d2/92/c7d292ea-44b3-47ff-2f5e-74fa5b23db6c/mza_7005270671777648882.png/30x30bb.jpg",
+            "artworkUrl60": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts124/v4/c7/d2/92/c7d292ea-44b3-47ff-2f5e-74fa5b23db6c/mza_7005270671777648882.png/60x60bb.jpg",
+            "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts124/v4/c7/d2/92/c7d292ea-44b3-47ff-2f5e-74fa5b23db6c/mza_7005270671777648882.png/100x100bb.jpg",
+            "collectionPrice": 0.0,
+            "trackPrice": 0.0,
+            "collectionHdPrice": 0,
+            "releaseDate": "2026-09-17T16:54:00Z",
+            "collectionExplicitness": "notExplicit",
+            "trackExplicitness": "cleaned",
+            "trackCount": 422,
+            "trackTimeMillis": 2632,
+            "country": "USA",
+            "currency": "USD",
+            "primaryGenreName": "Technology",
+            "contentAdvisoryRating": "Clean",
+            "artworkUrl600": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts124/v4/c7/d2/92/c7d292ea-44b3-47ff-2f5e-74fa5b23db6c/mza_7005270671777648882.png/600x600bb.jpg",
+            "genreIds": [
+              "1318",
+              "26",
+              "1321",
+              "1493"
+            ],
+            "genres": [
+              "Technology",
+              "Podcasts",
+              "Business",
+              "Entrepreneurship"
+            ]
+          }
+        },
+        {
+          "id": "3fef4533f6ececb96fe07154",
+          "upstream_id": "1848156557",
+          "title": "Tomorrow, Today",
+          "author": "Shekhar Natarajan",
+          "feed_url": "https://feeds.simplecast.com/tj_igLD4",
+          "language": "",
+          "genres": [
+            "Technology",
+            "Podcasts",
+            "News",
+            "Tech News"
+          ],
+          "observed_at": "2026-09-18T09:55:09.133007+00:00",
+          "raw": {
+            "wrapperType": "track",
+            "kind": "podcast",
+            "collectionId": 1848156557,
+            "trackId": 1848156557,
+            "artistName": "Shekhar Natarajan",
+            "collectionName": "Tomorrow, Today",
+            "trackName": "Tomorrow, Today",
+            "collectionCensoredName": "Tomorrow, Today",
+            "trackCensoredName": "Tomorrow, Today",
+            "collectionViewUrl": "https://podcasts.apple.com/us/podcast/tomorrow-today/id1848156557?uo=4",
+            "feedUrl": "https://feeds.simplecast.com/tj_igLD4",
+            "trackViewUrl": "https://podcasts.apple.com/us/podcast/tomorrow-today/id1848156557?uo=4",
+            "artworkUrl30": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/b2/b4/80/b2b48020-11e7-92a9-db46-b7d475a19757/mza_619091211434212889.jpg/30x30bb.jpg",
+            "artworkUrl60": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/b2/b4/80/b2b48020-11e7-92a9-db46-b7d475a19757/mza_619091211434212889.jpg/60x60bb.jpg",
+            "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/b2/b4/80/b2b48020-11e7-92a9-db46-b7d475a19757/mza_619091211434212889.jpg/100x100bb.jpg",
+            "collectionPrice": 0.0,
+            "trackPrice": 0.0,
+            "collectionHdPrice": 0,
+            "releaseDate": "2026-09-08T15:30:00Z",
+            "collectionExplicitness": "notExplicit",
+            "trackExplicitness": "cleaned",
+            "trackCount": 34,
+            "trackTimeMillis": 10209,
+            "country": "USA",
+            "currency": "USD",
+            "primaryGenreName": "Technology",
+            "contentAdvisoryRating": "Clean",
+            "artworkUrl600": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/b2/b4/80/b2b48020-11e7-92a9-db46-b7d475a19757/mza_619091211434212889.jpg/600x600bb.jpg",
+            "genreIds": [
+              "1318",
+              "26",
+              "1489",
+              "1528"
+            ],
+            "genres": [
+              "Technology",
+              "Podcasts",
+              "News",
+              "Tech News"
+            ]
+          }
+        },
+        {
+          "id": "28485c15f62507aaa8c557d3",
+          "upstream_id": "1050462261",
+          "title": "Acquired",
+          "author": "Ben Gilbert and David Rosenthal",
+          "feed_url": "https://feeds.transistor.fm/acquired",
+          "language": "",
+          "genres": [
+            "Technology",
+            "Podcasts",
+            "Business",
+            "Investing"
+          ],
+          "observed_at": "2026-09-18T09:55:09.133020+00:00",
+          "raw": {
+            "wrapperType": "track",
+            "kind": "podcast",
+            "collectionId": 1050462261,
+            "trackId": 1050462261,
+            "artistName": "Ben Gilbert and David Rosenthal",
+            "collectionName": "Acquired",
+            "trackName": "Acquired",
+            "collectionCensoredName": "Acquired",
+            "trackCensoredName": "Acquired",
+            "collectionViewUrl": "https://podcasts.apple.com/us/podcast/acquired/id1050462261?uo=4",
+            "feedUrl": "https://feeds.transistor.fm/acquired",
+            "trackViewUrl": "https://podcasts.apple.com/us/podcast/acquired/id1050462261?uo=4",
+            "artworkUrl30": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/a8/e1/de/a8e1deff-9f88-4e55-a541-b0dc793c0cdc/mza_11539673419613154037.jpg/30x30bb.jpg",
+            "artworkUrl60": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/a8/e1/de/a8e1deff-9f88-4e55-a541-b0dc793c0cdc/mza_11539673419613154037.jpg/60x60bb.jpg",
+            "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/a8/e1/de/a8e1deff-9f88-4e55-a541-b0dc793c0cdc/mza_11539673419613154037.jpg/100x100bb.jpg",
+            "collectionPrice": 0.0,
+            "trackPrice": 0.0,
+            "collectionHdPrice": 0,
+            "releaseDate": "2026-08-10T04:41:00Z",
+            "collectionExplicitness": "notExplicit",
+            "trackExplicitness": "cleaned",
+            "trackCount": 217,
+            "trackTimeMillis": 16376,
+            "country": "USA",
+            "currency": "USD",
+            "primaryGenreName": "Technology",
+            "contentAdvisoryRating": "Clean",
+            "artworkUrl600": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/a8/e1/de/a8e1deff-9f88-4e55-a541-b0dc793c0cdc/mza_11539673419613154037.jpg/600x600bb.jpg",
+            "genreIds": [
+              "1318",
+              "26",
+              "1321",
+              "1412"
+            ],
+            "genres": [
+              "Technology",
+              "Podcasts",
+              "Business",
+              "Investing"
+            ]
+          }
+        }
+      ],
+      "errors": [],
+      "warnings": [
+        "Discovery is bounded; collection count is not proof of complete platform coverage"
+      ],
+      "stats": {
+        "collections": 5,
+        "parsed_collections": 3,
+        "records": 15,
+        "downloads": {
+          "failed": 1,
+          "pending": 14
+        }
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

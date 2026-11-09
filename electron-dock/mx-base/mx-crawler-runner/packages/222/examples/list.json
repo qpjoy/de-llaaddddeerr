@@ -1,0 +1,7 @@
+{
+  "operation": "list_records",
+  "params": {
+    "run_dir": "./runtime/222",
+    "limit": 20
+  }
+}

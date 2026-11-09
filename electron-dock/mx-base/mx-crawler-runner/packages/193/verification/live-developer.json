@@ -1,0 +1,78 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "developer",
+  "observed_at": "2026-09-12T17:20:25.335606+00:00",
+  "query": {
+    "developer_id": "Google LLC",
+    "lang": "en",
+    "country": "us",
+    "num": 3,
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "title": "Google Chrome",
+        "appId": "com.android.chrome",
+        "url": "https://play.google.com/store/apps/details?id=com.android.chrome",
+        "icon": "https://play-lh.googleusercontent.com/gbkzfC3R1fXcGR4Uag1uRSN_123Tpo_KxhVZFLFCatmthFuO1bzPczUomFtxI42YYEQMJeAaZuIFVrTF58gZYg",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Chrome helps you do what’s possible on the web. Choose the fast, secure browser by Google.<br><br>GET THE BEST OF GOOGLE IN CHROME<br><br>• SEARCH WITH GOOGLE - Search and get answers on Google fast. Use your voice to search hands-free.<br>• GOOGLE LENS - Search what you see around you with your camera.<br>• GOOGLE TRANSLATE - Explore the web in 130+ languages. Translate entire sites in one click.<br><br>BROWSE WITH BEST-IN-CLASS SECURITY<br><br>• ENHANCED PROTECTION MODE - Browse confidently with the highest level of Chrome’s security.<br>• SAFETY CHECK - Get peace of mind with proactive safety alerts.<br>• GOOGLE PASSWORD MANAGER - Securely generate and save passwords for fast sign-in, and get alerts if your passwords are at risk.<br><br>ACCESS YOUR CHROME ACROSS DEVICES<br><br>• SYNC ACROSS DEVICES - Save your things (like bookmarks, tabs, and passwords) and easily access them when you sign in to Chrome on your phone, computer or tablet.<br>• TAB GROUPS - Create tab groups to stay organized across devices.<br>• AUTOFILL - Save time typing by autofilling your saved payments, addresses and passwords.<br><br>Feature availability varies by country and language. Compatibility varies. Check responses for accuracy.",
+        "scoreText": "4.1",
+        "score": 4.119559
+      },
+      {
+        "title": "Google Messages",
+        "appId": "com.google.android.apps.messaging",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.apps.messaging",
+        "icon": "https://play-lh.googleusercontent.com/Mgukz1fq2stUYX_lQf79gmMeDzNvRCu5eobmiJwNkXl4riNY6HZ3VB-HRW5QciwEuLnFyk_ZmHumvn8RJ5Um",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Google Messages is the official Google app for messaging. Google Messages is revolutionizing how a billion users connect and is powered by Rich Communication Services (RCS), the industry standard for texting that replaces SMS and MMS. With RCS, you can share high resolution photos and videos, enjoy dynamic group chats, and seamlessly connect with other RCS users including your iPhone friends. <br><br>        •        Rich Communication: Share high-quality photos and videos, see when friends are typing, and enjoy dynamic group chats that now seamlessly include your iPhone friends.<br>        •        Personal Touch: Make conversations uniquely yours with features like custom chat bubble colors or fun selfie gifs. <br>        •        Privacy Matters: Rest easy knowing your personal chats are protected with end-to-end encryption between Google Messages users, so no one (including Google and third parties) can read or view your messages and attachments except the person you’re messaging. Plus, enjoy advanced spam protection. <br>        •        AI-Powered Messaging: Craft the perfect message with Magic Compose suggestions and our latest AI features.<br>        •        Seamless Across Devices: Start a chat on your phone and continue it effortlessly on your tablet or computer. The app is also available on Wear OS.<br><br>Google Messages is more than just messaging; it&#39;s a richer, safer, and more expressive way to connect.<br><br>App is also available on Wear OS. Availability of RCS varies by region and carrier and a data plan may be required. Availability of features varies by market and device and sign up for beta testing may be required.",
+        "scoreText": "4.4",
+        "score": 4.370203
+      },
+      {
+        "title": "Google",
+        "appId": "com.google.android.googlequicksearchbox",
+        "url": "https://play.google.com/store/apps/details?id=com.google.android.googlequicksearchbox",
+        "icon": "https://play-lh.googleusercontent.com/xqk8hd6dMyffxE6iQa59cUt75EA-0YDvjnJlxH4z8W63-e5KwaWXbrNob6Q-OoH5SSDa78Y0I0YA3BB0zDVnB8w",
+        "developer": "Google LLC",
+        "currency": "USD",
+        "price": 0,
+        "free": true,
+        "summary": "Download the Google app to find quick answers, explore your interests, and ask anything on your mind in any way. Try AI in Google Search with AI Mode, Lens, Search Live, and more.<br><br>Feature highlights*:<br><br>• AI Mode: Get AI-powered responses to your toughest questions with AI Mode–talk, type, or snap a photo to get started, and ask follow-up questions to dig deeper. You’ll continue to see a range of helpful links so you can keep exploring across the web.<br>• Circle to Search: Instantly search what you see on your phone without switching apps. Circle, highlight, scribble, or tap an image, video, or text to search. Available on select premium Android smartphones in some languages and locations.<br>• Google Lens: See something you like? Snap a photo and discover where to shop for it, find related images, and more. Refine your camera searches by adding words – whether you want those shoes but in ‘blue’, or want to learn how to ‘repair’ that broken bit on your bicycle.<br>• Search Live: Have a live, real-time conversation in Search by using your voice and camera to easily get answers and on-screen links to the web when you need them. <br>• AI Overviews: Get a snapshot of key information about a topic or question, like ’how to fix a broken zipper’, with links so you can easily explore more on the web.<br>• Hum to Search: Can&#39;t remember the name of that song? Hum the tune and Google will help find it for you—no lyrics, artist name or perfect pitch required. You can also search for a song playing near you.<br>• Discover: Stay up-to-date on topics that matter to you. Get personalized news, articles, and videos based on your interests.<br>• Google Search Widget: Search faster from your home screen or lock screen, with easy shortcuts to AI Mode, Lens, and more.<br><br>Google Search, totally reimagined with AI<br><br>• Explore a new intelligent Search box that expands with your curiosity, offers AI powered suggestions and lets you search with text, videos and more.<br>• Bring your toughest questions to Search. With a more seamless Search experience, you can go from an AI Overview on the search results page to asking follow-up questions in AI Mode, with links to the web.<br>• Get help with planning, researching, brainstorming new ideas, and more with the latest Gemini models delivering frontier performance for agents and coding.<br>• Bring your ideas to life by transforming your photos in Lens or creating images in AI Mode with Nano Banana. Available in select languages and locations.<br><br>Search what you see with Google Lens:<br><br>• Use your camera to identify what you’re looking at. Identify plants and animals, translate text in real-time, find similar products to buy, and even solve math problems with step-by-step guides.<br>• Translate over 100 languages on things like road signs when you travel, menus, and more by pointing your camera at text.<br>• Reverse image search: Find the source, similar photos, and related information for any image.<br>• Get step-by-step homework help on math, physics and word problems, and testing your knowledge with Questions and Answers are now fully supported within the Google app.<br><br>Search safely and securely:<br><br>• All searches in the Google app are protected by encrypting the connection between your device and Google.<br>• Privacy controls are easy to find and use. Tap your profile picture to access your menu and delete recent search history from your account with one click.<br>• Search proactively filters webspam to help ensure that you see safe, high-quality results.<br><br><br>Learn more about what the Google app can do for you: https://search.google/<br><br>Privacy policy: https://www.google.com/policies/privacy<br><br>Your feedback helps us create products you&#39;ll love. Join a user research study here:<br>https://goo.gl/kKQn99<br><br>*Features may not be available in all countries.",
+        "scoreText": "4.0",
+        "score": 4.0413027
+      }
+    ],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [],
+  "error": null,
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-76bbee4adcbe42628cbdec130d1ba296",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/store/apps/developer?id=Google%20LLC&hl=en&gl=us"
+  ]
+}

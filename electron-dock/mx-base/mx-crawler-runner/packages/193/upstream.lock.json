@@ -1,0 +1,37 @@
+{
+  "repository": "https://github.com/facundoolano/google-play-scraper",
+  "commit": "1547a3a51bc56390ea0ecae7d8a6eca6d343003d",
+  "archive_url": "https://codeload.github.com/facundoolano/google-play-scraper/tar.gz/1547a3a51bc56390ea0ecae7d8a6eca6d343003d",
+  "archive_sha256": "9c189b3a9eb893e0224c8d20cab890e736d064464a8b5b36a02196652233955d",
+  "version": "10.1.3",
+  "files_sha256": {
+    "LICENSE": "bec055fb075e6ac737399f4f2a31226b4c86fc9a8655e137ae3949e65c3376d0",
+    "README.md": "e0cbf2480438e653311cb10f476adf2f38b998426197db81b2911733adb00626",
+    "index.d.ts": "cafadd3220599ca26953aad1cc0303cacbaa7ac71c16855e18115201c4690232",
+    "index.js": "03a776abf1df59d9de1981f60c598a553a5d0ee9d7d6f1b570fc61bd6a492a80",
+    "lib/app.js": "a3ebfe4000c898523f86e318f8b19407c2f3b753c5d57f3a29122dbb61480fb3",
+    "lib/categories.js": "0bb1be782ed0f6736f6b37547468e5a9f99977cff785c1f8517d51e4162449b0",
+    "lib/constants.js": "9da88337c3f988963a986e9914cdcc1e52ac318efd60f72b903be1e1b9ad59e5",
+    "lib/datasafety.js": "94d5c6f9918f80069cf903d643afbf8f565ea88282f62464d626c164f170bdbf",
+    "lib/developer.js": "269dc33a0f6e6d267a9aabc3580660e0a94783c074dc2399e6e1d365eed15b54",
+    "lib/list.js": "e6c26574d1f086c48f1f835c551aca8ac33bdc04d5354ecc15eec4775612ab38",
+    "lib/permissions.js": "c104f4b243474d2de9c12dd15afebe8914e67ee0527d02640f9bda79c11134d3",
+    "lib/reviews.js": "7e6eb223e2fcc9d259c14f81745522123395cbb1ac0bde66767d5a6cadbf1914",
+    "lib/search.js": "43010ff682e8d0b977654fd2e325855e02dafc9019f57ef5d2297fd433df2b45",
+    "lib/similar.js": "cdd74f550e7044af340a7ce6f6342de4d2fba2790fc204a1378527805106df46",
+    "lib/suggest.js": "3cec86fe3adb7ad53cf92b8ed6a388c13deb32688798a7ccfe9d3bf185315b3b",
+    "lib/utils/appList.js": "b65e9d2245791c04c1295a685002b3846ac6f7c2d5dd88fac3d3b62e3e88028b",
+    "lib/utils/mappingHelpers.js": "5882f4f7aa13705fa12837789dc8b74eebc42ec0a00447166fdedae0de38fa0e",
+    "lib/utils/processPages.js": "2971ce230f1a4224a4ebda717209a3276a15eab3aa0c61bbcfdc44dc82feed02",
+    "lib/utils/request.js": "099619207b90431c5a3aece7c0de92817a0d8390d1511367ce73d2502a006a52",
+    "lib/utils/scriptData.js": "ccb15e6a3b8d17de17c4cccc92b13dc7592e3427b7d3d803a0c8794a5ae5618c",
+    "lib/utils/throttle.js": "6699a34fe6089ff3f7df5c0d03233b501db4f0edfe05e3c6f99e72e1bc88ab5f",
+    "package.json": "1dcfb10d6af061f69574bf2d6e3997876fb8a449499d36c3aa02013002a7b172"
+  },
+  "local_modifications": {
+    "lib/similar.js": {
+      "reason": "Preserve proxy, HTTP timeout, request-budget hooks and num on follow-up similar-app requests.",
+      "sha256": "2f4ca8e8105e6db13babb4cbb481bf4ad4f4262f01ac29b40b43a10bc707964b"
+    }
+  }
+}

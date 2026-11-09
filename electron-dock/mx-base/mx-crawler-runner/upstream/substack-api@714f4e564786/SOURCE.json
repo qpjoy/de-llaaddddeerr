@@ -1,0 +1,14 @@
+{
+  "name": "substack-api",
+  "repo": "NHagar/substack_api",
+  "origin": "https://github.com/NHagar/substack_api.git",
+  "commit": "714f4e564786af97a076595fd6bf5942dccc42a2",
+  "commitDate": "2026-05-29T08:56:17-05:00",
+  "license": "MIT",
+  "paths": [
+    "substack_api",
+    "LICENSE"
+  ],
+  "deliveredBy": "package 105",
+  "scrubbed": []
+}

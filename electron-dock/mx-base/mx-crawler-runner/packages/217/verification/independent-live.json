@@ -1,0 +1,220 @@
+{
+  "source_row_id": 217,
+  "provider": "halifox/app_market_crawler",
+  "platform": "lenovo",
+  "observed_at": "2026-09-12T10:20:00.448673+00:00",
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "input_value": "com.tencent.mobileqq",
+        "record_type": "detail",
+        "source_url": "https://www.lenovomm.com/appdetail/com.tencent.mobileqq/0",
+        "app": {
+          "package": "com.tencent.mobileqq",
+          "app_id": 28639269,
+          "name": "QQ",
+          "version": "9.3.60",
+          "version_code": "16070",
+          "developer": "深圳市腾讯计算机系统有限公司-SNG帐号",
+          "rating": 3,
+          "privacy_policy_url": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "updated_at": 1788919973000,
+          "icon_url": "https://img.lenovomm.com/ali/icon/app-img-lestore/7329-2022-08-11023744-1660199864407.png?isCompress=true&width=75&height=75&quantity=0.8"
+        },
+        "raw": {
+          "apkmd5": "DC9D399E37A629E4A6252E08CB33BE8A",
+          "overflowPrice": null,
+          "privacyProtocolUrl": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+          "newShelf": {
+            "code": "new_shelf_detail",
+            "lt": "top",
+            "from": "detail"
+          },
+          "chinesize": 0,
+          "hasGameCard": 1,
+          "publishDate": 1788919973000,
+          "discount": "1",
+          "fSnapList": [
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/1656-2026-08-12024208-1786516928826.jpg?isCompress=true&width=800&height=1280&quantity=0.8&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/2122-2026-08-12024213-1786516933864.jpg?isCompress=true&width=800&height=1280&quantity=0.8&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/2602-2026-08-12024218-1786516938618.jpg?isCompress=true&width=800&height=1280&quantity=0.8&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/5729-2026-08-12024222-1786516942571.jpg?isCompress=true&width=800&height=1280&quantity=0.8&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/1246-2026-08-12024225-1786516945162.jpg?isCompress=true&width=800&height=1280&quantity=0.8&rotate=true",
+              "DEVICE_RESOLUTION": null
+            }
+          ],
+          "realDownCount": 240606590,
+          "bigCategory": 2,
+          "compatibleDesc": "兼容本机",
+          "vid": "",
+          "compatible": "1",
+          "crack": 0,
+          "advertiseDesc": "无广告",
+          "themeInfo": {},
+          "authorProNum": 12,
+          "actualDownCount": 240606590,
+          "price": "0.0",
+          "tipTitle": "",
+          "fState": null,
+          "hasSubscribe": 0,
+          "ageSegment": "",
+          "hasGameGift": 0,
+          "audited": 1,
+          "network_identity": "",
+          "version": "9.3.60",
+          "typeBoneId": 16,
+          "size": 391019122,
+          "vcNum": 277,
+          "hState": "0",
+          "shortDesc": "QQ9全新上线，一起轻松做自己",
+          "hasInnerPay": 0,
+          "downloadCount": "2亿次安装",
+          "lcaid": 28639269,
+          "bg": {},
+          "superShortDesc": null,
+          "typeName": "聊天社交",
+          "lStateText": null,
+          "outUrl": "leapp://ptn/specialcategory.do?apptypeid=1028&code=1028&name=%E8%81%8A%E5%A4%A9%E7%A4%BE%E4%BA%A4&tagid=-1",
+          "oState": "0",
+          "shareContent": "QQ:QQ9全新上线，一起轻松做自己 https://3g.lenovomm.com/redsea/com.tencent.mobileqq",
+          "apkSize": 391019122,
+          "vImg": "",
+          "snapList": [
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/1656-2026-08-12024208-1786516928826.jpg?isCompress=true&width=163&height=271&quantity=0.4&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/2122-2026-08-12024213-1786516933864.jpg?isCompress=true&width=163&height=271&quantity=0.4&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/2602-2026-08-12024218-1786516938618.jpg?isCompress=true&width=163&height=271&quantity=0.4&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/5729-2026-08-12024222-1786516942571.jpg?isCompress=true&width=163&height=271&quantity=0.4&rotate=true",
+              "DEVICE_RESOLUTION": null
+            },
+            {
+              "APPIMG_PATH": "https://img.lenovomm.com/ali/img/app-img-lestore/1246-2026-08-12024225-1786516945162.jpg?isCompress=true&width=163&height=271&quantity=0.4&rotate=true",
+              "DEVICE_RESOLUTION": null
+            }
+          ],
+          "hasActivity": 0,
+          "averageStar": 3,
+          "minSdk": "23",
+          "shareTitle": "给你推荐个应用",
+          "btnColor": "",
+          "targetUrl": "",
+          "dangerousDesc": "",
+          "buttonCaption": "",
+          "appPerversion": "28617373",
+          "canBeSubscribe": 0,
+          "putOnRecord": 1,
+          "sharepoints": "null",
+          "commonTitle": "",
+          "typeInfoId": 1028,
+          "unDownloadable": 0,
+          "commonDesc": "",
+          "points": 0,
+          "tipContent": "",
+          "tab": [
+            "detail",
+            "comment",
+            "recommend"
+          ],
+          "credibleFlag": 0,
+          "lState": "0",
+          "vState": null,
+          "safeCertification": 1,
+          "privilege_url": "",
+          "commentsNum": 64420,
+          "paymentDesc": "无额外收费",
+          "isPrivilege": 0,
+          "highQualityTag": 1,
+          "operatorDesc": "",
+          "updateDesc": "近期更新：\n- QQ闪传文件有效期新增支持90天/180天；\n- QQ闪传支持添加或删除已分享的文件，灵活调整分享内容；\n- 宠物功能上线，支持多种养宠互动玩法，解锁社交新体验；\n- 输入状态个性装扮上线，让好友等待回复的时刻也变得有趣；\n- 进群特效全新升级，款式更多元，呈现更自然，字色更护眼；\n- QQ秀生成效果升级，提升形象还原度。上线展柜功能，可收藏精选形象。",
+          "appTypeCode": "tx",
+          "goldFlag": 0,
+          "name": "QQ",
+          "hasAd": 0,
+          "ispay": "0",
+          "smsSupport": "0",
+          "dangerous": 0,
+          "hasStrategy": 0,
+          "description": "在QQ，轻松社交\n- [聊天消息]随时随地好友和群消息；\n- [语音通话]、[视频聊天]和亲友自在畅聊；\n- [文件传输]手机电脑多端互传，轻松便捷。\n\n在QQ，轻松生活\n- [空间动态]快速获知好友动态，随时分享生活；\n- [移动支付]话费充值、转账收款、网购一应俱全；\n- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。\n\n在QQ，轻松娱乐\n- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；\n- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。\n\nQQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。\n\n\n-----联系我们-----\n如在使用过程中遇到任何问题，请联系我们：\n- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈\n- 客服热线：4006 700 700（服务时间：8:00 - 23:00）\n\n*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+          "definition": "",
+          "packageName": "com.tencent.mobileqq",
+          "versioncode": "16070",
+          "developerName": "深圳市腾讯计算机系统有限公司-SNG帐号",
+          "putOnRecordInfo": "粤B2-20090059-1622A",
+          "develperId": "77980",
+          "tagList": [],
+          "iconAddr": "https://img.lenovomm.com/ali/icon/app-img-lestore/7329-2022-08-11023744-1660199864407.png?isCompress=true&width=75&height=75&quantity=0.8",
+          "hasTesterSign": 1,
+          "noAd": 0,
+          "jumpCode": "detail",
+          "gradeCount": 46950,
+          "risky": 0,
+          "_meta": {
+            "market": "lenovo",
+            "mode": "package-list",
+            "input_value": "com.tencent.mobileqq",
+            "record_type": "detail"
+          }
+        }
+      }
+    ],
+    "outcomes": [
+      {
+        "input_value": "com.tencent.mobileqq",
+        "status": "success"
+      }
+    ],
+    "native_outcomes": [
+      {
+        "market": "lenovo",
+        "mode": "package-list",
+        "input_value": "com.tencent.mobileqq",
+        "success": 1,
+        "error": null
+      }
+    ],
+    "errors": [],
+    "rejected": [],
+    "http": [
+      {
+        "url": "https://www.lenovomm.com/appdetail/com.tencent.mobileqq/0",
+        "status": 200,
+        "input_value": "com.tencent.mobileqq"
+      }
+    ]
+  },
+  "warnings": [],
+  "error": null,
+  "stats": {
+    "requests": 1,
+    "responses": 1,
+    "finish_reason": "finished"
+  },
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\\independent\\217\\data\\run-a1504b9480204182b56fe32736aad171",
+    "returncode": 0,
+    "timed_out": false
+  }
+}

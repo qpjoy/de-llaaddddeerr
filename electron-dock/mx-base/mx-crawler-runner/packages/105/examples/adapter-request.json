@@ -1,0 +1,6 @@
+{
+  "operation": "collect",
+  "params": {
+    "target": "https://example.substack.com"
+  }
+}

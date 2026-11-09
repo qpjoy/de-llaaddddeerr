@@ -1,0 +1,52 @@
+{
+  "request": {
+    "operation": "download",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\45",
+      "total_timeout": 60,
+      "request_timeout": 20,
+      "record_ids": [
+        "0e22856206b00a7c330bf6db"
+      ],
+      "limit": 1,
+      "max_file_bytes": 10485760
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "45",
+    "source_id": "45",
+    "operation": "download",
+    "observed_at": "2026-09-18T10:38:14.336626+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "45",
+      "platform": "小宇宙",
+      "observed_at": "2026-09-18T10:38:14.336626+00:00",
+      "items": [
+        {
+          "id": "0e22856206b00a7c330bf6db",
+          "status": "done",
+          "local_path": "G:\\data_tongbu\\data\\audio_runs\\45\\downloads\\0e22856206b00a7c330bf6db.m4a",
+          "bytes": 3011927,
+          "sha256": "0bea8d8fce1199d71abe1490afb9f081473a61e44c05a5496adab3385109f9a9",
+          "duplicate_of": null,
+          "conversion": null
+        }
+      ],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 2,
+        "parsed_collections": 2,
+        "records": 4,
+        "downloads": {
+          "done": 1,
+          "pending": 3
+        }
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

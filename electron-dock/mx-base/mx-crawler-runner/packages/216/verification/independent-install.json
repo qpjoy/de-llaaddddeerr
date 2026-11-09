@@ -1,0 +1,72 @@
+{
+  "row_id": 216,
+  "status": "passed",
+  "python": "3.13.3 (tags/v3.13.3:6280bb5, Apr  8 2025, 14:47:33) [MSC v.1943 64 bit (AMD64)]",
+  "installed_module": "G:\\data_tongbu\\data\\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\\independent\\216\\.venv\\Lib\\site-packages\\mingxi_market_216\\__init__.py",
+  "steps": [
+    {
+      "step": "setup",
+      "returncode": 0,
+      "seconds": 26.79
+    },
+    {
+      "step": "pip-check",
+      "returncode": 0,
+      "seconds": 0.62
+    },
+    {
+      "step": "import",
+      "returncode": 0,
+      "seconds": 0.13
+    },
+    {
+      "step": "tests",
+      "returncode": 0,
+      "seconds": 0.86
+    },
+    {
+      "step": "cli",
+      "returncode": 0,
+      "seconds": 0.16
+    },
+    {
+      "step": "example",
+      "returncode": 0,
+      "seconds": 2.95
+    },
+    {
+      "step": "smoke",
+      "returncode": 0,
+      "seconds": 2.84
+    },
+    {
+      "step": "packages",
+      "returncode": 0,
+      "seconds": 0.31
+    }
+  ],
+  "source_sha256": {
+    "main.py": "076a50faeb76e4617ecb9479ea85618c016b259209eef04df729f9e0bea40a8a",
+    "pyproject.toml": "4b95090cdea334f7e96b4f291f0b4a92af392363d753f2936bc16d4307809f1a",
+    "requirements.lock.txt": "da7770622fee2d0f897d9ee5bee7151b2aa09567ad301559a007f1eabbff1070",
+    "examples/basic.py": "b51f86fbf5aa749700477415f7fec05437adcb0294a4cd3caa1e2da730650ddf",
+    "scripts/setup.ps1": "73c4596687fb1db80c3490511e224eeb86de7d3638a22329bdd28fd920f31df5",
+    "scripts/smoke.py": "e938c88ae166a42afbf98a1b240aa5bf515e6db8a4127d78928b9ebea17fdeb5",
+    "tests/test_client.py": "dd1aa06f52d6c3745cd5ca48457d7bd21813ae6fd183e4d841836f6311d2bec9",
+    "src/mingxi_market_216/cli.py": "8e60800235c99b152d182a7c29d93ebc1b893bad74ee4223d95109a0e4b055bc",
+    "src/mingxi_market_216/client.py": "092745c78cb1d986bbc1bde4d3599158068bbb33daa9f4d27faa7937f9f104eb",
+    "src/mingxi_market_216/config.py": "fdd8d832ef958a10dceb43328e0d9708c1dcd83d3262c33987d8c91357291ad8",
+    "src/mingxi_market_216/normalize.py": "f1d3073c759450dfed29862d08c484e85a433f02a522bf99686a8fd28a33c065",
+    "src/mingxi_market_216/spider.py": "1b4157fcbc54c52a62e970ecea48b01cbbfd9242c717a18d3442ab25a6582b13",
+    "src/mingxi_market_216/tls.py": "d14ea3bafdb51bce296a3611dacf66704dd902d6f075941bcdc848f13eefd232",
+    "src/mingxi_market_216/worker.py": "ed4ea14b838386cae595d269e8c6407164d923018cbcd1f5cc0323cfaf55a9a5",
+    "src/mingxi_market_216/__init__.py": "5ac981db3af220701ebeb211a6d562700c12631d8b8e64af7158f253b67350b7",
+    "src/mingxi_market_216/__main__.py": "8134dc71036ab6fef7cb605ec59b400b2864890fc00526f9763c447e2937e295",
+    "src/mingxi_market_216/vendor/base.py": "17680512569fc15aa1a0c836229b8b1c7ff0aefac3e21cacd2670831fee38dec",
+    "src/mingxi_market_216/vendor/inputs.py": "ee8a2a5acedf040d07d4d4167ca7ea7bd7f98f9b9d445f538124e9cc3d095442",
+    "src/mingxi_market_216/vendor/items.py": "2abfced87968caf8498c5c069796bda889f14ebdf28aea0a34d4a00d83cd7f96",
+    "src/mingxi_market_216/vendor/models.py": "ade5016fee46a3838e1f0b9861bcf65d9078204cdfb5a8c283193160dc09035b",
+    "src/mingxi_market_216/vendor/utils.py": "ad4690e4e70bf1796a8201d864bcafaf73f08abbb0129aa9c6e842ac63b4a316",
+    "src/mingxi_market_216/vendor/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

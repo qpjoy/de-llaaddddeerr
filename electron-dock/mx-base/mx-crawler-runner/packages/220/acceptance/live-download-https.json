@@ -1,0 +1,52 @@
+{
+  "request": {
+    "operation": "download",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "record_ids": [
+        "79a67efe0c67d6dfaa7b6cbf"
+      ],
+      "limit": 1,
+      "request_timeout": 120,
+      "total_timeout": 600,
+      "max_file_bytes": 104857600
+    }
+  },
+  "exit_code": 1,
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "download",
+    "observed_at": "2026-09-18T09:55:59.358413+00:00",
+    "status": "error",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T09:55:59.358413+00:00",
+      "items": [],
+      "errors": [
+        {
+          "id": "79a67efe0c67d6dfaa7b6cbf",
+          "code": "UPSTREAM_HTTP",
+          "message": "Audio HTTP 403"
+        }
+      ],
+      "warnings": [],
+      "stats": {
+        "collections": 5,
+        "parsed_collections": 3,
+        "records": 15,
+        "downloads": {
+          "failed": 2,
+          "pending": 13
+        }
+      },
+      "pagination": null
+    },
+    "error": {
+      "code": "SOURCE_FAILED",
+      "message": "See result.errors for individual failures"
+    }
+  }
+}

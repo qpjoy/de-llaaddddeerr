@@ -1,0 +1,33 @@
+{
+  "date": "2026-09-13",
+  "status": "completed",
+  "source_row_id": 193,
+  "passed_operations": [
+    "app",
+    "search",
+    "reviews",
+    "list",
+    "developer",
+    "suggest",
+    "similar",
+    "permissions",
+    "datasafety"
+  ],
+  "unverified_operations": [
+    "categories"
+  ],
+  "tests_passed": 11,
+  "workbook": "G:\\data_tongbu\\明悉科技-数据源表.xlsx",
+  "backup": "G:\\data_tongbu\\backups\\明悉科技-数据源表_GooglePlay接入前_20260913_012202.xlsx",
+  "workbook_before_sha256": "28793b1b25692a7228b0ef2425ae2310d4562d71b91b5f92583c733711f05c3b",
+  "workbook_after_sha256": "254a8b5c43e9ae0fa43aa55cb4df1abd4a9df8d2a75698fef1429340fcf8c671",
+  "sheets_updated": [
+    "数据表",
+    "数据表1"
+  ],
+  "other_cells_verified_unchanged": 6372,
+  "original_global_coverage_preserved": true,
+  "existing_notes_styles_and_validations_preserved": true,
+  "source_hashes_verified": true,
+  "documentation_links_verified": true
+}

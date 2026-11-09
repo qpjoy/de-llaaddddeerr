@@ -1,0 +1,7 @@
+.venv/
+.runtime/
+data/
+build/
+*.egg-info/
+__pycache__/
+node_modules/

@@ -1,0 +1,11 @@
+.venvs
+.data
+packages/*/.venv
+packages/*/.runtime
+packages/*/data
+**/__pycache__
+**/*.pyc
+node_modules
+deploy
+tests
+README.md

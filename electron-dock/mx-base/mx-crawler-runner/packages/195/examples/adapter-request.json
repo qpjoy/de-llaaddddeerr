@@ -1,0 +1,9 @@
+{
+  "operation": "collect",
+  "params": {
+    "inputs": [
+      "12345"
+    ],
+    "input_kind": "id"
+  }
+}

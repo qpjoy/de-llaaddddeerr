@@ -1,0 +1,142 @@
+# mx-crawler-runner (spider_man 07 §12): runs reviewed collection packages for
+# Hub's runner engines, one process per invocation.
+#
+# Deliberately NOT part of Hub's kustomization: Hub deploys never touch it,
+# and it never touches Launcher, WireGuard, split DNS or any MX-H2I path.
+# Deploy with scripts/deploy.sh in electron-dock/mx-base/mx-crawler-runner.
+#
+# hostNetwork on the Hub node, listening on 127.0.0.1:18190 only: Hub Admin
+# (also hostNetwork) reaches it on loopback, and the System Proxy endpoint
+# Hub selects for Google Play (127.0.0.1:7788) means the same listener here.
+# Once Hub runs on several nodes this pod must stay with the Admin plane (the
+# pod affinity below) or move to a cluster-addressable proxy (spider_man 01 S0).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-crawler-runner
+  namespace: mx-insight-hub
+  labels:
+    app.kubernetes.io/name: mx-crawler-runner
+    app.kubernetes.io/part-of: mx-insight-hub
+spec:
+  replicas: 1
+  strategy:
+    # One host port, and running invocations are recorded as interrupted on
+    # stop; never two runners at once.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-crawler-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-crawler-runner
+        app.kubernetes.io/part-of: mx-insight-hub
+        mx-insight-hub.io/plane: worker
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: mx-insight-hub-admin
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # Group-readable token file for the runner user (secret volumes only;
+        # hostPath ownership is handled by the init container).
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # hostPath directories are created root-owned; hand this one to the
+        # runner user. Nothing else runs as root.
+        - name: data-owner
+          image: mx-crawler-runner:shadow
+          imagePullPolicy: Never
+          command: ["/bin/sh", "-c", "chown 1000:1000 /var/lib/mx-crawler-runner && chmod 700 /var/lib/mx-crawler-runner"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mx-crawler-runner
+      containers:
+        - name: runner
+          image: mx-crawler-runner:shadow
+          imagePullPolicy: Never
+          # Defaults in src/main.mjs: 127.0.0.1:18190, /var/lib/mx-crawler-runner,
+          # /run/secrets/mx-crawler-runner/token. No environment variables.
+          ports:
+            - name: http
+              containerPort: 18190
+          readinessProbe:
+            tcpSocket:
+              host: 127.0.0.1
+              port: 18190
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              host: 127.0.0.1
+              port: 18190
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            # Up to 24 adapter processes (4 per package), mostly waiting on the
+            # network with the packages' own request delays. Scrapy and yt-dlp
+            # runs are about 80-150 MiB each; 18 engines x 1 slot ~ 2.5 GiB.
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mx-crawler-runner
+            - name: token
+              mountPath: /run/secrets/mx-crawler-runner
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Invocation records (24 h) and per-invocation work directories. On the
+        # host so a restart turns running records into `interrupted` instead of
+        # losing them (Hub would otherwise see a lost invocation).
+        - name: data
+          hostPath:
+            path: /var/lib/mx-crawler-runner
+            type: DirectoryOrCreate
+        - name: token
+          secret:
+            secretName: mx-crawler-runner-token
+            defaultMode: 0440
+            items:
+              - key: token
+                path: token
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

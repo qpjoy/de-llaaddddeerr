@@ -1,0 +1,44 @@
+{
+  "source_id": "222",
+  "observed_at": "2026-09-18T09:52:14.108360+00:00",
+  "live_status": "partial_or_failed",
+  "verified_capabilities": [
+    "discovery",
+    "episodes"
+  ],
+  "pending_capabilities": [
+    "opus_conversion_missing_ffmpeg"
+  ],
+  "runtime": "G:\\data_tongbu\\data\\audio_runs\\222",
+  "real_requests_performed": true,
+  "checks": [
+    {
+      "label": "discover",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "collect",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "list",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "download",
+      "status": "error",
+      "error": {
+        "code": "SOURCE_FAILED",
+        "message": "See result.errors for individual failures"
+      }
+    },
+    {
+      "label": "refresh",
+      "status": "success",
+      "error": null
+    }
+  ]
+}

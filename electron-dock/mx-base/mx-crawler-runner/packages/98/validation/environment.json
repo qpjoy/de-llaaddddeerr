@@ -1,0 +1,21 @@
+{
+  "python": "3.13.3",
+  "packages": [
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "yt-dlp",
+      "version": "2026.8.19"
+    }
+  ],
+  "install": {
+    "id": 98,
+    "slug": "snapchat_spotlight",
+    "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+    "python": "G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\snapchat_spotlight\\venv\\Scripts\\python.exe",
+    "observed_at": "2026-09-10T16:37:10.4794957Z",
+    "exit_code": 0
+  }
+}

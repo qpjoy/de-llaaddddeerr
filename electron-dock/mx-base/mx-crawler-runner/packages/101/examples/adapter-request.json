@@ -1,0 +1,6 @@
+{
+  "operation": "collect",
+  "params": {
+    "target": "https://www.dailymotion.com/video/replace-id"
+  }
+}

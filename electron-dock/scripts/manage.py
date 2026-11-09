@@ -34,9 +34,13 @@ PROJECTS = {
     "mx-rig": ("mx-rig", "mx-rig", "MX_RIG_BUILD_PROXY"),
     "mx-common": ("mx-common", "mx-common", None),
     "mx-hanlp": ("mx-common", "mx-common", "PROXY"),
+    # Collection runner for the Hub (spider_man 07 §12): its own Deployment in
+    # the Hub namespace; builds through the Hub's proxy-scoped buildx builder.
+    "mx-crawler-runner": ("mx-base/mx-crawler-runner", "mx-insight-hub", "MX_INSIGHT_BUILD_PROXY"),
 }
 ALIASES = dict(zip(("launcher", "hub", "dataport", "device", "pay", "rig", "common"), PROJECTS))
 ALIASES["hanlp"] = "mx-hanlp"
+ALIASES["runner"] = "mx-crawler-runner"
 ALL_PROJECTS = ("mx-launcher", "mx-pay", "mx-hanlp", "mx-insight-hub", "mx-dataport")
 EFFECTS = {
     "mx-launcher": "发布 Internal 登录/网络相关组件；保留原恢复检查，地址变化可能触发控制面修复。PG 为 OnDelete，模板变化不重启数据库；完成后 db apply 原地调整资源和参数。",
@@ -46,6 +50,7 @@ EFFECTS = {
     "mx-pay": "执行 Pay 自身迁移和 API/console 发布；按原流程暂停/恢复新 checkout；保留已有 PG。",
     "mx-rig": "执行 Rig Kubernetes 发布；PG 为 OnDelete，模板变化不重建数据库 Pod，CPU/内存由 db apply 原地调整。",
     "mx-hanlp": "执行 mx-common deploy hanlp：构建模型镜像、导入当前 K8s 运行时、发布 HanLP 并等待分词服务就绪。",
+    "mx-crawler-runner": "构建采集 runner 镜像（核对交付包 sha256 并跑离线测试，复用 Hub 同一 PROXY 的 buildx builder）、导入当前 K8s 运行时、首次创建 token Secret、发布并重启单独的 Deployment；进行中的调用记为 interrupted（Hub 判为失败、不收费）。不碰 Hub 工作负载、Launcher 或 MX-H2I。",
 }
 HELP = """MX 统一管理入口（在目标服务器的 electron-dock 目录执行）
   bash scripts/manage.sh list
@@ -60,9 +65,10 @@ HELP = """MX 统一管理入口（在目标服务器的 electron-dock 目录执�
   bash scripts/manage.sh db status [项目]  # 数据库参数/资源与声明是否一致（只读）
   bash scripts/manage.sh db apply <项目>   # 热加载参数、Pod 原地调整资源；从不重启数据库
 
-项目：mx-launcher / mx-insight-hub / mx-dataport / mx-device / mx-pay / mx-rig
-短名：launcher / hub / dataport / device / pay / rig / hanlp；mx-common 仅支持只读检查。
-all = Launcher → Pay → HanLP → Hub → DataPort，仅用于已有 Internal 安装的显式发布。
+项目：mx-launcher / mx-insight-hub / mx-dataport / mx-device / mx-pay / mx-rig / mx-crawler-runner
+短名：launcher / hub / dataport / device / pay / rig / hanlp / runner；mx-common 仅支持只读检查。
+all = Launcher → Pay → HanLP → Hub → DataPort，仅用于已有 Internal 安装的显式发布；不含 runner。
+runner 需在 Hub 之后用同一 PROXY 单独发布（复用 Hub 创建的构建器）。
 Hub 发布前等待宿主 127.0.0.1:5432 PostgreSQL 和 HanLP；MX_WAIT_TIMEOUT 默认 300 秒。
 PROXY 支持 host:port 或 http(s)://host:port；* 是主机占位，不能原样使用。
 显式 PROXY 优先；空值清空本次专用构建代理，未设置时沿用各项目配置。

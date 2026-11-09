@@ -1,0 +1,41 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "categories",
+  "observed_at": "2026-09-12T17:20:33.968624+00:00",
+  "query": {
+    "lang": "en",
+    "country": "us",
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "unknown",
+  "data": {
+    "items": [],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [
+    "Only the upstream fallback category was returned; real category extraction was not verified."
+  ],
+  "error": {
+    "code": "NO_VALID_RECORDS",
+    "message": "Empty or incomplete data is not proof that an app is unavailable."
+  },
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-c1ec522a835e4e22807e97196d1290e2",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/store/apps"
+  ]
+}

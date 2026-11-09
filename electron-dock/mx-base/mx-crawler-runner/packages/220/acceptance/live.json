@@ -1,0 +1,59 @@
+{
+  "source_id": "220",
+  "observed_at": "2026-09-18T09:55:11.623676+00:00",
+  "live_status": "passed_with_source_limits",
+  "verified_capabilities": [
+    "discovery",
+    "episodes",
+    "charts",
+    "original_audio_download"
+  ],
+  "pending_capabilities": [
+    "opus_conversion_missing_ffmpeg"
+  ],
+  "runtime": "G:\\data_tongbu\\data\\audio_runs\\220",
+  "real_requests_performed": true,
+  "checks": [
+    {
+      "label": "discover",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "collect",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "list",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "download",
+      "status": "error",
+      "error": {
+        "code": "SOURCE_FAILED",
+        "message": "See result.errors for individual failures"
+      }
+    },
+    {
+      "label": "charts",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "refresh",
+      "status": "success",
+      "error": null
+    },
+    {
+      "label": "public-podcast-download",
+      "status": "success",
+      "error": null
+    }
+  ],
+  "source_limitations": [
+    "BBC and All-In enclosure requests returned HTTP 403 in this environment; a public-domain podcast discovered via Apple downloaded successfully"
+  ]
+}

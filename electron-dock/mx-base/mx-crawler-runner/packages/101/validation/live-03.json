@@ -1,0 +1,161 @@
+{
+  "id": 101,
+  "target": "https://www.dailymotion.com/video/xhfpjn",
+  "observed_at": "2026-09-10T16:41:24.247344+00:00",
+  "python": "3.13.3",
+  "live_data_verified": true,
+  "status": "success",
+  "capabilities_verified": [
+    "video_metadata",
+    "media_url"
+  ],
+  "data": {
+    "id": "xhfpjn",
+    "title": "NASA - NASA TV",
+    "description": "08.03.2011 dıscovery nin son görevi",
+    "thumbnails": [
+      {
+        "height": 60,
+        "id": "60",
+        "url": "https://s1.dmcdn.net/v/1lk0J1eoUqsgBo-hm/x60"
+      },
+      {
+        "height": 120,
+        "id": "120",
+        "url": "https://s2.dmcdn.net/v/1lk0J1eoUqsC4-7PF/x120"
+      },
+      {
+        "height": 180,
+        "id": "180",
+        "url": "https://s2.dmcdn.net/v/1lk0J1eoUqsFEI7N2/x180"
+      },
+      {
+        "height": 240,
+        "id": "240",
+        "url": "https://s1.dmcdn.net/v/1lk0J1eoUqs1yA_I-/x240"
+      },
+      {
+        "height": 360,
+        "id": "360",
+        "url": "https://s2.dmcdn.net/v/1lk0J1eoUqsyOnBuQ/x360"
+      },
+      {
+        "height": 480,
+        "id": "480",
+        "url": "https://s2.dmcdn.net/v/1lk0J1eoUqs4cmFGf/x480"
+      },
+      {
+        "height": 720,
+        "id": "720",
+        "url": "https://s2.dmcdn.net/v/1lk0J1eoUqspey618/x720"
+      },
+      {
+        "height": 1080,
+        "id": "1080",
+        "url": "https://s1.dmcdn.net/v/1lk0J1eoUqsFMPVFV/x1080"
+      }
+    ],
+    "duration": 944,
+    "timestamp": 1299565164,
+    "uploader": "olisatastra",
+    "uploader_id": "xkei7o",
+    "age_limit": 0,
+    "tags": [
+      "nasa"
+    ],
+    "view_count": 25,
+    "like_count": 0,
+    "formats": [
+      {
+        "format_id": "hls-380",
+        "format_index": null,
+        "url": "https://vod3.cf.dmcdn.net/sec2(2aSmd0AjgRwVBtUFTkEmpHG8LNlCuye8fM-5B41QZ32Y2e8DPX9AFWrT91S2X10rCDVKI29zI1H8pIF1LFIsQkOdpfn1xn6aJ04BDShc1iAfiIOcs8cuCF3PZlFvOZcGZ0rVHBZPoRDMheFV4Uxli1A41bs_As9CdJfxpmhsyc0)/video/914/682/29286419_mp4_h264_aac.m3u8",
+        "manifest_url": "https://cdndirector.dailymotion.com/cdn/manifest/video/xhfpjn.m3u8?sec=S1EugxseopwwJYUCxR2QIso5in4-6bYyJG7AAYU59AASFbUfBoWObKevrcD6Fo4JD6syzS4OkTffzQW0Ogqbzg&dmTs=789687&dmV1st=6588FC3187E8206123B762560EB63D71",
+        "tbr": 460.56,
+        "ext": "mp4",
+        "fps": null,
+        "protocol": "m3u8_native",
+        "preference": null,
+        "quality": null,
+        "has_drm": false,
+        "width": 320,
+        "height": 240,
+        "vcodec": "avc1.64000d",
+        "acodec": "mp4a.40.2",
+        "dynamic_range": "SDR",
+        "video_ext": "mp4",
+        "audio_ext": "none",
+        "vbr": null,
+        "abr": null,
+        "resolution": "320x240",
+        "aspect_ratio": 1.33,
+        "http_headers": {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-us,en;q=0.5",
+          "Sec-Fetch-Mode": "navigate"
+        },
+        "format": "hls-380 - 320x240"
+      }
+    ],
+    "subtitles": {},
+    "is_live": null,
+    "webpage_url": "https://www.dailymotion.com/video/xhfpjn",
+    "original_url": "https://www.dailymotion.com/video/xhfpjn",
+    "webpage_url_basename": "xhfpjn",
+    "webpage_url_domain": "dailymotion.com",
+    "extractor": "dailymotion",
+    "extractor_key": "Dailymotion",
+    "playlist": null,
+    "playlist_index": null,
+    "thumbnail": "https://s1.dmcdn.net/v/1lk0J1eoUqsFMPVFV/x1080",
+    "display_id": "xhfpjn",
+    "fulltitle": "NASA - NASA TV",
+    "duration_string": "15:44",
+    "upload_date": "20110308",
+    "release_year": null,
+    "requested_subtitles": null,
+    "_has_drm": null,
+    "epoch": 1789058488,
+    "format_id": "hls-380",
+    "format_index": null,
+    "url": "https://vod3.cf.dmcdn.net/sec2(2aSmd0AjgRwVBtUFTkEmpHG8LNlCuye8fM-5B41QZ32Y2e8DPX9AFWrT91S2X10rCDVKI29zI1H8pIF1LFIsQkOdpfn1xn6aJ04BDShc1iAfiIOcs8cuCF3PZlFvOZcGZ0rVHBZPoRDMheFV4Uxli1A41bs_As9CdJfxpmhsyc0)/video/914/682/29286419_mp4_h264_aac.m3u8",
+    "manifest_url": "https://cdndirector.dailymotion.com/cdn/manifest/video/xhfpjn.m3u8?sec=S1EugxseopwwJYUCxR2QIso5in4-6bYyJG7AAYU59AASFbUfBoWObKevrcD6Fo4JD6syzS4OkTffzQW0Ogqbzg&dmTs=789687&dmV1st=6588FC3187E8206123B762560EB63D71",
+    "tbr": 460.56,
+    "ext": "mp4",
+    "fps": null,
+    "protocol": "m3u8_native",
+    "preference": null,
+    "quality": null,
+    "has_drm": false,
+    "width": 320,
+    "height": 240,
+    "vcodec": "avc1.64000d",
+    "acodec": "mp4a.40.2",
+    "dynamic_range": "SDR",
+    "video_ext": "mp4",
+    "audio_ext": "none",
+    "vbr": null,
+    "abr": null,
+    "resolution": "320x240",
+    "aspect_ratio": 1.33,
+    "http_headers": {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-us,en;q=0.5",
+      "Sec-Fetch-Mode": "navigate"
+    },
+    "format": "hls-380 - 320x240",
+    "_type": "video",
+    "_version": {
+      "version": "2026.08.19",
+      "current_git_head": null,
+      "release_git_head": "594bd50c2c78ac432f81600d309fdc4e0a92d82c",
+      "repository": "yt-dlp/yt-dlp"
+    }
+  },
+  "limits": [
+    "media was not downloaded",
+    "comments/chat/channel enumeration not verified"
+  ]
+}

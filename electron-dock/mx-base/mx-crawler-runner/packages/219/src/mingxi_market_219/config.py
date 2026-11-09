@@ -1,0 +1,4 @@
+MARKET='wandoujia'
+SOURCE_ID=219
+INPUT_KINDS=['id']
+HISTORY_KINDS=['id']

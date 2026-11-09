@@ -1,0 +1,14 @@
+{
+  "name": "blog2epub",
+  "repo": "bohdanbobrowski/blog2epub",
+  "origin": "https://github.com/bohdanbobrowski/blog2epub.git",
+  "commit": "97ab6fe30793623ad5e1eafcffb1609b20842a33",
+  "commitDate": "2025-11-27T21:04:58+01:00",
+  "license": "MIT",
+  "paths": [
+    "blog2epub",
+    "LICENSE"
+  ],
+  "deliveredBy": "package 107",
+  "scrubbed": []
+}

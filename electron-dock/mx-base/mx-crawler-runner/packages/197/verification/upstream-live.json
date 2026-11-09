@@ -1,0 +1,116 @@
+{
+  "market": "vivo",
+  "mode": "id-list",
+  "value": "40439",
+  "history": false,
+  "observed_at": "2026-09-12T10:01:51.702089+00:00",
+  "items": [
+    {
+      "collection": "vivo",
+      "unique_fields": [
+        "package_name",
+        "version_code"
+      ],
+      "payload": {
+        "id": 40439,
+        "title_zh": "QQ",
+        "title_en": "QQ",
+        "score": 4.13,
+        "raters_count": 2268039,
+        "package_name": "com.tencent.mobileqq",
+        "version_name": "9.3.55",
+        "version_code": "15900",
+        "size": 380592,
+        "icon_url": "https://imgwsdl.vivo.com.cn/appstore/developer/icon/20211029/202110291634000wqez.png",
+        "offical": "1",
+        "patchs": "",
+        "status": 0,
+        "apk": "/developer/apk/20260828/202608280946123wu62.apk",
+        "innerSelfUpdate": false,
+        "goldLabel": 0,
+        "overseasApkFlag": false,
+        "parent_id": 0,
+        "developer": "深圳市腾讯计算机系统有限公司",
+        "download_count": 2538363230,
+        "upload_time": "2026-09-02 14:44:02",
+        "screenshot_type": 0,
+        "screenshotList": [
+          "https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/htso1f07/202608071107227674j.jpg",
+          "https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/iixc93eq/202608071107294d5ai.jpg",
+          "https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/w4gqx0t6/2026080711073385ven.jpg",
+          "https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/7rdpxzcq/202608071107386fq93.jpg",
+          "https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/3yzwkg33/202608071107432i8fu.jpg"
+        ],
+        "zoomScreenshotList": [],
+        "permissionList": [],
+        "introduction": "在QQ，轻松社交<br>- [聊天消息]随时随地好友和群消息；<br>- [语音通话]、[视频聊天]和亲友自在畅聊；<br>- [文件传输]手机电脑多端互传，轻松便捷。<br><br>在QQ，轻松生活<br>- [空间动态]快速获知好友动态，随时分享生活；<br>- [移动支付]话费充值、转账收款、网购一应俱全；<br>- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。<br><br>在QQ，轻松娱乐<br>- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；<br>- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。<br><br>QQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。<br><br><br>-----联系我们-----<br>如在使用过程中遇到任何问题，请联系我们：<br>- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈<br>- 客服热线：4006 700 700（服务时间：8:00 - 23:00）<br><br>*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间",
+        "app_remark": "在QQ轻松做自己！",
+        "ad": "1",
+        "fee": "0",
+        "category": 0,
+        "showGl": true,
+        "appComments": [],
+        "acts": [],
+        "tips": false,
+        "stag": "1",
+        "safe": [
+          "0:安全管家",
+          "2:360手机卫士"
+        ],
+        "aurora": false,
+        "ht": 0,
+        "filter": false,
+        "privacyPolicyUrl": "https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62",
+        "installReferrerSupport": 0,
+        "icpInfo": "粤B2-20090059-1622A",
+        "icpInfoTitle": "{\"zh-CN\":\"核准号\",\"en-US\":\"Approval number\",\"zh-TW\":\"核准號\",\"zh-HK\":\"批准編號\"}",
+        "canDownloadStatus": 0,
+        "washAdApkFlag": false,
+        "_meta": {
+          "market": "vivo",
+          "mode": "id-list",
+          "input_value": "40439",
+          "record_type": "detail"
+        }
+      }
+    },
+    {
+      "market": "vivo",
+      "mode": "id-list",
+      "input_value": "40439",
+      "success": 1,
+      "error": null
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "url": "https://h5-api.appstore.vivo.com.cn/detail/40439?frompage=messageh5",
+      "status": 200,
+      "input": "40439",
+      "body": "{\"id\":40439,\"title_zh\":\"QQ\",\"title_en\":\"QQ\",\"score\":4.13,\"raters_count\":2268039,\"package_name\":\"com.tencent.mobileqq\",\"version_name\":\"9.3.55\",\"version_code\":\"15900\",\"size\":380592,\"icon_url\":\"https://imgwsdl.vivo.com.cn/appstore/developer/icon/20211029/202110291634000wqez.png\",\"offical\":\"1\",\"patchs\":\"\",\"status\":0,\"apk\":\"/developer/apk/20260828/202608280946123wu62.apk\",\"innerSelfUpdate\":false,\"goldLabel\":0,\"overseasApkFlag\":false,\"parent_id\":0,\"developer\":\"深圳市腾讯计算机系统有限公司\",\"download_count\":2538363230,\"upload_time\":\"2026-09-02 14:44:02\",\"screenshot_type\":0,\"screenshotList\":[\"https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/htso1f07/202608071107227674j.jpg\",\"https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/iixc93eq/202608071107294d5ai.jpg\",\"https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/w4gqx0t6/2026080711073385ven.jpg\",\"https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/7rdpxzcq/202608071107386fq93.jpg\",\"https://imgwsdl.vivo.com.cn/appstore/developer/screenshot/20260807/3yzwkg33/202608071107432i8fu.jpg\"],\"zoomScreenshotList\":[],\"permissionList\":[],\"introduction\":\"在QQ，轻松社交<br>- [聊天消息]随时随地好友和群消息；<br>- [语音通话]、[视频聊天]和亲友自在畅聊；<br>- [文件传输]手机电脑多端互传，轻松便捷。<br><br>在QQ，轻松生活<br>- [空间动态]快速获知好友动态，随时分享生活；<br>- [移动支付]话费充值、转账收款、网购一应俱全；<br>- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。<br><br>在QQ，轻松娱乐<br>- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；<br>- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。<br><br>QQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。<br><br><br>-----联系我们-----<br>如在使用过程中遇到任何问题，请联系我们：<br>- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈<br>- 客服热线：4006 700 700（服务时间：8:00 - 23:00）<br><br>*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间\",\"app_remark\":\"在QQ轻松做自己！\",\"ad\":\"1\",\"fee\":\"0\",\"category\":0,\"showGl\":true,\"appComments\":[],\"acts\":[],\"tips\":false,\"stag\":\"1\",\"safe\":[\"0:安全管家\",\"2:360手机卫士\"],\"aurora\":false,\"ht\":0,\"filter\":false,\"privacyPolicyUrl\":\"https://rule.tencent.com/rule/preview/3fd52bde-6555-453b-9ab8-c5f1f3d22c62\",\"installReferrerSupport\":0,\"icpInfo\":\"粤B2-20090059-1622A\",\"icpInfoTitle\":\"{\\\"zh-CN\\\":\\\"核准号\\\",\\\"en-US\\\":\\\"Approval number\\\",\\\"zh-TW\\\":\\\"核准號\\\",\\\"zh-HK\\\":\\\"批准編號\\\"}\",\"canDownloadStatus\":0,\"washAdApkFlag\":false}"
+    }
+  ],
+  "stats": {
+    "start_time": "2026-09-12 10:01:51.925777+00:00",
+    "scheduler/enqueued/memory": 1,
+    "scheduler/enqueued": 1,
+    "scheduler/dequeued/memory": 1,
+    "scheduler/dequeued": 1,
+    "downloader/request_count": 1,
+    "downloader/request_method_count/GET": 1,
+    "downloader/request_bytes": 259,
+    "downloader/response_count": 1,
+    "downloader/response_status_count/200": 1,
+    "downloader/response_bytes": 2205,
+    "httpcompression/response_bytes": 2769,
+    "httpcompression/response_count": 1,
+    "response_received_count": 1,
+    "item_scraped_count": 2,
+    "elapsed_time_seconds": 0.463944,
+    "finish_time": "2026-09-12 10:01:52.389721+00:00",
+    "finish_reason": "finished",
+    "responses_per_minute": null,
+    "items_per_minute": null
+  }
+}

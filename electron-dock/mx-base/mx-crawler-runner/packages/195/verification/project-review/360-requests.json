@@ -1,0 +1,4 @@
+{
+  "url": "https://app.api.sj.360.cn/Iservice/AppDetail?id=7953",
+  "error": "HTTPSConnectionPool(host='app.api.sj.360.cn', port=443): Max retries exceeded with url: /Iservice/AppDetail?id=7953 (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1028)')))"
+}

@@ -1,0 +1,156 @@
+# -*- coding: utf-8 -*-
+
+# Copyright 2021-2026 Mike Fährmann
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 as
+# published by the Free Software Foundation.
+
+"""Extractors for sites supported by youtube-dl"""
+
+from .common import Extractor, Message
+from .. import ytdl, config
+
+
+class YoutubeDLExtractor(Extractor):
+    """Generic extractor for youtube-dl supported URLs"""
+    category = "ytdl"
+    directory_fmt = ("{category}", "{subcategory}")
+    filename_fmt = "{title}-{id}.{extension}"
+    archive_fmt = "{extractor_key} {id}"
+    pattern = r"ytdl:(.*)"
+    example = "ytdl:https://www.youtube.com/watch?v=abcdefghijk"
+
+    def __init__(self, match):
+        # import main youtube_dl module
+        ytdl_module = ytdl.import_module(config.get(
+            ("extractor", "ytdl"), "module"))
+        self.ytdl_module_name = ytdl_module.__name__
+
+        # find suitable youtube_dl extractor
+        self.ytdl_url = url = match[1]
+        generic = config.interpolate(("extractor", "ytdl"), "generic", True)
+        if generic == "force":
+            self.ytdl_ie_key = "Generic"
+            self.force_generic_extractor = True
+        else:
+            for ie in ytdl_module.extractor.gen_extractor_classes():
+                if ie.suitable(url):
+                    self.ytdl_ie_key = ie.ie_key()
+                    break
+            if not generic and self.ytdl_ie_key == "Generic":
+                raise self.exc.NoExtractorError()
+            self.force_generic_extractor = False
+
+        if self.ytdl_ie_key == "Generic" and config.interpolate(
+                ("extractor", "ytdl"), "generic-category", True):
+            # set subcategory to URL domain
+            self.category = "ytdl-generic"
+            self.subcategory = url[url.rfind("/", None, 8)+1:url.find("/", 8)]
+        else:
+            # set subcategory to youtube_dl extractor's key
+            self.subcategory = self.ytdl_ie_key
+        Extractor.__init__(self, match)
+
+    def items(self):
+        # import subcategory module
+        ytdl_module = ytdl.import_module(
+            config.get(("extractor", "ytdl", self.subcategory), "module") or
+            self.ytdl_module_name)
+        self.log.debug("Using %s", ytdl_module)
+
+        # construct YoutubeDL object
+        extr_opts = {
+            "extract_flat"           : "in_playlist",
+            "force_generic_extractor": self.force_generic_extractor,
+        }
+        user_opts = {
+            "retries"                : self._retries,
+            "socket_timeout"         : self._timeout,
+            "nocheckcertificate"     : not self._verify,
+        }
+
+        if self._proxies:
+            user_opts["proxy"] = self._proxies.get("http")
+
+        username, password = self._get_auth_info()
+        if username:
+            user_opts["username"], user_opts["password"] = username, password
+        del username, password
+
+        ytdl_instance = ytdl.construct_YoutubeDL(
+            ytdl_module, self, user_opts, extr_opts)
+
+        # transfer cookies to ytdl
+        if cookies := self.cookies:
+            set_cookie = ytdl_instance.cookiejar.set_cookie
+            for cookie in cookies:
+                set_cookie(cookie)
+
+        # extract youtube_dl info_dict
+        try:
+            info_dict = ytdl_instance._YoutubeDL__extract_info(
+                self.ytdl_url,
+                ytdl_instance.get_info_extractor(self.ytdl_ie_key),
+                False, {}, True)
+        #  except ytdl_module.utils.YoutubeDLError:
+        #     raise self.exc.AbortExtraction("Failed to extract video data")
+        except self.exc.ControlException:
+            raise
+        except Exception as exc:
+            raise self.exc.AbortExtraction(
+                f"Failed to extract video data "
+                f"({exc.__class__.__name__}: {exc})")
+
+        if not info_dict:
+            return
+        elif "entries" in info_dict:
+            results = self._process_entries(
+                ytdl_module, ytdl_instance, info_dict["entries"])
+        else:
+            results = (info_dict,)
+
+        # yield results
+        for info_dict in results:
+            info_dict["extension"] = None
+            info_dict["_ytdl_info_dict"] = info_dict
+            info_dict["_ytdl_instance"] = ytdl_instance
+
+            url = "ytdl:" + (info_dict.get("url") or
+                             info_dict.get("webpage_url") or
+                             self.ytdl_url)
+
+            yield Message.Directory, "", info_dict
+            yield Message.Url, url, info_dict
+
+    def _process_entries(self, ytdl_module, ytdl_instance, entries):
+        for entry in entries:
+            if not entry:
+                continue
+
+            if entry.get("_type") in {"url", "url_transparent"}:
+                try:
+                    entry = ytdl_instance.extract_info(
+                        entry["url"], False,
+                        ie_key=entry.get("ie_key"))
+                except self.exc.ControlException:
+                    raise
+                except Exception as exc:
+                    if ytdl_instance.params.get("ignoreerrors"):
+                        continue
+                    raise self.exc.AbortExtraction(
+                        f"Failed to extract playlist entry "
+                        f"({exc.__class__.__name__}: {exc})")
+                if not entry:
+                    continue
+
+            if "entries" in entry:
+                yield from self._process_entries(
+                    ytdl_module, ytdl_instance, entry["entries"])
+            else:
+                yield entry
+
+
+if config.get(("extractor", "ytdl"), "enabled"):
+    # make 'ytdl:' prefix optional
+    YoutubeDLExtractor.pattern = r"(?:ytdl:)?(.*)"

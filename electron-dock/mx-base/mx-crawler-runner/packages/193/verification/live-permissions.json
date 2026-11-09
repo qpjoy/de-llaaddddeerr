@@ -1,0 +1,102 @@
+{
+  "source_row_id": 193,
+  "platform": "google_play",
+  "provider": "facundoolano/google-play-scraper",
+  "operation": "permissions",
+  "observed_at": "2026-09-12T17:20:31.333304+00:00",
+  "query": {
+    "app_id": "com.google.android.apps.translate",
+    "lang": "en",
+    "country": "us",
+    "max_pages": 1,
+    "sort": "newest",
+    "collection": "TOP_FREE"
+  },
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "permission": "read the contents of your USB storage",
+        "type": "Photos/Media/Files"
+      },
+      {
+        "permission": "modify or delete the contents of your USB storage",
+        "type": "Photos/Media/Files"
+      },
+      {
+        "permission": "read the contents of your USB storage",
+        "type": "Storage"
+      },
+      {
+        "permission": "modify or delete the contents of your USB storage",
+        "type": "Storage"
+      },
+      {
+        "permission": "take pictures and videos",
+        "type": "Camera"
+      },
+      {
+        "permission": "record audio",
+        "type": "Microphone"
+      },
+      {
+        "permission": "view Wi-Fi connections",
+        "type": "Wi-Fi connection information"
+      },
+      {
+        "permission": "view network connections",
+        "type": "Other"
+      },
+      {
+        "permission": "measure app storage space",
+        "type": "Other"
+      },
+      {
+        "permission": "full network access",
+        "type": "Other"
+      },
+      {
+        "permission": "change your audio settings",
+        "type": "Other"
+      },
+      {
+        "permission": "control Near Field Communication",
+        "type": "Other"
+      },
+      {
+        "permission": "run at startup",
+        "type": "Other"
+      },
+      {
+        "permission": "draw over other apps",
+        "type": "Other"
+      },
+      {
+        "permission": "prevent device from sleeping",
+        "type": "Other"
+      },
+      {
+        "permission": "read Google service configuration",
+        "type": "Other"
+      }
+    ],
+    "next_page_token": null,
+    "has_more": false
+  },
+  "warnings": [],
+  "error": null,
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\google-play-193-acceptance\\data\\run-a2c352266f6c4f2da203a52030b85097",
+    "proxy_used": true,
+    "timed_out": false,
+    "returncode": 0
+  },
+  "stats": {
+    "requests": 1,
+    "pages": 1,
+    "rejected": 0
+  },
+  "source_urls": [
+    "https://play.google.com/_/PlayStoreUi/data/batchexecute?rpcids=qnKhOb&f.sid=-697906427155521722&bl=boq_playuiserver_20190903.08_p0&hl=en&gl=us&authuser&soc-app=121&soc-platform=1&soc-device=1&_reqid=1065213"
+  ]
+}

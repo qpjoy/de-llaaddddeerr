@@ -1,6 +1,6 @@
 # MX 项目统一管理入口
 
-`scripts/manage.sh` 在目标服务器上调用各项目已有部署脚本，统一项目选择、构建代理、只读检查、部署互斥和退出结果。支持已有 Internal 环境的逐项目发布、核心服务串行全量发布和开机验收；各项目继续负责自己的数据库迁移、凭据保留和就绪检查。原来的项目命令保持可用。2026-10-27 的新增能力仅完成本地实现与隔离验证，尚未安装到生产或验证真实断电重启。
+`scripts/manage.sh` 在目标服务器上调用各项目已有部署脚本，统一项目选择、构建代理、只读检查、部署互斥和退出结果。支持已有 Internal 环境的逐项目发布、核心服务串行全量发布和开机验收；各项目继续负责自己的数据库迁移、凭据保留和就绪检查。原来的项目命令保持可用。2026-10-27 用户已回传原 Internal 服务器的 `boot audit`、`boot install`、手动 `boot verify` 成功结果，新增验收服务已 enable；全量部署、新 Hub 启动门禁上线及真实断电重启仍未收到验收结果。
 
 需要 Bash、Python 3.6+，以及各项目原来要求的 Docker、kubectl、Node 等工具；生产发布仍在原 Linux 部署主机执行。依赖探测还使用 curl、宿主 pg_isready；开机验收使用原 systemd 与 crictl。没有新增后台平台或第三方 Python 包。总入口不提供通用 `restart`、备份恢复或自动回滚。Launcher 原部署流程已有的恢复动作仍然保留。
 
@@ -44,7 +44,17 @@ PROXY=127.0.0.1:7789 bash scripts/manage.sh deploy mx-pay
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-rig
 ```
 
-短名 `launcher`、`hub`、`dataport`、`device`、`pay`、`rig`、`common`、`hanlp` 与完整项目名等价。
+Hub 的采集 runner（`mx-base/mx-crawler-runner`）在 Hub **之后**单独发布，用同一个 `PROXY`：
+
+```bash
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-crawler-runner
+```
+
+- **构建器**：runner 复用 Hub 部署时按该代理创建的 buildx 构建器，所以先部署 Hub，两次的 `PROXY` 要相同。
+- **重启**：每次发布都会重建镜像并重启 runner，正在执行的采集调用记为失败、不收费。所以 runner 不属于 `all`，只在它的代码或交付包变化时发布。
+- **完整上线**：首次上线的步骤见 [采集引擎上线手册](mx-insight-hub/docs/operations/collect-engines-rollout.md)。
+
+短名 `launcher`、`hub`、`dataport`、`device`、`pay`、`rig`、`common`、`hanlp`、`runner` 与完整项目名等价。
 
 ## 核心服务一键部署
 
@@ -53,7 +63,7 @@ bash scripts/manage.sh plan all
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy all
 ```
 
-顺序固定为 **Launcher → Pay → HanLP → Hub → DataPort**。HanLP 委派给 `mx-common/scripts/manage.sh deploy hanlp`，Hub 原流程继续 ensure mx-common 的 PostgreSQL、Elasticsearch、Redis。Device、Rig、Luopan 不属于 `all`。采用串行是因为各步骤会构建镜像、执行迁移、调用共享设施及占用同一节点资源；目前不提供并行发布。
+顺序固定为 **Launcher → Pay → HanLP → Hub → DataPort**。HanLP 委派给 `mx-common/scripts/manage.sh deploy hanlp`，Hub 原流程继续 ensure mx-common 的 PostgreSQL、Elasticsearch、Redis。Device、Rig、Luopan 和采集 runner 不属于 `all`。采用串行是因为各步骤会构建镜像、执行迁移、调用共享设施及占用同一节点资源；目前不提供并行发布。
 
 `all` 要求原 Internal 主机、已激活的独立 `mx-k8s-containerd`、`/etc/kubernetes/admin.conf` 及原 Launcher/Pay/DataPort 安装记录；它不负责首次安装。预检要求保存的集群 UID/context/node 一致，现有 apiserver advertise-address 与节点 IPv4 一致，并拒绝更改 Launcher 主机名或地址；检查 Pay `.env` 与 Hub `.env.internal` 的目标覆盖项，每步前重新核对目标。context 别名即使指向同一集群也须先人工对齐；复杂 shell 配置无法静态确认时停止，不执行配置文件来探测目标。子项目保留自己的最终身份与存储校验。
 
@@ -92,6 +102,17 @@ journalctl -u mx-boot-verify.service -b
 `audit` 只读检查原 runtime、storage/etcd guards、集群身份、控制器、镜像缓存、PG/HanLP、本机健康入口与 enable 状态；发现未 enable 会报告。`install` 先核验当前健康基线，然后仅 enable 已确认存在的原 runtime、kubelet、宿主 PG、host runner、nginx 及可识别代理 unit，安装版本化的只读 `mx-boot-verify.service`。它不 start/restart 任何服务、不覆盖陌生同名 unit；部分 enable 失败会明确保留已完成结果。
 
 2026-10-27 远程验收修正：`systemctl show` 会将多个 `ExecStartPre` 分行输出；旧审计器只保留最后一条，曾把完整的 etcd/storage 启动保护误报为缺失。当前版本保留全部条目，真正缺项会逐条显示服务名、属性和预期依赖。遇到旧版笼统错误时，先同步新版 `scripts/boot.py` 并重跑 `boot audit`；该解析修复不需要修改、重载或重启服务器 unit。若已经安装过验收服务，源码同步后需再次运行 `boot install`，才能更新其固定版本副本。
+
+同日用户回传 `mx-internal-server` 安装结果：原 runtime、kubelet、postgresql-16、host runner、nginx、mihomo、mihomo-client、mx-internal-egress 均为 `active=active enabled=enabled`，安装时保持 `enabled -> enabled`；新增 `mx-boot-verify.service` 为 `disabled -> enabled`，`systemctl is-enabled` 返回 `enabled`。随后从仓库执行的 `boot verify` 通过原运行时、工作负载、PG、HanLP 与本机入口检查。本次安装没有启动验收服务或重启业务；尚未收到由 systemd 执行固定副本、真实重启恢复及用户登录/联网的验收结果。
+
+可先在不重启服务器的情况下验证已安装的 systemd 入口：
+
+```bash
+systemctl start mx-boot-verify.service
+systemctl show mx-boot-verify.service -p Result -p ExecMainStatus
+```
+
+预期为 `Result=success`、`ExecMainStatus=0`。该 oneshot 只执行验收，成功结束后可以显示 `inactive (dead)`；这不代表原业务服务停止，也不能替代真实重启演练。
 
 PG 服务名不同须显式给 `MX_HOST_PG_SERVICE`。代理默认只识别已存在且活跃的 `mx-internal-egress.service`、`mihomo.service`、`mihomo-client.service`；其他名称用 `MX_PROXY_SERVICE` 指定原 unit，不会猜测或新建代理服务。oneshot 开机有界等待 900 秒、结果进入 journal，失败不会阻塞 kubelet 或 MX-H2I，也不会自动重启业务。手动 `verify` 可用 `MX_WAIT_TIMEOUT` 调整等待时间。
 

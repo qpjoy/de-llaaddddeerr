@@ -1,0 +1,35 @@
+usage: main.py [-h] [--app-id APP_ID] [--term TERM]
+               [--developer-id DEVELOPER_ID] [--num NUM]
+               [--next-page-token NEXT_PAGE_TOKEN] [--category CATEGORY]
+               [--lang LANG] [--country COUNTRY] [--sort SORT]
+               [--collection COLLECTION] [--max-pages MAX_PAGES]
+               [--timeout TIMEOUT] [--request-timeout REQUEST_TIMEOUT]
+               [--max-requests MAX_REQUESTS] [--work-dir WORK_DIR]
+               [--runtime-dir RUNTIME_DIR] [--direct] [--output OUTPUT]
+               {app,search,reviews,list,developer,suggest,similar,permissions,datasafety,categories}
+
+Google Play public data — source row 193
+
+positional arguments:
+  {app,search,reviews,list,developer,suggest,similar,permissions,datasafety,categories}
+
+options:
+  -h, --help            show this help message and exit
+  --app-id APP_ID
+  --term TERM
+  --developer-id DEVELOPER_ID
+  --num NUM
+  --next-page-token NEXT_PAGE_TOKEN
+  --category CATEGORY
+  --lang LANG
+  --country COUNTRY
+  --sort SORT
+  --collection COLLECTION
+  --max-pages MAX_PAGES
+  --timeout TIMEOUT
+  --request-timeout REQUEST_TIMEOUT
+  --max-requests MAX_REQUESTS
+  --work-dir WORK_DIR
+  --runtime-dir RUNTIME_DIR
+  --direct              Ignore environment proxy; use direct connection
+  --output OUTPUT

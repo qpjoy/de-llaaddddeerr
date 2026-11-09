@@ -1,0 +1,2 @@
+# Python runtime uses only the standard library.
+# Build dependency is pinned in pyproject.toml; Node dependencies in src/mingxi_google_play/node/package-lock.json.

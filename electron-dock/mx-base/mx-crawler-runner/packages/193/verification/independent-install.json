@@ -1,0 +1,99 @@
+{
+  "date": "2026-09-13",
+  "status": "passed_for_nine_operations",
+  "unverified_operations": [
+    "categories"
+  ],
+  "installed_module": "G:\\data_tongbu\\data\\google-play-193-acceptance\\.venv\\Lib\\site-packages\\mingxi_google_play\\__init__.py",
+  "pythonpath_removed": true,
+  "steps": [
+    {
+      "step": "install-final",
+      "returncode": 0,
+      "seconds": 7.96
+    },
+    {
+      "step": "tests",
+      "returncode": 0,
+      "seconds": 3.86
+    },
+    {
+      "step": "pip-check",
+      "returncode": 0,
+      "seconds": 0.3
+    },
+    {
+      "step": "import",
+      "returncode": 0,
+      "seconds": 0.1
+    },
+    {
+      "step": "example",
+      "returncode": 0,
+      "seconds": 1.5
+    },
+    {
+      "step": "cli",
+      "returncode": 0,
+      "seconds": 0.09
+    },
+    {
+      "step": "live",
+      "returncode": 1,
+      "seconds": 20.86
+    },
+    {
+      "step": "additional",
+      "returncode": 0,
+      "seconds": 7.38
+    }
+  ],
+  "live_operations": {
+    "app": "success",
+    "search": "success",
+    "reviews": "success",
+    "list": "success",
+    "developer": "success",
+    "suggest": "success",
+    "similar": "success",
+    "permissions": "success",
+    "datasafety": "success",
+    "categories": "unknown"
+  },
+  "source_sha256": {
+    "main.py": "f3a1e0c6e150549cb73e93d054af3aaa62aa5df629d29eb922b19fec0cacb62a",
+    "pyproject.toml": "2c05a94abf547ff0036ab5e9e7a29f617aa944c66679267d98fc47cc706d243a",
+    "requirements.lock.txt": "059ebd1038820779903ae65c333b2f0fda1d92b8c96b71343962b5db11e1ff73",
+    "examples/basic.py": "09bbc7aa5df0b99c8d036476675023ac703fa9e2bb29c8b6f6411ed040e98d24",
+    "scripts/setup.ps1": "c6d001ae95aaac2b5e8fa5314a493bdc340be67e58e087a4ae0173cbef5874a1",
+    "scripts/smoke.py": "f987546e3f3e837447f88c7e235fb5cd75ae694097cf3da79015e7f8b93c4322",
+    "tests/test_client.py": "0ea2a4484c99b47c157a8069d87db5d9c22db92f3a5959e1ce15f4b657027aeb",
+    "src/mingxi_google_play/cli.py": "80f0602de3e1d02fb9ad9a6bb43134f9bd29aa52a61f5b1f676d60011ec792f1",
+    "src/mingxi_google_play/client.py": "df3ae6a3d537f0d184be4587164fc86c6fa64b42cbfa7707741f8cccaffec5e0",
+    "src/mingxi_google_play/runtime.py": "40011c4728920d9ec3cff024fb3dddba84e3680f6767e0b42633a98b962084c4",
+    "src/mingxi_google_play/__init__.py": "6d8136491674328ba6e36f08f2a411d81fe870d4941d786d1d2caaf6cd9cc25f",
+    "src/mingxi_google_play/__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+    "src/mingxi_google_play/node/package-lock.json": "98beaee94222baf03acb7c2c40a2aeea37473352f1a8dd98c02222b7200dccc3",
+    "src/mingxi_google_play/node/package.json": "407fb3b1da532695b32e405f57e263fe1bf382830f8b7c2ba1d4b684889bd992",
+    "src/mingxi_google_play/node/worker.mjs": "0e9d6be814b95ec53a0ec1e08608b545dc3e13b32f2c5451e44bcce306f44292",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/index.js": "03a776abf1df59d9de1981f60c598a553a5d0ee9d7d6f1b570fc61bd6a492a80",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/package.json": "1dcfb10d6af061f69574bf2d6e3997876fb8a449499d36c3aa02013002a7b172",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/app.js": "a3ebfe4000c898523f86e318f8b19407c2f3b753c5d57f3a29122dbb61480fb3",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/categories.js": "0bb1be782ed0f6736f6b37547468e5a9f99977cff785c1f8517d51e4162449b0",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/constants.js": "9da88337c3f988963a986e9914cdcc1e52ac318efd60f72b903be1e1b9ad59e5",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/datasafety.js": "94d5c6f9918f80069cf903d643afbf8f565ea88282f62464d626c164f170bdbf",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/developer.js": "269dc33a0f6e6d267a9aabc3580660e0a94783c074dc2399e6e1d365eed15b54",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/list.js": "e6c26574d1f086c48f1f835c551aca8ac33bdc04d5354ecc15eec4775612ab38",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/permissions.js": "c104f4b243474d2de9c12dd15afebe8914e67ee0527d02640f9bda79c11134d3",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/reviews.js": "7e6eb223e2fcc9d259c14f81745522123395cbb1ac0bde66767d5a6cadbf1914",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/search.js": "43010ff682e8d0b977654fd2e325855e02dafc9019f57ef5d2297fd433df2b45",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/similar.js": "2f4ca8e8105e6db13babb4cbb481bf4ad4f4262f01ac29b40b43a10bc707964b",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/suggest.js": "3cec86fe3adb7ad53cf92b8ed6a388c13deb32688798a7ccfe9d3bf185315b3b",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/utils/appList.js": "b65e9d2245791c04c1295a685002b3846ac6f7c2d5dd88fac3d3b62e3e88028b",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/utils/mappingHelpers.js": "5882f4f7aa13705fa12837789dc8b74eebc42ec0a00447166fdedae0de38fa0e",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/utils/processPages.js": "2971ce230f1a4224a4ebda717209a3276a15eab3aa0c61bbcfdc44dc82feed02",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/utils/request.js": "099619207b90431c5a3aece7c0de92817a0d8390d1511367ce73d2502a006a52",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/utils/scriptData.js": "ccb15e6a3b8d17de17c4cccc92b13dc7592e3427b7d3d803a0c8794a5ae5618c",
+    "src/mingxi_google_play/node/vendor/google-play-scraper/lib/utils/throttle.js": "6699a34fe6089ff3f7df5c0d03233b501db4f0edfe05e3c6f99e72e1bc88ab5f"
+  }
+}

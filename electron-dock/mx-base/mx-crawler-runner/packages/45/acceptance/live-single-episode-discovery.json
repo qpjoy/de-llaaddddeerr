@@ -1,0 +1,61 @@
+{
+  "request": {
+    "operation": "discover",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\45",
+      "total_timeout": 60,
+      "request_timeout": 20,
+      "episode_ids": [
+        "5e4ee557418a84a0466737c1"
+      ],
+      "limit": 1
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "45",
+    "source_id": "45",
+    "operation": "discover",
+    "observed_at": "2026-09-18T10:38:12.667900+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "45",
+      "platform": "小宇宙",
+      "observed_at": "2026-09-18T10:38:12.667900+00:00",
+      "items": [
+        {
+          "id": "0e22856206b00a7c330bf6db",
+          "upstream_id": "episode:5e4ee557418a84a0466737c1",
+          "title": "忽左忽右",
+          "author": "JustPod",
+          "language": "zh",
+          "genres": [],
+          "feed_url": "https://www.xiaoyuzhoufm.com/episode/5e4ee557418a84a0466737c1",
+          "collection_url": "https://www.xiaoyuzhoufm.com/episode/5e4ee557418a84a0466737c1",
+          "observed_at": "2026-09-18T10:38:13.157036+00:00",
+          "raw": {
+            "kind": "episode",
+            "page_id": "5e4ee557418a84a0466737c1",
+            "pid": "5e4ee557418a84a0466737b7",
+            "episode_count": 641,
+            "subscription_count": 1242562
+          }
+        }
+      ],
+      "errors": [],
+      "warnings": [
+        "Discovery is bounded; collection count is not proof of complete platform coverage"
+      ],
+      "stats": {
+        "collections": 2,
+        "parsed_collections": 1,
+        "records": 3,
+        "downloads": {
+          "pending": 3
+        }
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

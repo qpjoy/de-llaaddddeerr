@@ -1,0 +1,150 @@
+{
+  "label": "discover",
+  "request": {
+    "operation": "discover",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "keyword": "BBC Minute",
+      "country": "us",
+      "limit": 3
+    }
+  },
+  "exit_code": 0,
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "discover",
+    "observed_at": "2026-09-18T09:51:48.448870+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T09:51:48.448870+00:00",
+      "items": [
+        {
+          "id": "d12249eeeac9e1554f675f6f",
+          "upstream_id": "262026947",
+          "title": "6 Minute English",
+          "author": "BBC Radio",
+          "feed_url": "https://podcasts.files.bbci.co.uk/p02pc9tn.rss",
+          "language": "",
+          "genres": [
+            "Language Learning",
+            "Podcasts",
+            "Education"
+          ],
+          "observed_at": "2026-09-18T09:51:48.869043+00:00",
+          "raw": {
+            "wrapperType": "track",
+            "kind": "podcast",
+            "artistId": 121676617,
+            "collectionId": 262026947,
+            "trackId": 262026947,
+            "artistName": "BBC Radio",
+            "collectionName": "6 Minute English",
+            "trackName": "6 Minute English",
+            "collectionCensoredName": "6 Minute English",
+            "trackCensoredName": "6 Minute English",
+            "artistViewUrl": "https://podcasts.apple.com/us/artist/bbc/121676617?uo=4",
+            "collectionViewUrl": "https://podcasts.apple.com/us/podcast/6-minute-english/id262026947?uo=4",
+            "feedUrl": "https://podcasts.files.bbci.co.uk/p02pc9tn.rss",
+            "trackViewUrl": "https://podcasts.apple.com/us/podcast/6-minute-english/id262026947?uo=4",
+            "artworkUrl30": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/ba/98/35/ba9835eb-1ef3-60e4-bf05-3d141b8d1c7a/mza_3844641997714022659.jpg/30x30bb.jpg",
+            "artworkUrl60": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/ba/98/35/ba9835eb-1ef3-60e4-bf05-3d141b8d1c7a/mza_3844641997714022659.jpg/60x60bb.jpg",
+            "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/ba/98/35/ba9835eb-1ef3-60e4-bf05-3d141b8d1c7a/mza_3844641997714022659.jpg/100x100bb.jpg",
+            "collectionPrice": 0.0,
+            "trackPrice": 0.0,
+            "collectionHdPrice": 0,
+            "releaseDate": "2026-09-17T08:34:00Z",
+            "collectionExplicitness": "notExplicit",
+            "trackExplicitness": "cleaned",
+            "trackCount": 342,
+            "trackTimeMillis": 381,
+            "country": "USA",
+            "currency": "USD",
+            "primaryGenreName": "Language Learning",
+            "contentAdvisoryRating": "Clean",
+            "artworkUrl600": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/ba/98/35/ba9835eb-1ef3-60e4-bf05-3d141b8d1c7a/mza_3844641997714022659.jpg/600x600bb.jpg",
+            "genreIds": [
+              "1498",
+              "26",
+              "1304"
+            ],
+            "genres": [
+              "Language Learning",
+              "Podcasts",
+              "Education"
+            ]
+          }
+        },
+        {
+          "id": "a90ebb03a857c209a81199c5",
+          "upstream_id": "1767854856",
+          "title": "Just a Minute",
+          "author": "BBC Radio 4",
+          "feed_url": "https://podcasts.files.bbci.co.uk/b006s5dp.rss",
+          "language": "",
+          "genres": [
+            "Improv",
+            "Podcasts",
+            "Comedy"
+          ],
+          "observed_at": "2026-09-18T09:51:48.869083+00:00",
+          "raw": {
+            "wrapperType": "track",
+            "kind": "podcast",
+            "collectionId": 1767854856,
+            "trackId": 1767854856,
+            "artistName": "BBC Radio 4",
+            "collectionName": "Just a Minute",
+            "trackName": "Just a Minute",
+            "collectionCensoredName": "Just a Minute",
+            "trackCensoredName": "Just a Minute",
+            "collectionViewUrl": "https://podcasts.apple.com/us/podcast/just-a-minute/id1767854856?uo=4",
+            "feedUrl": "https://podcasts.files.bbci.co.uk/b006s5dp.rss",
+            "trackViewUrl": "https://podcasts.apple.com/us/podcast/just-a-minute/id1767854856?uo=4",
+            "artworkUrl30": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/c0/7e/0a/c07e0a0c-b134-2a85-53a1-4518d3ebfdbc/mza_6362207318254558903.jpg/30x30bb.jpg",
+            "artworkUrl60": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/c0/7e/0a/c07e0a0c-b134-2a85-53a1-4518d3ebfdbc/mza_6362207318254558903.jpg/60x60bb.jpg",
+            "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/c0/7e/0a/c07e0a0c-b134-2a85-53a1-4518d3ebfdbc/mza_6362207318254558903.jpg/100x100bb.jpg",
+            "collectionPrice": 0.0,
+            "trackPrice": 0.0,
+            "collectionHdPrice": 0,
+            "releaseDate": "2026-09-14T18:00:00Z",
+            "collectionExplicitness": "notExplicit",
+            "trackExplicitness": "cleaned",
+            "trackCount": 54,
+            "trackTimeMillis": 1710,
+            "country": "USA",
+            "currency": "USD",
+            "primaryGenreName": "Improv",
+            "contentAdvisoryRating": "Clean",
+            "artworkUrl600": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/c0/7e/0a/c07e0a0c-b134-2a85-53a1-4518d3ebfdbc/mza_6362207318254558903.jpg/600x600bb.jpg",
+            "genreIds": [
+              "1495",
+              "26",
+              "1303"
+            ],
+            "genres": [
+              "Improv",
+              "Podcasts",
+              "Comedy"
+            ]
+          }
+        }
+      ],
+      "errors": [],
+      "warnings": [
+        "Discovery is bounded; collection count is not proof of complete platform coverage"
+      ],
+      "stats": {
+        "collections": 2,
+        "parsed_collections": 0,
+        "records": 0,
+        "downloads": {}
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

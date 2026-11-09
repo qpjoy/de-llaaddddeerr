@@ -1,0 +1,53 @@
+{
+  "label": "collect",
+  "request": {
+    "operation": "collect",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "feed_limit": 3,
+      "episodes_per_feed": 5,
+      "request_timeout": 45,
+      "total_timeout": 180
+    }
+  },
+  "exit_code": 1,
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "collect",
+    "observed_at": "2026-09-18T09:51:49.171409+00:00",
+    "status": "error",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T09:51:49.171409+00:00",
+      "items": [],
+      "errors": [
+        {
+          "collection_id": "a90ebb03a857c209a81199c5",
+          "code": "NETWORK_ERROR",
+          "message": "HTTP connection or response transfer failed"
+        },
+        {
+          "collection_id": "d12249eeeac9e1554f675f6f",
+          "code": "NETWORK_ERROR",
+          "message": "HTTP connection or response transfer failed"
+        }
+      ],
+      "warnings": [],
+      "stats": {
+        "collections": 2,
+        "parsed_collections": 0,
+        "records": 0,
+        "downloads": {}
+      },
+      "pagination": null,
+      "new_records": 0
+    },
+    "error": {
+      "code": "SOURCE_FAILED",
+      "message": "See result.errors for individual failures"
+    }
+  }
+}

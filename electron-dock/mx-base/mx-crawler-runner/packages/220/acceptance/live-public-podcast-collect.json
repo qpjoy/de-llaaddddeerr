@@ -1,0 +1,113 @@
+{
+  "request": {
+    "operation": "collect",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "collection_ids": [
+        "aa54946854f5b9cd5be9ccc3"
+      ],
+      "feed_limit": 1,
+      "episodes_per_feed": 3,
+      "request_timeout": 45
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "collect",
+    "observed_at": "2026-09-18T09:56:42.275363+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T09:56:42.275363+00:00",
+      "items": [
+        {
+          "url": "https://www.archive.org/download/shortpoetry_002_librivox/annabel_lee_eap_jc_64kb.mp3",
+          "source": "apple",
+          "title": "Annabel Lee",
+          "file_format": "mp3",
+          "file_size": 0,
+          "duration": 121,
+          "language": "en",
+          "category": "podcast",
+          "speaker": "Short Poetry Collection 002 by Various",
+          "status": "pending",
+          "local_path": "",
+          "content_hash": "",
+          "published_at": "",
+          "discovered_at": "2026-09-18T09:56:42.643934+00:00",
+          "downloaded_at": "",
+          "upstream_item_id": "https://www.archive.org/download/shortpoetry_002_librivox/annabel_lee_eap_jc_64kb.mp3",
+          "id": "05a38da8a62e3479d05d8780",
+          "collection_id": "aa54946854f5b9cd5be9ccc3",
+          "feed_url": "https://librivox.org/rss/249",
+          "collection_title": "Short Poetry Collection 002 by Various",
+          "author": "LibriVox"
+        },
+        {
+          "url": "https://www.archive.org/download/shortpoetry_002_librivox/childs_nightmare_rg_jc_64kb.mp3",
+          "source": "apple",
+          "title": "A Child's Nightmare",
+          "file_format": "mp3",
+          "file_size": 0,
+          "duration": 140,
+          "language": "en",
+          "category": "podcast",
+          "speaker": "Short Poetry Collection 002 by Various",
+          "status": "pending",
+          "local_path": "",
+          "content_hash": "",
+          "published_at": "",
+          "discovered_at": "2026-09-18T09:56:42.644039+00:00",
+          "downloaded_at": "",
+          "upstream_item_id": "https://www.archive.org/download/shortpoetry_002_librivox/childs_nightmare_rg_jc_64kb.mp3",
+          "id": "28faad4e735c97fc30638d12",
+          "collection_id": "aa54946854f5b9cd5be9ccc3",
+          "feed_url": "https://librivox.org/rss/249",
+          "collection_title": "Short Poetry Collection 002 by Various",
+          "author": "LibriVox"
+        },
+        {
+          "url": "https://www.archive.org/download/shortpoetry_002_librivox/the_dawn_patrol_pb_pdc_64kb.mp3",
+          "source": "apple",
+          "title": "The Dawn Patrol",
+          "file_format": "mp3",
+          "file_size": 0,
+          "duration": 131,
+          "language": "en",
+          "category": "podcast",
+          "speaker": "Short Poetry Collection 002 by Various",
+          "status": "pending",
+          "local_path": "",
+          "content_hash": "",
+          "published_at": "",
+          "discovered_at": "2026-09-18T09:56:42.644104+00:00",
+          "downloaded_at": "",
+          "upstream_item_id": "https://www.archive.org/download/shortpoetry_002_librivox/the_dawn_patrol_pb_pdc_64kb.mp3",
+          "id": "d4d1aa4da324828400431eab",
+          "collection_id": "aa54946854f5b9cd5be9ccc3",
+          "feed_url": "https://librivox.org/rss/249",
+          "collection_title": "Short Poetry Collection 002 by Various",
+          "author": "LibriVox"
+        }
+      ],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 6,
+        "parsed_collections": 4,
+        "records": 18,
+        "downloads": {
+          "failed": 2,
+          "pending": 16
+        }
+      },
+      "pagination": null,
+      "new_records": 3
+    },
+    "error": null
+  },
+  "exit_code": 0
+}

@@ -1,0 +1,6 @@
+{
+  "operation": "collect",
+  "params": {
+    "target": "https://www.snapchat.com/spotlight/replace-id"
+  }
+}

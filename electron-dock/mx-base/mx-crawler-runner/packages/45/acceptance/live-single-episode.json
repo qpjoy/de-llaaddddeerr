@@ -1,0 +1,71 @@
+{
+  "request": {
+    "operation": "collect",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\45",
+      "total_timeout": 60,
+      "request_timeout": 20,
+      "collection_ids": [
+        "0e22856206b00a7c330bf6db"
+      ],
+      "feed_limit": 1,
+      "episodes_per_feed": 1
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "45",
+    "source_id": "45",
+    "operation": "collect",
+    "observed_at": "2026-09-18T10:38:13.498944+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "45",
+      "platform": "小宇宙",
+      "observed_at": "2026-09-18T10:38:13.498944+00:00",
+      "items": [
+        {
+          "url": "https://media.xyzcdn.net/Fj13qx_hidW0D8gmnrfgUzc1w0_o.m4a",
+          "source": "xiaoyuzhou",
+          "title": "2月3日起 《忽左忽右》",
+          "file_format": "m4a",
+          "file_size": 3011927,
+          "duration": 186,
+          "language": "zh",
+          "category": "podcast",
+          "speaker": "忽左忽右",
+          "status": "pending",
+          "local_path": "",
+          "content_hash": "",
+          "published_at": "2018-01-28T18:31:35.000Z",
+          "discovered_at": "2026-09-18T10:38:14.013763+00:00",
+          "downloaded_at": "",
+          "upstream_item_id": "5e4ee557418a84a0466737c1",
+          "id": "0e22856206b00a7c330bf6db",
+          "collection_id": "0e22856206b00a7c330bf6db",
+          "collection_title": "忽左忽右",
+          "feed_url": "https://www.xiaoyuzhoufm.com/episode/5e4ee557418a84a0466737c1",
+          "collection_url": "https://www.xiaoyuzhoufm.com/episode/5e4ee557418a84a0466737c1",
+          "author": "JustPod",
+          "page_url": "https://www.xiaoyuzhoufm.com/episode/5e4ee557418a84a0466737c1",
+          "play_count": 25846,
+          "comment_count": 78,
+          "availability": "public"
+        }
+      ],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 2,
+        "parsed_collections": 2,
+        "records": 4,
+        "downloads": {
+          "pending": 4
+        }
+      },
+      "pagination": null,
+      "new_records": 1
+    },
+    "error": null
+  }
+}

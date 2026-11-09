@@ -1,0 +1,52 @@
+{
+  "request": {
+    "operation": "download",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\46",
+      "total_timeout": 60,
+      "request_timeout": 20,
+      "record_ids": [
+        "6d4c882dfe4db20d37c92468"
+      ],
+      "limit": 1,
+      "max_file_bytes": 10485760
+    }
+  },
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "46",
+    "source_id": "46",
+    "operation": "download",
+    "observed_at": "2026-09-18T10:38:17.997074+00:00",
+    "status": "success",
+    "result": {
+      "source_id": "46",
+      "platform": "喜马拉雅",
+      "observed_at": "2026-09-18T10:38:17.997074+00:00",
+      "items": [
+        {
+          "id": "6d4c882dfe4db20d37c92468",
+          "status": "done",
+          "local_path": "G:\\data_tongbu\\data\\audio_runs\\46\\downloads\\6d4c882dfe4db20d37c92468.mp3",
+          "bytes": 1027710,
+          "sha256": "c503395e0772b42c0d946afa9b89a0135d8335910cbcec62eb5ab6cf4ba61dc4",
+          "duplicate_of": null,
+          "conversion": null
+        }
+      ],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 1,
+        "parsed_collections": 1,
+        "records": 3,
+        "downloads": {
+          "done": 1,
+          "pending": 2
+        }
+      },
+      "pagination": null
+    },
+    "error": null
+  }
+}

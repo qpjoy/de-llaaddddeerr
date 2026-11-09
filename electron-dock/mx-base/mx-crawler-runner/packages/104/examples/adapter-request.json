@@ -1,0 +1,6 @@
+{
+  "operation": "collect",
+  "params": {
+    "target": "https://kick.com/replace-channel/clips/replace-id"
+  }
+}

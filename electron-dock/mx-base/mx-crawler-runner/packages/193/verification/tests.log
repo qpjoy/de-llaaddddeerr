@@ -1,0 +1,16 @@
+test_actual_subprocess_timeout_retains_checkpoint (test_client.CollectTests.test_actual_subprocess_timeout_retains_checkpoint) ... ok
+test_empty_payload_is_unknown (test_client.CollectTests.test_empty_payload_is_unknown) ... ok
+test_invalid_inputs_prevent_process_and_disk_work (test_client.CollectTests.test_invalid_inputs_prevent_process_and_disk_work) ... ok
+test_missing_backend_is_structured_error (test_client.CollectTests.test_missing_backend_is_structured_error) ... ok
+test_no_proxy_is_respected (test_client.CollectTests.test_no_proxy_is_respected) ... ok
+test_proxy_credentials_are_redacted (test_client.CollectTests.test_proxy_credentials_are_redacted) ... ok
+test_request_budget_retains_first_page (test_client.CollectTests.test_request_budget_retains_first_page) ... ok
+test_reviews_return_complete_pages_and_resume (test_client.CollectTests.test_reviews_return_complete_pages_and_resume) ... ok
+test_second_page_failure_retains_first_page (test_client.CollectTests.test_second_page_failure_retains_first_page) ... ok
+test_success_and_repeat_calls_have_independent_directories (test_client.CollectTests.test_success_and_repeat_calls_have_independent_directories) ... ok
+test_synthetic_category_fallback_is_not_success (test_client.CollectTests.test_synthetic_category_fallback_is_not_success) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 3.724s
+
+OK

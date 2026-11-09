@@ -1,0 +1,15 @@
+{
+  "name": "@qpjoy/mx-crawler-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runs reviewed collection packages (adapter.py) for mx-insight-hub, one process per invocation.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "lock": "node scripts/lock-packages.mjs",
+    "lock:write": "node scripts/lock-packages.mjs --write",
+    "install:packages": "node scripts/install-packages.mjs"
+  }
+}

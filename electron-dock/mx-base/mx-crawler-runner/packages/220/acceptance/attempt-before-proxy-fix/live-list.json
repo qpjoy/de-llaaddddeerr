@@ -1,0 +1,41 @@
+{
+  "label": "list",
+  "request": {
+    "operation": "list_records",
+    "params": {
+      "run_dir": "G:\\data_tongbu\\data\\audio_runs\\220",
+      "limit": 30
+    }
+  },
+  "exit_code": 0,
+  "response": {
+    "schema_version": "1.0",
+    "project_id": "220",
+    "source_id": "220",
+    "operation": "list_records",
+    "observed_at": "2026-09-18T09:52:10.534939+00:00",
+    "status": "no_data",
+    "result": {
+      "source_id": "220",
+      "platform": "Apple Podcasts",
+      "observed_at": "2026-09-18T09:52:10.534939+00:00",
+      "items": [],
+      "errors": [],
+      "warnings": [],
+      "stats": {
+        "collections": 2,
+        "parsed_collections": 0,
+        "records": 0,
+        "downloads": {}
+      },
+      "pagination": {
+        "offset": 0,
+        "limit": 30,
+        "total": 0,
+        "next_offset": 0,
+        "has_more": false
+      }
+    },
+    "error": null
+  }
+}

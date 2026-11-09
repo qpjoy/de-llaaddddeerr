@@ -13,6 +13,7 @@ const projects = [
   ['mx-pay', 'pay', 'mx-base/mx-pay', 'MX_PAY_BUILD_PROXY', ['deploy']],
   ['mx-rig', 'rig', 'mx-rig', 'MX_RIG_BUILD_PROXY', ['deploy']],
   ['mx-hanlp', 'hanlp', 'mx-common', 'PROXY', ['deploy', 'hanlp']],
+  ['mx-crawler-runner', 'runner', 'mx-base/mx-crawler-runner', 'MX_INSIGHT_BUILD_PROXY', ['deploy']],
 ]
 
 const recorder = `const fs = require('node:fs')
@@ -166,8 +167,24 @@ test('each selected project uses its own directory, exact deployment argv and sh
       assert.equal(call.env.MX_SMOKE_DATA, '0')
     }
     if (name === 'mx-launcher') assert.equal(call.env.MX_INSIGHT_HUB_DEPLOY, '0')
+    // The runner derives its build-proxy builder name from this exact value,
+    // so it must match what the Hub deploy received.
+    if (name === 'mx-crawler-runner') assert.equal(call.env.PROXY, 'http://127.0.0.1:7788')
   }
   assert.equal(f.calls().length, projects.length)
+})
+
+test('the runner is deployed on its own, never as part of all', t => {
+  const f = fixture(t)
+  const all = f.run(['plan', 'all'])
+  success(all)
+  assert.doesNotMatch(all.stdout, /mx-crawler-runner/)
+  const plan = f.run(['plan', 'runner'], { PROXY: '127.0.0.1:7788' })
+  success(plan)
+  const parsed = JSON.parse(plan.stdout)
+  assert.deepEqual(parsed.command, ['bash', 'scripts/manage.sh', 'deploy'])
+  assert.match(parsed.cwd, /mx-base\/mx-crawler-runner$/)
+  assert.deepEqual(f.calls(), [])
 })
 
 test('Launcher defaults preserve the supplied production parameters and accept explicit overrides', t => {

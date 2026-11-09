@@ -1,0 +1,76 @@
+{
+  "id": 104,
+  "platform": "Kick",
+  "slug": "kick",
+  "repo": "yt-dlp/yt-dlp",
+  "kind": "提取器候选",
+  "capability": "直播频道、录像及剪辑 URL 的元数据/媒体提取",
+  "limits": "直播需频道在线；不承诺历史聊天采集或长期监控服务。",
+  "observed_at": "2026-09-10T16:27:31.963007+00:00",
+  "path": "domain_sources/platforms/104/upstream/yt-dlp__yt-dlp",
+  "origin": "https://github.com/yt-dlp/yt-dlp.git",
+  "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+  "commit_date": "2026-08-30T15:58:45+02:00",
+  "commit_subject": "[utils] `devalue`: Improve binary type parsing (#16934)",
+  "clean": true,
+  "tracked_files": 1239,
+  "pull_status": "cloned",
+  "live_data_verified": true,
+  "github_metadata": {
+    "full_name": "yt-dlp/yt-dlp",
+    "default_branch": "master",
+    "archived": false,
+    "pushed_at": "2026-08-30T13:58:45Z",
+    "language": "Python",
+    "license": {
+      "key": "unlicense",
+      "name": "The Unlicense",
+      "spdx_id": "Unlicense",
+      "url": "https://api.github.com/licenses/unlicense",
+      "node_id": "MDc6TGljZW5zZTE1"
+    }
+  },
+  "verification": {
+    "id": 104,
+    "observed_at": "2026-09-10T16:30:32.834357+00:00",
+    "live_data_verified": false,
+    "evidence": [
+      {
+        "file": "yt_dlp/extractor/kick.py",
+        "tokens": [
+          "class KickIE",
+          "class KickVODIE",
+          "class KickClipIE"
+        ],
+        "sha256": "ca102270df6e54b2c9b6f31f090b683e8b9b23b21cb1b058c714b44d1c72a28a"
+      }
+    ],
+    "offline_cli_extractors": [
+      "kick:clips",
+      "kick:live",
+      "kick:vod",
+      "Kicker",
+      "KickStarter"
+    ],
+    "source_checks_passed": true
+  },
+  "live_validation": {
+    "id": 104,
+    "platform": "Kick",
+    "slug": "kick",
+    "repo": "yt-dlp/yt-dlp",
+    "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+    "status": "success",
+    "label": "已取得真实数据（限下列能力）",
+    "live_data_verified": true,
+    "note": "成功取得真实 Kick 剪辑、频道名和媒体地址；在线直播、频道枚举和聊天未验收。",
+    "capabilities_verified": [
+      "video_metadata",
+      "media_url"
+    ],
+    "evidence": "domain_sources/platforms/104/validation/live-01.json",
+    "observed_at": "2026-09-10T16:39:19.560704+00:00",
+    "target": "https://kick.com/mxddy?clip=clip_01GYXVB5Y8PWAPWCWMSBCFB05X",
+    "coverage_action": "preserve_status_append_note"
+  }
+}

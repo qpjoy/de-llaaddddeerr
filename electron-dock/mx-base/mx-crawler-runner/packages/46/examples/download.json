@@ -1,0 +1,9 @@
+{
+  "operation": "download",
+  "params": {
+    "run_dir": "./runtime/46",
+    "limit": 1,
+    "format": "original",
+    "max_file_bytes": 104857600
+  }
+}

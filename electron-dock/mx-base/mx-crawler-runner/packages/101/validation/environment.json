@@ -1,0 +1,37 @@
+{
+  "python": "3.13.3",
+  "packages": [
+    {
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1"
+    },
+    {
+      "name": "curl_cffi",
+      "version": "0.16.3"
+    },
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "pycparser",
+      "version": "3.0"
+    },
+    {
+      "name": "yt-dlp",
+      "version": "2026.8.19"
+    }
+  ],
+  "install": {
+    "id": 101,
+    "slug": "dailymotion",
+    "commit": "bbc809a1161d3bfca51fa36f59dda35556ee85a0",
+    "python": "G:\\data_tongbu\\domain_sources\\.cache\\live_checks\\dailymotion\\venv\\Scripts\\python.exe",
+    "observed_at": "2026-09-10T16:37:29.7815924Z",
+    "exit_code": 0
+  }
+}

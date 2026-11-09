@@ -1,0 +1,68 @@
+{
+  "id": 94,
+  "platform": "Pinterest",
+  "slug": "pinterest",
+  "repo": "mikf/gallery-dl",
+  "kind": "采集器候选",
+  "capability": "Pin、图板及账号下的公开图片/视频与元数据",
+  "limits": "部分页面需要有效会话；外链字段取决于具体响应；尚未验证实时采集。",
+  "observed_at": "2026-09-10T16:27:21.841387+00:00",
+  "path": "domain_sources/platforms/94/upstream/mikf__gallery-dl",
+  "origin": "https://github.com/mikf/gallery-dl.git",
+  "commit": "2adf2a8e0041ec55afdcc2211fd5c7ca239a9352",
+  "commit_date": "2026-09-04T19:24:35+02:00",
+  "commit_subject": "release version 1.32.11",
+  "clean": true,
+  "tracked_files": 763,
+  "pull_status": "cloned",
+  "live_data_verified": true,
+  "github_metadata": {
+    "full_name": "mikf/gallery-dl",
+    "default_branch": "master",
+    "archived": false,
+    "pushed_at": "2026-09-04T17:24:37Z",
+    "language": "Python",
+    "license": {
+      "key": "gpl-2.0",
+      "name": "GNU General Public License v2.0",
+      "spdx_id": "GPL-2.0",
+      "url": "https://api.github.com/licenses/gpl-2.0",
+      "node_id": "MDc6TGljZW5zZTg="
+    }
+  },
+  "verification": {
+    "id": 94,
+    "observed_at": "2026-09-10T16:30:24.593367+00:00",
+    "live_data_verified": false,
+    "evidence": [
+      {
+        "file": "gallery_dl/extractor/pinterest.py",
+        "tokens": [
+          "class PinterestPinExtractor",
+          "class PinterestBoardExtractor"
+        ],
+        "sha256": "44e5d4342f65fa825c262e3dfa3cff387f1f1e4e8252e4c6ec25ec34b42e160c"
+      }
+    ],
+    "source_checks_passed": true
+  },
+  "live_validation": {
+    "id": 94,
+    "platform": "Pinterest",
+    "slug": "pinterest",
+    "repo": "mikf/gallery-dl",
+    "commit": "2adf2a8e0041ec55afdcc2211fd5c7ca239a9352",
+    "status": "success",
+    "label": "已取得真实数据（限下列能力）",
+    "live_data_verified": true,
+    "note": "成功返回真实 Pin 元数据和媒体链接；图板枚举、完整账号资料未验收。",
+    "capabilities_verified": [
+      "pin_metadata",
+      "media_url"
+    ],
+    "evidence": "domain_sources/platforms/94/validation/live-01.json",
+    "observed_at": "2026-09-10T16:39:13.912538+00:00",
+    "target": "https://www.pinterest.com/pin/858146903966145189/",
+    "coverage_action": "preserve_status_append_note"
+  }
+}

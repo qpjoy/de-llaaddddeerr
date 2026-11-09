@@ -1,0 +1,389 @@
+{
+  "source_row_id": 198,
+  "provider": "halifox/app_market_crawler",
+  "platform": "yingyongbao",
+  "observed_at": "2026-09-12T10:19:43.936168+00:00",
+  "status": "success",
+  "data": {
+    "items": [
+      {
+        "input_value": "com.tencent.mobileqq",
+        "record_type": "detail",
+        "source_url": "https://sj.qq.com/appdetail/com.tencent.mobileqq",
+        "app": {
+          "package": "com.tencent.mobileqq",
+          "app_id": "6633",
+          "name": "QQ",
+          "version": "9.3.60",
+          "developer": "深圳市腾讯计算机系统有限公司",
+          "rating": "4.52",
+          "privacy_policy_url": "https://ti.qq.com/doc/redirect/qq-privacy-guild",
+          "download_url": "http://imtt2.dd.qq.com/sjy.00009/sjy.00004/16891/apk/DC9D399E37A629E4A6252E08CB33BE8A.apk?fsname=com.tencent.mobileqq_9.3.60.apk",
+          "updated_at": "1788875252",
+          "icon_url": "http://pp.myapp.com/ma_icon/0/icon_6633_1788875231/256"
+        },
+        "raw": {
+          "pkg_name": "com.tencent.mobileqq",
+          "app_id": "6633",
+          "name": "QQ",
+          "icon": "http://pp.myapp.com/ma_icon/0/icon_6633_1788875231/256",
+          "md_5": "DC9D399E37A629E4A6252E08CB33BE8A",
+          "download_url": "http://imtt2.dd.qq.com/sjy.00009/sjy.00004/16891/apk/DC9D399E37A629E4A6252E08CB33BE8A.apk?fsname=com.tencent.mobileqq_9.3.60.apk",
+          "is_game": "0",
+          "is_cloud_game": "0",
+          "channel_info": "",
+          "apk_size": "391019122",
+          "ios_url": "https://itunes.apple.com/cn/app/id444934666",
+          "developer": "深圳市腾讯计算机系统有限公司",
+          "update_time": "1788875252",
+          "privacy_agreement": "https://ti.qq.com/doc/redirect/qq-privacy-guild",
+          "version_name": "9.3.60",
+          "operator": "深圳市腾讯计算机系统有限公司",
+          "game_type": "0",
+          "is_pc_yyb_available": "1",
+          "is_booking": "0",
+          "report_info": {
+            "cid": "",
+            "ctype": "",
+            "trace_id": "79543807-ae93-11f1-8875-525400bb2971",
+            "slot": 1,
+            "screenorder": 1,
+            "rid": "",
+            "appid": "6633",
+            "pkgname": "com.tencent.mobileqq",
+            "appname": "QQ",
+            "iscloudgame": "0",
+            "yyb_app_type": "software",
+            "pcyyb_ready": "1",
+            "is_game": "0",
+            "cardid": "yybn_game_basic_info",
+            "rel_exp_ids": ""
+          },
+          "restrict_level": "0",
+          "cp_id": "",
+          "ms_store_id": "XP99SPMSZ082XF",
+          "ms_store_status": "1",
+          "relevance_pkg_name": "com.tencent.pcgame.qqnt",
+          "relevance_game_type": "7",
+          "is_mac_online": 1,
+          "tags": "好友社交",
+          "tag_alias": "",
+          "tags_st": "[{\"tag_id\":\"19001001\",\"tag_name\":\"好友社交\",\"tag_alias\":\"\",\"parent_id\":0,\"rank\":0,\"is_shown\":0}]",
+          "average_rating": "4.52",
+          "editor_intro": "      ",
+          "show_text": "",
+          "audited_snapshots": "",
+          "cate_name_new": "社交",
+          "apk_url": "",
+          "button_info": "{\"MSStoreButtonText\":\"\",\"PCYYBButtonText\":\"\",\"emphasizedButton\":\"\"}",
+          "description": "在QQ，轻松社交\n- [聊天消息]随时随地好友和群消息；\n- [语音通话]、[视频聊天]和亲友自在畅聊；\n- [文件传输]手机电脑多端互传，轻松便捷。\n\n在QQ，轻松生活\n- [空间动态]快速获知好友动态，随时分享生活；\n- [移动支付]话费充值、转账收款、网购一应俱全；\n- [关怀模式]大字体、大图标，操作更简单，长辈使用更方便。\n\n在QQ，轻松娱乐\n- [游戏中心]体验热门手游乐趣，还有更多大神攻略分享；\n- [个性装扮]各种主题、名片、彩铃、气泡、挂件自由选。\n\nQQ将功能赋能，打造轻松欢乐的社交、娱乐与生活体验。\n\n-----联系我们-----\n如在使用过程中遇到任何问题，请联系我们：\n- 在线帮助：进入QQ设置 -> 关于QQ -> 帮助与反馈\n- 客服热线：4006 700 700（服务时间：8:00 - 23:00）\n\n*加入寻找丢失儿童公益项目，GPS在后台运行可能会影响电池续航时间。",
+          "video": "",
+          "snap_shots": "http://pp.myapp.com/ma_pic2/0/shot_6633_1_1788875231/0,http://pp.myapp.com/ma_pic2/0/shot_6633_2_1788875231/0,http://pp.myapp.com/ma_pic2/0/shot_6633_3_1788875231/0,http://pp.myapp.com/ma_pic2/0/shot_6633_4_1788875231/0,http://pp.myapp.com/ma_pic2/0/shot_6633_5_1788875231/0",
+          "permissions_list": [
+            {
+              "title": "安装快捷方式",
+              "description": "允许应用自行添加主屏幕快捷方式。"
+            },
+            {
+              "title": "修改或删除您的SD卡中的内容",
+              "description": "允许应用写入SD卡。"
+            },
+            {
+              "title": "读取您的SD卡中的内容",
+              "description": "允许应用读取您SD卡的内容。"
+            },
+            {
+              "title": "拥有完全的网络访问权限",
+              "description": "允许该应用创建网络套接字和使用自定义网络协议。浏览器和其他某些应用提供了向互联网发送数据的途径，因此应用无需该权限即可向互联网发送数据。"
+            },
+            {
+              "title": "控制振动",
+              "description": "允许应用控制振动器。"
+            },
+            {
+              "title": "查看网络连接",
+              "description": "允许该应用查看网络连接的相关信息，例如存在和连接的网络。"
+            },
+            {
+              "title": "开机启动",
+              "description": "允许应用在系统完成引导后立即自动启动。这样可能会延长手机的启动时间，并允许应用始终运行，从而导致手机总体运行速度减慢。"
+            },
+            {
+              "title": "防止手机休眠",
+              "description": "允许应用阻止手机进入休眠状态。"
+            },
+            {
+              "title": "在其他应用之上显示内容",
+              "description": "允许该应用在其他应用之上或用户界面的特定部分绘图。这可能会干扰您对所有应用界面的使用，或使您在其他应用中看到的内容发生变化。"
+            },
+            {
+              "title": "录音",
+              "description": "允许该应用使用麦克风录制音频。此权限可让该应用不经您的确认即可随时录制音频。"
+            },
+            {
+              "title": "更改您的音频设置",
+              "description": "允许该应用修改全局音频设置，例如音量和用于输出的扬声器。"
+            },
+            {
+              "title": "拍摄照片和视频",
+              "description": "允许该应用使用相机拍摄照片和视频。此权限可让该应用随时使用相机，而无需您的确认。"
+            },
+            {
+              "title": "连接WLAN网络和断开连接",
+              "description": "允许该应用与WLAN接入点建立和断开连接，以及更改WLAN网络的设备配置。"
+            },
+            {
+              "title": "查看WLAN连接",
+              "description": "允许该应用查看WLAN网络的相关信息，例如是否启用了WLAN以及连接的WLAN设备的名称。"
+            },
+            {
+              "title": "关闭其他应用",
+              "description": "允许该应用结束其他应用的后台进程。此权限可导致其他应用停止运行。"
+            },
+            {
+              "title": "卸载快捷方式",
+              "description": "允许应用自行删除主屏幕快捷方式。"
+            },
+            {
+              "title": "让应用始终运行",
+              "description": "允许该应用在内存中持续保留其自身的某些组件。这会限制其他应用可用的内存，从而减缓手机运行速度。"
+            },
+            {
+              "title": "修改系统设置",
+              "description": "允许应用修改系统的设置数据。恶意应用可能会破坏您的系统配置。"
+            },
+            {
+              "title": "检索正在运行的应用",
+              "description": "允许该应用检索近期运行的和当前正在运行的任务的相关信息。此权限可让该应用了解设备上使用了哪些应用。"
+            },
+            {
+              "title": "读取您的通讯录",
+              "description": "允许该应用读取您手机上存储的联系人的相关数据，包括您通过打电话、发送电子邮件或以其他方式与特定个人通信的频率。此权限可让应用保存您的联系人数据，而恶意应用可能会在您不知情的情况下分享联系人数据。"
+            },
+            {
+              "title": "与蓝牙设备配对",
+              "description": "允许该应用查看手机上的蓝牙配置，以及与配对设备建立连接或接受其连接请求。"
+            },
+            {
+              "title": "访问蓝牙设置",
+              "description": "允许应用配置本地蓝牙手机，并允许其查找远程设备且与之配对。"
+            },
+            {
+              "title": "写入/删除您的通讯录",
+              "description": "允许该应用修改您手机上存储的联系人的相关数据，包括您通过打电话、发送电子邮件或以其他方式与特定联系人通信的频率。此权限可让应用删除联系人数据。"
+            },
+            {
+              "title": "使用指纹硬件",
+              "description": "允许该应用使用指纹硬件进行身份验证"
+            },
+            {
+              "title": "更改网络连接性",
+              "description": "允许应用更改网络连接的状态。"
+            },
+            {
+              "title": "展开/收拢状态栏",
+              "description": "允许应用展开或折叠状态栏。"
+            },
+            {
+              "title": "写入/删除您的通讯录",
+              "description": "允许该应用修改您手机上存储的联系人的相关数据，包括您通过打电话、发送电子邮件或以其他方式与特定联系人通信的频率。此权限可让应用删除联系人数据。"
+            },
+            {
+              "title": "读取同步设置",
+              "description": "允许该应用读取某个帐号的同步设置。例如，此权限可确定“联系人”应用是否与某个帐号同步。"
+            },
+            {
+              "title": "启用和停用同步",
+              "description": "允许该应用修改某个帐号的同步设置。例如，此权限可用于在“联系人”应用与某个帐号之间启用同步。"
+            },
+            {
+              "title": "停用屏幕锁定",
+              "description": "允许该应用停用键锁以及任何关联的密码安全措施。例如，让手机在接听来电时停用键锁，在通话结束后重新启用键锁。"
+            },
+            {
+              "title": "允许接收WLAN多播",
+              "description": "允许该应用使用多播地址接收发送到WLAN网络上所有设备（而不仅仅是您的手机）的数据包。该操作的耗电量比非多播模式要大。"
+            },
+            {
+              "title": "添加或修改日历活动，并在所有者不知情的情况下向邀请对象发送电子邮件",
+              "description": "允许该应用添加、删除、更改您可在手机上修改的活动，包括朋友或同事的活动。此权限可让该应用冒充日历所有者发送消息，或在所有者不知情的情况下修改活动。"
+            },
+            {
+              "title": "关闭其他应用",
+              "description": "允许该应用结束其他应用的后台进程。此权限可导致其他应用停止运行。"
+            },
+            {
+              "title": "请求安装文件包",
+              "description": "允许应用请求安装文件包。"
+            },
+            {
+              "title": "连接WLAN网络和断开连接",
+              "description": "允许该应用与WLAN接入点建立和断开连接，以及更改WLAN网络的设备配置。"
+            },
+            {
+              "title": "拥有完全的网络访问权限",
+              "description": "允许该应用创建网络套接字和使用自定义网络协议。浏览器和其他某些应用提供了向互联网发送数据的途径，因此应用无需该权限即可向互联网发送数据。"
+            },
+            {
+              "title": "查看WLAN连接",
+              "description": "允许该应用查看WLAN网络的相关信息，例如是否启用了WLAN以及连接的WLAN设备的名称。"
+            },
+            {
+              "title": "查看网络连接",
+              "description": "允许该应用查看网络连接的相关信息，例如存在和连接的网络。"
+            },
+            {
+              "title": "访问确切位置信息（以 GPS 和网络为依据）",
+              "description": "允许该应用通过全球定位系统(GPS)或网络位置信息源（例如基站和WLAN）获取您的精确位置信息。您必须在设备上开启这些位置信息服务，应用才能获得位置信息。应用会使用此类服务确定您的位置，这可能会消耗更多电量。"
+            },
+            {
+              "title": "访问大致位置信息（以网络为依据）",
+              "description": "允许该应用获取您的大致位置信息。这类位置信息来自于使用网络位置信息源（例如基站和WLAN）的位置信息服务。您必须在设备上开启这些位置信息服务，应用才能获得位置信息。应用会使用此类服务确定您的大概位置。"
+            },
+            {
+              "title": "拍摄照片和视频",
+              "description": "允许该应用使用相机拍摄照片和视频。此权限可让该应用随时使用相机，而无需您的确认。"
+            },
+            {
+              "title": "防止手机休眠",
+              "description": "允许应用阻止手机进入休眠状态。"
+            },
+            {
+              "title": "安装快捷方式",
+              "description": "允许应用自行添加主屏幕快捷方式。"
+            },
+            {
+              "title": "开机启动",
+              "description": "允许应用在系统完成引导后立即自动启动。这样可能会延长手机的启动时间，并允许应用始终运行，从而导致手机总体运行速度减慢。"
+            },
+            {
+              "title": "关闭其他应用",
+              "description": "允许该应用结束其他应用的后台进程。此权限可导致其他应用停止运行。"
+            },
+            {
+              "title": "关闭其他应用",
+              "description": "允许该应用结束其他应用的后台进程。此权限可导致其他应用停止运行。"
+            },
+            {
+              "title": "控制近距离通信",
+              "description": "允许应用与近距离无线通信(NFC)标签、卡和读取器通信。"
+            },
+            {
+              "title": "对正在运行的应用重新排序",
+              "description": "允许该应用将任务移动到前台和后台。该应用可能不经您的命令自行执行此操作。"
+            },
+            {
+              "title": "对正在运行的应用重新排序",
+              "description": "允许该应用将任务移动到前台和后台。该应用可能不经您的命令自行执行此操作。"
+            }
+          ],
+          "download_num": "9706716131",
+          "detail_template": [
+            {
+              "title": "QQ简介",
+              "detail": "QQ是由腾讯公司开发的即时通讯软件，旨在满足用户的即时通讯需求，提供文字消息、语音通话、视频聊天、文件传输等功能。在现代社会中，无论是工作交流、朋友聊天还是家人联系，QQ都扮演着重要的角色。其强大的功能性和便捷性使其成为数亿用户的选择。首先，QQ支持多平台登录，无论是手机、平板还是电脑，都可以实现无缝沟通；其次，它提供了丰富的社交功能，比如QQ空间、群组、讨论组，让用户在保持联系的同时，也能分享生活、工作中的点点滴滴；最后，QQ不断创新，推出了多种个性化服务，如游戏中心、QQ音乐、QQ阅读等，满足了用户在娱乐、阅读等方面的需求。\n\n文字聊天 - 沟通从这里开始\n文字聊天是QQ最基础也是最核心的功能之一，它不仅支持发送文字消息，还可以发送表情、图片、视频等多媒体信息，让沟通更加丰富多彩。用户可以通过文字聊天功能快速地与朋友、家人、同事进行交流，不论是日常闲聊、工作协调还是信息分享，都能够轻松应对。此外，QQ的文字聊天还具备消息撤回、聊天记录备份等实用功能，大大提升了用户的沟通体验。\n\n语音通话 - 近在咫尺的声音\n语音通话功能让QQ的沟通方式更加多元化。不论距离多远，用户都可以通过语音通话感受到对方的声音，就如同对方近在咫尺。这一功能尤其适合那些需要即时沟通但又不方便打字的场合，比如开车、做家务时等。语音通话的清晰度高，连接稳定，即便是跨国通话也能保证良好的通话质量。\n\n除了一对一的语音通话外，QQ还支持多人语音聊天，这一功能非常适合朋友聚会、家庭聚会、工作会议等多人沟通场合。通过QQ创建一个语音群聊，用户可以邀请多达数十人同时参与到语音聊天中来，不仅能够节省通话费用，还能增加沟通的趣味性和互动性。\n\n语音通话功能的另一个亮点是它的低延迟设计，即使是在网络条件不佳的情况下，也能尽量减少通话中的卡顿现象，确保通话流畅。而且，QQ的语音通话还具有语音变声功能，用户可以在聊天中选择不同的声音效果，增加聊天的趣味性，让沟通变得更加轻松愉快。\n\n视频聊天 - 面对面的温暖\n视频聊天功能进一步拉近了人与人之间的距离。在QQ中，用户不仅可以听到对方的声音，还可以看到对方的面容，仿佛坐在对方面前一样进行沟通。这一功能特别适合那些长时间分隔两地的家人、朋友，通过视频聊天，他们可以看到对方的每一个表情，分享彼此的生活，感受到对方的存在。视频聊天支持高清画质，即使在网络环境不佳的情况下也能保证视频的流畅性，让沟通无障碍。\n\n视频聊天不仅限于一对一的交流，QQ还提供了多人视频功能，允许多达9人同时参与视频通话。无论是家庭聚会、朋友聚会还是工作会议，都可以通过这一功能让每个人都出现在同一个屏幕上，共同分享、讨论。这种形式的交流打破了地理限制，让距离不再是问题。\n\n除了基本的视频通话功能，QQ还提供了丰富的互动特效和美颜功能，用户可以根据自己的喜好调整，使视频聊天变得更加有趣、美观。无论是在聊天时使用有趣的动态效果，还是通过美颜功能优化自己的画面，都能使视频聊天的体验更上一层楼。\n\n文件传输 - 快速便捷的共享\n文件传输功能是QQ中的又一实用功能，它允许用户在聊天过程中轻松地发送或接收文件，无论是文档、图片、视频还是音频文件，都可以快速分享。这一功能特别适合工作交流中的文件共享，或是在朋友之间分享有趣的内容。QQ支持的文件类型广泛，传输速度快，即使是大文件也能在短时间内完成传输，大大提高了沟通的效率。\n\nQQ的文件传输功能不仅限于个人之间的分享，也支持在群组中分享文件，方便团队协作和资料共享。群文件功能允许将文件上传到群共享空间，群成员都可以下载查看，非常适合需要集体讨论或共同编辑的工作场景。\n\n此外，QQ还提供了文件预览功能，用户在接收到文件后无需下载即可在线预览文档内容，提高了查看文件的便利性。对于常用的办公文件格式，如PDF、DOC、XLS等，QQ都能提供良好的支持和预览效果。\n\n群组功能 - 聚集志同道合的朋友\n群组功能是QQ中不可或缺的社交工具之一，它允许用户创建或加入兴趣群组，与志同道合的人一起讨论、分享信息。群组功能为用户提供了一个广阔的社交平台，无论是爱好、学习、游戏、工作还是任何其他领域，用户都可以在这里找到合适的群组加入，或者自己创建群组，邀请朋友加入。通过群组，用户可以与群内成员进行实时交流，分享资讯，进行讨论，增强了信息交换和沟通的效率。\n\n群组功能的强大之处还在于它丰富的管理和互动功能。群主和管理员可以根据需要设置群公告、管理群成员，以及调整群设置等，确保群组的正常运营和秩序。此外，QQ还提供了群文件共享、群相册、群日历等功能，方便群成员之间的文件共享和活动组织。群投票功能也让群内决策变得更加便捷和民主。\n\n在日常生活和工作中，群组功能让用户能够快速找到感兴趣的话题和圈子，便捷地与人交流，分享和获取信息。无论是学习交流群、兴趣爱好群、同城活动群，还是工作协作群，QQ的群组功能都能满足用户的不同需求，让人们的社交生活更加丰富多彩。\n\n讨论组功能 - 高效便捷的团队协作\n讨论组功能是针对临时性讨论需求设计的，它提供了一个更加灵活和便捷的沟通方式。不同于群组的长期性和稳定性，讨论组更适合处理临时任务、项目协作或者即时讨论的需要。用户可以快速创建一个讨论组，邀请相关人员加入，完成讨论或协作后，也可以随时解散。这种灵活性使得讨论组成为了处理工作任务、组织活动或者临时沟通的理想选择。\n\n讨论组功能支持文字、语音、视频聊天以及文件共享等基本通讯功能，满足了各种沟通需求。与此同时，讨论组中的成员可以随时增加或减少，十分适合项目团队协作、学习小组讨论等场景。通过讨论组，成员之间的沟通更加直接高效，有助于提高协作效率，促进信息的快速交流。"
+            }
+          ],
+          "ios_app_link_info": "",
+          "public_time": "",
+          "booking_url": "",
+          "booking_user_cnt": "0",
+          "booking_gift": "",
+          "app_update_time": "",
+          "cloudGameInfo": {
+            "pay_type": "",
+            "pkgname": "",
+            "tmast": "",
+            "apk_url": ""
+          },
+          "syzs_download_num": "0",
+          "username": "",
+          "cate_name": "社交",
+          "icp_number": "粤B2-20090059-1622A",
+          "icp_entity": "深圳市腾讯计算机系统有限公司",
+          "exe_download_url": "http://dd2.myapp.com/16891/exe/B92C68F3140A36D42DD660C91371F42DD7A2BFB7ACCB43FE91C01A3F75C6598D.exe",
+          "exe_dmg_rel_info": {},
+          "recommend_topic_list": [
+            {
+              "topicId": "200084566",
+              "title": "这几个让视障人士世界「亮」起来的App",
+              "description": "10月15日是第41个国际盲人节。盲人，又称视障人士。相关数据表明：中国，是世界上盲人最多的国家，含盲人在内的视力残疾者约有1700多万——这意味着每100人中，至少有1位视障者。虽然数量众多，但随着我国互联网「盲道」的发展和完善，盲人不仅能独自出门、用手机导航，还可以成为软件工程师、网文作者、游戏主播……在信息世界里，除了看不见，他们什么都能做。值得一提的是：大多数视障人士并不缺少应用，而是缺乏一双援手，帮助他们下载、使用这些应用。小宝分享几个帮助「视障人士」更好工作和生活的App，并附上了进入和使用指南。●腾讯视频用「科技+文化」，让视障朋友们更快看上更多好剧。今年腾讯视频专门面向视障人群正式上线「无障碍剧场」，分批上线《<a href=\"https://sj.qq.com/appdetail/cn.styd.management_app\" target=\"_blank\">三体</a>》《梦华录》《漫长的季节》等600余部热门影视作品的无障碍版本。在这里的所有影片都近于 “广播剧” ，通过辅助讲解帮助视障观众了解剧情。⭐️路径：进入腾讯视频App—点击右上角「频道」—下拉至「精彩频道」——选择「无障碍剧场」——完成身份认证后即可免费听、随心享。视障朋友们也能畅游影音世界，感受剧情起伏，享受视听盛宴。●搜狗输入法「触觉输入」，让打字不再靠猜！首创的分按键差异化振动方式，通过给键盘上的锚点字符添加特殊振动效果，为视障用户有效提供震动反馈。⭐️路径：进入主页——点击「我的」——点击右上角「设置」按钮，选择「输入设置」——下拉页面至底部，选择「无障碍设置」，让每一次敲击，都充满力量。●腾讯地图（关怀版）腾讯地图关怀版，为特殊群体点亮出行之路。大字体、高对比度，朗读功能贴心陪伴。强化朗读功能，支持无障碍朗读播报指引，方便特殊用户使用。保留最基本、最适合特殊群体出行的功能，包括地点检索、步行路线与导航、公交地铁路线及实时公交、叮当语音助手等，让导航不再复杂。●天天象棋（无障碍版）如何让视障群体也能足不出户，在手机上与他人对弈？天天象棋无障碍版上线。语音指令，是一个重要突破。视障棋友使用触屏时，语音会提示棋子所在位置，走子是依靠对弈者发出的语音指令进行的。该功能，将完全打破盲人“下盲棋”的困境。“触屏”+“语音”的互动，可以帮助盲人棋友顺利、独立地下完一盘棋。同时还配备了强大的复盘分析功能，语音操作使用天天象棋自带的分析功能进行总结，以利再战。在这里，人人都是象棋大师，弈棋逢知己，对局无界限！●QQ线上社交有点难？别怕，QQ来帮你！曾经，emoji表情让你摸不着头脑，但现在，QQ针对无障碍功能大升级，连表情和GIF都能“听”懂啦！抢红包、发课件、玩狼人杀，无障碍社交让你畅通无阻。国际盲人节，和QQ一起，打破沟通壁垒，享受平等社交的乐趣，让快乐加倍传递，让友谊更加深厚～<br/>",
+              "rid": "CL6ohamJNBABGgZ3ZWJ5eWIiAzM3MioTdGhlbWVfcmVsZXZhbnRfbGlzdDIkNDU4ZTQ0MDAtYWRiMy00YmM1LTgxZTEtZGQ5MjdjOWY0ODdkOiQ3OTZhOTNkNi1hZTkzLTExZjEtYmVlYS01MjU0MDBhYjAzNGJCHWY3OWY2NTZjMTM0MjgzZmMtNDAyN2E1NmEtMzcyUgkyMDAwODQ1NjZYDWInCV41K0kLrdE/EhwKEWNmX3JlbGF0ZWRfdGhlbWVzEV41K0kLrdE/agwSCgoIYXBwX3R5cGVyAHoA",
+              "exp_ids": ""
+            },
+            {
+              "topicId": "200079594",
+              "title": "下载软件的软件",
+              "description": "为了满足您“下载软件的软件”的需求，我们为您精心挑选了一些优质的APP应用。这些应用不仅功能强大，而且操作简便，能够帮助您轻松找到并下载各种所需的软件。首先，<a href=\"https://sj.qq.com/appdetail/com.android.chrome\" target=\"_blank\">谷歌浏览器Google Chrome</a>和<a href=\"https://sj.qq.com/appdetail/com.UCMobile\" target=\"_blank\">UC浏览器</a>都是非常优秀的浏览器，您可以通过它们快速搜索并下载软件。其次，应用市场和app下载是专门为“下载软件的软件”而设计的平台，提供了丰富的应用资源，您可以在这里找到各种类型的软件。<a href=\"https://sj.qq.com/appdetail/com.baidu.searchbox\" target=\"_blank\">百度</a>和<a href=\"https://sj.qq.com/appdetail/com.baidu.searchbox.lite\" target=\"_blank\">百度极速版</a>则是搜索引擎类应用，通过它们您可以快速定位到下载软件的链接。<a href=\"https://sj.qq.com/appdetail/com.quark.browser\" target=\"_blank\">夸克浏览器</a>以其简洁高效的特点，也能帮助您快速找到并下载所需的软件。最后，<a href=\"https://sj.qq.com/appdetail/cn.soulapp.android\" target=\"_blank\">Soul</a>虽然主要是社交应用，但也提供了一些有趣的软件推荐。总之，这些APP都能满足您“下载软件的软件”的需求，让您轻松获取各种应用。",
+              "rid": "CL6ohamJNBABGgZ3ZWJ5eWIiAzM3MioTdGhlbWVfcmVsZXZhbnRfbGlzdDIkNDU4ZTQ0MDAtYWRiMy00YmM1LTgxZTEtZGQ5MjdjOWY0ODdkOiQ3OTZhOTNkNi1hZTkzLTExZjEtYmVlYS01MjU0MDBhYjAzNGJCHWY3OWY2NTZjMTM0MjgzZmMtNDAyN2E1NmEtMzcyUgkyMDAwNzk1OTRYDWInCcWJRoS0Gs4/EhwKEWNmX3JlbGF0ZWRfdGhlbWVzEcWJRoS0Gs4/agwSCgoIYXBwX3R5cGVyAhABegA=",
+              "exp_ids": ""
+            },
+            {
+              "topicId": "200076717",
+              "title": "腾讯软件有哪些",
+              "description": "当你在寻找腾讯软件有哪些时，不妨看看这些优质应用。<a href=\"https://sj.qq.com/appdetail/com.tencent.qqlive\" target=\"_blank\">腾讯视频</a>为你提供海量影视资源，<a href=\"https://sj.qq.com/appdetail/com.tencent.wemeet.app\" target=\"_blank\">腾讯会议</a>则是高效的在线会议工具。想了解最新资讯？<a href=\"https://sj.qq.com/appdetail/com.tencent.news\" target=\"_blank\">腾讯新闻</a>-专注热点新闻与优质资讯是你的不二选择。喜欢短视频创作与分享？<a href=\"https://sj.qq.com/appdetail/com.tencent.weishi\" target=\"_blank\">腾讯微视</a>满足你的需求。出行时，<a href=\"https://sj.qq.com/appdetail/com.tencent.map\" target=\"_blank\">腾讯地图</a>为你导航。对于老年用户，<a href=\"https://sj.qq.com/appdetail/com.tencent.qnchat\" target=\"_blank\">腾讯新闻关怀版</a>提供了更友好的阅读体验。虽然百度并非腾讯旗下，但在搜索领域同样出色。最后，<a href=\"https://sj.qq.com/appdetail/com.tencent.gallerymanager\" target=\"_blank\">腾讯相册管家</a>帮你轻松管理照片。综上所述，腾讯软件有哪些？这些应用都能为你提供全方位的服务。",
+              "rid": "CL6ohamJNBABGgZ3ZWJ5eWIiAzM3MioTdGhlbWVfcmVsZXZhbnRfbGlzdDIkNDU4ZTQ0MDAtYWRiMy00YmM1LTgxZTEtZGQ5MjdjOWY0ODdkOiQ3OTZhOTNkNi1hZTkzLTExZjEtYmVlYS01MjU0MDBhYjAzNGJCHWY3OWY2NTZjMTM0MjgzZmMtNDAyN2E1NmEtMzcyUgkyMDAwNzY3MTdYDWInCbotm615Bc0/EhwKEWNmX3JlbGF0ZWRfdGhlbWVzEbotm615Bc0/agwSCgoIYXBwX3R5cGVyAhACegA=",
+              "exp_ids": ""
+            },
+            {
+              "topicId": "200079615",
+              "title": "平板软件",
+              "description": "平板软件的选择对于提升用户体验至关重要。我们为您精心挑选了一系列优质的平板软件，包括《<a href=\"https://sj.qq.com/appdetail/com.tencent.qqlive\" target=\"_blank\">腾讯视频</a>》、《<a href=\"https://sj.qq.com/appdetail/com.android.chrome\" target=\"_blank\">谷歌浏览器Google Chrome</a>》、《<a href=\"https://sj.qq.com/appdetail/com.baidu.searchbox\" target=\"_blank\">百度</a>》、《色多多》、《应用市场》、《微信》、《<a href=\"https://sj.qq.com/appdetail/com.UCMobile\" target=\"_blank\">UC浏览器</a>》和《<a href=\"https://sj.qq.com/appdetail/com.baidu.searchbox.lite\" target=\"_blank\">百度极速版</a>》。这些平板软件不仅在功能上各具特色，还能在大屏设备上提供流畅的操作体验。《腾讯视频》让您随时随地享受高清影视，《谷歌浏览器Google Chrome》提供快速稳定的网页浏览，《百度》与《百度极速版》则满足您多样化的搜索需求。《色多多》丰富了您的娱乐生活，《应用市场》帮助您发现更多实用的平板软件，而《微信》和《UC浏览器》则是日常沟通和信息获取的必备工具。选择这些平板软件，您将体验到更高效、更便捷的数字生活。",
+              "rid": "CL6ohamJNBABGgZ3ZWJ5eWIiAzM3MioTdGhlbWVfcmVsZXZhbnRfbGlzdDIkNDU4ZTQ0MDAtYWRiMy00YmM1LTgxZTEtZGQ5MjdjOWY0ODdkOiQ3OTZhOTNkNi1hZTkzLTExZjEtYmVlYS01MjU0MDBhYjAzNGJCHWY3OWY2NTZjMTM0MjgzZmMtNDAyN2E1NmEtMzcyUgkyMDAwNzk2MTVYDWInCZTY6i2Zqcw/EhwKEWNmX3JlbGF0ZWRfdGhlbWVzEZTY6i2Zqcw/agwSCgoIYXBwX3R5cGVyAhADegA=",
+              "exp_ids": ""
+            },
+            {
+              "topicId": "200079591",
+              "title": "博客下载",
+              "description": "对于需要“博客下载”的用户，我们推荐一系列适合的APP应用软件。这些软件不仅能满足你对博客内容的下载需求，还能提供丰富的社交和信息资源。首先，《新浪<a href=\"https://sj.qq.com/appdetail/com.sina.weibo\" target=\"_blank\">微博</a>4G版》、《微博》、《<a href=\"https://sj.qq.com/appdetail/com.weico.international\" target=\"_blank\">微博轻享版</a>》和《<a href=\"https://sj.qq.com/appdetail/com.sina.weibolite\" target=\"_blank\">微博极速版</a>》都是微博平台的不同版本，用户可以通过这些APP轻松找到并下载各种博客内容，享受流畅的阅读体验。其次，《<a href=\"https://sj.qq.com/appdetail/com.baidu.searchbox\" target=\"_blank\">百度</a>》和《<a href=\"https://sj.qq.com/appdetail/com.baidu.tieba\" target=\"_blank\">百度贴吧</a>》作为强大的搜索和社区平台，也能帮助你快速找到并下载你感兴趣的博客文章。此外，《<a href=\"https://sj.qq.com/appdetail/com.xingin.xhs\" target=\"_blank\">小红书</a>》不仅是一个分享生活经验的平台，还包含了大量优质的博客内容，用户可以通过下载功能保存自己喜欢的文章。最后，《<a href=\"https://sj.qq.com/appdetail/com.baidu.wenku\" target=\"_blank\">百度文库</a>》作为一个知识分享平台，提供了丰富的文档资源，用户可以通过博客下载功能获取到各种专业和学术博客内容。总之，这些APP软件都能为你提供便捷的博客下载服务，满足你对博客内容的多样化需求。",
+              "rid": "CL6ohamJNBABGgZ3ZWJ5eWIiAzM3MioTdGhlbWVfcmVsZXZhbnRfbGlzdDIkNDU4ZTQ0MDAtYWRiMy00YmM1LTgxZTEtZGQ5MjdjOWY0ODdkOiQ3OTZhOTNkNi1hZTkzLTExZjEtYmVlYS01MjU0MDBhYjAzNGJCHWY3OWY2NTZjMTM0MjgzZmMtNDAyN2E1NmEtMzcyUgkyMDAwNzk1OTFYDWInCc+DORzKRco/EhwKEWNmX3JlbGF0ZWRfdGhlbWVzEc+DORzKRco/agwSCgoIYXBwX3R5cGVyAhAEegA=",
+              "exp_ids": ""
+            }
+          ],
+          "_meta": {
+            "market": "yingyongbao",
+            "mode": "package-list",
+            "input_value": "com.tencent.mobileqq",
+            "record_type": "detail"
+          }
+        }
+      }
+    ],
+    "outcomes": [
+      {
+        "input_value": "com.tencent.mobileqq",
+        "status": "success"
+      }
+    ],
+    "native_outcomes": [
+      {
+        "market": "yingyongbao",
+        "mode": "package-list",
+        "input_value": "com.tencent.mobileqq",
+        "success": 1,
+        "error": null
+      }
+    ],
+    "errors": [],
+    "rejected": [],
+    "http": [
+      {
+        "url": "https://sj.qq.com/appdetail/com.tencent.mobileqq",
+        "status": 200,
+        "input_value": "com.tencent.mobileqq"
+      }
+    ]
+  },
+  "warnings": [],
+  "error": null,
+  "stats": {
+    "requests": 1,
+    "responses": 1,
+    "finish_reason": "finished"
+  },
+  "execution": {
+    "run_dir": "G:\\data_tongbu\\data\\app-market-check-7888b52eeab14b6d9df163e229ce7bf5\\independent\\198\\data\\run-514d60eb29054180951adbd7b70be170",
+    "returncode": 0,
+    "timed_out": false
+  }
+}

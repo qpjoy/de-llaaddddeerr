@@ -1,0 +1,30 @@
+{
+  "name": "gallery-dl",
+  "repo": "mikf/gallery-dl",
+  "origin": "https://github.com/mikf/gallery-dl.git",
+  "commit": "2adf2a8e0041ec55afdcc2211fd5c7ca239a9352",
+  "commitDate": "2026-09-04T19:24:35+02:00",
+  "license": "GPL-2.0",
+  "paths": [
+    "gallery_dl",
+    "LICENSE"
+  ],
+  "deliveredBy": "package 94",
+  "scrubbed": [
+    {
+      "file": "gallery_dl/extractor/blogger.py",
+      "line": 170,
+      "kind": "google_api_key"
+    },
+    {
+      "file": "gallery_dl/extractor/pixiv.py",
+      "line": 1135,
+      "kind": "aws_secret"
+    },
+    {
+      "file": "gallery_dl/extractor/tenor.py",
+      "line": 69,
+      "kind": "google_api_key"
+    }
+  ]
+}

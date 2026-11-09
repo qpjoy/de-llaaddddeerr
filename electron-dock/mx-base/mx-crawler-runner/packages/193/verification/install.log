@@ -1,0 +1,56 @@
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple/
+Processing g:\data_tongbu\data\google-play-193-acceptance
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: mingxi-google-play
+  Building wheel for mingxi-google-play (pyproject.toml): started
+  Building wheel for mingxi-google-play (pyproject.toml): finished with status 'done'
+  Created wheel for mingxi-google-play: filename=mingxi_google_play-0.1.0-py3-none-any.whl size=98603 sha256=fe7a0be4efa58aab618c6b57fc215f69c216f5da06e9c88f7c683ddd774baf1d
+  Stored in directory: c:\users\dudumen\appdata\local\pip\cache\wheels\eb\4d\5e\a9ff3dcb90a568f1b6597fc8289742cca1bea622dc3a458e14
+Successfully built mingxi-google-play
+Installing collected packages: mingxi-google-play
+Successfully installed mingxi-google-play-0.1.0
+G:\data_tongbu\data\google-play-193-acceptance\.runtime\d5f52c91040fa7e26de9
+usage: main.py [-h] [--app-id APP_ID] [--term TERM]
+               [--developer-id DEVELOPER_ID] [--num NUM]
+               [--next-page-token NEXT_PAGE_TOKEN] [--category CATEGORY]
+               [--lang LANG] [--country COUNTRY] [--sort SORT]
+               [--collection COLLECTION] [--max-pages MAX_PAGES]
+               [--timeout TIMEOUT] [--request-timeout REQUEST_TIMEOUT]
+               [--max-requests MAX_REQUESTS] [--work-dir WORK_DIR]
+               [--runtime-dir RUNTIME_DIR] [--direct] [--output OUTPUT]
+               {app,search,reviews,list,developer,suggest,similar,permissions,datasafety,categories}
+
+Google Play public data — source row 193
+
+positional arguments:
+  {app,search,reviews,list,developer,suggest,similar,permissions,datasafety,categories}
+
+options:
+  -h, --help            show this help message and exit
+  --app-id APP_ID
+  --term TERM
+  --developer-id DEVELOPER_ID
+  --num NUM
+  --next-page-token NEXT_PAGE_TOKEN
+  --category CATEGORY
+  --lang LANG
+  --country COUNTRY
+  --sort SORT
+  --collection COLLECTION
+  --max-pages MAX_PAGES
+  --timeout TIMEOUT
+  --request-timeout REQUEST_TIMEOUT
+  --max-requests MAX_REQUESTS
+  --work-dir WORK_DIR
+  --runtime-dir RUNTIME_DIR
+  --direct              Ignore environment proxy; use direct connection
+  --output OUTPUT
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: G:\data_tongbu\data\google-play-193-acceptance\.venv\Scripts\python.exe -m pip install --upgrade pip
+<frozen runpy>:128: RuntimeWarning: 'mingxi_google_play.runtime' found in sys.modules after import of package 'mingxi_google_play', but prior to execution of 'mingxi_google_play.runtime'; this may result in unpredictable behaviour
