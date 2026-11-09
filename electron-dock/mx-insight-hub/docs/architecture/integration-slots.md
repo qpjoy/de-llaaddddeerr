@@ -43,7 +43,9 @@ Hub 管理卡片统一呈现“归属 / 接入方式 / 操作入口 / 数据交�
 | TikHub | 同步 HTTP，多步搜索/详情 | 分页、归档、映射与 System Proxy | 不改变代理、原合同或用户权限 |
 | Night-All | 历史同步兼容服务 | 逻辑请求、快照、旧计费键 | 不改路由或替换为 Night-All-A |
 | Night-All-A | HTTP 异步采集 + 独立数据库清洗 | 派发收据、任务/运行、步骤日志、Writer 契约 | 可选运行适配器、案例、观察与操作记录 |
-| 195 小米应用商店 | 每请求一个独立 Python 进程 | 原 SDK envelope，待定 Canonical 映射 | 复核材料、候选 manifest；未安装/执行/上线 |
+| 195 小米应用商店（及 193、197、198、216、217、219） | mx-crawler-runner：每请求一个独立进程组 | 原 SDK envelope，待定 Canonical 映射 | 候选 manifest；runner 与 Hub 引擎已实现未部署，本地联网实测见 [spider_man 07 第 12 节](spider_man/07-collect-engines.md#12-阶段-4runner-与应用商店) |
+| 94、96、98、101、104、105、107 单链接补全 | mx-crawler-runner：每请求一个进程组，上游库按审核 commit 加载 | 原 collector 记录，待定 Canonical 映射 | 候选 manifest；已实现未部署，本地实测和缺陷见 [spider_man 07 第 13 节](spider_man/07-collect-engines.md#13-阶段-5单链接详情补全与子域名) |
+| 45、46、220、222 音频 | mx-crawler-runner：discover → collect 两步共用一个 run_dir，不下载 | 原 SDK envelope（每一步），待定 Canonical 映射 | 候选 manifest；已实现未部署，见 [spider_man 07 第 14 节](spider_man/07-collect-engines.md#14-阶段-6音频节目与单集) |
 | Telegram / 移动电商 / 舆情等数据库源 | 增量 pull | 已有固定表、身份、水位、Writer 约束 | 保留现有 source/plan 身份和 checkpoint |
 | 文件源 | 有界读取/导入 | 文件规则版本、来源身份、导入证据 | 继续使用现有受限文件根与格式规则 |
 | 未来事件接入 | push/webhook/队列 | 事件身份、重放窗、顺序和确认点 | 仅定义扩展点，本轮不提供通用入口 |

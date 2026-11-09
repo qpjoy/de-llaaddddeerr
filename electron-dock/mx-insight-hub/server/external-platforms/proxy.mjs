@@ -39,6 +39,14 @@ const PROVIDER_ROUTES = Object.freeze({
   qixin: { origin: 'https://api.qixin.com', probeUrl: 'https://api.qixin.com/' },
   // Collection engines of kind apify (spider_man 07, D19).
   apify: { origin: 'https://api.apify.com', probeUrl: 'https://api.apify.com/v2/' },
+  shodan: { origin: 'https://api.shodan.io', probeUrl: 'https://api.shodan.io/' },
+  // Runner packages that reach overseas stores (spider_man 07 §12). Hub only
+  // selects the proxy; the runner process on the same host uses it.
+  googleplay: { origin: 'https://play.google.com', probeUrl: 'https://play.google.com/' },
+  // Phase 5 link enrichment (Pinterest, Medium, Snapchat, Dailymotion, Kick,
+  // Substack, WordPress.com): one binding for every overseas site; the probe
+  // only checks that the route reaches the open internet.
+  overseas: { origin: 'https://www.gstatic.com', probeUrl: 'https://www.gstatic.com/generate_204' },
 })
 function providerRoute(providerKey) {
   const route = Object.hasOwn(PROVIDER_ROUTES, providerKey) ? PROVIDER_ROUTES[providerKey] : null
@@ -277,6 +285,9 @@ export function createRapidApiProxyFetch(store, options = {}) {
 export function createApifyProxyFetch(store, options = {}) {
   return createProviderProxyFetch(store, { ...options, providerKey: 'apify' })
 }
+export function createShodanProxyFetch(store, options = {}) {
+  return createProviderProxyFetch(store, { ...options, providerKey: 'shodan' })
+}
 
 export function createQixinProxyFetch(store, { resolveEgressBase = async () => '', ...options } = {}) {
   const directFetch = options.fetchImpl || proxyFetch
@@ -352,6 +363,41 @@ function createProviderProxyFetch(store, {
       `System Proxy sequence connectivity probes failed: ${summarize(attempts)}`,
       { attempts },
     )
+  }
+}
+
+// Choose a proxy for a process Hub does not run itself (the collection
+// runner): same binding, probe policy and selection cache as the fetch
+// wrappers, but the answer is the proxy URL (null = direct) instead of a
+// response. Only for free public reads, where probing and failover are safe.
+export function createProviderProxySelector(store, { providerKey, fetchImpl = proxyFetch, makeAgent = url => new ProxyAgent(url), now = () => Date.now() } = {}) {
+  const { origin, probeUrl } = providerRoute(providerKey)
+  const selection = new Map()
+  return async ({ signal } = {}) => {
+    const route = await store.route()
+    const policy = resolveProbePolicy(route.probePolicy)
+    const candidates = [...route.proxyUrls, ...(route.directFallback ? [null] : [])]
+    if (!candidates.length) throw new AppError(503, 'proxy_route_unavailable', 'No enabled System Proxy route')
+    if (candidates.length === 1 && candidates[0] === null) return null
+    const key = `${origin}:${route.fingerprint}`
+    const cached = policy.cacheTtlMs > 0 ? selection.get(key) : null
+    if (cached && cached.expiresAt > now() && candidates.includes(cached.proxyUrl)) return cached.proxyUrl
+    const attempts = []
+    for (const candidate of candidates) {
+      const dispatcher = candidate ? makeAgent(candidate) : undefined
+      try {
+        const verdict = await probeCandidate({ fetchImpl, dispatcher, candidate, policy, signal, now, probeUrl })
+        attempts.push(...verdict.attempts)
+        if (verdict.callerAborted) break
+        if (!verdict.reachable) continue
+        if (policy.cacheTtlMs > 0) selection.set(key, { proxyUrl: candidate, expiresAt: now() + policy.cacheTtlMs })
+        return candidate
+      } finally {
+        if (dispatcher) void dispatcher.close().catch(() => {})
+      }
+    }
+    await recordFailure(store, route, attempts, providerKey)
+    throw new AppError(503, 'proxy_routes_unreachable', `System Proxy sequence connectivity probes failed: ${summarize(attempts)}`, { attempts })
   }
 }
 

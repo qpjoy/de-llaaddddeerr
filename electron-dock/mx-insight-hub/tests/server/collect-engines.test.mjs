@@ -31,7 +31,8 @@ function fakeRunner({ start = () => ({ status: 202, body: { data: { state: 'acce
     const path = new URL(url).pathname
     const call = { method: init.method || 'GET', path, body: init.body ? JSON.parse(init.body) : null, auth: init.headers?.authorization || null }
     calls.push(call)
-    if (path === '/v1/health') return Response.json({ data: { ok: true, version: 'runner-test', capacity: 4, running: 0 } })
+    if (path === '/v1/health') return Response.json({ data: { ok: true, version: 'runner-test', capacity: 4, running: 0,
+      slots: [{ slotId: 'market-195', available: true, reason: null, operations: ['collect'] }] } })
     const answer = call.method === 'POST' ? start(call) : state(call, path.split('/').pop())
     if (answer instanceof Error) throw answer
     return Response.json(answer.body, { status: answer.status })
@@ -39,7 +40,7 @@ function fakeRunner({ start = () => ({ status: 202, body: { data: { state: 'acce
   return { calls, fetchImpl }
 }
 
-async function fixture({ grant = true, runner = fakeRunner(), engine = {}, credentials = {} } = {}) {
+async function fixture({ grant = true, runner = fakeRunner(), engine = {}, credentials = { 'collect-runner': 'runner-token' } } = {}) {
   const ledger = new MemoryStore()
   const hub = new HubService({ store: ledger, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await hub.createTenant({ name: 'Delta' })
@@ -74,12 +75,13 @@ async function checkNow(fx) {
 test('catalog: app details accepts only reviewed fields and keeps IDs as strings', () => {
   const { definition, item } = normalizeJobRequest({ capability: CAP, input: { market: 'xiaomi', appIds: ['108048', 2882303761517] } })
   assert.equal(definition.key, CAP)
-  assert.deepEqual(item.input, { market: 'xiaomi', appIds: ['108048', '2882303761517'] })
+  assert.deepEqual(item.input, { market: 'xiaomi', appIds: ['108048', '2882303761517'], idKind: 'id' })
   assert.equal(item.routeKey, 'xiaomi')
-  assert.deepEqual(definition.runner(item.input), { operation: 'collect', params: { inputs: ['108048', '2882303761517'], input_kind: 'id', history: false } })
+  assert.deepEqual(definition.runner(item.input), { operation: 'collect', params: { inputs: ['108048', '2882303761517'], input_kind: 'id', history: false,
+    max_requests: 10, timeout: 70 } })
   for (const body of [
     { capability: 'collect.nope', input: {} },
-    { capability: CAP, input: { market: 'vivo', appIds: ['1'] } },
+    { capability: CAP, input: { market: 'huawei', appIds: ['1'] } },
     { capability: CAP, input: { market: 'xiaomi', appIds: [] } },
     { capability: CAP, input: { market: 'xiaomi', appIds: appIds(51) } },
     { capability: CAP, input: { market: 'xiaomi', appIds: ['com.xiaomi.shop'] } },
@@ -149,7 +151,7 @@ test('runner start/check: ambiguous answers are reconciled, never guessed', asyn
 
 test('admin: engines start from validated input and routes are exclusive', async () => {
   const fx = await fixture({ engine: null })
-  const base = { kind: 'runner', displayName: 'r', baseUrl: 'http://127.0.0.1:18300', reason: '新建' }
+  const base = { kind: 'runner', displayName: 'r', slotRef: 'market-195', baseUrl: 'http://127.0.0.1:18300', reason: '新建' }
   await assert.rejects(fx.service.adminCreateEngine({ ...base, id: 'Bad ID' }, 't'), { code: 'invalid_engine_config' })
   await assert.rejects(fx.service.adminCreateEngine({ ...base, id: 'runner.a', kind: 'apify' }, 't'), { code: 'invalid_engine_config' })
   await assert.rejects(fx.service.adminCreateEngine({ ...base, id: 'runner.a', baseUrl: 'https://example.com:443' }, 't'), { code: 'invalid_engine_base_url' })
@@ -264,7 +266,7 @@ test('executor: a lost dispatch is reconciled with the runner instead of guessed
 })
 
 test('executor: refused callers, missing credentials and unreachable runners never hold a slot', async () => {
-  const fx = await fixture({ runner: fakeRunner({ start: () => refused('ECONNREFUSED') }), engine: { credentialProvider: 'collect-runner' } })
+  const fx = await fixture({ runner: fakeRunner({ start: () => refused('ECONNREFUSED') }), engine: { credentialProvider: 'collect-runner' }, credentials: {} })
   const missing = (await submit(fx)).data.jobId
   await fx.executor.drain()
   assert.equal((await fx.service.getJob(fx.context, missing)).error.code, 'engine_credential_missing')

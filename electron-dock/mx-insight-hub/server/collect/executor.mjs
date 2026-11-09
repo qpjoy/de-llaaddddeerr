@@ -29,12 +29,14 @@ export const LEASE_GRACE_MS = 30_000
 
 export class CollectExecutor {
   constructor({
-    jobs, ledger, contracts, policyFor, credentialsFor = async () => null, fetchImpl = globalThis.fetch, fetchFor = null, logger = console,
+    jobs, ledger, contracts, policyFor, credentialsFor = async () => null, fetchImpl = globalThis.fetch, fetchFor = null, deps = {}, logger = console,
     pollMs = 1_000, maxInFlight = 32, owner = `collect:${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`,
   }) {
     Object.assign(this, { jobs, ledger, contracts, policyFor, credentialsFor, fetchImpl, logger, pollMs, maxInFlight, owner })
     // Per-kind transport, e.g. the System Proxy route for api.apify.com.
     this.fetchFor = fetchFor || (() => fetchImpl)
+    // Injected runtime pieces for native queries (e.g. a DNS Resolver in tests).
+    this.deps = deps
     this.inFlight = new Set()
     this.spawned = 0
     this.ticking = null
@@ -42,6 +44,7 @@ export class CollectExecutor {
     this.lastPruneAt = 0
     this.stopped = true
     this.reconcilableKinds = [...contracts.values()].filter(contract => contract.reconcilable).map(contract => contract.kind)
+    this.readOnlyKinds = [...contracts.values()].filter(contract => contract.readOnly).map(contract => contract.kind)
   }
 
   start() {
@@ -82,6 +85,13 @@ export class CollectExecutor {
       if (this.ticking) await this.ticking
       if (this.spawned === before && !this.inFlight.size) return
     }
+  }
+
+  // Inline run of a job this caller already claimed (synchronous queries).
+  // Same checks, billing and recording as a queued dispatch.
+  async runClaimed(job, engine) {
+    await this.#dispatch(job, engine)
+    return this.jobs.get(job.id)
   }
 
   #spawn(work) {
@@ -125,7 +135,7 @@ export class CollectExecutor {
   async #housekeeping(ready) {
     if (ready.expired) await this.jobs.expireQueued().catch(() => {})
     if (ready.orphans) {
-      const orphans = await this.jobs.reapOrphans({ reconcilableKinds: this.reconcilableKinds, leaseGraceMs: LEASE_GRACE_MS })
+      const orphans = await this.jobs.reapOrphans({ reconcilableKinds: this.reconcilableKinds, readOnlyKinds: this.readOnlyKinds, leaseGraceMs: LEASE_GRACE_MS })
       for (const job of orphans) {
         if (job.usageRequestId) await this.ledger.markRequestUnknown(job.usageRequestId, 'executor_lost').catch(() => {})
       }
@@ -220,7 +230,7 @@ export class CollectExecutor {
       return
     }
     const { contract, definition, credential, usageRequestId } = prepared
-    const context = { engine, job, definition, credential, fetchImpl: this.fetchFor(engine.kind), runDeadlineAt: job.runDeadlineAt }
+    const context = { engine, job, definition, credential, fetchImpl: this.fetchFor(engine.kind), runDeadlineAt: job.runDeadlineAt, deps: this.deps }
     let answer
     try {
       answer = contract.mode === 'sync' ? await contract.dispatch(context) : await contract.start(context)
@@ -228,7 +238,10 @@ export class CollectExecutor {
       answer = { outcome: unknown('contract_error', '引擎合同执行异常，上游是否已开始执行未知', { cause: String(error?.code || error?.message || error).slice(0, 200) }) }
     }
     if (answer.outcome) {
-      await this.#complete({ ...job, usageRequestId }, answer.outcome, { durationMs: Date.now() - started })
+      // Rate-limited upstreams (Shodan: one call per second) pace the whole
+      // engine through its shared PG cooldown, whichever process ran the call.
+      const outcome = contract.minIntervalMs ? { ...answer.outcome, paceUntil: Date.now() + contract.minIntervalMs } : answer.outcome
+      await this.#complete({ ...job, usageRequestId }, outcome, { durationMs: Date.now() - started })
       return
     }
     const waiting = await this.jobs.markWaiting({ jobId: job.id, owner: this.owner, upstreamRef: answer.upstream?.ref ?? job.id,

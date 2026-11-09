@@ -85,7 +85,7 @@ flowchart LR
 | 多节点 | 规划中，新服务器尚未采购 | S0 约定现在就执行，S1 等新机器到位 |
 | 全局准入信号量 | 设计中 | Public 多副本之前必须完成 |
 | LCY 供应商优先排队 | 已实现未部署：每进程优先队列 + 80% 预留 + PG 令牌桶等待，见 [04](04-admission-and-concurrency.md) | 发布 migration 172，先调好“管理”页供应商限额，再在开关里选“优先排队” |
-| 外部交付采集包接入（[06](06-platforms-integration-plan.md)） | 阶段 0–6 顺序已定；D17–D19 已确认。阶段 1、阶段 2（Apify 执行方式 + 2a 试点）已实现未部署 | 部署后在引擎页录入 Apify token 并探测（Q9），查清价格（Q10），再对 2a 做小量联网验收 |
+| 外部交付采集包接入（[06](06-platforms-integration-plan.md)） | 阶段 0–6 都已实现未部署：通用骨架；17 个 Apify 能力项；同步查询；runner + 7 个应用市场；单链接补全 + 原生子域名；音频节目与单集（4 个平台）。D17–D44 | 部署 migration 183–187、Hub 和 runner 镜像；录入 Apify token、Shodan key、runner token 并探测；逐个能力做小量联网验收。外部待办：Medium 交付包修复、Snapchat 和 Substack 上游修复、Podcast Index 凭据；音频下载等 mx-static |
 | 通用采集引擎（[07](07-collect-engines.md)） | 已实现未部署：migration 183、184，多执行槽，runner 和 apify 两种执行方式，collect 对外接口，管理台「自建引擎」页（原微信引擎也列在其中） | 发布 migration 183、184 和 Hub 镜像；部署后没有任何引擎，对现有接口无影响 |
 | Facebook 自建搜索（Night-All-A） | 已实现未部署：策略模式 `selfhosted`，全集群 PG 名额（默认同时 2 个、每分钟 12 次启动），见 [03](03-self-hosted-engines.md) 第 11 节 | 发布 migration 173 → Internal 上确认 Night-All-A 可达且 facebook-protocol 有有效登录会话 → 策略搜索管理里选「自建」 |
 
@@ -98,6 +98,30 @@ flowchart LR
 
 ## 7. 变更记录
 
+- 2026-11-09 上线准备：新增 [采集引擎上线手册](../../operations/collect-engines-rollout.md) 和 `scripts/collect-acceptance.mjs`（plan / apply / runner-token / probe / enable / smoke）。
+  - 标准引擎集合从能力目录推导，覆盖每条路由且只覆盖一次。
+  - 本机预演发现 runner 并发上限（8）低于标准配置的 18 个 runner 执行槽，已改为 24，`probe` 会核对这条规则。
+  - runner 部署脚本复用 Hub 的 `MX_INSIGHT_BUILD_PROXY` builder。
+  - 预演中 Google Play 9 个操作全部联网成功。
+- 2026-11-09 阶段 6：音频已实现未部署（[07](07-collect-engines.md) 第 14 节）。
+  - **runner**：协议新增 `steps`，一次调用按顺序执行多个白名单内的操作，共用一个工作目录（D41）。
+  - **能力**：`collect.audio.shows` / `collect.audio.episodes`，覆盖小宇宙、喜马拉雅、Apple Podcasts、LibriVox，只取元数据和音频地址。
+  - **不挂持久卷**，下载等 mx-static（D42）；ID 必须填写（D43）；Podcast Index 等凭据（D44）。
+  - **本地实测**：小宇宙、Apple、LibriVox 成功；喜马拉雅被接口限流，待在 Internal 复测。
+- 2026-11-09 阶段 5：单链接补全与子域名已实现未部署（[07](07-collect-engines.md) 第 13 节）。
+  - **单链接补全**：`collect.web.url.details` 按链接主机名路由到 Pinterest、Medium、Snapchat、Dailymotion、Kick、Substack、WordPress.com 的 runner 包，不接受自定义域名（D37）。上游库只收审核 commit 的导入包，经 `PYTHONPATH` 加载，yt-dlp 三家共用（D36）。runner 镜像改用 Python 3.13，适配器输出也做代理脱敏（D40）。migration 187 新增 `overseas` 出口。
+  - **子域名**：subfinder 改为 Hub 原生的 `collect.intel.subdomains`，查 Cert Spotter 和 crt.sh（D38）。
+  - **Mastodon**：暂不接（D39）。
+  - **本地实测**：子域名、Pinterest、Dailymotion、Kick、WordPress 成功；Medium 是交付包缺陷，Snapchat 和 Substack 是上游失效。
+- 2026-11-09 阶段 4：runner 与应用商店已实现未部署（[07](07-collect-engines.md) 第 12 节）。
+  - **runner**：新项目 `electron-dock/mx-base/mx-crawler-runner`，Node 22，不依赖第三方包。7 个交付包原样放进仓库，按 sha256 校验；每次调用一个进程组，先持久登记再启动；只监听 127.0.0.1:18190，单独部署，不进 Hub 的 kustomization（D31、D32）。
+  - **Hub 能力**：`collect.app.details` 扩展到小米、vivo、应用宝、百度、联想、豌豆荚、Google Play；另有 8 个 `collect.app.googleplay.*` 能力项（D33）。
+  - **出口**：Google Play 经 migration 186 的 `googleplay` 绑定选代理，再传给 runner（D34）。
+  - **约束**：runner 引擎必须带 token，只能承接本插槽的能力（D35）。
+  - **验证**：本地经 Hub → runner 从 5 个国内市场取到了真实详情；豌豆荚因本机 DNS 没有测成；Google Play 没有联网测试。
+- 2026-11-09 阶段 3：同步查询已实现未部署（[07](07-collect-engines.md) 第 11 节）。新增 `POST /api/v1/data/collect/query`：有空槽时在请求内执行并返回 200 和结果，否则退回 202。新增 `native` 执行方式（DNS 只走公共解析器、RDAP 走 IANA 引导表、证书透明日志走 Cert Spotter）和 `shodan` 执行方式（host / search 首页 / count / domain；每秒 1 次的节流记在 PG 冷却里，跨进程共享；migration 185 把出口绑到 7788）。只读任务失联记为失败，并释放执行槽（D28–D30）。本地已对 DNS、RDAP、证书透明日志做了真实只读查询；Shodan 没有用真实 key 调用。
+- 2026-11-09 2c：新增 9 个 Apify 候选能力项，已实现未部署（[07](07-collect-engines.md) 第 10.2c 节）：Shein、Flipkart、Mercado Libre、FB Marketplace、Craigslist、Shopify、BuiltWith、UK Companies House（只取企业基础信息，高管和实际控制人等个人数据关闭）、Trip.com 酒店评论。每次运行都传 `maxItems`，值等于 Hub 会读回的条数（D27）。管理台引擎列表能折叠显示较多的能力项。没有调用真实 Apify。
+- 2026-11-09 2b 电商：新增 Amazon（关键词加站点，或站内链接）、eBay、AliExpress、Etsy、Shopee（国家必填，关键词或本国站点店铺链接）5 个 Apify 能力项，已实现未部署（[07](07-collect-engines.md) 第 10.2b 节）。只开放搜索；卖家、报价、验证码破解、详情、评论一律关闭。都是 candidate，不自动授权。它们是异步产品，不作为同步商品搜索的备用。没有调用真实 Apify。
 - 2026-11-09 阶段 2：Apify 执行方式已实现未部署（[07](07-collect-engines.md) 第 10 节）。启动用 `/v2/acts/{id}/runs`，固定版本，不传花费上限；运行 ID 落库后异步核对；数据集分页读取，完整性按总数判断；启动应答丢失或执行器失联都记为 unknown 并隔离执行槽，从不重提；截止时间请求中止，确认后才释放执行槽；成本记入任务，只在管理台显示。migration 184 把 apify 出口绑定到 7788 序列（探测缓存 5 分钟），其他绑定不动。凭据写入共享凭据库，只写不读。新增 Temu、Meta 广告库、Similarweb 三个候选能力项，不自动授权。没有用真实 token 调用 Apify。不涉及 MX-H2I、Launcher。
 - 2026-11-09 阶段 1：通用采集引擎已实现未部署（[07](07-collect-engines.md)）。新建 schema `collect`（migration 183），微信表不动；执行槽为行，派发用 SKIP LOCKED，加锁顺序统一为引擎 → 执行槽 → 任务；同一调用方的提交加锁，因此每个调用方的上限精确；异步任务进入 waiting 后由任一执行器核对，派发途中进程失联靠租约发现；结果单独存表。新增 `/api/v1/data/collect/*` 和管理台「数据接入与治理 → 自建引擎」页，原微信引擎嵌入其原有面板。能力项 `collect.app.details` 加入 PUBLIC_CAPABILITIES，但不自动授予 managed_full Key。另外把微信内存存储的提交时间改为严格递增，修复同一毫秒提交时顺序随机的问题。不涉及 MX-H2I、Launcher。
 - 2026-11-09：新增 [06 外部交付采集包接入计划](06-platforms-integration-plan.md)（设计中）。用户确认 D17–D19：Apify token 录入 Hub 凭据库（来源是 po-infra 旧爬虫里写死的 token，有效性未核实），先不做花费限制，海外出口走 System Proxy 的 7788 序列。只改了文档，没有代码、存储或 MX-H2I 变化。

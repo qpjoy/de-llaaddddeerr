@@ -1,7 +1,8 @@
 import { AppError } from '../core/errors.mjs'
 import { normalizeEngineBaseUrl } from '../self-hosted/wechat-contract.mjs'
 import {
-  COLLECT, COLLECT_CAPABILITIES, COLLECT_ENGINE_BOUNDS as BOUNDS, COLLECT_KINDS, COLLECT_TERMINAL, collectCapability,
+  COLLECT, COLLECT_CAPABILITIES, COLLECT_ENGINE_BOUNDS as BOUNDS, COLLECT_KINDS, COLLECT_RUNNER_SLOTS, COLLECT_TERMINAL, collectCapability,
+  collectEgressProvider,
 } from '../../shared/collect-engines.mjs'
 import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
 import { assertIdempotencyKey, normalizeBatchRequest, normalizeJobRequest } from './catalog.mjs'
@@ -16,7 +17,13 @@ const PROVIDER_KEY = /^[a-z][a-z0-9._-]{0,63}$/
 // Polling reads share one queue snapshot per engine and process for this long.
 const SNAPSHOT_TTL_MS = 2_000
 const DEFAULT_ITEM_MS = 60_000
+// /query waits this long for a slot (or for another executor to finish the
+// job) before answering 202 like /jobs. The run itself is bounded by the
+// engine's run timeout.
+const SYNC_WAIT_MS = 5_000
+const SYNC_POLL_MS = 200
 const terminal = new Set(COLLECT_TERMINAL)
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const ownerOf = context => ({ tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id })
 const iso = value => value == null ? null : new Date(value).toISOString()
@@ -94,9 +101,12 @@ function bounded(value, name, { min, max }, scale = 1) {
 export class CollectService {
   // credentials: { read, describe, update } over the provider credential store
   // (migration 052). egressStores: provider key → System Proxy binding store.
-  constructor({ jobs, ledger, contracts, executor = null, credentials = null, credentialsFor = null, fetchImpl = globalThis.fetch,
-    fetchFor = null, egressStores = {}, legacy = {} }) {
-    Object.assign(this, { jobs, ledger, contracts, executor, credentials, fetchImpl, egressStores, legacy })
+  // runner: the executor used for inline /query runs. Admin processes pass
+  // their polling executor; Public processes pass one that is never started.
+  constructor({ jobs, ledger, contracts, executor = null, runner = null, credentials = null, credentialsFor = null, fetchImpl = globalThis.fetch,
+    fetchFor = null, egressStores = {}, legacy = {}, syncWaitMs = SYNC_WAIT_MS }) {
+    Object.assign(this, { jobs, ledger, contracts, executor, credentials, fetchImpl, egressStores, legacy, syncWaitMs })
+    this.runner = runner || executor
     this.credentialsFor = credentialsFor || (credentials ? provider => credentials.read(provider) : async () => null)
     this.fetchFor = fetchFor || (() => fetchImpl)
     this.snapshots = new Map()
@@ -180,6 +190,40 @@ export class CollectService {
     for (const job of jobs) counts[job.status]++
     return { batchId: batch.id, capability: batch.capability, total: jobs.length, complete: jobs.every(job => terminal.has(job.status)), counts, jobs: views,
       links: { self: `${COLLECT.apiPrefix}/batches/${batch.id}`, result: `${COLLECT.apiPrefix}/batches/${batch.id}/result` } }
+  }
+
+  // Synchronous query for capabilities served by sync kinds (phase 3). The
+  // job is recorded exactly like /jobs; when a slot is free it runs inside
+  // this request and the answer carries the result (200). Otherwise it stays
+  // queued for the executor and the answer is the usual 202.
+  async queryNow(context, body, idempotencyKey) {
+    assertIdempotencyKey(idempotencyKey)
+    const { definition, item } = normalizeJobRequest(body)
+    if (!definition.sync) {
+      throw new AppError(400, 'capability_not_synchronous', '该能力只支持异步提交，请使用 POST /jobs', { capability: definition.key })
+    }
+    await this.#authorize(context, definition.key)
+    const submitted = await this.jobs.submit({ owner: ownerOf(context), kind: 'job', idempotencyKey, fingerprint: item.fingerprint,
+      capability: definition.key, items: [item] })
+    this.#forget(submitted.jobs)
+    let job = submitted.jobs[0]
+    const waitUntil = Date.now() + this.syncWaitMs
+    while (!terminal.has(job.status) && Date.now() < waitUntil) {
+      if (job.status === 'queued' && this.runner) {
+        const claimed = await this.jobs.claimJob({ jobId: job.id, owner: this.runner.owner, leaseGraceMs: 30_000 })
+        if (claimed.job) { job = await this.runner.runClaimed(claimed.job, claimed.engine); continue }
+      }
+      await sleep(SYNC_POLL_MS)
+      job = await this.jobs.get(job.id)
+    }
+    if (!terminal.has(job.status)) {
+      this.executor?.nudge()
+      const [view] = await this.#views([job])
+      return { completed: false, replay: submitted.replay, data: view }
+    }
+    const stored = job.result ? await this.jobs.result(job.id) : null
+    return { completed: true, replay: submitted.replay, data: { job: publicJobView(job),
+      result: stored ? { dataStatus: job.dataStatus, evidence: { bytes: stored.bytes, sha256: stored.sha256, itemCount: stored.itemCount }, payload: stored.payload } : null } }
   }
 
   async getJob(context, jobId) {
@@ -282,13 +326,23 @@ export class CollectService {
     const [snapshot, recent, events] = await Promise.all([
       this.jobs.queueSnapshot(engineId), this.jobs.listRecent(engineId, 50), this.jobs.events(engineId, 30),
     ])
-    const [credential, egress] = await Promise.all([this.#credentialState(detail.engine), this.#egressState(detail.engine.kind)])
+    const [credential, egress] = await Promise.all([this.#credentialState(detail.engine), this.#egressState(detail.engine)])
     return { ...detail, credential, egress, queue: { queued: snapshot.queued, running: snapshot.running, medianMs: snapshot.medianMs, oldestRunningAt: snapshot.oldestRunningAt,
       drainAt: snapshot.queued ? estimateStart({ position: snapshot.queued + detail.engine.capacity, capacity: detail.engine.capacity, running: snapshot.running, medianMs: snapshot.medianMs }) : null },
     jobs: recent.map(adminJobView), events, kind: { kind: detail.engine.kind, ...(COLLECT_KINDS[detail.engine.kind] || {}), available: this.contracts.has(detail.engine.kind) } }
   }
 
-  #routes(kind, input) {
+  // A runner engine calls exactly one reviewed package (its slot), so it may
+  // only take the capabilities and routes that package serves.
+  #slotFits(kind, definition, routeKey, slotRef) {
+    if (kind !== 'runner') return
+    const required = definition.routeBy ? (definition.routes || []).find(row => row.key === routeKey)?.slotRef : definition.slotRef
+    if (required && required !== slotRef) {
+      throw configError(`${definition.key}${routeKey ? ` 的路由 ${routeKey}` : ''} 只能由插槽 ${required}（${COLLECT_RUNNER_SLOTS[required]?.label || required}）的 runner 引擎承接，当前引擎插槽为 ${slotRef || '（未填写）'}`)
+    }
+  }
+
+  #routes(kind, input, slotRef = null) {
     if (input === undefined) return null
     if (!Array.isArray(input) || input.length > 32) throw configError('routes 须为数组（最多 32 项）')
     const seen = new Set()
@@ -301,6 +355,7 @@ export class CollectService {
       if (definition.routeBy ? !(definition.routes || []).some(row => row.key === routeKey) : routeKey !== '') {
         throw configError(`${definition.key} 的路由 ${routeKey || '（空）'} 不在允许范围内`)
       }
+      this.#slotFits(kind, definition, routeKey, slotRef)
       const key = `${definition.key}:${routeKey}`
       if (seen.has(key)) throw configError(`重复的路由 ${key}`)
       seen.add(key)
@@ -372,7 +427,7 @@ export class CollectService {
       // New engines start stopped: enabling is a separate, deliberate step.
       enabled: fields.enabled ?? false, billingEnabled: fields.billingEnabled ?? false,
     }
-    const created = await this.jobs.createEngine({ engine, routes: this.#routes(input.kind, input.routes) || [], actor, reason: input.reason })
+    const created = await this.jobs.createEngine({ engine, routes: this.#routes(input.kind, input.routes, engine.slotRef) || [], actor, reason: input.reason })
     this.executor?.nudge()
     return created
   }
@@ -384,7 +439,14 @@ export class CollectService {
     if (!current) throw new AppError(404, 'engine_not_found', 'Engine not found')
     const patch = this.#fields(current.kind, input, { creating: false })
     if (patch.credentialProvider === null && COLLECT_KINDS[current.kind]?.credential === 'required') throw configError('该类型的引擎必须填写凭据键')
-    const engine = await this.jobs.updateEngine({ engineId, patch, routes: this.#routes(current.kind, input.routes),
+    const slotRef = patch.slotRef !== undefined ? patch.slotRef : current.slotRef
+    const routes = this.#routes(current.kind, input.routes, slotRef)
+    if (routes === null && slotRef !== current.slotRef) {
+      // Moving an engine to another package must not strand its routes.
+      const detail = await this.jobs.engineDetail(engineId)
+      this.#routes(current.kind, detail?.routes || [], slotRef)
+    }
+    const engine = await this.jobs.updateEngine({ engineId, patch, routes,
       expectedRevision: input.expectedRevision, actor, reason: input.reason })
     this.snapshots.delete(engineId)
     this.executor?.nudge()
@@ -436,8 +498,8 @@ export class CollectService {
     }
   }
 
-  async #egressState(kind) {
-    const provider = COLLECT_KINDS[kind]?.egressProvider
+  async #egressState(engine) {
+    const provider = collectEgressProvider(engine)
     if (!provider) return null
     const store = this.egressStores[provider]
     if (!store) return { provider, available: false }
@@ -466,7 +528,7 @@ export class CollectService {
   async adminSetEgress(engineId, body, actor) {
     const engine = await this.jobs.engine(engineId)
     if (!engine) throw new AppError(404, 'engine_not_found', 'Engine not found')
-    const provider = COLLECT_KINDS[engine.kind]?.egressProvider
+    const provider = collectEgressProvider(engine)
     const store = provider ? this.egressStores[provider] : null
     if (!store) throw new AppError(409, 'egress_unsupported', '该类型的引擎没有可配置的出口，或当前进程没有数据库')
     const input = body && typeof body === 'object' && !Array.isArray(body) ? body : {}
@@ -475,7 +537,7 @@ export class CollectService {
     await store.update({ mode: input.mode, sequenceKey: input.sequenceKey ?? null, expectedRevision: input.expectedRevision, reason: input.reason })
     await this.jobs.recordEvent(engineId, 'egress_updated', { actor, reason: typeof input.reason === 'string' ? input.reason.trim() : '',
       details: { provider, mode: input.mode, sequenceKey: input.sequenceKey ?? null } })
-    return this.#egressState(engine.kind)
+    return this.#egressState(engine)
   }
 
   async adminJob(jobId) {

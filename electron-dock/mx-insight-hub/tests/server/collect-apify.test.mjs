@@ -105,7 +105,8 @@ test('apify start: a created run waits; refusals fail; a lost answer is unknown 
   assert.equal(created.result.upstream.ref, 'RunAbc123456')
   assert.equal(created.result.upstream.state.run.userId, undefined, 'only the reviewed run fields are kept')
   assert.equal(created.call.path, `/v2/acts/${ACTOR}/runs`)
-  assert.deepEqual(created.call.query, { build: '0.0.452', timeout: created.call.query.timeout, restartOnError: 'false' })
+  assert.deepEqual(created.call.query, { build: '0.0.452', timeout: created.call.query.timeout, restartOnError: 'false', maxItems: '40' },
+    'maxItems bounds charged records to what Hub reads (D27)')
   assert.ok(Number(created.call.query.timeout) >= 30 && Number(created.call.query.timeout) <= 540, 'Apify ends the run before Hub does')
   assert.equal(created.call.query.maxTotalChargeUsd, undefined, 'no spend cap is sent (D18)')
   assert.equal(created.call.auth, `Bearer ${TOKEN}`)
@@ -288,4 +289,128 @@ test('HTTP: credential is write-only and the egress route reports when unavailab
   } finally {
     await new Promise(resolve => server.close(resolve))
   }
+})
+
+test('2b ecommerce: keyword search maps to the pinned Actor input with paid extras off', () => {
+  const map = (capability, input) => { const { definition, item } = normalizeJobRequest({ capability, input }); return { input: item.input, actor: definition.actorInput(item.input), limit: definition.resultLimit(item.input), definition } }
+  const amazon = map('collect.ecommerce.amazon.search', { keyword: 'mechanical keyboard', marketplace: 'JP', maxItems: 45 })
+  assert.deepEqual(amazon.actor.categoryOrProductUrls, [{ url: 'https://www.amazon.co.jp/s?k=mechanical%20keyboard' }])
+  assert.deepEqual([amazon.actor.maxItemsPerStartUrl, amazon.actor.maxSearchPagesPerStartUrl, amazon.limit], [45, 3, 45])
+  assert.deepEqual([amazon.actor.scrapeSellers, amazon.actor.maxOffers, amazon.actor.useCaptchaSolver, amazon.actor.scrapeProductVariantPrices], [false, 0, false, false])
+  const links = map('collect.ecommerce.amazon.search', { urls: ['https://www.amazon.com/dp/B0TEST1234', 'https://amazon.de/s?k=x'], maxItems: 10 })
+  assert.equal(links.limit, 20, 'one page per link')
+  const ebay = map('collect.ecommerce.ebay.search', { keywords: ['keyboard', 'mouse'], marketplace: 'UK', maxItems: 120, condition: ['used', 'refurbished'], minPrice: 5, maxPrice: 50 })
+  assert.deepEqual(ebay.actor, { searchQueries: ['keyboard', 'mouse'], marketplace: 'UK', maxProductsPerSearch: 120, maxSearchPages: 2, sort: 'best_match',
+    listingType: 'all', condition: ['used', 'refurbished'], minPrice: 5, maxPrice: 50, maxRequestRetries: 3 })
+  assert.equal(ebay.limit, 240)
+  assert.equal('condition' in map('collect.ecommerce.ebay.search', { keywords: ['x'] }).actor, false, 'empty filters are not sent')
+  const ali = map('collect.ecommerce.aliexpress.search', { keyword: 'earbuds', site: 'de.aliexpress.com', shipCountry: 'DE', maxItems: 20 })
+  assert.deepEqual(ali.actor, { searchQuery: 'earbuds', maxResults: 20, detailedItems: false, includeReviews: false, site: 'de.aliexpress.com', shipCountry: 'DE' })
+  const etsy = map('collect.ecommerce.etsy.search', { keywords: ['mug', 'vase'], maxItems: 100, freeShippingOnly: true })
+  assert.deepEqual([etsy.actor.maxResults, etsy.actor.maxPages, etsy.actor.includeAds, etsy.actor.freeShippingOnly, etsy.actor.digitalOnly, etsy.limit], [200, 3, false, true, false, 200])
+  const shopee = map('collect.ecommerce.shopee.search', { country: 'MY', keywords: ['keyboard'] })
+  assert.deepEqual(shopee.actor, { country: 'MY', keywords: ['keyboard'], shopUrls: [], categoryUrls: [], maxItems: 50, priceSlicing: false, debug: false })
+  const shop = map('collect.ecommerce.shopee.search', { country: 'VN', shopUrls: ['https://shopee.vn/some_shop'], maxItems: 10 })
+  assert.deepEqual(shop.actor.shopUrls, ['https://shopee.vn/some_shop'])
+  for (const { definition } of [amazon, ebay, ali, etsy, shopee]) assert.match(definition.apify.build, /^\d+\.\d+\.\d+$/, 'every Actor build is pinned')
+})
+
+test('2b ecommerce: anything outside the reviewed input is refused before queueing', () => {
+  for (const [capability, input] of [
+    ['collect.ecommerce.amazon.search', { keyword: 'x', urls: ['https://www.amazon.com/s?k=x'] }],
+    ['collect.ecommerce.amazon.search', {}],
+    ['collect.ecommerce.amazon.search', { keyword: 'x', marketplace: 'CN' }],
+    ['collect.ecommerce.amazon.search', { urls: ['https://www.amazon.com.evil.example/s?k=x'] }],
+    ['collect.ecommerce.amazon.search', { urls: ['https://www.amazon.com/dp/B0'], marketplace: 'US' }],
+    ['collect.ecommerce.amazon.search', { keyword: 'x', maxItems: 101 }],
+    ['collect.ecommerce.amazon.search', { keyword: 'x', scrapeSellers: true }],
+    ['collect.ecommerce.ebay.search', { keywords: [] }],
+    ['collect.ecommerce.ebay.search', { keywords: ['a', 'b', 'c', 'd', 'e', 'f'] }],
+    ['collect.ecommerce.ebay.search', { keywords: ['a'], marketplace: 'JP' }],
+    ['collect.ecommerce.ebay.search', { keywords: ['a'], condition: ['mint'] }],
+    ['collect.ecommerce.ebay.search', { keywords: ['a'], minPrice: 50, maxPrice: 5 }],
+    ['collect.ecommerce.aliexpress.search', { keyword: 'x', includeReviews: true }],
+    ['collect.ecommerce.aliexpress.search', { keyword: 'x', shipCountry: 'usa' }],
+    ['collect.ecommerce.aliexpress.search', { keyword: 'x', site: 'aliexpress.cn' }],
+    ['collect.ecommerce.etsy.search', { keywords: ['x'], country: 'CN' }],
+    ['collect.ecommerce.etsy.search', { keywords: ['x'], digitalOnly: true }],
+    ['collect.ecommerce.etsy.search', { keywords: ['x'], onSaleOnly: 'yes' }],
+    ['collect.ecommerce.shopee.search', { keywords: ['x'] }],
+    ['collect.ecommerce.shopee.search', { country: 'SG', keywords: ['x'], shopUrls: ['https://shopee.sg/a'] }],
+    ['collect.ecommerce.shopee.search', { country: 'SG', shopUrls: ['https://shopee.vn/a'] }],
+    ['collect.ecommerce.shopee.search', { country: 'SG', keywords: ['x'], maxItems: 5 }],
+  ]) assert.throws(() => normalizeJobRequest({ capability, input }), { code: 'invalid_collect_request' }, `${capability} ${JSON.stringify(input)}`)
+})
+
+test('2b ecommerce: one Apify engine serves several platforms and reads each result page by its own limit', async () => {
+  const runs = new Map()
+  const apify = fakeApify({
+    'POST /v2/acts/.+/runs': call => {
+      const actId = call.path.split('/')[3]
+      const id = `Run${runs.size + 1}x${actId.slice(0, 6)}`
+      runs.set(id, actId)
+      return { status: 201, body: { data: run('READY', { actId, id }) } }
+    },
+    'GET /v2/actor-runs/.+': call => { const id = call.path.split('/').pop(); return { status: 200, body: { data: run('SUCCEEDED', { id, actId: runs.get(id) }) } } },
+    'GET /v2/datasets/DsAbc123456/items': call => ({ status: 200, body: items(Number(call.query.limit)), headers: { 'x-apify-pagination-total': call.query.limit } }),
+  })
+  const fx = await fixture({ apify, engine: { routes: [{ capability: TEMU }, { capability: 'collect.ecommerce.ebay.search' }, { capability: 'collect.ecommerce.amazon.search' }] } })
+  await fx.hub.putCapabilityConfiguration('collect.ecommerce.ebay.search', { tenantId: fx.context.tenant.id, consumerId: fx.context.consumer.id, enabled: true })
+  const key = await fx.hub.createApiKey({ consumerId: fx.context.consumer.id, name: 'ebay', platforms: [], capabilities: ['collect.ecommerce.ebay.search'] })
+  const ebayContext = await fx.hub.authenticate(key.secret)
+  const { data } = await fx.service.submitJob(ebayContext, { capability: 'collect.ecommerce.ebay.search', input: { keywords: ['keyboard', 'mouse'], maxItems: 30 } }, 'delta-ebay-0001')
+  await assert.rejects(fx.service.submitJob(ebayContext, { capability: TEMU, input: { keyword: 'x' } }, 'delta-temu-0001'), { code: 'capability_not_granted' })
+  // The run must belong to the pinned Actor; the fake remembers which one it started.
+  await fx.executor.drain()
+  await checkNow(fx)
+  const view = await fx.service.getJob(ebayContext, data.jobId)
+  assert.deepEqual([view.status, view.delivery.itemCount], ['succeeded', 60])
+  const read = fx.apify.calls.find(call => call.path.endsWith('/items'))
+  assert.equal(read.query.limit, '60', 'two keywords × 30 items')
+  assert.equal(fx.apify.calls[0].path, '/v2/acts/Y7h6Aodb7ZXkv6Ieb/runs')
+})
+
+test('2c: long-tail capabilities map to pinned Actors with enrichments and personal data off', () => {
+  const map = (capability, input) => { const { definition, item } = normalizeJobRequest({ capability, input }); return { input: item.input, actor: definition.actorInput(item.input), limit: definition.resultLimit(item.input) } }
+  assert.deepEqual(map('collect.ecommerce.shein.listing', { url: 'https://www.shein.com/Women-Dresses-c-1727.html', maxItems: 30 }).actor,
+    { startUrl: 'https://www.shein.com/Women-Dresses-c-1727.html', results_wanted: 30 })
+  assert.deepEqual(map('collect.ecommerce.flipkart.search', { url: 'https://www.flipkart.com/mobiles/pr?sid=tyy', sort: 'newest' }).actor,
+    { startUrl: 'https://www.flipkart.com/mobiles/pr?sid=tyy', sort: 'newest', results_wanted: 20 })
+  const meli = map('collect.ecommerce.mercadolibre.search', { country: 'BR', keyword: 'teclado' }).actor
+  assert.deepEqual([meli.mode, meli.scrapeProductDetails, meli.includeReviews, meli.includeQuestions, meli.includeVariations, meli.includeSellerProfile], ['search', false, false, false, false, false])
+  assert.equal(map('collect.ecommerce.fbmarketplace.search', { urls: ['https://www.facebook.com/marketplace/nyc/search/?query=desk'] }).actor.includeListingDetails, false)
+  const craigslist = map('collect.classifieds.craigslist.search', { urls: ['https://seattle.craigslist.org/search/sss?query=keyboard'], maxItems: 25 })
+  assert.deepEqual([craigslist.actor.maxAge, craigslist.actor.maxConcurrency, craigslist.limit], [7, 2, 25], 'the run maxItems bounds a pay-per-result Actor without its own limit')
+  const shopify = map('collect.ecommerce.shopify.catalog', { domains: ['Shop.Example.com', 'www.store.io'], maxItems: 100 })
+  assert.deepEqual([shopify.actor.domains, shopify.actor.includeInventoryDetails, shopify.limit], [['https://shop.example.com', 'https://store.io'], false, 200])
+  assert.deepEqual(map('collect.web.builtwith.technologies', { domains: ['apify.com', 'example.org'] }).actor, { startDomains: ['apify.com', 'example.org'], maxRequestsPerCrawl: 6 })
+  const uk = map('collect.company.uk.search', { companyNumbers: ['6', 'sc123456'] })
+  assert.deepEqual(uk.input.companyNumbers, ['00000006', 'SC123456'])
+  assert.deepEqual([uk.actor.includeOfficers, uk.actor.includePSCs, uk.actor.includeFilingHistory, uk.actor.includeCharges, uk.actor.emitOfficerRecords, uk.actor.monitoringMode, uk.limit],
+    [false, false, false, false, false, false, 2])
+  assert.deepEqual(map('collect.company.uk.search', { query: 'green energy', maxItems: 5 }).actor.searchQueries, ['green energy'])
+  const trip = map('collect.travel.tripcom.hotel-reviews', { hotelUrl: 'https://us.trip.com/hotels/shanghai-hotel-detail-346403/x/', maxReviews: 50, since: '2026-06-01' })
+  assert.deepEqual(trip.actor, { hotelUrl: 'https://us.trip.com/hotels/shanghai-hotel-detail-346403/x/', maxReviews: 50, sortBy: 'mostRecent', cutoffDate: '2026-06-01' })
+})
+
+test('2c: links outside the reviewed hosts and paths, and closed options, are refused', () => {
+  for (const [capability, input] of [
+    ['collect.ecommerce.shein.listing', { url: 'https://m.shein.com/x' }], ['collect.ecommerce.shein.listing', { keyword: 'dress' }],
+    ['collect.ecommerce.flipkart.search', { keyword: 'x', url: 'https://www.flipkart.com/x' }], ['collect.ecommerce.flipkart.search', { url: 'https://www.amazon.in/x' }],
+    ['collect.ecommerce.mercadolibre.search', { keyword: 'x' }], ['collect.ecommerce.mercadolibre.search', { country: 'US', keyword: 'x' }],
+    ['collect.ecommerce.mercadolibre.search', { country: 'MX', keyword: 'x', includeReviews: true }],
+    ['collect.ecommerce.fbmarketplace.search', { urls: ['https://www.facebook.com/SHEINOFFICIAL'] }],
+    ['collect.ecommerce.fbmarketplace.search', { urls: ['https://www.facebook.com/marketplace/x'], includeListingDetails: true }],
+    ['collect.classifieds.craigslist.search', { urls: ['https://craigslist.org/search/sss'] }],
+    ['collect.classifieds.craigslist.search', { urls: ['https://seattle.craigslist.org/about/'] }],
+    ['collect.classifieds.craigslist.search', { urls: ['https://seattle.craigslist.org.evil.example/search/sss'] }],
+    ['collect.classifieds.craigslist.search', { urls: ['https://seattle.craigslist.org/search/sss'], maxAgeDays: 90 }],
+    ['collect.ecommerce.shopify.catalog', { domains: ['https://shop.example.com'] }], ['collect.ecommerce.shopify.catalog', { domains: ['a.com'], includeInventoryDetails: true }],
+    ['collect.web.builtwith.technologies', { domains: Array.from({ length: 11 }, (_, i) => `d${i}.com`) }],
+    ['collect.company.uk.search', { query: 'x', companyNumbers: ['00000006'] }], ['collect.company.uk.search', { companyNumbers: ['ABC'] }],
+    ['collect.company.uk.search', { query: 'x', includeOfficers: true }], ['collect.company.uk.search', { companyNumbers: ['00000006'], maxItems: 5 }],
+    ['collect.travel.tripcom.hotel-reviews', { hotelUrl: 'https://hotels.ctrip.com/hotels/346403.html' }],
+    ['collect.travel.tripcom.hotel-reviews', { hotelUrl: 'https://www.trip.com/flights/x' }],
+    ['collect.travel.tripcom.hotel-reviews', { hotelUrl: 'https://www.trip.com/hotels/x/', maxReviews: 1000 }],
+  ]) assert.throws(() => normalizeJobRequest({ capability, input }), { code: 'invalid_collect_request' }, `${capability} ${JSON.stringify(input)}`)
 })

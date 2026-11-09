@@ -1,6 +1,8 @@
 import { COLLECT_KINDS } from '../../../shared/collect-engines.mjs'
 import { runnerContract } from './runner.mjs'
 import { apifyContract } from './apify.mjs'
+import { nativeContract } from './native.mjs'
+import { shodanContract } from './shodan.mjs'
 
 // One contract module per execution kind. A contract only builds requests
 // and classifies answers; the store and executor own every state change.
@@ -11,10 +13,12 @@ import { apifyContract } from './apify.mjs'
 //   abort(ctx)                             → { stopped } at the run deadline (optional)
 //   probe(ctx)                             → read-only reachability
 //   reconcilable: an orphaned dispatch is re-checked instead of marked unknown
+//   readOnly: nothing keeps running upstream; an orphaned dispatch is failed and frees its slot
+//   minIntervalMs: pace the engine (shared PG cooldown) after every call
 //
 // outcome: { status: succeeded|failed|unknown, dataStatus?, result?, itemCount?,
 //            error?, quarantine?: 'slot' | 'engine' | null, charge, cooldownUntil?, cost? }
-const BUILT_IN = [runnerContract, apifyContract]
+const BUILT_IN = [runnerContract, apifyContract, nativeContract, shodanContract]
 
 export function createCollectContracts(extra = []) {
   const contracts = new Map()

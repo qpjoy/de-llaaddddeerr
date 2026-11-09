@@ -10,6 +10,7 @@ import { AppError } from '../core/errors.mjs'
 
 const EXPIRED = { code: 'queue_deadline_exceeded', message: '排队超过最长等待时间，未派发，不收费' }
 const ORPHANED = { code: 'executor_lost', message: '执行进程在派发途中失联，上游是否已开始执行未知' }
+const READ_LOST = { code: 'executor_lost', message: '执行进程在只读查询途中失联；查询没有后续动作，可以重新提交' }
 const ENGINE_RETRY_MS = 10 * 60 * 1000
 const QUEUE_SNAPSHOT_MAX = 1_000
 const iso = value => value == null ? null : new Date(value).toISOString()
@@ -396,6 +397,32 @@ export class PostgresCollectStore {
     })
   }
 
+  // Claim one specific queued job for an inline (synchronous) run. Same slot
+  // arbitration as claim(); it only skips the queue order, so it is used for
+  // synchronous kinds whose jobs are meant to run at once.
+  async claimJob({ jobId, owner, dispatchLeaseMs = null, leaseGraceMs }) {
+    return this.#tx(async client => {
+      const { rows: [target] } = await client.query(`SELECT engine_id FROM collect.jobs WHERE id = $1`, [jobId])
+      if (!target) return { job: null, reason: 'missing' }
+      const { rows: [engine] } = await client.query(`SELECT *, COALESCE(cooldown_until > clock_timestamp(), false) AS cooling
+        FROM collect.engines WHERE id = $1 FOR KEY SHARE`, [target.engine_id])
+      if (!engine || !engine.enabled || engine.quarantine_reason || engine.cooling) return { job: null, reason: 'engine_not_ready' }
+      const { rows: [slot] } = await client.query(`SELECT slot_no FROM collect.engine_slots WHERE engine_id = $1 AND slot_no <= $2
+        AND job_id IS NULL AND quarantine_reason IS NULL ORDER BY slot_no LIMIT 1 FOR UPDATE SKIP LOCKED`, [engine.id, engine.capacity])
+      if (!slot) return { job: null, reason: 'no_free_slot' }
+      const { rows: [queued] } = await client.query(`SELECT id FROM collect.jobs WHERE id = $1 AND status = 'queued'
+        AND deadline_at > clock_timestamp() FOR UPDATE SKIP LOCKED`, [jobId])
+      if (!queued) return { job: null, reason: 'not_queued' }
+      const leaseMs = dispatchLeaseMs ?? engine.run_timeout_ms + leaseGraceMs
+      const { rows: [running] } = await client.query(`UPDATE collect.jobs SET status = 'running', phase = 'dispatching', slot_no = $2, owner = $3,
+          dispatched_at = clock_timestamp(), run_deadline_at = clock_timestamp() + $4::bigint * interval '1 millisecond',
+          lease_until = clock_timestamp() + $5::bigint * interval '1 millisecond', engine_revision = $6, base_url = $7
+        WHERE id = $1 RETURNING *`, [jobId, slot.slot_no, owner, engine.run_timeout_ms, leaseMs, engine.revision, engine.base_url])
+      await client.query('UPDATE collect.engine_slots SET job_id = $3 WHERE engine_id = $1 AND slot_no = $2', [engine.id, slot.slot_no, jobId])
+      return { job: jobRow(running), engine: engineRow(engine) }
+    })
+  }
+
   async markReserved({ jobId, owner, usageRequestId }) {
     const { rowCount } = await this.pool.query(`UPDATE collect.jobs SET usage_request_id = $3, billing = 'reserved'
       WHERE id = $1 AND owner = $2 AND status = 'running'`, [jobId, owner, usageRequestId])
@@ -432,7 +459,7 @@ export class PostgresCollectStore {
   async finish({ jobId, owner, outcome, httpStatus = null, durationMs = null, billing }) {
     const record = resultRecord(outcome)
     return this.#tx(async client => {
-      const engineScoped = Boolean(outcome.cooldownUntil || outcome.quarantine === 'engine')
+      const engineScoped = Boolean(outcome.cooldownUntil || outcome.paceUntil || outcome.quarantine === 'engine')
       if (engineScoped) {
         // Engine row first, matching the engine → slot → job order elsewhere.
         await client.query(`SELECT 1 FROM collect.engines WHERE id = (SELECT engine_id FROM collect.jobs WHERE id = $1) FOR NO KEY UPDATE`, [jobId])
@@ -475,6 +502,11 @@ export class PostgresCollectStore {
         await this.#event(client, row.engine_id, 'cooldown', { jobId, actor: 'executor', reason: outcome.error?.message || '上游要求冷却',
           details: { until: until.toISOString() } })
       }
+      if (outcome.paceUntil) {
+        // Routine pacing (e.g. one request per second): no audit event.
+        await client.query(`UPDATE collect.engines SET cooldown_until = GREATEST(COALESCE(cooldown_until, $2::timestamptz), $2::timestamptz)
+          WHERE id = $1`, [row.engine_id, new Date(outcome.paceUntil)])
+      }
       return { fenced: false, job: jobRow({ ...row, result_bytes: record?.bytes ?? null, result_sha256: record?.sha256 ?? null, result_item_count: record?.itemCount ?? null }) }
     })
   }
@@ -493,7 +525,7 @@ export class PostgresCollectStore {
   // Dispatches whose executor stopped renewing them. A reconcilable kind is
   // re-checked against the upstream; otherwise the run is unknown and its
   // slot stays quarantined.
-  async reapOrphans({ reconcilableKinds, leaseGraceMs, limit = 100 }) {
+  async reapOrphans({ reconcilableKinds, readOnlyKinds = [], leaseGraceMs, limit = 100 }) {
     return this.#tx(async client => {
       const { rows } = await client.query(`SELECT job.id, job.engine_id, job.slot_no, job.usage_request_id, engine.kind FROM collect.jobs job
         JOIN collect.engines engine ON engine.id = job.engine_id
@@ -507,6 +539,14 @@ export class PostgresCollectStore {
               lease_until = GREATEST(run_deadline_at, clock_timestamp()) + $2::bigint * interval '1 millisecond'
             WHERE id = $1`, [row.id, leaseGraceMs])
           await this.#event(client, row.engine_id, 'reconcile', { jobId: row.id, slotNo: row.slot_no, actor: 'executor', reason: '派发进程失联，改为向上游核对' })
+          continue
+        }
+        if (readOnlyKinds.includes(row.kind)) {
+          // A read-only query leaves nothing running upstream: fail it and free the slot.
+          await client.query(`UPDATE collect.jobs SET status = 'failed', phase = NULL, finished_at = clock_timestamp(), lease_until = NULL,
+              next_check_at = NULL, error = $2::jsonb, billing = CASE WHEN billing = 'reserved' THEN 'pending_review' ELSE billing END
+            WHERE id = $1`, [row.id, JSON.stringify(READ_LOST)])
+          await client.query('UPDATE collect.engine_slots SET job_id = NULL WHERE engine_id = $1 AND slot_no = $2 AND job_id = $3', [row.engine_id, row.slot_no, row.id])
           continue
         }
         const { rows: [job] } = await client.query(`UPDATE collect.jobs SET status = 'unknown', phase = NULL, data_status = 'unknown',
@@ -832,6 +872,23 @@ export class MemoryCollectStore {
     return { job: this.#view(next), engine: this.#copy(engine) }
   }
 
+  async claimJob({ jobId, owner, dispatchLeaseMs = null, leaseGraceMs }) {
+    const target = this.jobs.get(jobId)
+    if (!target) return { job: null, reason: 'missing' }
+    const engine = this.engines.get(target.engineId)
+    const now = this.#now()
+    if (!engine || !engine.enabled || engine.quarantineReason || (engine.cooldownUntil && new Date(engine.cooldownUntil).getTime() > now)) return { job: null, reason: 'engine_not_ready' }
+    const slot = this.#engineSlots(engine.id).find(row => row.slotNo <= engine.capacity && !row.jobId && !row.quarantineReason)
+    if (!slot) return { job: null, reason: 'no_free_slot' }
+    if (target.status !== 'queued' || new Date(target.deadlineAt).getTime() <= now) return { job: null, reason: 'not_queued' }
+    const leaseMs = dispatchLeaseMs ?? engine.runTimeoutMs + leaseGraceMs
+    Object.assign(target, { status: 'running', phase: 'dispatching', slotNo: slot.slotNo, owner, dispatchedAt: new Date(now).toISOString(),
+      runDeadlineAt: new Date(now + engine.runTimeoutMs).toISOString(), leaseUntil: new Date(now + leaseMs).toISOString(),
+      engineRevision: engine.revision, baseUrl: engine.baseUrl })
+    slot.jobId = target.id
+    return { job: this.#view(target), engine: this.#copy(engine) }
+  }
+
   async markReserved({ jobId, owner, usageRequestId }) {
     const job = this.jobs.get(jobId)
     if (!job || job.owner !== owner || job.status !== 'running') return false
@@ -892,6 +949,10 @@ export class MemoryCollectStore {
       engine.cooldownUntil = new Date(until).toISOString()
       this.#event(job.engineId, 'cooldown', { jobId, actor: 'executor', reason: outcome.error?.message || '上游要求冷却', details: { until: engine.cooldownUntil } })
     }
+    if (outcome.paceUntil) {
+      const until = Math.max(new Date(outcome.paceUntil).getTime(), engine.cooldownUntil ? new Date(engine.cooldownUntil).getTime() : 0)
+      engine.cooldownUntil = new Date(until).toISOString()
+    }
     return { fenced: false, job: this.#view(job) }
   }
 
@@ -912,7 +973,7 @@ export class MemoryCollectStore {
     return expired
   }
 
-  async reapOrphans({ reconcilableKinds, leaseGraceMs, limit = 100 }) {
+  async reapOrphans({ reconcilableKinds, readOnlyKinds = [], leaseGraceMs, limit = 100 }) {
     const now = this.#now()
     const stale = [...this.jobs.values()].filter(job => job.phase === 'dispatching' && new Date(job.leaseUntil).getTime() <= now).slice(0, limit)
     const unknownJobs = []
@@ -922,6 +983,13 @@ export class MemoryCollectStore {
         Object.assign(job, { phase: 'waiting', owner: 'reaper', upstreamRef: job.upstreamRef || job.id, upstreamState: job.upstreamState || { confirmed: false },
           nextCheckAt: new Date(now).toISOString(), leaseUntil: new Date(Math.max(new Date(job.runDeadlineAt).getTime(), now) + leaseGraceMs).toISOString() })
         this.#event(job.engineId, 'reconcile', { jobId: job.id, slotNo: job.slotNo, actor: 'executor', reason: '派发进程失联，改为向上游核对' })
+        continue
+      }
+      if (readOnlyKinds.includes(engine.kind)) {
+        Object.assign(job, { status: 'failed', phase: null, finishedAt: new Date(now).toISOString(), leaseUntil: null, nextCheckAt: null, error: READ_LOST,
+          billing: job.billing === 'reserved' ? 'pending_review' : job.billing })
+        const slot = this.slots.get(`${job.engineId}:${job.slotNo}`)
+        if (slot?.jobId === job.id) slot.jobId = null
         continue
       }
       Object.assign(job, { status: 'unknown', phase: null, dataStatus: 'unknown', finishedAt: new Date(now).toISOString(), leaseUntil: null, nextCheckAt: null,

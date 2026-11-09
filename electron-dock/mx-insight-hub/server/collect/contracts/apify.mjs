@@ -11,7 +11,9 @@ import { readBounded, parseJson, failed, unknown, notDelivered, transportCause, 
 //   probe:  GET  /v2/users/me and /v2/users/me/limits (free, read-only)
 //
 // No maxTotalChargeUsd is sent (spider_man D18); every run's usageTotalUsd is
-// recorded as procurement cost. A start whose answer was lost may have created
+// recorded as procurement cost. maxItems is set to the number of records Hub
+// will read, so pay-per-result Actors never bill for records Hub drops (D27).
+// It bounds a count, not a budget. A start whose answer was lost may have created
 // a paid run that Hub cannot find by its own ID, so it is unknown and holds
 // the slot until an operator checks the Apify console.
 
@@ -123,7 +125,7 @@ export const apifyContract = Object.freeze({
     let answer
     try {
       answer = await call(fetchImpl, `/v2/acts/${encodeURIComponent(actorId)}/runs`, { method: 'POST', credential,
-        query: { build, timeout, restartOnError: 'false' }, body: definition.actorInput(job.input) })
+        query: { build, timeout, restartOnError: 'false', maxItems: definition.resultLimit(job.input) }, body: definition.actorInput(job.input) })
     } catch (error) {
       if (EGRESS_REFUSED.has(error?.code)) return { outcome: failed('egress_unavailable', 'System Proxy 出口不可用，请求未发出', { cause: error.code }) }
       if (notDelivered(error)) return { outcome: failed('engine_unreachable', '无法连接 Apify，请求未送达', { cause: transportCause(error) }) }

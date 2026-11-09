@@ -2,7 +2,7 @@
 
 **活文档，持续调整。** 每完成一个阶段或一个平台，都要更新本章对应小节、第 13 节平台总表、[README](README.md) 的看板和变更记录。
 
-最后更新：2026-11-09。状态：阶段 1 已实现未部署（见 [07](07-collect-engines.md)），其余阶段设计中。
+最后更新：2026-11-09。状态：阶段 1–6 已实现未部署（见 [07](07-collect-engines.md)）；音频下载和 Podcast Index 仍在等待。
 
 ## 1. 材料与现状
 
@@ -118,6 +118,10 @@ flowchart LR
 > - 执行器失联时不重提，直接记为 unknown 并隔离执行槽，因为 Apify 不能按 Hub 的任务 ID 查运行。
 >
 > 联网验收需要先在引擎页录入 token 并探测。
+>
+> **2b 电商（Amazon、eBay、AliExpress、Etsy、Shopee）同日已实现未部署**，输入白名单见 [07](07-collect-engines.md) 第 10.2b 节；付费附加项一律关闭。
+>
+> **2c 同日已实现未部署**（Shein、Flipkart、Mercado Libre、FB Marketplace、Craigslist、Shopify、BuiltWith、UK Companies House、Trip.com），见 07 第 10.2c 节。另外，每次运行都传 `maxItems`（D27）。至此 20 个 Apify 交付包里，除了暂缓的 85、91、92，都已接入（都是候选）。
 
 ### 6.1 技术实现
 
@@ -179,6 +183,8 @@ flowchart LR
 
 ## 7. 阶段 3：主体追踪类，改成 Hub 原生同步接口
 
+> **2026-11-09 已实现未部署，见 [07](07-collect-engines.md) 第 11 节。** 和下表原计划的区别：Shodan 没有做成 native forwarding 的新前缀，而是在通用采集引擎上加了同步执行方式（`native`、`shodan` 两种 kind），新增同步接口 `POST /api/v1/data/collect/query`，有空槽时直接返回 200（D28）。证书透明日志用 SSLMate Cert Spotter。
+
 这几个包都只是对公开协议或 REST 的薄封装。在 Hub 里用 Node 直接实现，比放进 runner 更稳，也不用开异步任务。
 
 | 平台 | 方向 | 技术实现 |
@@ -191,6 +197,16 @@ flowchart LR
 这一阶段和阶段 2 互不依赖，可以并行。
 
 ## 8. 阶段 4：独立 runner + 应用商店
+
+> **2026-11-09：已实现，未部署。** 详见 [07](07-collect-engines.md) 第 12 节。和下面原计划相比有以下调整：
+> - **runner 的实现**：用 Node 22 写成，不依赖任何第三方包。7 个交付包原样放进仓库，每个包登记 sha256；lock 相同的包共用一个 Python 环境。
+> - **部署**：单独一个 Deployment，不进 Hub 的 kustomization；只监听 `127.0.0.1:18190`，用 podAffinity 和 Hub Admin 放在同一节点（回答 Q13 的首期部分）。
+> - **出口**：Google Play 经新增的 `googleplay` 绑定（migration 186）由 Hub 选好代理，每次调用时传给 runner。
+> - **能力项**：Google Play 的另外 8 个操作是独立能力项 `collect.app.googleplay.*`。
+> - **runner 引擎的凭据改为必填。**
+> - **历史版本**：上限为 10 个应用 × 5 个版本。
+>
+> 本地实测：小米、vivo、应用宝、百度、联想都取到了真实详情。豌豆荚因为本机 DNS 没有测成；Google Play 因为本机没有海外代理没有测。
 
 ### 8.1 runner（项目名拟定 `electron-dock/mx-base/mx-crawler-runner`）
 
@@ -225,6 +241,19 @@ flowchart LR
 
 ## 9. 阶段 5：runner 上的单 URL 内容补全和子域名
 
+> **2026-11-09：已实现，未部署。** 详见 [07](07-collect-engines.md) 第 13 节。和下面原计划相比有以下调整：
+> - **subfinder 改由 Hub 原生实现**：`collect.intel.subdomains` 查 Cert Spotter 和 crt.sh（D38）。交付配置本来就只开了 crt.sh。
+> - **Mastodon 暂不接**：适配器把账号写死了（D39）。
+> - **上游库**：只收审核 commit 的导入包，用 `PYTHONPATH` 加载，不构建、不安装；yt-dlp 一份三家共用（D36）。
+> - **runner 镜像改用 Python 3.13**：这是交付方的验收版本，Substack 也要求 ≥ 3.12。
+> - **链接限制**：只接受各站点自己的主机名，不接受自定义域名（D37）。
+> - **出口**：海外站点共用新增的 `overseas` 绑定（migration 187）。
+>
+> **本地实测**：子域名、Pinterest、Dailymotion、Kick、WordPress 成功；另外 3 家失败，原因都不在我们这边：
+> - Medium：交付包自身的缺陷；
+> - Snapchat：页面改版，上游 yt-dlp 已失效；
+> - Substack：接口改版，上游库已失效。
+
 | 平台 | 方向 | 底层 |
 |---|---|---|
 | 94 Pinterest | 给一个 Pin URL，取元数据和媒体链接 | gallery-dl |
@@ -238,6 +267,15 @@ flowchart LR
 - yt-dlp 和 gallery-dl 更新很频繁，要定期更新固定的版本。
 
 ## 10. 阶段 6：音频（最后做）
+
+> **2026-11-09：已实现，未部署。** 详见 [07](07-collect-engines.md) 第 14 节。
+> - **不挂持久卷**：每次调用用一个新的 `run_dir`；runner 新增「一次调用多个步骤」，`discover` 和 `collect` 在同一次调用里先后执行（D41、D42）。
+> - **新增两个能力项**：`collect.audio.shows`、`collect.audio.episodes`。
+> - **ID 必须填写**（D43）。
+> - **Podcast Index 等凭据**（D44）。
+> - **下载、列表、统计不开放**。
+>
+> 本地实测：小宇宙、Apple Podcasts、LibriVox 成功；喜马拉雅接口对本机返回「操作过于频繁」，需要在 Internal 上复测。
 
 | 平台 | 方向 | 说明 |
 |---|---|---|
@@ -270,7 +308,7 @@ flowchart LR
 | Q10 | 各 Actor 的计费方式和单价 | 是否对外收费、怎么定价 |
 | Q11 | JustOne 是否已经续费 | 决定 2b 电商批的优先级 |
 | Q12 | 能力项和对外产品怎么命名、怎么分组（按平台还是按领域） | 阶段 1 接口和权限的设计 |
-| Q13 | runner 首期部署在 A 机，多节点后跟着代理走还是改用集群内代理 | 阶段 4 的部署方式 |
+| Q13 | runner 首期部署在 A 机，多节点后跟着代理走还是改用集群内代理 | 阶段 4 的部署方式。首期已定：hostNetwork + 与 Hub Admin 同节点（07 第 12.2 节）；多节点方案仍待定 |
 | Q14 | po-infra 源码里写死的 token 要不要清掉，迁到 Hub 凭据库后要不要轮换 | 安全 |
 
 ## 13. 平台总表
@@ -280,57 +318,63 @@ flowchart LR
 | 4 | 小红书热点 | 0 不接 | Hub 已有 | — |
 | ipsearch | IP 查询 | 0 不接 | Hub 已有 | — |
 | 额度监控 | TikHub / JustOne 余额告警 | 0 不接 | 已被 Hub 余额监控取代 | 已废弃 |
-| 45 | 小宇宙 | 6 | runner | 规划中 |
-| 46 | 喜马拉雅 | 6 | runner | 规划中 |
-| 80 | Trip.com 酒店评论 | 2c | Apify | 规划中 |
+| 45 | 小宇宙 | 6 | runner | 已实现未部署（候选，本地联网成功；不下载） |
+| 46 | 喜马拉雅 | 6 | runner | 已实现未部署（候选）；本机被接口限流（ret 999），待在 Internal 复测 |
+| 80 | Trip.com 酒店评论 | 2c | Apify | 已实现未部署（候选） |
 | 85 | TikTok | 2d 按需 | Apify | 暂不接 |
 | 91 | LinkedIn | 2d 按需 | Apify | 暂不接 |
 | 92 | Threads | 2d 按需 | Apify | 暂不接 |
-| 94 | Pinterest | 5 | runner | 规划中 |
+| 94 | Pinterest | 5 | runner（gallery-dl） | 已实现未部署（候选，本地联网成功） |
 | 95 | Quora | 0 暂不接 | — | 包不可运行 |
-| 96 | Medium | 5 | runner | 规划中 |
-| 98 | Snapchat Spotlight | 5 | runner | 规划中 |
-| 100 | Mastodon | 5 | runner | 规划中 |
-| 101 | Dailymotion | 5 | runner | 规划中 |
+| 96 | Medium | 5 | runner（medium-scraper） | 已实现未部署（候选）；交付包缺陷：调用了锁定的 curl_cffi 没有的 `aclose()`，待交付方修复 |
+| 98 | Snapchat Spotlight | 5 | runner（yt-dlp） | 已实现未部署（候选）；页面改版，yt-dlp（含最新 nightly）失效 |
+| 100 | Mastodon | 5 | — | 暂不接：适配器把账号写死成 `Mastodon`；以后考虑 Hub 原生公开 API（D39） |
+| 101 | Dailymotion | 5 | runner（yt-dlp + curl_cffi） | 已实现未部署（候选）；Mac 上联网成功，Linux 容器取 m3u8 时 CDN 返回 403，待在 Internal 经 7788 确认 |
 | 103 | Rumble | 0 暂不接 | — | 上游 403 |
-| 104 | Kick | 5 | runner | 规划中 |
-| 105 | Substack | 5 | runner | 规划中 |
-| 107 | WordPress.com | 5 | runner | 规划中 |
-| 108 | Amazon | 2b | Apify | 规划中 |
-| 109 | eBay | 2b | Apify | 规划中 |
-| 110 | AliExpress | 2b | Apify | 规划中 |
-| 111 | Temu 美国站 | 2a 试点 | Apify | 规划中 |
-| 112 | Shein | 2c | Apify | 规划中 |
-| 113 | Etsy | 2b | Apify | 规划中 |
-| 114 | Shopee | 2b | Apify | 规划中 |
-| 118 | Mercado Libre | 2c | Apify | 规划中 |
-| 123 | Flipkart | 2c | Apify | 规划中 |
-| 124 | Facebook Marketplace | 2c | Apify | 规划中 |
-| 127 | Craigslist | 2c | Apify | 规划中 |
-| 129 | Shopify 独立站 | 2c | Apify | 规划中 |
-| 180 | WHOIS | 3 | Hub 原生（RDAP） | 规划中 |
-| 181 | DNS（dnsx / dnspython） | 3 | Hub 原生（`node:dns`） | 规划中 |
-| 182 | certspotter / subfinder | 3（证书查询）、5（subfinder） | Hub 原生 / runner | 规划中 |
-| 184 | BuiltWith | 2c | Apify | 规划中 |
-| 185 | Similarweb | 2a 试点 | Apify | 规划中 |
-| 188 | Shodan | 3 | Hub 原生（native forwarding） | 规划中 |
-| 191 | UK Companies House | 2c | Apify | 规划中 |
-| 193 | Google Play | 4d | runner（Node） | 规划中 |
-| 195 | 小米应用商店 | 4a 试点 | runner | 候选插槽已登记 |
-| 197 | vivo 应用商店 | 4b | runner | 规划中 |
-| 198 | 应用宝 | 4b | runner | 规划中 |
-| 202 | Meta 广告库 | 2a 试点 | Apify | 规划中 |
-| 216 | 百度手机助手 | 4c | runner | 规划中 |
-| 217 | 联想应用商店 | 4b | runner | 规划中 |
-| 219 | 豌豆荚 | 4c | runner | 规划中 |
-| 220 | Apple Podcasts | 6 | runner | 规划中 |
-| 221 | Podcast Index | 6 | runner | 等凭据 |
-| 222 | LibriVox | 6 | runner | 规划中 |
+| 104 | Kick | 5 | runner（yt-dlp） | 已实现未部署（候选，本地联网成功；只接受剪辑和回放） |
+| 105 | Substack | 5 | runner（substack_api） | 已实现未部署（候选）；接口拒绝 `offset=0`，上游（含 1.3.2）失效 |
+| 107 | WordPress.com | 5 | runner（blog2epub，Linux 依赖清单） | 已实现未部署（候选，本地联网成功） |
+| 108 | Amazon | 2b | Apify | 已实现未部署（候选） |
+| 109 | eBay | 2b | Apify | 已实现未部署（候选） |
+| 110 | AliExpress | 2b | Apify | 已实现未部署（候选） |
+| 111 | Temu 美国站 | 2a 试点 | Apify | 已实现未部署（候选） |
+| 112 | Shein | 2c | Apify | 已实现未部署（候选） |
+| 113 | Etsy | 2b | Apify | 已实现未部署（候选） |
+| 114 | Shopee | 2b | Apify | 已实现未部署（候选） |
+| 118 | Mercado Libre | 2c | Apify | 已实现未部署（候选） |
+| 123 | Flipkart | 2c | Apify | 已实现未部署（候选） |
+| 124 | Facebook Marketplace | 2c | Apify | 已实现未部署（候选） |
+| 127 | Craigslist | 2c | Apify | 已实现未部署（候选） |
+| 129 | Shopify 独立站 | 2c | Apify | 已实现未部署（候选） |
+| 180 | WHOIS | 3 | Hub 原生（RDAP） | 已实现未部署（候选） |
+| 181 | DNS（dnsx / dnspython） | 3 | Hub 原生（`node:dns`） | 已实现未部署（候选） |
+| 182 | certspotter / subfinder | 3（证书查询）、5（子域名） | Hub 原生 | 证书查询和子域名（Cert Spotter + crt.sh，代替 subfinder）都已实现未部署（候选，子域名本地联网成功） |
+| 184 | BuiltWith | 2c | Apify | 已实现未部署（候选） |
+| 185 | Similarweb | 2a 试点 | Apify | 已实现未部署（候选） |
+| 188 | Shodan | 3 | 同步引擎 `shodan`（不是 native forwarding） | 已实现未部署（候选，4 个接口） |
+| 191 | UK Companies House | 2c | Apify | 已实现未部署（候选） |
+| 193 | Google Play | 4d | runner（Node 后端，经 `googleplay` 出口） | 已实现未部署（候选；9 个操作在本机预演中联网成功） |
+| 195 | 小米应用商店 | 4a 试点 | runner | 已实现未部署（候选，本地已联网实测） |
+| 197 | vivo 应用商店 | 4b | runner | 已实现未部署（候选，本地已联网实测） |
+| 198 | 应用宝 | 4b | runner | 已实现未部署（候选，本地已联网实测） |
+| 202 | Meta 广告库 | 2a 试点 | Apify | 已实现未部署（候选） |
+| 216 | 百度手机助手 | 4c | runner | 已实现未部署（候选，本地已联网实测；历史版本未测） |
+| 217 | 联想应用商店 | 4b | runner | 已实现未部署（候选，本地已联网实测） |
+| 219 | 豌豆荚 | 4c | runner | 已实现未部署（候选；本机 DNS 原因未联网验收） |
+| 220 | Apple Podcasts | 6 | runner（经 `overseas`） | 已实现未部署（候选，本地联网成功：搜索、榜单、RSS 单集） |
+| 221 | Podcast Index | 6 | runner | 等凭据（D44），未接入 |
+| 222 | LibriVox | 6 | runner（经 `overseas`） | 已实现未部署（候选，本地联网成功：书目和章节） |
 
 ## 14. 调整记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-11-09 | 阶段 6 已实现未部署：<br>· runner 新增「一次调用多个步骤」和 4 个音频包（45、46、220、222）；<br>· `collect.audio.shows` / `collect.audio.episodes` 按平台路由；<br>· 不挂持久卷，下载等 mx-static；Podcast Index 等凭据；<br>· 4 个插槽 manifest。<br>详见 [07](07-collect-engines.md) 第 14 节。 |
+| 2026-11-09 | 阶段 5 已实现未部署：<br>· runner 新增 7 个交付包和 5 个上游库（固定 commit 和 sha256），镜像改用 Python 3.13；<br>· 新增 `collect.web.url.details`（按链接路由）和原生 `collect.intel.subdomains`；<br>· migration 187 新增 `overseas` 出口绑定；<br>· 7 个插槽 manifest；<br>· Mastodon 暂不接。<br>详见 [07](07-collect-engines.md) 第 13 节。 |
+| 2026-11-09 | 阶段 4 已实现未部署：<br>· 新项目 `mx-crawler-runner`，含 7 个审核过的交付包、镜像和部署清单；<br>· `collect.app.details` 扩展到 7 个市场，新增 8 个 `collect.app.googleplay.*` 能力项；<br>· migration 186，新增 `googleplay` 出口绑定；<br>· runner 引擎只能承接本插槽的能力；<br>· 7 个插槽 manifest。<br>详见 [07](07-collect-engines.md) 第 12 节。 |
+| 2026-11-09 | 阶段 3 已实现未部署：同步执行方式 native 和 shodan，同步查询接口 `/query`，7 个能力项（DNS、RDAP、证书透明日志、Shodan host / search / count / domain），migration 185。详见 [07](07-collect-engines.md) 第 11 节。 |
+| 2026-11-09 | 2c 9 个能力项已实现未部署；新增运行选项 `maxItems`（D27）；平台总表状态已更新。详见 [07](07-collect-engines.md) 第 10.2c 节。 |
+| 2026-11-09 | 2b 电商 5 个能力项已实现未部署：Amazon、eBay、AliExpress、Etsy、Shopee，输入白名单，付费附加项全部关闭，都是 candidate；平台总表状态已更新。详见 [07](07-collect-engines.md) 第 10.2b 节。 |
 | 2026-11-09 | 阶段 2 执行方式和 2a 试点已实现未部署：`apify` 合同、migration 184（apify 出口绑定 7788）、只写凭据、成本记录、截止时间中止；三个能力项都是 candidate。详见 [07](07-collect-engines.md) 第 10 节。 |
 | 2026-11-09 | 阶段 1 已实现未部署：schema `collect`（migration 183）、多执行槽、runner 合同、`/api/v1/data/collect/*`、管理台「自建引擎」页；第一个能力项是 `collect.app.details`（不自动授权）。详见 [07](07-collect-engines.md)。 |
 | 2026-11-09 | 建立本章：分阶段接入顺序和每个平台的技术方向。用户确认 D17（Apify 凭据录入 Hub 凭据库，来源是 po-infra 旧爬虫的 token，有效性未核实）、D18（先不做花费限制）、D19（海外出口走 System Proxy 7788）。 |

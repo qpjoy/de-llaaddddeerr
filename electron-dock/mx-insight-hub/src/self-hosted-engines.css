@@ -28,3 +28,5 @@
 .mih-she .qp-table td code { white-space: nowrap; }
 .mih-she-subpanel { display: grid; gap: 6px; padding-top: 12px; border-top: 1px solid rgba(127, 127, 127, .2); }
 .mih-she-subpanel h3 { margin: 0; }
+.mih-she .qp-table td.mih-she-routes-cell { white-space: normal; min-width: 240px; max-width: 340px; }
+.mih-she-routes-cell .mih-she-route { display: block; margin: 0 0 2px; }

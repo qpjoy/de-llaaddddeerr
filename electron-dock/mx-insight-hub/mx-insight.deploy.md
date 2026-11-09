@@ -8,6 +8,8 @@
 
 Web Search 的八家适配器已在 Hub。若服务器 `.env.internal` 已配置独立的 `NIGHT_ALL_DATABASE_URL`，Internal deploy/apply 仍通过只读 SQL 从 Night-All 数据库凭据中心补齐 active 渠道，此时 JSON 只负责三家采集供应商。不会误用 Hub `DATABASE_URL`，SQL 失败也不会改用 JSON 重试。源不可用会警告，不阻断 Hub。迁移后可在“Web Search → 供应商管理”查看/修改各家 Token，并进入对应供应商管理运行状态、价格和代理。SQL 来源步骤见 [Web Search 迁移](docs/operations/web-search-migration-2026-10-13.md)。
 
+采集引擎（spider_man 阶段 1–6：`collect` schema、mx-crawler-runner、标准引擎和联网验收）的首次上线步骤见 [采集引擎上线手册](docs/operations/collect-engines-rollout.md)。runner 是单独的 Deployment，日常 Hub deploy 不会构建或重启它。
+
 ## 固定依赖和责任边界
 
 **Hub 的持久业务数据来自兄弟项目 `../mx-common`，不是 Hub 容器文件层或 Hub 自己的 PostgreSQL。** Hub 与 mx-common 都要同步代码；仅拉取/复制 Hub 子目录不能获得共享部署脚本的修复。

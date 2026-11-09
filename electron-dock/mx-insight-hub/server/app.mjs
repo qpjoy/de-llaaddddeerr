@@ -6488,6 +6488,14 @@ export function createApp({
           sendJson(response, 200, { data: await requireCollect().capabilities(context), requestId })
           return
         }
+        if (pathname === `${prefix}/query` && request.method === 'POST') {
+          requireNoQuery(searchParams, 'collection query')
+          const context = await requirePublic(request)
+          const result = await requireCollect().queryNow(context, await readJson(request, 32 * 1024), request.headers['idempotency-key'])
+          if (result.completed) sendJson(response, 200, { data: result.data, requestId }, { 'idempotent-replay': String(Boolean(result.replay)) })
+          else sendJson(response, 202, { data: result.data, requestId }, collectHeaders(result.data, result.replay))
+          return
+        }
         if (pathname === `${prefix}/jobs` && request.method === 'POST') {
           requireNoQuery(searchParams, 'collection job')
           const context = await requirePublic(request)

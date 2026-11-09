@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { adminApi } from './api.js'
 import { ErrorState, LoadingState, PageHeading, StatusBadge, formatDate, useRemoteData } from './components.jsx'
 import { WechatSelfHostedEngineAdmin } from './wechat-self-hosted.jsx'
-import { COLLECT_ENGINE_BOUNDS as BOUNDS, COLLECT_KINDS } from '../shared/collect-engines.mjs'
+import { COLLECT_ENGINE_BOUNDS as BOUNDS, COLLECT_KINDS, COLLECT_RUNNER_SLOTS } from '../shared/collect-engines.mjs'
 import './self-hosted-engines.css'
 
 // 自建引擎管理: every self-hosted collection engine in one place. Generic
@@ -14,7 +14,7 @@ const STATUS = { queued: '排队中', running: '执行中', succeeded: '已完�
 const PHASE = { dispatching: '派发中', waiting: '上游执行中' }
 const DATA = { success: '完整', partial: '部分', no_data: '空结果', unknown: '未知' }
 const BILLING = { none: '未计费', reserved: '已预留', charged: '已计费', not_charged: '不计费', pending_review: '待核实' }
-const KIND = { runner: '独立 runner', apify: 'Apify Actor', night_all_http: 'Night-All HTTP' }
+const KIND = { runner: '独立 runner', apify: 'Apify Actor', native: 'Hub 原生查询', shodan: 'Shodan API', night_all_http: 'Night-All HTTP' }
 const EVENT = { created: '新建', configured: '修改配置', recovered: '恢复引擎', slot_recovered: '恢复执行槽', slot_quarantined: '执行槽隔离',
   quarantined: '引擎隔离', cooldown: '冷却', reconcile: '向上游核对', credential_updated: '更新凭据', egress_updated: '更新出口' }
 const EGRESS = { inherit: '继承全局', 'system-egress': '系统直连', 'proxy-sequence': '代理序列' }
@@ -41,6 +41,19 @@ export function engineState(engine) {
 
 function JobStatus({ job }) {
   return <span className={`mih-wsh-status mih-wsh-status--${job.status}`}>{STATUS[job.status] || job.status}{job.phase ? ` · ${PHASE[job.phase]}` : ''}</span>
+}
+
+const routeLabel = route => `${route.capability}${route.routeKey ? `:${route.routeKey}` : ''}`
+
+// The list stays one row tall however many capabilities an engine serves;
+// the full set is on hover and on the engine's configuration tab.
+function RouteSummary({ routes }) {
+  if (!routes?.length) return <span className="mih-wsh-note">未承接</span>
+  const shown = routes.length > 3 ? routes.slice(0, 2) : routes
+  return <>
+    {shown.map(route => <code key={routeLabel(route)} className="mih-she-route">{routeLabel(route)}</code>)}
+    {routes.length > shown.length ? <span className="mih-she-tag" title={routes.map(routeLabel).join('\n')}>等 {routes.length} 项</span> : null}
+  </>
 }
 
 function useAction(notify, onUnauthorized) {
@@ -101,8 +114,7 @@ export function SelfHostedEnginesPage({ token, query, setQuery, onUnauthorized, 
             return <tr key={row.id} aria-selected={row.id === selected}>
               <td><strong>{row.displayName}</strong><br /><code>{row.id}</code>{row.source === 'wechat' ? <span className="mih-she-tag">原微信引擎</span> : null}</td>
               <td>{KIND[row.kind] || row.kind}</td>
-              <td>{row.routes?.length ? row.routes.map(route => <code key={`${route.capability}:${route.routeKey}`} className="mih-she-route">
-                {route.capability}{route.routeKey ? `:${route.routeKey}` : ''}</code>) : <span className="mih-wsh-note">未承接</span>}</td>
+              <td className="mih-she-routes-cell"><RouteSummary routes={row.routes} /></td>
               <td><StatusBadge status={state.status} label={state.label} /></td>
               <td>{row.error ? '—' : `${row.stats.busySlots} / ${row.capacity}${row.stats.quarantinedSlots ? ` · 隔离 ${row.stats.quarantinedSlots}` : ''}`}</td>
               <td>{row.stats?.queued ?? '—'}</td>
@@ -206,16 +218,22 @@ function EngineOverview({ token, data, notify, onUnauthorized, onChanged }) {
       <button type="button" className="qp-button qp-button--outline" disabled={probe?.pending || (!engine.baseUrl && COLLECT_KINDS[engine.kind]?.baseUrl !== 'none')} onClick={check}>连通性探测（只读）</button>
     </div>
     {probe && !probe.pending ? <p role="status">{probe.error ? `探测失败：${probe.error.message}` : probe.reachable
-      ? `${probe.baseUrl} 可达 · HTTP ${probe.httpStatus} · ${probe.healthy ? '健康' : `未通过${probe.error ? `（${probe.error}）` : ''}`} · ${probe.durationMs} ms${probe.version ? ` · 版本 ${probe.version}` : ''}${probe.capacity != null ? ` · runner 容量 ${probe.capacity}` : ''}${probe.account ? ` · 账号 ${probe.account.username || '—'}（${probe.account.plan || '未知套餐'}）` : ''}${probe.usage ? ` · 本月已用 ${money(probe.usage.monthlyUsageUsd)} / 上限 ${money(probe.usage.maxMonthlyUsageUsd)}${probe.usage.maxConcurrentRuns ? ` · 并发上限 ${probe.usage.maxConcurrentRuns}` : ''}` : ''} · 凭据 ${{ configured: '已配置', missing: '缺失', not_required: '不需要' }[probe.credential] || probe.credential}`
+      ? `${probe.baseUrl || 'Hub 进程内'} 可达${probe.httpStatus ? ` · HTTP ${probe.httpStatus}` : ''} · ${probe.healthy ? '健康' : `未通过${probe.error ? `（${probe.error}）` : ''}`} · ${probe.durationMs} ms${probe.version ? ` · 版本 ${probe.version}` : ''}${probe.capacity != null ? ` · runner 容量 ${probe.capacity}` : ''}${probe.slot ? ` · 交付包 ${probe.slot.slotId} ${probe.slot.available ? '可运行' : `不可运行（${probe.slot.reason || '—'}）`}` : ''}${probe.account ? ` · 账号 ${probe.account.username || ''}（${probe.account.plan || '未知套餐'}）` : ''}${probe.usage?.monthlyUsageUsd !== undefined ? ` · 本月已用 ${money(probe.usage.monthlyUsageUsd)} / 上限 ${money(probe.usage.maxMonthlyUsageUsd)}${probe.usage.maxConcurrentRuns ? ` · 并发上限 ${probe.usage.maxConcurrentRuns}` : ''}` : ''}${probe.usage?.queryCredits !== undefined ? ` · 查询额度 ${probe.usage.queryCredits ?? '—'} · 扫描额度 ${probe.usage.scanCredits ?? '—'}` : ''}${probe.checks ? ` · DNS ${probe.checks.dns ? '正常' : `失败（${probe.checks.dnsError || '—'}）`} · RDAP 引导表 ${probe.checks.rdapBootstrap ? '正常' : `失败（${probe.checks.rdapError || '—'}）`}` : ''} · 凭据 ${{ configured: '已配置', missing: '缺失', not_required: '不需要' }[probe.credential] || probe.credential}`
       : `${probe.baseUrl} 不可达（${probe.error}）`}</p> : null}
     {action.failure ? <ErrorState error={action.failure} /> : null}
   </>
 }
 
-function RoutePicker({ kind, catalog, value, onChange }) {
-  const options = catalog.capabilities.filter(row => row.kinds.includes(kind))
-    .flatMap(row => row.routeBy ? row.routes.map(route => ({ capability: row.key, routeKey: route.key, label: `${row.label} · ${route.label}`, stage: row.stage }))
-      : [{ capability: row.key, routeKey: '', label: row.label, stage: row.stage }])
+// A runner engine calls one reviewed package (its slot) and may only take
+// what that package serves; the server enforces the same rule.
+const routeOptions = (catalog, kind, slotRef) => catalog.capabilities.filter(row => row.kinds.includes(kind))
+  .flatMap(row => row.routeBy ? row.routes.map(route => ({ capability: row.key, routeKey: route.key, label: `${row.label} · ${route.label}`, stage: row.stage, slotRef: route.slotRef || null }))
+    : [{ capability: row.key, routeKey: '', label: row.label, stage: row.stage, slotRef: row.slotRef || null }])
+  .filter(option => kind !== 'runner' || !option.slotRef || option.slotRef === slotRef)
+
+function RoutePicker({ kind, catalog, value, onChange, slotRef }) {
+  const options = routeOptions(catalog, kind, slotRef)
+  if (kind === 'runner' && !slotRef) return <p className="mih-wsh-note">先选择交付包插槽，再选择它承接的能力。</p>
   if (!options.length) return <p className="mih-wsh-note">该类型目前没有可承接的能力。</p>
   const has = option => value.some(route => route.capability === option.capability && route.routeKey === option.routeKey)
   return <fieldset className="mih-she-routes"><legend>承接能力</legend>{options.map(option => <label key={`${option.capability}:${option.routeKey}`} className="mih-wsh-check">
@@ -241,16 +259,28 @@ function EngineFields({ draft, setDraft, catalog, kind, creating = false }) {
   const fixedAddress = kindInfo?.baseUrl === 'none'
   return <div className="mih-wsh-form mih-she-form">
     <label className="qp-field">名称<input className="qp-input" value={draft.displayName} maxLength={80} onChange={event => setDraft({ ...draft, displayName: event.target.value })} /></label>
-    {fixedAddress ? null : <label className="qp-field">接口地址<input className="qp-input" value={draft.baseUrl} placeholder="http://10.0.0.8:18300" onChange={event => setDraft({ ...draft, baseUrl: event.target.value })} /></label>}
-    <label className="qp-field">凭据键<input className="qp-input" title="凭据库（迁移 052）中的供应商键；留空表示不需要" value={draft.credentialProvider}
+    {fixedAddress ? null : <label className="qp-field">接口地址<input className="qp-input" value={draft.baseUrl} placeholder={kindInfo?.defaultBaseUrl || 'http://10.0.0.8:18300'} onChange={event => setDraft({ ...draft, baseUrl: event.target.value })} /></label>}
+    <label className="qp-field">凭据键<input className="qp-input" title="凭据库（迁移 052）中的供应商键；留空时使用该类型的默认键" value={draft.credentialProvider}
       placeholder={kindInfo?.defaultCredentialProvider || 'collect-runner'} onChange={event => setDraft({ ...draft, credentialProvider: event.target.value })} /></label>
-    {fixedAddress ? null : <label className="qp-field">插槽 ID<input className="qp-input" title="integrations/ 下的插槽 ID，作为 runner 的 slotId" value={draft.slotRef} placeholder="market-195" onChange={event => setDraft({ ...draft, slotRef: event.target.value })} /></label>}
+    {kind === 'runner' ? <label className="qp-field">交付包插槽<select className="qp-input" title="runner 上审核过的交付包（mx-crawler-runner/packages.json），作为调用的 slotId" value={draft.slotRef}
+      onChange={event => {
+        const slotRef = event.target.value
+        // Routes the new package does not serve are dropped, not kept dangling.
+        const allowed = routeOptions(catalog, kind, slotRef)
+        setDraft({ ...draft, slotRef, displayName: draft.displayName || (COLLECT_RUNNER_SLOTS[slotRef] ? `${COLLECT_RUNNER_SLOTS[slotRef].label} runner` : ''),
+          routes: draft.routes.filter(route => allowed.some(option => option.capability === route.capability && option.routeKey === route.routeKey)) })
+      }}>
+      <option value="">选择插槽</option>
+      {Object.entries(COLLECT_RUNNER_SLOTS).map(([slotRef, slot]) => <option key={slotRef} value={slotRef}>{slot.label}（{slotRef}{slot.egressProvider ? ' · 海外出口' : ''}）</option>)}
+      {draft.slotRef && !COLLECT_RUNNER_SLOTS[draft.slotRef] ? <option value={draft.slotRef}>{draft.slotRef}（未登记）</option> : null}
+    </select></label>
+      : fixedAddress ? null : <label className="qp-field">插槽 ID<input className="qp-input" title="integrations/ 下的插槽 ID" value={draft.slotRef} placeholder="market-195" onChange={event => setDraft({ ...draft, slotRef: event.target.value })} /></label>}
     {numberField('执行槽数', 'capacity', BOUNDS.capacity, draft, setDraft, '同时执行的任务数，按上游真实容量设置')}
     {numberField('排队上限', 'queueLimit', BOUNDS.queueLimit, draft, setDraft)}
     {numberField('每个调用方未完成上限', 'consumerOpenLimit', BOUNDS.consumerOpenLimit, draft, setDraft)}
     {numberField('最长排队（分钟）', 'queueWaitMinutes', BOUNDS.queueWaitMinutes, draft, setDraft)}
     {numberField('单次执行上限（秒）', 'runTimeoutSeconds', BOUNDS.runTimeoutSeconds, draft, setDraft)}
-    <RoutePicker kind={kind} catalog={catalog} value={draft.routes} onChange={routes => setDraft({ ...draft, routes })} />
+    <RoutePicker kind={kind} catalog={catalog} slotRef={draft.slotRef} value={draft.routes} onChange={routes => setDraft({ ...draft, routes })} />
     {!creating ? <>
       <label className="mih-wsh-check"><input type="checkbox" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />接收并派发新任务</label>
       <label className="mih-wsh-check"><input type="checkbox" title="关闭时不写使用账本" checked={draft.billingEnabled} onChange={event => setDraft({ ...draft, billingEnabled: event.target.checked })} />计费（派发时预留账本）</label>
@@ -339,7 +369,7 @@ function EgressPanel({ token, engine, egress, notify, onUnauthorized, onChanged 
 function CreateEngine({ token, catalog, notify, onUnauthorized, onCancel, onCreated }) {
   const kinds = catalog.kinds.filter(row => row.available)
   const [kind, setKind] = useState(kinds[0]?.kind || ''), [id, setId] = useState(''), [reason, setReason] = useState('')
-  const [draft, setDraft] = useState({ displayName: '', baseUrl: '', credentialProvider: '', slotRef: '', capacity: BOUNDS.capacity.default,
+  const [draft, setDraft] = useState({ displayName: '', baseUrl: COLLECT_KINDS[kinds[0]?.kind]?.defaultBaseUrl || '', credentialProvider: '', slotRef: '', capacity: BOUNDS.capacity.default,
     queueLimit: BOUNDS.queueLimit.default, consumerOpenLimit: BOUNDS.consumerOpenLimit.default, queueWaitMinutes: BOUNDS.queueWaitMinutes.default,
     runTimeoutSeconds: BOUNDS.runTimeoutSeconds.default, routes: [] })
   const action = useAction(notify, onUnauthorized)
@@ -351,9 +381,9 @@ function CreateEngine({ token, catalog, notify, onUnauthorized, onCancel, onCrea
     <h2>新建引擎</h2>
     <p className="mih-wsh-note">一个引擎对应一个真实的上游资源。新建后为停用状态：先探测连通、确认能力绑定，再在配置里启用。</p>
     <div className="mih-wsh-form mih-she-form">
-      <label className="qp-field">类型<select className="qp-input" value={kind} onChange={event => { setKind(event.target.value); setDraft({ ...draft, routes: [] }) }}>
+      <label className="qp-field">类型<select className="qp-input" value={kind} onChange={event => { setKind(event.target.value); setDraft({ ...draft, routes: [], slotRef: '', baseUrl: COLLECT_KINDS[event.target.value]?.defaultBaseUrl || '' }) }}>
         {kinds.map(row => <option key={row.kind} value={row.kind}>{row.label}</option>)}</select></label>
-      <label className="qp-field">引擎 ID<input className="qp-input" value={id} placeholder={kind === 'apify' ? 'apify.main' : 'runner.market-195'} onChange={event => setId(event.target.value)} /></label>
+      <label className="qp-field">引擎 ID<input className="qp-input" value={id} placeholder={kind === 'runner' ? `runner.${draft.slotRef || 'market-195'}` : `${kind || 'engine'}.main`} onChange={event => setId(event.target.value)} /></label>
     </div>
     {kinds.find(row => row.kind === kind)?.description ? <p className="mih-wsh-note">{kinds.find(row => row.kind === kind).description}</p> : null}
     <EngineFields draft={draft} setDraft={setDraft} catalog={catalog} kind={kind} creating />

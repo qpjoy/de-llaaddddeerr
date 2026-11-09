@@ -38,7 +38,7 @@ function serviceFor(pool, ledger, fetchImpl = async () => completed()) {
 }
 
 async function engine(service, overrides = {}) {
-  return service.adminCreateEngine({ id: ENGINE, kind: 'runner', displayName: 'pg', baseUrl: 'http://127.0.0.1:18300',
+  return service.adminCreateEngine({ id: ENGINE, kind: 'runner', displayName: 'pg', slotRef: 'market-195', baseUrl: 'http://127.0.0.1:18300',
     routes: [{ capability: CAP, routeKey: 'xiaomi' }], enabled: true, reason: '原生测试', ...overrides }, 'tester')
 }
 
@@ -104,6 +104,7 @@ test('PostgreSQL: executors on separate pools share slots, check async runs and 
     const ids = []
     for (let index = 0; index < 6; index++) ids.push((await service.submitJob(context, body(index), `pg-exec-${index}-${randomUUID()}`)).data.jobId)
     const executors = pools.map((pool, index) => Object.assign(new CollectExecutor({ jobs: new PostgresCollectStore(pool), ledger,
+      credentialsFor: async () => 'runner-token-0123456789abcdef',
       contracts: createCollectContracts(), fetchImpl, logger: { error() {}, warn() {} }, pollMs: 60_000, owner: `exec-${index}`,
       policyFor: (ctx, platform) => hub.usagePolicy(ctx, platform) }), { stopped: false }))
     await Promise.all(executors.map(executor => executor.drain()))
@@ -184,5 +185,41 @@ test('PostgreSQL: migration 184 binds apify to the 7788 sequence and engine cost
     assert.equal((await store.get(job.id)).cost.usd, 0.0375)
   } finally {
     await pool.end()
+  }
+})
+
+test('PostgreSQL: inline claim of one job, silent pacing and the shodan / googleplay / overseas egress bindings (185–187)', native, async () => {
+  const pools = Array.from({ length: 3 }, () => new pg.Pool({ connectionString, max: 2 }))
+  try {
+    const pool = pools[0]
+    await reset(pool)
+    const shodan = await new ExternalPlatformProxyStore(pool, {}, { providerKey: 'shodan' }).describe()
+    const { rows: [sequence] } = await pool.query(`SELECT enabled FROM control.agent_proxy_sequences WHERE sequence_key = 'tikhub-internal-7788'`)
+    assert.deepEqual([shodan.mode, shodan.sequenceKey], sequence?.enabled ? ['proxy-sequence', 'tikhub-internal-7788'] : ['system-egress', null])
+    const googleplay = await new ExternalPlatformProxyStore(pool, {}, { providerKey: 'googleplay' }).describe()
+    assert.deepEqual([googleplay.mode, googleplay.sequenceKey], [shodan.mode, shodan.sequenceKey])
+    const overseas = await new ExternalPlatformProxyStore(pool, {}, { providerKey: 'overseas' }).describe()
+    assert.deepEqual([overseas.mode, overseas.sequenceKey], [shodan.mode, shodan.sequenceKey])
+    const { context, ledger } = await caller(pool)
+    const service = serviceFor(pool, ledger)
+    await engine(service, { capacity: 1 })
+    const first = await service.submitJob(context, body(1), `pg-inline-1-${randomUUID()}`)
+    const second = await service.submitJob(context, body(2), `pg-inline-2-${randomUUID()}`)
+    // Three processes race to run the second job inline: one wins, none takes the first.
+    const claims = await Promise.all(pools.map((p, index) => new PostgresCollectStore(p).claimJob({ jobId: second.data.jobId, owner: `inline-${index}`, leaseGraceMs: 30_000 })))
+    const won = claims.filter(row => row.job)
+    assert.equal(won.length, 1)
+    assert.equal(won[0].job.id, second.data.jobId)
+    assert.ok(claims.filter(row => !row.job).every(row => ['no_free_slot', 'not_queued'].includes(row.reason)))
+    const store = new PostgresCollectStore(pool)
+    assert.equal((await store.get(first.data.jobId)).status, 'queued')
+    await store.finish({ jobId: second.data.jobId, owner: won[0].job.owner, billing: 'none', outcome: { status: 'succeeded', dataStatus: 'success', charge: true,
+      result: { ok: true }, itemCount: 1, paceUntil: Date.now() + 60_000 } })
+    const paced = await store.engine(ENGINE)
+    assert.ok(Date.parse(paced.cooldownUntil) > Date.now() + 50_000, 'pacing sets the shared cooldown')
+    assert.equal((await store.events(ENGINE)).filter(event => event.action === 'cooldown').length, 0, 'pacing writes no audit event')
+    assert.equal((await store.claimJob({ jobId: first.data.jobId, owner: 'inline-x', leaseGraceMs: 30_000 })).reason, 'engine_not_ready', 'a paced engine is not claimed')
+  } finally {
+    await Promise.all(pools.map(p => p.end()))
   }
 })
