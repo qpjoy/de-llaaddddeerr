@@ -98,6 +98,10 @@ window.MxH2iView = Object.freeze({
     dismissedReleasePromptKey = releasePromptKey(state?.update);
     render();
   },
+  devices: async () => {
+    try { return await api.mincaveDevices(); }
+    catch { return { ok: false, error: { code: 'unavailable', message: '暂时无法获取设备，请稍后重试。' } }; }
+  },
   admin: async (input) => {
     if (!api.mincaveAdmin) return { ok: false, error: { code: 'unavailable', message: '管理服务暂不可用。' } };
     try { return await api.mincaveAdmin(input); }

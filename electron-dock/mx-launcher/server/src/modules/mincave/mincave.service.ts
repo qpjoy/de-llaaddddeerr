@@ -1,3 +1,4 @@
+import { mincaveSessionDevice } from '../../lib/mincave-devices.js';
 import {
   BadRequestException,
   ForbiddenException,
@@ -71,13 +72,15 @@ export class MinCaveService {
     }
     return { user, proof };
   }
-  async session(authorization?: string) {
+  async session(authorization?: string, body?: unknown) {
+    const device = mincaveSessionDevice(body);
     const { user, proof } = await this.identity(authorization);
     const result = await this.store.admitMinCaveMember({
       userId: user.userId,
       tenantKey: proof.tenantKey,
       feishuSubject: proof.subject,
     });
+    if (device) await this.store.recordMinCaveDevice(user.userId, device);
     const role = mincaveRole(result.user)!;
     return {
       allowed: true,
@@ -86,6 +89,15 @@ export class MinCaveService {
       companyName: '明悉科技',
       userId: user.userId,
     };
+  }
+  async devices(authorization?: string) {
+    const { user, proof } = await this.identity(authorization);
+    const member = (await this.store.listMinCaveMembers()).find(row =>
+      row.userId === user.userId && row.tenantKey === proof.tenantKey);
+    if (!member || !activeMinCaveMember(user, member))
+      throw new ForbiddenException({ code: 'mincave_access_denied', message: '当前账号无 MinCave 使用权限。' });
+    const devices = await this.store.listMinCaveDevices(user.userId);
+    return { userId: user.userId, devices: devices.map(({ userId: _owner, ...device }) => device) };
   }
   private async administrator(authorization?: string) {
     const identity = await this.identity(authorization);

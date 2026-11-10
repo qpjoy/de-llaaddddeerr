@@ -1,3 +1,4 @@
+import { mincaveDeviceKey, mergeMinCaveDevices, observeMinCaveDevice, type MinCaveDevice, type MinCaveDeviceInput } from '../lib/mincave-devices.js';
 import { admitMinCave, changeMinCaveMember, assertMinCaveTransition, type MinCaveMember, type MinCaveAdmission, type MinCaveMemberChange } from '../lib/mincave-access.js';
 import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -404,6 +405,7 @@ export class MemoryStore implements PlatformStore {
   private readonly tenants = new Map<string, UserCenterTenant>();
   private readonly orgs = new Map<string, UserCenterOrg>();
   private readonly roles = new Map<string, UserCenterRole>();
+  private readonly mincaveDevices = new Map<string, MinCaveDevice>();
   private readonly mincaveMembers = new Map<string, MinCaveMember>();
   private readonly users = new Map<string, UserCenterUser>();
   private readonly userCredentials = new Map<string, UserCenterUserCredential>();
@@ -895,6 +897,16 @@ export class MemoryStore implements PlatformStore {
   }
 
   getUserCenterUser(userId: string): UserCenterUser | null { return structuredClone(this.users.get(userId) || null); }
+
+  listMinCaveDevices(userId: string): MinCaveDevice[] {
+    return mergeMinCaveDevices(userId, [...this.mincaveDevices.values()], this.listLauncherNetworkLeases('mx-h2i'));
+  }
+
+  recordMinCaveDevice(userId: string, device: MinCaveDeviceInput): void {
+    for (const row of observeMinCaveDevice(userId, device, this.listMinCaveDevices(userId))) {
+      this.mincaveDevices.set(mincaveDeviceKey(userId, row.deviceId), structuredClone(row));
+    }
+  }
 
   listMinCaveMembers(): MinCaveMember[] { return structuredClone([...this.mincaveMembers.values()]); }
 

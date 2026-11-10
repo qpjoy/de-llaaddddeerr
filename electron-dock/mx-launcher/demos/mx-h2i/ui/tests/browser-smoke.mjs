@@ -4,7 +4,7 @@ import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { runtimeFixture, idleFixture } from './fixture.mjs';
+import { runtimeFixture, idleFixture, devicesFixture } from './fixture.mjs';
 
 const demoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const dist = path.join(demoRoot, 'src/renderer-dist');
@@ -27,7 +27,7 @@ async function createPage(fixture, { bridge = true, width = 1120, height = 760 }
       await route.fulfill({ body: await readFile(file), contentType });
     } catch { await route.fulfill({ status: 404, body: 'Not found' }); }
   });
-  await context.addInitScript(({ state, bridge }) => {
+  await context.addInitScript(({ state, bridge, devices }) => {
     if (!bridge) return;
     let runtime = structuredClone(state);
     let notify;
@@ -35,6 +35,7 @@ async function createPage(fixture, { bridge = true, width = 1120, height = 760 }
     const commit = (patch) => { runtime = { ...runtime, ...patch }; notify?.(structuredClone(runtime)); return structuredClone(runtime); };
     window.__emit = commit;
     window.mxH2i = {
+      mincaveDevices: async () => ({ ok: true, value: devices }),
       platform: 'darwin',
       getState: async () => structuredClone(runtime),
       onState: (cb) => { notify = cb; return () => { notify = undefined; }; },
@@ -54,7 +55,7 @@ async function createPage(fixture, { bridge = true, width = 1120, height = 760 }
       openAdmin: async () => { window.__calls.push('openAdmin'); return true; },
       windowControl: async (action) => { window.__calls.push(`window:${action}`); return true; }
     };
-  }, { state: fixture, bridge });
+  }, { state: fixture, bridge, devices: devicesFixture(fixture.mincaveAccess?.userId) });
   const page = await context.newPage();
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('http://mincave.test/');
@@ -98,7 +99,9 @@ try {
   assert.equal(await home.locator('.mincave-apps-grid.is-list').count(), 1);
   await home.getByRole('button', { name: '网格视图', exact: true }).click();
   await home.getByRole('button', { name: '设备', exact: true }).click();
-  await home.getByText('qa-device', { exact: true }).waitFor();
+  await home.getByRole('heading', { name: 'QA Mac', exact: true }).waitFor();
+  assert.equal(await home.locator('.mincave-device').count(), 2);
+  assert.equal(await home.getByText('qa-device', { exact: true }).count(), 0);
   assert.equal(await home.getByText('已授权', { exact: true }).count(), 0);
   await home.locator('.mincave-account').click();
   await home.screenshot({ path: path.join(output, 'account.png') });

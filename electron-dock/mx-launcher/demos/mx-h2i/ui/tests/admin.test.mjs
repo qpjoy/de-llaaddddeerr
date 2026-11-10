@@ -24,7 +24,9 @@ function harness() {
         status: server.status,
         json: async () => ({ code: 'test-rejected', message: '测试拒绝' }),
       };
-    const value = path.endsWith('/session')
+    const value = path.endsWith('/devices')
+      ? { userId: 'current-user', devices: [{ deviceId: 'own-device', deviceLabel: 'My Mac' }] }
+      : path.endsWith('/session')
       ? {
           allowed: true,
           canManage: server.role === 'admin',
@@ -169,4 +171,37 @@ test('password and mismatched subject proofs cannot authorize a connection', asy
   await assert.rejects(h.bridge.checkLogin({ ...h.runtime.auth, provider: 'password' }));
   await assert.rejects(h.bridge.checkLogin({ ...h.runtime.auth, subject: 'user:another' }));
   assert.equal(h.bridge.snapshot().canManage, false);
+});
+
+
+test('employees register only main-process installation metadata and read their own account devices with the current bearer', async () => {
+  const h = harness();
+  h.server.role = 'employee';
+  h.runtime.installation = { deviceId: 'my-device', deviceLabel: 'My Mac', userId: 'injected-owner', installId: 'private-install' };
+  const result = await h.bridge.devices();
+  assert.equal(result.ok, true);
+  assert.equal(result.value.devices[0].deviceId, 'own-device');
+  assert.equal(h.bridge.snapshot().canManage, false);
+  assert.deepEqual(JSON.parse(h.calls[0].options.body), { device: { deviceId: 'my-device', deviceLabel: 'My Mac', platform: null, deviceModel: null, osVersion: null } });
+  assert.equal(h.calls[1].url, 'https://h2i.example.test/internal/v1/mincave/devices');
+  assert.ok(!JSON.stringify(result).includes('current-token'));
+  h.server.status = 503;
+  assert.equal((await h.bridge.devices()).ok, false);
+});
+test('device responses are discarded after account switches or if the server returns a different owner', async () => {
+  const runtime = { auth: { accessToken: 'old', subject: 'user:old', provider: 'feishu' } };
+  let change = false;
+  const bridge = createMincaveAdminBridge({
+    getRuntime: () => runtime, resolveBaseUrl: async () => 'https://h2i.example.test',
+    fetch: async url => ({ ok: true, json: async () => {
+      if (url.endsWith('/session')) return { allowed: true, canManage: false, role: 'employee', userId: 'old' };
+      if (change) runtime.auth = { accessToken: 'new', subject: 'user:new', provider: 'feishu' };
+      return { userId: change ? 'old' : 'different-owner', devices: [{ deviceId: 'secret-old-device' }] };
+    } }),
+  });
+  assert.equal((await bridge.devices()).ok, false);
+  change = true;
+  const result = await bridge.devices();
+  assert.equal(result.ok, false);
+  assert.ok(!JSON.stringify(result).includes('secret-old-device'));
 });

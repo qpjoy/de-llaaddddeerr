@@ -4,7 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import test from 'node:test';
 import { JSDOM, VirtualConsole } from 'jsdom';
-import { idleFixture, runtimeFixture, adminFixture } from './fixture.mjs';
+import { idleFixture, runtimeFixture, adminFixture, devicesFixture } from './fixture.mjs';
 
 const index = await readFile(
   new URL('../../src/renderer-dist/index.html', import.meta.url),
@@ -107,6 +107,7 @@ async function mount(initial, withBridge = true, methods = {}) {
         calls.push('openAdmin');
         return true;
       },
+      mincaveDevices: async () => ({ ok: true, value: devicesFixture(runtime.mincaveAccess?.userId) }),
       mincaveAdmin: async (input) => {
         calls.push(`admin:${input.action}`);
         if (input.action === 'workspace') return { ok: true, value: structuredClone(management) };
@@ -199,7 +200,9 @@ test('workbench omits unsupported UI and retains search, list, device and H2O na
     await h.click('列表视图');
     assert.ok(h.document.querySelector('.mincave-apps-grid.is-list'));
     await h.click('设备');
-    assert.match(h.document.body.textContent, /qa-device/);
+    assert.match(h.document.body.textContent, /QA Mac/);
+    assert.match(h.document.body.textContent, /QA Windows/);
+    assert.ok(!h.document.body.textContent.includes('qa-device'));
     assert.ok(!h.document.body.textContent.includes('已授权'));
     await h.click('工作台');
     await h.click('打开管理 海外代理');
@@ -632,5 +635,61 @@ test('enterprise login refusal shows only its actionable reason on the Feishu lo
     h.emit({ mincaveLoginError: null }); await tick();
     assert.equal(h.document.querySelector('[role="alert"]'), null);
     assert.deepEqual(h.errors, []);
+  } finally { h.dom.window.close(); }
+});
+
+
+test('account devices follow prototype cards, current connection only, and hide installation identifiers', async () => {
+  const h = await mount(runtimeFixture());
+  try {
+    await h.click('设备');
+    const cards = () => [...h.document.querySelectorAll('.mincave-device')];
+    assert.equal(cards().length, 2);
+    assert.equal(cards()[0].querySelector('h2').textContent, 'QA Mac');
+    assert.match(cards()[0].textContent, /当前设备已连接虚拟地址10.88.1.21/);
+    assert.match(cards()[1].textContent, /历史设备已绑定最近虚拟地址10.88.1.22/);
+    assert.ok(!cards()[1].textContent.includes('已连接'));
+    assert.equal(h.document.querySelector('.mincave-device dl'), null);
+    for (const removed of ['qa-device', 'qa-install', '设备标识', '安装标识', '站点标识'])
+      assert.ok(!h.document.querySelector('main').textContent.includes(removed));
+    h.emit({ connection: { state: 'lease-only', mode: 'employee', localIp: '10.88.1.21' } });
+    await tick();
+    assert.match(cards()[0].textContent, /当前设备未连接虚拟地址未连接/);
+    assert.ok(!cards()[0].textContent.includes('10.88.1.21'));
+    assert.deepEqual(h.errors, []);
+  } finally { h.dom.window.close(); }
+});
+test('device errors and empty states do not invent a current device; retries restore own history', async () => {
+  let result = { ok: false, error: { code: 'unavailable' } };
+  const h = await mount(runtimeFixture(), true, { mincaveDevices: async () => result });
+  try {
+    await h.click('设备');
+    assert.equal(h.document.querySelectorAll('.mincave-device').length, 0);
+    assert.match(h.document.querySelector('[role="alert"]').textContent, /无法获取设备/);
+    result = { ok: true, value: { userId: 'qa-employee', devices: [] } };
+    await h.click('重试');
+    assert.match(h.document.querySelector('main').textContent, /暂无设备记录/);
+    await h.click('工作台');
+    result = { ok: true, value: devicesFixture() };
+    await h.click('设备');
+    assert.equal(h.document.querySelectorAll('.mincave-device').length, 2);
+  } finally { h.dom.window.close(); }
+});
+test('switching accounts clears previous device data and discards a late response for the former account', async () => {
+  let resolveOld;
+  let calls = 0;
+  const h = await mount(runtimeFixture(), true, { mincaveDevices: () => {
+    calls++;
+    return calls === 1 ? new Promise(resolve => { resolveOld = resolve; }) : Promise.resolve({ ok: true, value: { userId: 'new-user', devices: [] } });
+  } });
+  try {
+    await h.click('设备');
+    h.emit({ mincaveAccess: { status: 'allowed', allowed: true, role: 'employee', canManage: false, userId: 'new-user' } });
+    await tick();
+    resolveOld({ ok: true, value: devicesFixture() });
+    await tick();
+    assert.equal(h.document.querySelectorAll('.mincave-device').length, 0);
+    assert.ok(!h.document.querySelector('main').textContent.includes('QA Mac'));
+    assert.match(h.document.querySelector('main').textContent, /暂无设备记录/);
   } finally { h.dom.window.close(); }
 });

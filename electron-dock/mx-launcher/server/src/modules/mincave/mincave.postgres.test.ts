@@ -61,6 +61,29 @@ test(
         1,
       );
       assert.equal((await store.listMinCaveMembers()).length, 2);
+      const device = { deviceId: 'shared-installation', deviceLabel: 'QA Mac', platform: 'darwin', deviceModel: null, osVersion: null };
+      await Promise.all([
+        store.recordMinCaveDevice('admin', device),
+        store.recordMinCaveDevice('admin', { ...device, deviceId: 'second-installation' }),
+        store.recordMinCaveDevice('other', { ...device, deviceLabel: 'Other account' }),
+      ]);
+      const first = (await store.listMinCaveDevices('admin')).find(row => row.deviceId === device.deviceId)!;
+      await store.recordMinCaveDevice('admin', { ...device, deviceLabel: 'Renamed Mac' });
+      const devices = await store.listMinCaveDevices('admin');
+      assert.equal(devices.length, 2);
+      assert.equal(devices.find(row => row.deviceId === device.deviceId)!.firstSeenAt, first.firstSeenAt);
+      assert.equal(devices.find(row => row.deviceId === device.deviceId)!.deviceLabel, 'Renamed Mac');
+      assert.ok(!JSON.stringify(devices).includes('Other account'));
+      assert.equal((await store.listMinCaveDevices('other')).length, 1);
+      // Read through a separate store/connection, proving bindings are database-backed.
+      const reopened = await PostgresStore.create(config);
+      try {
+        assert.deepEqual(await reopened.listMinCaveDevices('admin'), devices);
+      } finally {
+        reopened.onModuleDestroy();
+        await Reflect.get(reopened, 'dataSource').destroy();
+      }
+
     } finally {
       store.onModuleDestroy();
       // The test owns this store and its explicit isolated database connection.

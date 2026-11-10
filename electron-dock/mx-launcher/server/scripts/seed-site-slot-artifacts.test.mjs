@@ -335,6 +335,7 @@ test('image materialization never preserves runtime subscription secrets', () =>
     for (const name of ['Caddyfile', 'Caddyfile.public-tls']) {
       const caddy = execFileSync('tar', ['-xOf', join(domesticRoot, 'mx-domestic-services.tar.gz'), `./${name}`], { encoding: 'utf8' });
       assert.match(caddy, /@mincaveSession \{\s+method POST\s+path \/internal\/v1\/mincave\/session/);
+      assert.match(caddy, /@mincaveDevices \{\s+method GET\s+path \/internal\/v1\/mincave\/devices/);
       assert.match(caddy, /@mincaveMembers \{\s+method GET\s+path \/internal\/v1\/mincave\/members/);
       assert.match(caddy, /@mincaveMemberUpdate \{\s+method PATCH/);
       assert.doesNotMatch(caddy, /path \/internal\/v1\/mincave\/\*/);

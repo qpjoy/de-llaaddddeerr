@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { view, type CatalogApp, type Snapshot, type UpdateState } from './bridge';
 import Icon from './Icon';
+import Devices from './Devices';
 import LegacyPanel from './LegacyPanel';
 import { categoryLabel, connectionLabel, formatTransfer, updateStage } from './model';
 import snake from './assets/snake.svg';
@@ -315,41 +316,6 @@ function Catalog({ snapshot }: { snapshot: Snapshot }) {
           <Icon name="apps" size={30} />
           <strong>{query ? '没有匹配的应用' : '暂无可访问应用'}</strong>
         </div>
-      )}
-    </section>
-  );
-}
-
-function Device({ snapshot }: { snapshot: Snapshot }) {
-  const installation = snapshot.runtime.installation;
-  const values = [
-    ['设备名称', installation?.deviceLabel],
-    ['设备标识', installation?.deviceId],
-    ['安装标识', installation?.installId],
-    ['站点标识', installation?.siteId],
-    ['虚拟地址', snapshot.runtime.connection?.localIp],
-  ].filter(([, value]) => value);
-  return (
-    <section className="mincave-panel mincave-device">
-      <div className="mincave-device-heading">
-        <span>
-          <Icon name="device" size={32} />
-        </span>
-        <div>
-          <h2>当前设备</h2>
-        </div>
-      </div>
-      {values.length ? (
-        <dl>
-          {values.map(([name, value]) => (
-            <div key={name}>
-              <dt>{name}</dt>
-              <dd>{value}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : (
-        <p>暂无内容</p>
       )}
     </section>
   );
@@ -703,7 +669,7 @@ export default function App() {
                 )}
               </button>
             </header>
-            <main ref={contentRef} className="mincave-content" id="mincave-content">
+            <main ref={contentRef} className={`mincave-content ${mode === 'portal' && page === 'devices' ? 'mincave-devices-page' : ''}`} id="mincave-content">
               {mode === 'admin' && snapshot.access.canManage ? (
                 <AdminConsole page={adminPage} setPage={setAdminPage} />
               ) : (
@@ -725,7 +691,7 @@ export default function App() {
                   )}
                   <NetworkControl snapshot={snapshot} />
                   {['home', 'apps'].includes(page) && <Catalog snapshot={snapshot} />}
-                  {page === 'devices' && <Device snapshot={snapshot} />}
+                  {page === 'devices' && <Devices key={snapshot.access.userId} snapshot={snapshot} />}
                   {page === 'settings' && (
                     <section className="mincave-panel mincave-settings">
                       <h2>连接设置</h2>

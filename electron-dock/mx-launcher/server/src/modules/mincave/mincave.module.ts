@@ -20,8 +20,13 @@ class MinCaveController {
   constructor(@Inject(MinCaveService) private readonly service: MinCaveService) {}
   @Post('session')
   @Header('Cache-Control', 'no-store')
-  session(@Headers('authorization') authorization?: string) {
-    return this.service.session(authorization);
+  session(@Headers('authorization') authorization: string | undefined, @Body() body: unknown) {
+    return this.service.session(authorization, body);
+  }
+  @Get('devices')
+  @Header('Cache-Control', 'no-store')
+  devices(@Headers('authorization') authorization?: string) {
+    return this.service.devices(authorization);
   }
   @Get('members')
   @Header('Cache-Control', 'no-store')

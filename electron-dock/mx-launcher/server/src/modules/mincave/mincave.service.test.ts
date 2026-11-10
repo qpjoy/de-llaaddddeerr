@@ -12,6 +12,7 @@ import { loadConfig } from '../../config.js';
 import { MemoryStore } from '../../store/memory.js';
 import { MINCAVE_ADMIN, MINCAVE_EMPLOYEE } from '../../lib/mincave-access.js';
 import { MinCaveService } from './mincave.service.js';
+import { mergeMinCaveDevices } from '../../lib/mincave-devices.js';
 
 function fixture() {
   const config = {
@@ -188,4 +189,77 @@ test('both management paths protect the last effective administrator, including 
     'employee',
     'initial admin setting never regrants on a later login',
   );
+});
+
+test('device bindings belong to the verified account, deduplicate repeat sessions and retain both account histories on a shared installation', async () => {
+  const f = fixture();
+  const device = { deviceId: 'shared-device', deviceLabel: 'First Mac', platform: 'darwin' };
+  await f.service.session(f.bearer(f.employee.token), { device });
+  const first = await f.service.devices(f.bearer(f.employee.token));
+  assert.equal(first.userId, 'employee');
+  assert.equal(first.devices.length, 1);
+  await f.service.session(f.bearer(f.employee.token), { device: { ...device, deviceLabel: 'Renamed Mac' } });
+  const repeated = await f.service.devices(f.bearer(f.employee.token));
+  assert.equal(repeated.devices.length, 1);
+  assert.equal(repeated.devices[0].firstSeenAt, first.devices[0].firstSeenAt);
+  assert.equal(repeated.devices[0].deviceLabel, 'Renamed Mac');
+  await f.service.session(f.bearer(f.admin.token), { device: { ...device, deviceLabel: 'Admin shared Mac' } });
+  await f.service.session(f.bearer(f.admin.token), { device: { deviceId: 'admin-private-device' } });
+  assert.equal((await f.service.devices(f.bearer(f.admin.token))).devices.length, 2);
+  const employee = await f.service.devices(f.bearer(f.employee.token));
+  assert.equal(employee.devices.length, 1);
+  assert.equal(employee.devices[0].deviceLabel, 'Renamed Mac');
+  assert.ok(!JSON.stringify(employee).includes('Admin shared Mac'));
+  assert.ok(!JSON.stringify(employee).includes('admin-private-device'));
+  await assert.rejects(f.service.members(f.bearer(f.employee.token)), ForbiddenException);
+});
+test('device registration rejects forged owners and identity, disabled or unadmitted accounts cannot read devices', async () => {
+  const f = fixture();
+  for (const body of [
+    { userId: 'admin', device: { deviceId: 'forged' } },
+    { device: { userId: 'admin', deviceId: 'forged' } },
+    { device: { deviceId: 'forged', role: 'admin' } },
+    { device: { deviceId: '' } },
+    { device: { deviceId: 'x'.repeat(201) } },
+    { device: { deviceId: 'ok', deviceLabel: 'bad\nlabel' } },
+    { device: { deviceId: 1 } },
+  ]) await assert.rejects(f.service.session(f.bearer(f.employee.token), body), BadRequestException);
+  assert.equal(f.store.listMinCaveDevices('employee').length, 0);
+  await assert.rejects(f.service.devices(f.bearer(f.employee.token)), ForbiddenException);
+  await assert.rejects(f.service.devices(), UnauthorizedException);
+  await assert.rejects(f.service.devices(f.bearer(f.issue('employee', 'minsight-tenant', { authProvider: 'password' }).token)), UnauthorizedException);
+  await f.service.session(f.bearer(f.admin.token));
+  await f.service.session(f.bearer(f.employee.token), { device: { deviceId: 'own-device' } });
+  await f.service.update(f.bearer(f.admin.token), 'employee', { role: 'employee', enabled: false });
+  await assert.rejects(f.service.devices(f.bearer(f.employee.token)), ForbiddenException);
+  await assert.rejects(f.service.session(f.bearer(f.employee.token), { device: { deviceId: 'new-device' } }), ForbiddenException);
+  assert.equal(f.store.listMinCaveDevices('employee').length, 1);
+});
+test('released legacy leases are recovered by exact owner/product/device and persisted before a lease can change owner', async () => {
+  const f = fixture();
+  const legacy = f.store.enrollLauncherNetworkLease({
+    appId: 'mx-h2i', productId: 'mx-h2i', mode: 'standalone', identityKind: 'user', leaseProfile: 'feishu',
+    installId: 'old-install', deviceId: 'old-device', userId: 'employee', publicKey: 'never-render-public-key',
+    deviceLabel: 'Old Windows', platform: 'win32', sourceIp: '198.51.100.99', requestedBy: 'test',
+  });
+  assert.deepEqual(mergeMinCaveDevices('employee', [], [
+    { ...legacy, userId: 'admin' }, { ...legacy, identityKind: 'anonymous' },
+    { ...legacy, productId: 'h2o' }, { ...legacy, appId: 'another-app' },
+  ]), []);
+  legacy.status = 'released';
+  legacy.expiresAt = '2020-01-01T00:00:00Z';
+  legacy.releasedAt = '2020-01-01T00:00:00Z';
+  f.store.enrollLauncherNetworkLease({
+    appId: 'mx-h2i', productId: 'mx-h2i', mode: 'standalone', identityKind: 'user', leaseProfile: 'feishu',
+    installId: 'admin-install', deviceId: 'admin-only-history', userId: 'admin', publicKey: 'other-public-key', requestedBy: 'test',
+  });
+  await f.service.session(f.bearer(f.employee.token), { device: { deviceId: 'current-device', deviceLabel: 'My Mac' } });
+  const first = await f.service.devices(f.bearer(f.employee.token));
+  assert.deepEqual(first.devices.map(row => row.deviceId).sort(), ['current-device', 'old-device']);
+  assert.equal(first.devices.find(row => row.deviceId === 'old-device')?.lastVirtualIp, legacy.leaseIp);
+  for (const secret of ['never-render-public-key', '198.51.100.99', 'capability', 'installId', 'expiresAt', 'status', 'admin-only-history'])
+    assert.ok(!JSON.stringify(first).includes(secret), secret);
+  legacy.userId = 'admin';
+  const retained = await f.service.devices(f.bearer(f.employee.token));
+  assert.equal(retained.devices.length, 2, 'persisted bindings outlive changes in the lease inventory');
 });

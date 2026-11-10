@@ -1,3 +1,4 @@
+import { mincaveDeviceKey, mergeMinCaveDevices, observeMinCaveDevice, type MinCaveDevice, type MinCaveDeviceInput } from '../lib/mincave-devices.js';
 import { admitMinCave, changeMinCaveMember, assertMinCaveTransition, type MinCaveMember, type MinCaveAdmission, type MinCaveMemberChange } from '../lib/mincave-access.js';
 import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -382,6 +383,7 @@ function configuredLegacyServiceAccountSecrets(): Array<[string, string]> {
 }
 
 type RecordKind =
+  | 'mincave-device'
   | 'mincave-member'
   | 'site-heartbeat'
   | 'anonymous-enrollment'
@@ -1020,6 +1022,33 @@ export class PostgresStore implements PlatformStore {
   }
 
   async getUserCenterUser(userId: string): Promise<UserCenterUser | null> { return this.getRecord<UserCenterUser>('iam-user', userId); }
+
+  private async ownMinCaveDevices(records: Repository<PlatformRecordRow>, userId: string): Promise<MinCaveDevice[]> {
+    const rows = await records.createQueryBuilder('record')
+      .where('record.environment = :environment', { environment: this.config.environment })
+      .andWhere("record.kind IN (:...kinds)", { kinds: ['mincave-device', 'launcher-network-lease'] })
+      .andWhere("record.data ->> 'userId' = :userId", { userId })
+      .getMany();
+    return mergeMinCaveDevices(userId,
+      rows.filter(row => row.kind === 'mincave-device').map(row => row.data as unknown as MinCaveDevice),
+      rows.filter(row => row.kind === 'launcher-network-lease').map(row => row.data as unknown as LauncherNetworkLease));
+  }
+
+  async listMinCaveDevices(userId: string): Promise<MinCaveDevice[]> {
+    return this.ownMinCaveDevices(this.records, userId);
+  }
+
+  async recordMinCaveDevice(userId: string, device: MinCaveDeviceInput): Promise<void> {
+    await this.dataSource.transaction(async manager => {
+      // Serialize one account's bindings so concurrent sessions preserve first-seen and lease history.
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`mincave-devices:${this.config.environment}:${userId}`]);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const history = await this.ownMinCaveDevices(records, userId);
+      for (const row of observeMinCaveDevice(userId, device, history)) {
+        await this.saveRecordTo(records, 'mincave-device', mincaveDeviceKey(userId, row.deviceId), row, this.config.siteId);
+      }
+    });
+  }
 
   async listMinCaveMembers(): Promise<MinCaveMember[]> { return this.listRecords<MinCaveMember>('mincave-member'); }
 

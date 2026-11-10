@@ -103,3 +103,15 @@ export function adminFixture() {
     ],
   };
 }
+
+export function devicesFixture(userId = 'qa-employee') {
+  return {
+    userId,
+    devices: [
+      { deviceId: 'old-windows', deviceLabel: 'QA Windows', platform: 'win32', deviceModel: null, osVersion: null,
+        firstSeenAt: '2026-10-01T00:00:00Z', lastSeenAt: '2026-11-01T00:00:00Z', lastVirtualIp: '10.88.1.22' },
+      { deviceId: 'qa-device', deviceLabel: 'QA Mac', platform: 'darwin', deviceModel: null, osVersion: null,
+        firstSeenAt: '2026-11-09T00:00:00Z', lastSeenAt: '2026-11-10T00:00:00Z', lastVirtualIp: '10.88.1.21' },
+    ],
+  };
+}

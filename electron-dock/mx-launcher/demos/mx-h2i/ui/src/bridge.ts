@@ -44,6 +44,7 @@ export interface MinCaveAccess {
   allowed: boolean;
   canManage: boolean;
   role: 'admin' | 'employee' | null;
+  userId?: string;
   code?: string;
   message?: string;
 }
@@ -87,6 +88,7 @@ declare global {
       subscribe(listener: () => void): () => void;
       navigate(target: string): void;
       dismissRelease(): void;
+      devices(): Promise<import('./Devices').DeviceResult>;
       admin(input: import('./admin').AdminRequest): Promise<import('./admin').AdminResult>;
     };
   }

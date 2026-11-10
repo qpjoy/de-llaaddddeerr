@@ -770,44 +770,56 @@ html[data-platform='win32'] .mincave-topbar {
   font-size: 17px;
   margin: 0;
 }
-.mincave-device-heading {
+.mincave-devices-page .mincave-page-heading { margin-bottom: 20px; }
+.mincave-device {
+  font-family: Inter, var(--font);
+  font-weight: 450;
+  line-height: normal;
+  text-rendering: optimizeLegibility;
   display: flex;
   align-items: center;
-  gap: 18px;
-  margin-bottom: 20px;
+  padding: 28px;
+  gap: 25px;
+  background: #ffffffd9;
+  border-color: #e0e4ef;
 }
-.mincave-device-heading > span {
+.mincave-device-illustration {
+  flex: 0 0 110px;
+  height: 90px;
+  border-radius: 20px;
+  background: #eaeafe;
   display: grid;
   place-items: center;
-  width: 70px;
-  height: 70px;
-  border-radius: 20px;
-  background: #eeebff;
-  color: #7261f0;
 }
-.mincave-device-heading p {
-  margin: 5px 0 0;
-  font-size: 12px;
-}
-.mincave-device dl {
-  margin: 0;
-}
-.mincave-device dl > div {
+.mincave-device-illustration img { width: 44px; height: 44px; }
+.mincave-device-identity { min-width: 0; }
+.mincave-device h2 { font-size: 19px; font-weight: 620; letter-spacing: -0.35px; line-height: normal; overflow-wrap: anywhere; }
+.mincave-device p { margin: 9px 0 12px; font-size: 12px; }
+.mincave-device-address {
+  margin-left: auto;
   display: flex;
-  justify-content: space-between;
-  gap: 25px;
-  padding: 15px 0;
-  border-top: 1px solid var(--line);
-}
-.mincave-device dt {
-  font-size: 12px;
+  flex-direction: column;
+  gap: 9px;
   flex-shrink: 0;
 }
-.mincave-device dd {
-  font-size: 12px;
-  margin: 0;
-  overflow-wrap: anywhere;
-  text-align: right;
+.mincave-device-address small { color: #111; font-size: 12px; }
+.mincave-device-address strong { font-size: 14px; font-weight: 600; }
+.mincave-device .mincave-status { font-size: 12px; }
+.mincave-device .mincave-status.gray i { background: #99a1b1; }
+.mincave-device-state { padding: 28px; color: var(--text-4); }
+@media (max-width: 760px) {
+  .mincave-device { flex-wrap: wrap; gap: 18px; padding: 24px; }
+  .mincave-device-illustration { flex-basis: 70px; height: 70px; }
+  .mincave-device-illustration img { width: 35px; height: 35px; }
+  .mincave-device h2 { font-size: 17px; }
+  .mincave-device-address { margin-left: 0; width: 100%; padding-top: 17px; border-top: 1px solid var(--line); }
+  .mincave-device p { font-size: 10px; }
+}
+@media (max-width: 520px) {
+  .mincave-device { padding: 20px; gap: 16px; }
+  .mincave-device-illustration { flex-basis: 57px; height: 57px; }
+  .mincave-device h2 { font-size: 15px; }
+  .mincave-device .mincave-status { font-size: 11px; }
 }
 .mincave-setting-row {
   display: flex;

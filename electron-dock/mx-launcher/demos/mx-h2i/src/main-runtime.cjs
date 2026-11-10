@@ -295,6 +295,13 @@ if (gotSingleInstanceLock) {
     if (MINCAVE_UI_ENABLED) {
       mincaveBridge = createMincaveAdminBridge({
         getRuntime: () => runtime,
+        getDevice: () => ({
+          ...runtime.installation,
+          deviceLabel: runtime.installation?.deviceLabel && !/^(MinCave|MX-H2I) Desktop$/.test(runtime.installation.deviceLabel)
+            ? runtime.installation.deviceLabel : os.hostname(),
+          platform: process.platform,
+          osVersion: os.release()
+        }),
         fetch: (url, options) => electronSession.defaultSession.fetch(url, options),
         resolveBaseUrl: async () => {
           const bootstrap = await resolveBootstrapEndpoint(runtime.config, { requireSecureTransport: true });
@@ -648,6 +655,8 @@ function createMainWindow() {
 }
 
 function registerIpc() {
+  ipcMain.handle('mx-h2i:mincave-devices', () => mincaveBridge
+    ? mincaveBridge.devices() : { ok: false, error: { code: 'unavailable', message: '设备服务暂不可用。' } });
   ipcMain.handle('mx-h2i:mincave-admin', (_event, input) => mincaveBridge
     ? mincaveBridge.request(input) : { ok: false, error: { code: 'unavailable', message: 'MinCave 服务暂不可用。' } });
   ipcMain.handle('mx-h2i:mincave-access', async () => {

@@ -341,7 +341,8 @@ The Electron entry is intentionally light for the reservation phase:
 
 | 接口 | 权限与用途 |
 | --- | --- |
-| `POST /internal/v1/mincave/session` | 校验飞书、企业与当前权限，首次登记成员，返回 `allowed/role/canManage/companyName/userId` |
+| `POST /internal/v1/mincave/session` | 校验飞书、企业与当前权限，首次登记成员；可附带本机 `device` 元数据登记账号设备，兼容旧客户端空请求体 |
+| `GET /internal/v1/mincave/devices` | 有 MinCave 使用权限的当前成员读取自己的全部设备历史，不接受其他账号 ID |
 | `GET /internal/v1/mincave/members` | 管理员读取同企业登录过 MinCave 的成员，仅返回必要展示字段 |
 | `PATCH /internal/v1/mincave/members/:userId` | 管理员提交 `{role: admin或employee, enabled: boolean}`；拒绝额外字段 |
 
@@ -356,3 +357,16 @@ The Electron entry is intentionally light for the reservation phase:
 Domestic Caddy 两种制品及管理端配置模板只放行上述精确方法与路径，不开放通用后台 namespace。若公网 TLS 由 Compass nginx 承担，发布时还需核对该入口的精确白名单。回退新客户端前先恢复旧客户端；回退服务不删除已保存的 MinCave 角色／成员记录，不扩大旧管理权限。
 
 右上角通知继续使用现有真实更新状态，点击“查看更新”进入原下载、安装和重启流程；没有更新时保留浅紫胶囊样式的“检查更新”按钮。
+
+
+### 账号设备历史
+
+设备页沿用原型的横向卡片：设备名称、当前／历史标记、状态和虚拟地址。移除安装标识、站点标识及设备标识的技术字段展示。当前设备排在最前，其他设备按最近使用时间倒序；只有本机实时连接状态会显示“已连接”，历史设备显示“已绑定”，地址标记为“最近虚拟地址”。断开时本机显示“未连接”，不把旧地址或长效租约当作在线证明。
+
+主进程在原有 `session` 校验中附带 `deviceId/deviceLabel/platform/deviceModel/osVersion`，账号始终由可信 Bearer 在服务端确定，拒绝客户端传入 `userId` 或额外授权字段。`GET devices` 对员工与管理员使用相同的本人权限，不调用管理后台租约列表，也不向客户端下发全员设备后再过滤。Bearer 仍留在主进程，账号切换或旧请求晚到时丢弃旧结果。读取失败提供重试，不用本地演示设备或本机信息填充成功列表。
+
+共享记录表新增 `mincave-device` 类型，以账号 ID 和稳定设备 ID 的组合散列为键。重复登录和权限复核更新最近使用时间，保留首次记录；退出登录不清除历史。同一台设备可以出现在分别登录过的账号中，每个账号只能读取自己的关联。设备 ID 沿用既有安装身份，重装后身份改变可能产生新记录，不按名称合并不同设备。
+
+首次附带设备信息的会话会合并并保存当前账号仍可查到的 MX-H2I 员工租约历史，包括已释放和过期记录。仅返回必要展示字段，不返回 WireGuard 公钥、Capability、来源 IP、安装标识或全员资料。旧记录的更新时间属于最近使用信息，不声称为精确登录时间；此前从未记录或已被覆盖／删除的历史无法追溯恢复。之后每台升级后的客户端在登录／恢复校验时登记，因此无需先完成系统网络连接才能记录本次设备。
+
+本功能需先发布共享后端及 Domestic／公网入口的精确 `GET /internal/v1/mincave/devices` 路由，再更新客户端。旧客户端的空 `session` 请求仍兼容；不新增 SQL 表或配置项。服务端未部署时，新设备页会显示读取失败，本地 UI 验收不代表线上设备历史已可用。

@@ -7,6 +7,7 @@ const emptyAccess = () => ({ status: 'checking', allowed: false, canManage: fals
 // Bearer remains in the main process. These are MinCave routes, not Launcher SSO/BFF routes.
 function createMincaveAdminBridge({
   getRuntime,
+  getDevice = () => getRuntime().installation,
   fetch,
   resolveBaseUrl,
   onChange = () => {},
@@ -44,7 +45,11 @@ function createMincaveAdminBridge({
   async function checkLogin(auth, baseUrl, options = {}) {
     if (auth?.provider !== 'feishu')
       throw failure('feishu_login_required', '请使用飞书登录 MinCave。', 401);
-    const result = await json(auth.accessToken, 'session', { method: 'POST', body: '{}' }, baseUrl);
+    const installation = getDevice();
+    const device = installation?.deviceId ? Object.fromEntries(
+      ['deviceId', 'deviceLabel', 'platform', 'deviceModel', 'osVersion'].map(key => [key, installation[key] || null]),
+    ) : undefined;
+    const result = await json(auth.accessToken, 'session', { method: 'POST', body: JSON.stringify(device ? { device } : {}) }, baseUrl);
     if (
       result.allowed !== true ||
       !['admin', 'employee'].includes(result.role) ||
@@ -128,6 +133,23 @@ function createMincaveAdminBridge({
       if (refreshing?.promise === promise) refreshing = null;
     }
   }
+  async function devices() {
+    const token = getRuntime().auth?.accessToken;
+    const owner = userId(getRuntime().auth);
+    try {
+      const access = await refresh();
+      current(token);
+      if (access.status !== 'allowed' || !access.allowed)
+        throw failure('devices_unavailable', '暂时无法获取设备，请稍后重试。');
+      const value = await json(token, 'devices');
+      current(token);
+      if (value.userId !== owner || !Array.isArray(value.devices))
+        throw failure('invalid_devices_response', '设备信息校验失败，请重试。');
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, error: { code: error.code || 'unavailable', message: '暂时无法获取设备，请稍后重试。' } };
+    }
+  }
   async function request(input) {
     const token = getRuntime().auth?.accessToken;
     try {
@@ -180,6 +202,6 @@ function createMincaveAdminBridge({
       };
     }
   }
-  return { request, refresh, snapshot, checkLogin };
+  return { request, devices, refresh, snapshot, checkLogin };
 }
 module.exports = { createMincaveAdminBridge };

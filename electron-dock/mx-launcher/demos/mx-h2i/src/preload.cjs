@@ -40,6 +40,7 @@ const api = {
   repairNetworkOwnership: () => ipcRenderer.invoke('mx-h2i:repair-network-ownership'),
   openAdmin: () => ipcRenderer.invoke('mx-h2i:open-admin'),
   refreshMincaveAccess: () => ipcRenderer.invoke('mx-h2i:mincave-access'),
+  mincaveDevices: () => ipcRenderer.invoke('mx-h2i:mincave-devices'),
   mincaveAdmin: (input) => ipcRenderer.invoke('mx-h2i:mincave-admin', input),
   setWindowMode: (mode) => ipcRenderer.invoke('mx-h2i:set-window-mode', mode),
   startWindowDrag: (input) => ipcRenderer.invoke('mx-h2i:start-window-drag', input),
