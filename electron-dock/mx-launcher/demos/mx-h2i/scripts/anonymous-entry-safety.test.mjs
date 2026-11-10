@@ -491,7 +491,8 @@ const recoverWithAsyncIdentityGuard = Function(
   'normalizeRoutePlan',
   'importInstalledPackage',
   'broadcastState',
-  `let wireGuardRecoveryInFlight = null;
+  `const MINCAVE_UI_ENABLED = false;
+let wireGuardRecoveryInFlight = null;
 let lastWireGuardRecoveryFailureAt = 0;
 const wireGuardConnectOperations = new Set();
 let wireGuardDisconnectInFlight = false;

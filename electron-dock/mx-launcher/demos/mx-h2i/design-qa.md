@@ -1,28 +1,109 @@
-# MX-H2I Brand Refresh — Design QA
+# MinCave 登录页与提示文案验收
 
-- Source visual truth:
-  - `/Users/qpjoy/workspace/mingxi/de-mingxi/company/明悉科技Logo.png`
-  - `/var/folders/n2/kk2sxv7103z_fj_mmyp2rllc0000gn/T/codex-clipboard-29cd3c8e-a9de-4396-a216-52228caba6f6.png`
-- Implementation screenshot: `/private/tmp/mx-h2i-brand-connected-v2.png`
-- Full-view comparison: `/private/tmp/mx-h2i-brand-comparison.png`
-- Focused logo comparison: `/private/tmp/mx-h2i-brand-logo-comparison.png`
-- Viewport: source normalized from 924×1520 @2x to 462×760 CSS px; implementation captured at 462×760 CSS px.
-- State: connected guest session.
+## 验收范围
 
-## Findings
+按用户追加要求，未登录页只保留原型标题、副标题和飞书登录按钮。真实飞书 OAuth、网络操作和用户数据继续使用项目实现。全局提示条、登录通知、恢复步骤说明、断开认证说明、设备及设置描述、兼容功能页技术说明与工具提示从新界面移除；保留标题、真实状态、数据、操作与诊断日志。
 
-- The official black-and-white Mingxi mark replaces the former teal `H2I` placeholder without changing the 58×58 hero footprint.
-- The logo keeps its original neutral palette. MX-H2I teal remains reserved for connection state and the primary action.
-- Logo, product name, heading, CTA, and status cards preserve the existing hierarchy and alignment.
-- The source screenshot contains a runtime WireGuard feedback banner that is absent from the static mock state; this is state-data variance, not layout drift.
-- The same brand asset is wired into the app shell, ownership card, browser/window icon, tray, and platform packaging icons.
-- Browser console errors: none.
-- P0/P1/P2 visual issues: none.
+本报告的视觉结论仅覆盖此次纠正的登录页，不代表 Windows 实机、系统网络、覆盖安装和完整迁移已完成发布验收。
 
-## Iteration history
+## 对照证据
 
-1. Replaced the text placeholder with the optimized official mark and retained the existing layout footprint.
-2. Removed teal from the brand mark and added only a restrained neutral outline plus a low-opacity teal ambient glow.
-3. Re-captured idle and connected states at the target viewport and compared the connected state side by side with the supplied screenshot.
+- 视觉源：`/Users/lanan/Desktop/yjj/MinCave/MinCave-ui/MinCave/design/preview-login.png`。
+- 原型实现源：同项目 `src/pages/Login.tsx`、`src/components/ui.tsx`、`src/styles.css` 和 `public/snake.svg`。
+- 原型原图 1440 × 900，去除外部演示舞台，裁取 `(160,70,1120,760)` 内容区。
+- 实现：Electron 34.5.8 Chromium 实际渲染，`src/renderer-dist/index.html`，独立未登录配置；没有模拟员工登录。
+- CSS 视口 1120 × 760，native 截图 2240 × 1520，2 倍密度，等比例归一至 1120 × 760。
+- 状态：浅色、未登录、无授权进行中、无更新弹窗。
+- 改前全页对照：`out/ui-qa/login-comparison-before.png`，左侧原型，右侧用户提供的改前客户端截图。
+- 改后截图：`out/ui-qa/login-after.png`。
+- 改后全页对照：`out/ui-qa/login-comparison-after.png`，左侧原型，右侧实际客户端。
+- 局部对照：`out/ui-qa/login-focus-card.png`、`out/ui-qa/login-focus-art.png`。分别用于检查文本、按钮、卡片与插画，均为左侧原型／右侧实现。
 
-Final result: passed
+## 比较与修复记录
+
+第一轮：blocked。
+
+- [P1] 多出高级选项、账号密码入口及说明区域。已移除，登录页只保留飞书入口。
+- [P1] 飞书按钮被共享兼容样式覆盖成白色。已提高登录按钮选择器优先级，恢复原型蓝紫渐变与白色字标。
+- [P1] 插画及轨道过大。复用原始小蛇 SVG 和原型装饰，恢复原型尺寸与缩放。
+- [P2] 卡片过高，间距与位置偏离。复用原型网格、卡片内边距、标题与副标题行高、按钮间距。
+
+第二轮：passed。重新捕获相同状态与视口，进行全页及两个局部并排检查，上述 P1/P2 已消除，无待处理 P0/P1/P2。
+
+## 五项保真检查
+
+| 项目 | 结果 |
+| --- | --- |
+| 字体排版 | 使用同一系统中文字体栈、24px/650 标题、14px 副标题与按钮；未出现换行差异。原型截图与 native 截图抗锯齿存在轻微差异。 |
+| 布局节奏 | 950px 主区域、1.15:1 网格、44px 间距、卡片圆角及 48px 按钮与原型相符。 |
+| 颜色 | 使用原型背景径向渐变、蓝紫按钮渐变、白色半透明卡片及阴影 token。原始截图的色彩配置可能产生轻微视觉差异。 |
+| 图像资产 | 直接复用小蛇 SVG；飞书图标路径、轨道及装饰来自原型代码，无替代插画。源预览光标覆盖小蛇局部，不作为资产差异。 |
+| 文案 | 标题、副标题、默认飞书按钮与原型一致；无高级选项、账号密码、额外登录与恢复说明。真实 OAuth 进行中允许原按钮显示进度或取消状态。 |
+
+## 功能验证
+
+完整 `pnpm check` 通过，包括新 UI 15 项状态／窗口／实际构建 DOM 测试以及既有飞书、匿名策略、恢复取消、ownership、滚动、窗口、更新及 ASAR 检查。DOM 测试覆盖飞书启动与取消、状态广播后焦点、额外反馈不展示、应用过滤／搜索／视图切换、设备、H2O 数据与订阅、断开返回登录、更新进度／重启和恢复取消；DOM 未记录运行时错误。
+
+实际 Electron 原生窗口已打开并检查可访问树与截图；刷新只重载渲染层，不执行断开或清理。浏览器独立自动化受本机环境限制，视觉证据使用实际 Electron Chromium。没有为视觉验收发起真实飞书授权或改变网络配置。
+
+## 实施清单
+
+- [x] 移除未登录的高级及密码入口。
+- [x] 移除新增的解释提示与旧恢复面板。
+- [x] 修正登录比例、字体、间距与渐变按钮。
+- [x] 同状态同视口重新截图、全页与局部并排检查。
+- [x] 构建与检查通过，保留本地验收客户端。
+
+final result: passed
+
+## 2026-11-09 本地连接验收排障补充
+
+UI 检查通过不等于系统连接验收通过。此次在真实系统连接验收中查明两个本地启动环境问题：
+
+1. 已安装的 `/Applications/MX-H2I.app` 虽已断开，仍持有 `127.0.0.1:2053`。独立验收客户端无法准备 PAC/DNS 原子事务，因此没有进入管理员授权步骤。已通过旧客户端菜单正常退出并确认端口释放，没有强制结束进程。
+2. 用户完成原有飞书及系统授权后，系统提权脚本从桌面源码目录复制 WireGuard 配置时被拒绝：`Operation not permitted`。已正常退出验收客户端，完整保留原配置，复制至权限 0700 的 `/private/tmp/mincave-yjj-local-acceptance-profile`，仅调整本地验收包 wrapper 的 userData 路径并重新签名启动。未修改网络、OAuth、权限请求或恢复实现。
+
+重启后实测：客户端显示“已连接”；WireGuard active=true；wireGuard、domesticRelay、internalApi、splitDns、appBroker 均为 ready；内网 API 探测 ok=true；系统代理 applied=true、resolverApplied=true、verified=true。Chrome 原生新标签页可正常加载 `https://www.apple.com/`。终端受执行沙箱限制的 route／curl 探测不用于判断宿主机连通性。H2O 尚未安装，本次外网页面验证不代表 H2O 跨境代理功能验收。
+
+## 工作台入口追加验收
+
+用户最新要求覆盖之前排除无真实地址的演示卡片的决定。顶部恢复员工工作台／管理控制台，管理控制台使用既有真实后台入口；侧栏应用项移除。真实 URL 卡片显示 Delta、Night-All、Hub、Compass、Compass管理后台、Argus，另保留 H2O 插件卡片，共 7 项。实际 1120 × 760 Electron 2 倍密度截图：`out/ui-qa/workbench-web-apps.png`。已逐项核对可访问树中的名称和 URL、页面未溢出、所有卡片可见、顶部和侧栏可操作，网络仍为已连接。
+
+完整 `pnpm check` 与 15 项 UI 测试通过。新增 DOM 验证覆盖查询参数和 hash、断线禁止打开、管理入口调用、工作端返回、应用搜索；原有飞书、网络及更新测试继续通过。此次仅修改 UI 文件和文档，未修改 OAuth、网络实现、preload 或主进程 IPC。
+
+工作台最新分类调整：中台应用 3（Delta、Hub、Night-All），产品应用 2（Compass、Argus），管理后台 1（Compass管理后台），员工福利 1（海外代理）。海外代理复用 H2O 原始 appId 和动作，仅改变卡片显示名称。完整检查通过，现有 DOM 用例逐类核对成员、数量，并确认海外代理仍绑定原 `h2o` / `launchH2o` 命令。
+
+海外代理统一安装验收：工作台 AppCenter 区域移除，未安装卡片的安装按钮不再要求先手动安装 AppCenter。自动依赖和 H2O 安装全程以同一“安装中”按钮呈现，不展示第二个组件，不自动跳转／启动。完整检查与 19 项 UI 测试通过，实际客户端可访问树确认 AppCenter 文本与入口消失、海外代理安装按钮可用、网络保持已连接；真实插件下载与安装未执行。
+
+## 管理控制台与海外订阅最终接入
+
+- 海外代理现在以弹窗显示当前账号的已核验 Clash 订阅和复制按钮，原 H2O 管理页不再展示；已在实际客户端确认。真实订阅明文未写入验收文档或截图。
+- 管理控制台已在客户端内切换，复用真实后台数据与 SSO BFF，管理端六项导航替换员工导航。测试数据仅用于自动化，不作为生产回退。
+- 真实接入首次发现错误地使用员工网关 `h2i.minsight-ai.com`，导致用户看到“管理服务请求失败”；已按部署文档改为 `launcher.minsight-ai.com` 并增加回归测试。实际客户端现返回“请验证管理员身份”，原认证窗口已打开；没有把未认证判定为管理员或导入演示数据。
+- 完整检查及 29 项测试通过。真实管理员授权页面和写入操作尚未验收，因为仍需完成原管理员 Web 会话验证；这部分不包含在前述登录页视觉 passed 结论内。
+
+## 当前 H2I 登录复用（覆盖上文独立管理验证步骤）
+
+用户要求免二次验证后，管理验证弹窗与按钮已移除。客户端主进程自动使用当前 H2I 登录建立受同一 Token 约束的管理会话，服务端核验当前 `mx-admin` 权限；不采信本地角色、不使用其他管理员 Cookie，不刷新原登录年龄，既有写操作近期登录规则保留。
+
+完整 `pnpm check`（32 项 UI／桥接测试）、server 类型检查和构建、4 项真实 middleware 无端口会话测试、16 项原飞书／密码认证测试通过。HTTP SSO 集成套件因沙箱禁止监听 TCP（EPERM）未完成；Postgres 测试缺少测试数据库跳过。已正常重启实际客户端并确认办公网络仍已连接、进入管理控制台不会打开新验证窗口。现网尚无新接口能力，页面明确显示“管理服务需更新后才能复用当前登录”。证据 `out/ui-qa/admin-current-login-service-update.png`，不含订阅或凭据。
+
+现网服务未部署，真实管理数据和写操作尚未完成端到端验收；本节不扩大前述登录页视觉验收的 passed 范围。
+
+## 2026-11-10 版本更新通知
+
+员工工作台与管理控制台右上角新增通知铃铛，通知仅来自当前更新状态；有更新时显示红点、版本与状态，查看后复用现有更新弹窗，没有更新时展示空状态、当前版本及检查更新按钮。原有自动更新提示和下载／安装流程保留，登录页不增加入口。
+
+完整检查通过，34 项 UI／桥接测试无失败，覆盖新通知入口与原有更新动作。实际客户端已刷新并打开通知弹窗检查布局，无溢出；当前显示 2.1.20 和“暂无版本更新通知”，网络仍已连接。证据 `out/ui-qa/update-notifications.png`。未执行真实更新下载、安装或部署。
+
+通知按钮样式追加调整：“检查更新”改为浅紫底、蓝紫文字的无边框胶囊按钮，加入刷新图标，统一字号、间距和悬停状态。`pnpm check:ui` 34 项测试通过，实际客户端已刷新并核对截图 `out/ui-qa/update-notifications-style.png`。
+
+
+## 企业准入与成员角色（覆盖此前 Launcher 管理会话接入结论）
+
+MinCave 仅允许飞书登录的明悉科技成员，用户中心新增独立的 MinCave 管理员／员工角色。员工隐藏全部管理入口；管理员本轮仅开放成员页面，两端共享角色记录。原 `/auth/admin/desktop-session` 和 BFF 接法撤回，成员管理改走 MinCave 专属 Bearer 接口。保留既有通知与更新样式。
+
+自动化覆盖企业拒绝、旧 Token 重新登录、普通员工越权、角色升降级、停用不自动恢复、最后管理员保护、保留其他应用角色、临时故障保留已核验连接、旧响应丢弃以及恢复前准入校验。没有用演示数据替代真实身份或权限；测试 fixture 只用于自动化。真实飞书企业、Postgres 并发及两端原生角色变更验收尚未完成；现网未部署，真实管理员尚未初始化。本节不扩大登录页视觉 passed 的结论。
+
+
+本轮最终检查：完整 demo `pnpm check` 通过（38 项 UI／桥接／主进程测试及既有网络、飞书、更新检查）；server 类型检查与构建通过；4 项 MinCave 权限测试、17 项原认证／应用角色测试、5 项网关制品测试通过。Postgres 并发测试因未配置隔离测试数据库而跳过，真实企业 OAuth 与双端实机验收未执行；未部署、未初始化真实管理员。

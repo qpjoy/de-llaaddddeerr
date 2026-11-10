@@ -1,3 +1,4 @@
+import type { MinCaveMember, MinCaveAdmission, MinCaveMemberChange } from '../lib/mincave-access.js';
 import type {
   SystemSubscriptionPublication,
   AnonymousEnrollment,
@@ -257,6 +258,10 @@ export interface PlatformStore {
     snapshot: ConfigSnapshot;
     auditEvent: AuditEvent;
   }>;
+  getUserCenterUser(userId: string): MaybePromise<UserCenterUser | null>;
+  listMinCaveMembers(): MaybePromise<MinCaveMember[]>;
+  admitMinCaveMember(input: MinCaveAdmission): MaybePromise<{ user: UserCenterUser; member: MinCaveMember }>;
+  updateMinCaveMember(input: MinCaveMemberChange): MaybePromise<UserCenterUser>;
   bootstrapUserCenter(): MaybePromise<UserCenterBootstrapResult>;
   listUserCenterRoles(): MaybePromise<UserCenterRole[]>;
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;

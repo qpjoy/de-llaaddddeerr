@@ -1,5 +1,31 @@
 # MX-H2I Electron Demo
 
+## MinCave 客户端界面
+
+默认启动 React/TypeScript 的 MinCave 浅色界面。未登录页只提供现有飞书 OAuth 登录；账号密码和匿名底层能力保留在旧界面兼容路径。保留网络修复与取消、AppCenter/H2O 和 Release Center 更新流程；不迁入演示员工选择、今日／月度流量、演示通知、城市网关切换或未实现应用卡片。工作台提供 Delta、Night-All、Hub、Compass、Compass管理后台、Argus 六个真实网页入口；连接就绪后通过既有 HTTP(S) 外部打开逻辑进入系统浏览器，地址维护于 `ui/src/workplaceApps.ts`。顶部提供员工工作台和客户端内管理控制台；管理端使用共享用户中心的 MinCave 专属角色及独立 Bearer 接口，本轮只开放成员与角色管理；员工侧栏仅保留工作台与设备。应用按中台应用（Delta、Hub、Night-All）、产品应用（Compass、Argus）、管理后台（Compass管理后台）、员工福利（海外代理）分类。海外代理为 H2O 工作台卡片显示名，工作台不显示 AppCenter。点击“安装”后在同一次操作中自动准备 AppCenter 依赖，再安装 H2O，界面统一显示“安装中”；已存在的依赖跳过，失败可从同一卡片重试，不自动启动代理。安装完成后卡片仅打开“海外订阅”弹窗，展示经核验的当前账号 Clash 链接及复制操作，不再展示 H2O 模式、规则、端口、节点、日志或流量管理页。新界面移除原型中没有的额外说明、登录通知、恢复步骤面板、技术提示和全局反馈条；真实状态与操作仍由原命令处理器驱动。
+
+在本 demo 目录安装独立 UI 构建依赖（Node.js 22.18+）：
+
+```sh
+npm --prefix ui ci
+pnpm build:ui
+pnpm check:ui
+```
+
+随后按下文方式启动 Electron。`dev`、`check`、完整包与 ASAR 的构建链会先生成 `src/renderer-dist`；React 运行依赖包含在静态产物中，不要求旧安装基座额外提供 React。UI 使用独立的 `ui/package-lock.json`，工作区其余依赖仍按现有 pnpm 流程安装。
+
+界面默认约 1120 × 760，可调整大小，单独保存宽版窗口尺寸。宽版不启用旧窄窗口的顶部吸附。需要使用旧界面排查时，在启动进程前设置 `MX_H2I_UI=legacy`；macOS 示例：
+
+```sh
+MX_H2I_UI=legacy pnpm dev
+```
+
+此开关保留旧渲染入口与窗口策略，不重置客户端身份、租约或配置。原型的独立退出功能不迁入，仍按现有“断开连接成功后结束本次客户端认证”的语义执行。
+
+macOS 安装包使用 `build/icon.icns`，Windows 使用 `build/icon.ico`，分别复制自用户指定的 `MinCave-ui/MinCave-desktop-icons/MinCave.icns` 和 `MinCave.ico`。窗口／Dock 使用同套图标资源，macOS 菜单栏保留适配系统的 template 图标。
+
+`pnpm check:ui` 包含状态、竞态、窗口策略和实际构建产物的 DOM 交互测试。可在允许自动启动浏览器的环境运行 `pnpm test:ui:browser`，使用隔离的测试数据验证布局并保存截图到 `out/ui-qa`；不会连接真实飞书或改变系统网络。
+
 MX-H2I is the new H-side VPN product shell. It runs as a Launcher standalone
 Electron app and owns one local network, auth, update, and permission channel.
 The Launcher foundation itself is modeled as a reusable plugin/socket layer:
@@ -16,6 +42,8 @@ From `electron-dock/mx-launcher`:
 ```sh
 pnpm --filter @qpjoy/mx-h2i-demo dev
 ```
+
+本地连接验收时，先正常退出已安装的 MX-H2I，避免多个客户端同时占用默认本地代理端口 `127.0.0.1:2053`。独立验收配置不得放在桌面、文稿或下载等受 macOS 隐私保护的目录；否则系统提权脚本可能无法读取 WireGuard 配置。常规启动沿用 Electron 默认 userData；本次临时验收包使用独立私有临时目录，不修改产品网络实现。
 
 ## Test AppCenter And H2O
 
@@ -300,3 +328,31 @@ The Electron entry is intentionally light for the reservation phase:
 - `src/renderer.js` renders guest connect, employee login, AppCenter install,
   H2O enablement, endpoint injection, and gray update states.
 - `electron-builder.config.cjs` is ready for macOS, Windows, and Linux output.
+
+## MinCave 企业准入与管理控制台
+
+仅允许通过飞书登录且属于明悉科技的成员使用 MinCave。企业按服务端配置的精确 `tenant_key` 判断，不按名称、邮箱或客户端声明判断。角色保存在 Launcher 用户中心：`mx-mincave-admin`（MinCave 管理员）和 `mx-mincave-employee`（MinCave 员工），包含基本身份读取及 `mx:mincave:use`，管理员额外具有 `mx:mincave:admin`。`mx-admin` 不自动获得 MinCave 管理权限，MinCave 管理员也不获得 Launcher 或其他应用管理权限。
+
+明悉科技成员首次使用时默认员工；配置指定的首位管理员仅在首次准入时初始化。成员在 Launcher 或 MinCave 被撤销角色后，后续登录不会自动恢复。员工只显示工作台、设备和通知，隐藏全部管理入口；管理员的管理台本轮只开放成员列表、两种角色的分配和 MinCave 启停。姓名、部门只读；不改动全局账号状态、其他角色或应用授权。两端共同执行最后一位有效管理员保护。
+
+### 登录和接口
+
+保持原飞书 OAuth、PKCE 和系统浏览器授权。服务端为新签发的飞书 Token 保存可信企业来源；旧 Token 缺少来源时需要正常飞书登录一次，进入管理台无需再次登录。客户端主进程以当前 Bearer 访问经过现有安全传输校验的员工网关／内网地址，渲染层不获得 Bearer。不调用 Launcher `/auth/admin/*`、`/admin-api/*`，不使用 Cookie、Ops Token 或独立管理登录。
+
+| 接口 | 权限与用途 |
+| --- | --- |
+| `POST /internal/v1/mincave/session` | 校验飞书、企业与当前权限，首次登记成员，返回 `allowed/role/canManage/companyName/userId` |
+| `GET /internal/v1/mincave/members` | 管理员读取同企业登录过 MinCave 的成员，仅返回必要展示字段 |
+| `PATCH /internal/v1/mincave/members/:userId` | 管理员提交 `{role: admin或employee, enabled: boolean}`；拒绝额外字段 |
+
+登录、启动恢复、新连接、后台恢复及手动修复前验证权限。登录后每 60 秒、窗口激活及管理请求时复核。已经核验并连接的当前会话遇到临时服务故障时保留连接、暂停管理，不允许新连接；明确拒绝时锁定使用并执行原有断开流程。清理被取消或失败后不由每次轮询重复触发系统授权，用户仍可主动重试断开。账号切换丢弃旧响应。
+
+### 配置与发布顺序
+
+服务端配置：`MX_MINCAVE_FEISHU_TENANT_KEY` 为已核实属于明悉科技的企业唯一标识，缺失时拒绝准入；`MX_MINCAVE_INITIAL_ADMIN_USER_ID` 为已核实的当前叶佳俊稳定用户 ID，不能按姓名匹配或采用“第一个登录者”。生产清单从可选 Secret `mx-mincave-access` 的 `tenant-key` 和 `initial-admin-user-id` 读取，不在源码填写实际标识。
+
+先核实企业标识和当前用户在服务端的飞书绑定，再配置上述 Secret、发布共享用户中心服务中的 MinCave 模块和精确公网路由，最后更新客户端。现有通用记录表新增 `mincave-member` 类型，无新增 SQL 表／迁移；角色继续存放原用户记录。成员列表不导入完整通讯录，不提供自动离职同步。本次未部署或授予真实账号角色，缺少新接口的现网不能完成新客户端的准入验收。
+
+Domestic Caddy 两种制品及管理端配置模板只放行上述精确方法与路径，不开放通用后台 namespace。若公网 TLS 由 Compass nginx 承担，发布时还需核对该入口的精确白名单。回退新客户端前先恢复旧客户端；回退服务不删除已保存的 MinCave 角色／成员记录，不扩大旧管理权限。
+
+右上角通知继续使用现有真实更新状态，点击“查看更新”进入原下载、安装和重启流程；没有更新时保留浅紫胶囊样式的“检查更新”按钮。

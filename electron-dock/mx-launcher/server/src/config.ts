@@ -128,6 +128,8 @@ export function loadConfig(): RuntimeConfig {
       'MX_LAUNCHER_NETWORK_RUNTIME_SNAPSHOT_RETENTION_SAMPLES',
       288
     ),
+    mincaveFeishuTenantKey: process.env.MX_MINCAVE_FEISHU_TENANT_KEY?.trim() || null,
+    mincaveInitialAdminUserId: process.env.MX_MINCAVE_INITIAL_ADMIN_USER_ID?.trim() || null,
     feishuAppId: process.env.MX_FEISHU_APP_ID?.trim() || null,
     feishuAppSecret: process.env.MX_FEISHU_APP_SECRET?.trim() || null,
     feishuAllowedTenantKeys: stringListFromEnv('MX_FEISHU_ALLOWED_TENANT_KEYS'),

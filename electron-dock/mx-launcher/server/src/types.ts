@@ -33,6 +33,8 @@ export interface RuntimeConfig {
   /** Set to 0 to disable automatic Domestic WireGuard traffic snapshots. */
   launcherNetworkRuntimeSnapshotIntervalMs: number;
   launcherNetworkRuntimeSnapshotRetentionSamples: number;
+  mincaveFeishuTenantKey?: string | null;
+  mincaveInitialAdminUserId?: string | null;
   feishuAppId: string | null;
   feishuAppSecret: string | null;
   feishuAllowedTenantKeys: string[];
@@ -900,6 +902,8 @@ export interface UserCenterTokenRecord {
   subjectId: string;
   audience: string;
   scopes: string[];
+  /** Set only after the server verifies Feishu user_info. */
+  verifiedFeishuIdentity?: { tenantKey: string; subject: string } | null;
   authProvider?: string | null;
   issuer: string;
   issuedAt: string;
@@ -1113,6 +1117,8 @@ export interface IssueTokenInput {
   subjectId: string;
   audience?: string | null;
   scopes?: string[];
+  /** Set only after the server verifies Feishu user_info. */
+  verifiedFeishuIdentity?: { tenantKey: string; subject: string } | null;
   authProvider?: string | null;
   ttlSeconds?: number | null;
   requestId?: string | null;
@@ -1153,7 +1159,12 @@ export interface TokenIntrospectionResult {
   subject: string | null;
   principal: PlatformPrincipal | null;
   scopes: string[];
+  /** Set only after the server verifies Feishu user_info. */
+  verifiedFeishuIdentity?: { tenantKey: string; subject: string } | null;
   authProvider?: string | null;
+  /** Validated persisted token provenance; never accepted from client claims. */
+  appId?: string | null;
+  issuedAt?: string | null;
   expiresAt: string | null;
   reason: string;
 }

@@ -1,3 +1,4 @@
+import { admitMinCave, changeMinCaveMember, assertMinCaveTransition, type MinCaveMember, type MinCaveAdmission, type MinCaveMemberChange } from '../lib/mincave-access.js';
 import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -381,6 +382,7 @@ function configuredLegacyServiceAccountSecrets(): Array<[string, string]> {
 }
 
 type RecordKind =
+  | 'mincave-member'
   | 'site-heartbeat'
   | 'anonymous-enrollment'
   | 'config-snapshot'
@@ -1017,6 +1019,42 @@ export class PostgresStore implements PlatformStore {
     return { enrollment, snapshot, auditEvent };
   }
 
+  async getUserCenterUser(userId: string): Promise<UserCenterUser | null> { return this.getRecord<UserCenterUser>('iam-user', userId); }
+
+  async listMinCaveMembers(): Promise<MinCaveMember[]> { return this.listRecords<MinCaveMember>('mincave-member'); }
+
+  async admitMinCaveMember(input: MinCaveAdmission) {
+    return this.dataSource.transaction(async manager => {
+      await accountWriteLock(manager, this.config.environment);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const user = (await records.findOneBy({ kind: 'iam-user', id: input.userId, environment: this.config.environment }))?.data as unknown as UserCenterUser | undefined;
+      const member = (await records.findOneBy({ kind: 'mincave-member', id: input.userId, environment: this.config.environment }))?.data as unknown as MinCaveMember | undefined;
+      const users = user ? [user] : [];
+      const members = member ? [member] : [];
+      const result = admitMinCave(input, this.config, users, members);
+      if (!member) await this.saveRecordTo(records, 'iam-user', result.user.userId, result.user, this.config.siteId);
+      await this.saveRecordTo(records, 'mincave-member', input.userId, result.member, this.config.siteId);
+      if (!members.some(row => row.userId === input.userId)) await this.recordAuditTo(records, {
+        eventType: 'mincave.member.admitted', actorKind: 'user', userId: input.userId
+      });
+      return result;
+    });
+  }
+
+  async updateMinCaveMember(input: MinCaveMemberChange): Promise<UserCenterUser> {
+    return this.dataSource.transaction(async manager => {
+      await accountWriteLock(manager, this.config.environment);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const users = await this.listRecordsFrom<UserCenterUser>(records, 'iam-user');
+      const members = await this.listRecordsFrom<MinCaveMember>(records, 'mincave-member');
+      const user = changeMinCaveMember(input, users, members);
+      await this.saveRecordTo(records, 'iam-user', user.userId, user, this.config.siteId);
+      await this.recordAuditTo(records, { eventType: 'mincave.member.updated', actorKind: 'user', userId: input.actorId,
+        metadata: { targetUserId: input.userId, role: input.role, enabled: input.enabled } });
+      return user;
+    });
+  }
+
   async bootstrapUserCenter(): Promise<UserCenterBootstrapResult> {
     const tenant = await this.upsertRecord('iam-tenant', 'tenant_default', builtinUserCenterTenant(), this.config.siteId);
     const org = await this.upsertRecord('iam-org', 'org_default', builtinUserCenterOrg(), this.config.siteId);
@@ -1109,6 +1147,7 @@ export class PostgresStore implements PlatformStore {
       const records = manager.getRepository(PlatformRecordEntity);
       const previous = await this.findUserCenterUserForInput(input, records);
       const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
+      assertMinCaveTransition(previous, draft, await this.listRecordsFrom<UserCenterUser>(records, 'iam-user'), await this.listRecordsFrom<MinCaveMember>(records, 'mincave-member'));
       const feishuSubject = draft.profile.externalIds.feishuSubject;
       if (feishuSubject && feishuSubject !== previous?.profile.externalIds.feishuSubject) {
         const linked = await manager.query("SELECT id FROM mx_platform_records WHERE environment=$1 AND kind='iam-user' AND id<>$2 AND data->'profile'->'externalIds'->>'feishuSubject'=$3 LIMIT 1", [this.config.environment, draft.userId, feishuSubject]);
@@ -1275,7 +1314,11 @@ export class PostgresStore implements PlatformStore {
       { kind: 'iam-user', id: userId }
     ];
     await this.dataSource.transaction(async (manager) => {
+      await accountWriteLock(manager, this.config.environment);
       const records = manager.getRepository(PlatformRecordEntity);
+      const currentUsers = await this.listRecordsFrom<UserCenterUser>(records, 'iam-user');
+      const currentMembers = await this.listRecordsFrom<MinCaveMember>(records, 'mincave-member');
+      assertMinCaveTransition(currentUsers.find(row => row.userId === userId) || null, null, currentUsers, currentMembers);
       for (const target of targets) {
         await records.delete({
           kind: target.kind,

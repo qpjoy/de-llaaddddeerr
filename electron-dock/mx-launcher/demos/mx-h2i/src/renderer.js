@@ -1,5 +1,10 @@
 const electronApi = window.mxH2i || null;
-const api = electronApi || createMockApi();
+const mincaveUi = document.documentElement.dataset.ui === 'mincave';
+// The production shell must never turn a missing preload into a demo session.
+const api = electronApi || (mincaveUi ? {
+  platform: 'browser',
+  getState: async () => { throw new Error('请在 MinCave 桌面客户端中打开此界面。'); }
+} : createMockApi());
 const root = document.getElementById('app');
 const renderReleaseNotesMarkdown = window.MxReleaseNotesMarkdown?.renderReleaseNotesMarkdown
   || ((value) => `<p>${escapeHtml(value)}</p>`);
@@ -69,23 +74,67 @@ const EMPLOYEE_ACCOUNT_HISTORY_LIMIT = 10;
 let employeeLoginDraft = { account: '', password: '' };
 let employeeAccountHistory = readEmployeeAccountHistory();
 let dismissedReleasePromptKey = '';
+let mincaveSnapshot = null;
+const mincaveListeners = new Set();
 
-void boot();
+// Keep the existing command dispatcher and its cancellation epochs authoritative.
+// React consumes this projection; compatibility forms still use the delegated
+// handlers below, so login/network/H2O behavior does not fork during migration.
+window.MxH2iView = Object.freeze({
+  getSnapshot: () => mincaveSnapshot,
+  subscribe: (listener) => {
+    mincaveListeners.add(listener);
+    return () => mincaveListeners.delete(listener);
+  },
+  navigate: (target) => {
+    screen = target === 'advanced' ? 'advanced' : target === 'h2o' || target === 'apps' ? 'appcenter' : 'launcher';
+    if (target === 'h2o') { selectedAppId = 'h2o'; appCenterRoute = 'h2o'; }
+    else if (target === 'apps') appCenterRoute = 'catalog';
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
+    render();
+  },
+  dismissRelease: () => {
+    dismissedReleasePromptKey = releasePromptKey(state?.update);
+    render();
+  },
+  admin: async (input) => {
+    if (!api.mincaveAdmin) return { ok: false, error: { code: 'unavailable', message: '管理服务暂不可用。' } };
+    try { return await api.mincaveAdmin(input); }
+    catch { return { ok: false, error: { code: 'unavailable', message: '管理服务暂不可用。' } }; }
+  }
+});
+
+void boot().catch((error) => {
+  if (!mincaveUi) throw error;
+  mincaveSnapshot = { error: error?.message || '无法读取客户端状态，请重试。' };
+  for (const listener of mincaveListeners) listener();
+});
 
 async function boot() {
-  state = await api.getState();
-  if (isWindows) await api.setWindowMode?.('launcher');
-  modeDraft = preferredLauncherMode();
-  syncEmployeeLoginDraftFromState();
-  render();
+  let observedState = false;
   if (typeof api.onState === 'function') {
-    api.onState((next) => {
+    const unsubscribe = api.onState((next) => {
+      observedState = true;
       state = next;
       if (state.connection?.state === 'idle') modeDraft = 'employee';
+      else if (state.connection?.mode === 'guest' && modeDraft !== 'employee') modeDraft = preferredLauncherMode();
       syncEmployeeLoginDraftFromState();
       render();
     });
+    window.addEventListener('beforeunload', () => unsubscribe?.(), { once: true });
   }
+  // A broadcast can arrive while getState is pending. Its newer snapshot wins.
+  try {
+    const initial = await api.getState();
+    if (!observedState) state = initial;
+  } catch (error) {
+    if (!state) throw error;
+  }
+  if (isWindows && !mincaveUi) await api.setWindowMode?.('launcher');
+  modeDraft = preferredLauncherMode();
+  syncEmployeeLoginDraftFromState();
+  render();
 }
 
 root.addEventListener('click', (event) => {
@@ -194,7 +243,11 @@ root.addEventListener('click', (event) => {
     appCenterRoute = 'h2o';
     appInspectorCollapsed = true;
     appShellMenuOpen = false;
+    if (mincaveUi) screen = 'appcenter';
     render();
+    if (mincaveUi && isInternalConnected() && isUserIdentity() && !h2oRuntime().clashLink?.url) {
+      void runAction('refreshH2oSubscription', { subscriptionId: 'h2o-default' });
+    }
     return;
   }
   if (action === 'set-h2o-view') {
@@ -644,7 +697,7 @@ root.addEventListener('submit', (event) => {
 });
 
 root.addEventListener('pointerdown', (event) => {
-  if (isWindows && screen === 'appcenter') return;
+  if (isWindows && screen === 'appcenter' && !mincaveUi) return;
   const target = event.target instanceof Element ? event.target : null;
   if (!target || event.button !== 0) return;
   if (target.closest('button,input,select,a')) return;
@@ -711,6 +764,31 @@ function finishWindowDrag(event) {
   void api.finishWindowDrag?.({ dragId, totalDx, totalDy });
 }
 
+async function installOverseasProxy(runId) {
+  if (!isInternalConnected()) return null;
+  const leaseId = state.connection?.leaseId;
+  const subject = state.connection?.subject;
+  const current = () => busyActionRunId === runId
+    && isInternalConnected()
+    && state.connection?.leaseId === leaseId
+    && state.connection?.subject === subject;
+  const accept = (next) => {
+    // A disconnect/session change broadcast wins over an older install reply.
+    if (!current()) return false;
+    if (next && typeof next === 'object' && 'connection' in next) state = next;
+    render();
+    return current();
+  };
+  if (!state.apps?.appcenter?.installed) {
+    if (!accept(await api.installAppCenter())) return null;
+    if (!state.apps?.appcenter?.installed) return null;
+  }
+  if (!state.apps?.h2o?.installed || !state.apps?.h2o?.enabled) {
+    if (!current() || !accept(await api.enableH2o())) return null;
+  }
+  return null; // State was accepted per step; never replay an intermediate reply.
+}
+
 async function runAction(action, payload) {
   if (action === 'cancelNetworkOperation') {
     if (cancelNetworkOperationInFlight) return;
@@ -760,9 +838,11 @@ async function runAction(action, payload) {
       resetLocalNetworkIdentity: () => api.resetLocalNetworkIdentity?.(),
       'login-employee': () => api.loginEmployee(payload),
       'login-feishu': () => api.startFeishuLogin?.(),
+      refreshMincaveAccess: () => api.refreshMincaveAccess?.(),
       'cancel-feishu-login': () => api.cancelFeishuLogin?.(),
       'save-config': () => api.saveConfig(payload),
       installAppCenter: () => api.installAppCenter(),
+      installOverseasProxy: () => installOverseasProxy(runId),
       enableH2o: () => api.enableH2o(),
       launchH2o: () => api.launchH2o?.() || api.enableH2o(),
       stopH2o: () => api.stopH2o?.(),
@@ -823,6 +903,10 @@ async function runAction(action, payload) {
 async function setScreen(nextScreen) {
   screen = nextScreen;
   phoneMenuOpen = false;
+  if (mincaveUi) {
+    render();
+    return;
+  }
   if (nextScreen === 'appcenter') {
     await api.setWindowMode?.('appcenter');
   } else {
@@ -1196,6 +1280,11 @@ function renderCheckUpdatesButton(className = 'text-button') {
 
 function render() {
   if (!state) return;
+  if (mincaveUi) {
+    mincaveSnapshot = createMincaveSnapshot();
+    for (const listener of mincaveListeners) listener();
+    return;
+  }
   rememberPhoneScroll();
   const connected = state.connection?.state === 'connected';
   const leaseOnly = state.connection?.state === 'lease-only';
@@ -1212,6 +1301,102 @@ function render() {
   `;
   restorePhoneScroll();
   restoreAppCenterScroll();
+}
+
+function createMincaveSnapshot() {
+  const connected = isInternalConnected();
+  const pending = isConnectionPending();
+  const connection = state.connection || {};
+  const retained = ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
+  const apps = appCatalog().filter((app) => {
+    const action = appPrimaryAction(app, connected);
+    return !['diagnostics', 'luo'].includes(app.appId) && action.action !== 'select-app';
+  }).map((app) => ({
+    id: app.appId,
+    name: app.displayName,
+    description: app.description,
+    category: app.category,
+    installed: app.installed === true,
+    running: app.runtimeState === 'running',
+    error: appVisibleErrorMessage(app),
+    action: mincaveAppPrimaryAction(app, connected)
+  }));
+  const update = state.update || {};
+  return {
+    runtime: state,
+    loginError: typeof state.mincaveLoginError === 'string' ? state.mincaveLoginError : '',
+    access: state.mincaveAccess || { status: 'checking', allowed: false, canManage: false, role: null },
+    busyAction,
+    screen,
+    h2oOpen: screen === 'appcenter' && appCenterRoute === 'h2o',
+    showLogin: screen !== 'advanced' && (isEmployeeLoginVisible() || (!connected && !retained && !isGuestConnectionActive())),
+    connected,
+    pending,
+    paused: networkOperationPaused(),
+    mutating: networkOperationBlocksMutation(),
+    retainedEmployee: isRetainedEmployeeSession(),
+    guestActive: isGuestConnectionActive(),
+    anonymousBlocked: anonymousRecoveryBlockedByPolicy(),
+    guestCanRenew: canRenewAnonymousEnrollment(),
+    caption: connectionCaption(),
+    apps,
+    loginHtml: renderEmployeeLogin(pending),
+    networkControl: mincaveNetworkControl(),
+    feedbackHtml: renderFeedback(),
+    advancedHtml: renderAnonymousAccessPanel() + renderInstallationIdentityPanel()
+      + renderWindowsOwnershipRecoveryPanel() + renderDiagnosticLogPanel()
+      + renderWireGuardDiagnostics() + renderConfigForm(),
+    overseasSubscription: mincaveOverseasSubscription(),
+    releasePrompt: Boolean(renderReleaseUpdatePrompt()),
+    update: {
+      ...update,
+      summary: updateSummaryText(update),
+      actionLabel: updateApplyLabel(update),
+      canApply: Boolean(update.artifactUrl)
+        && !busyAction
+        && !['blocked', 'downloading', 'staged', 'installer-opened'].includes(update.status),
+      notesHtml: update.releaseNotes ? renderReleaseNotesMarkdown(update.releaseNotes) : '',
+      historyHtml: renderReleaseHistory(update) + renderRollbackSlots(update)
+    }
+  };
+}
+
+function mincaveAppPrimaryAction(app, connected) {
+  if (app.appId !== 'h2o') return appPrimaryAction(app, connected);
+  if (!app.installed || !app.enabled || busyAction === 'installOverseasProxy') {
+    return {
+      action: 'installOverseasProxy',
+      label: busyAction === 'installOverseasProxy' ? '安装中' : '安装',
+      disabled: !connected || Boolean(busyAction) || networkOperationBlocksMutation()
+    };
+  }
+  return { action: 'showH2oManager', label: '打开管理', disabled: !connected || Boolean(busyAction) };
+}
+
+function mincaveOverseasSubscription() {
+  const link = h2oRuntime().clashLink;
+  const expiry = Date.parse(link?.expiresAt || '');
+  const url = link?.url && (!Number.isFinite(expiry) || expiry > Date.now()) ? link.url : '';
+  return {
+    url,
+    status: link?.status || 'missing',
+    loading: ['refreshH2oSubscription', 'issueH2oClashLink'].includes(busyAction),
+    canRefresh: isInternalConnected() && isUserIdentity() && state.apps?.h2o?.installed === true && !busyAction
+  };
+}
+
+function mincaveNetworkControl() {
+  const visible = currentNetworkOperation();
+  if (!visible?.id && visible?.kind === 'background-recovery'
+    && ['disconnect', 'resetLocalNetworkIdentity'].includes(busyAction)) return null;
+  const pending = rendererPendingNetworkOperation();
+  const operation = visible?.status === 'paused' && pending ? pending : visible || pending;
+  if (!operation || operation.status === 'paused') return null;
+  return {
+    id: operation.id || '',
+    cancelable: operation.cancelable !== false,
+    stopping: operation.status === 'cancel-requested' || cancelNetworkOperationInFlight
+  };
 }
 
 function releasePromptKey(update) {
@@ -1511,6 +1696,15 @@ function renderEmployeeLogin(connecting) {
         : feishuCancelable
           ? '取消飞书登录'
           : '使用飞书登录';
+  if (mincaveUi) {
+    return `
+      <section class="login-panel" aria-label="飞书登录">
+        <button class="primary-button block-button mincave-feishu-login" type="button" data-action="${feishuAction}" aria-busy="${feishuPending && !feishuCancelable ? 'true' : 'false'}" ${feishuDisabled ? 'disabled' : ''}>
+          ${escapeHtml(feishuLabel)}
+        </button>
+      </section>
+    `;
+  }
   return `
     <form class="login-panel" data-form-action="login-employee">
       ${transitionMessage
@@ -2005,15 +2199,6 @@ function renderRollbackSlots(update) {
       `).join('')}
     </div>
   `;
-}
-
-function formatBytes(value) {
-  const bytes = Number(value);
-  if (!Number.isFinite(bytes) || bytes <= 0) return '-';
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
-  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${bytes} B`;
 }
 
 function renderConnectionStrip() {
