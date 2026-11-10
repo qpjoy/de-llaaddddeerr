@@ -247,5 +247,14 @@ curl -fsS \
 ```
 
 ```bash
+sudo mkdir -p /etc/systemd/system/mx-internal-egress.service.d
+sudo tee /etc/systemd/system/mx-internal-egress.service.d/10-yield-7788-to-mihomo-client.conf >/dev/null <<'EOF'
+[Unit]
+After=mihomo-client.service
 
+[Service]
+ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ss -ltn "sport = :7788" | grep -q "127.0.0.1:7788" && exit 0; sleep 1; done; exit 0'
+EOF
+sudo systemctl daemon-reload
+systemctl cat mx-internal-egress | tail -6
 ```

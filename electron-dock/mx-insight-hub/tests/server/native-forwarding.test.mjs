@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { NATIVE_FORWARDING_ENDPOINTS, nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
 import { JustOneAdapter } from '../../server/adapters/justone.mjs'
-import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
+import { TikHubAdapter, tikHubCallTimeoutMs } from '../../server/adapters/tikhub.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { EXTERNAL_PLATFORM_OPERATION_CATALOG, MemoryExternalPlatformControlStore, PostgresExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
@@ -119,6 +119,38 @@ test('TikHub native GET preserves an opaque pagination token without a request b
   const result = await adapter.forwardNative(key, { params: { username: 'fixture', after, count: 20 } })
   assert.deepEqual(result.publicBody.data, DATA)
   assert.equal(calls, 1)
+})
+
+test('TikHub Kuaishou comprehensive search waits at least 45 seconds; other endpoints keep the configured timeout', async (t) => {
+  const kuaishou = 't.kuaishou_app_search_comprehensive', instagram = 't.instagram_v3_get_user_posts'
+  assert.equal(tikHubCallTimeoutMs(kuaishou, 30_000), 45_000)
+  assert.equal(tikHubCallTimeoutMs(kuaishou, 60_000), 60_000)
+  assert.equal(tikHubCallTimeoutMs(kuaishou, undefined), 45_000)
+  assert.equal(tikHubCallTimeoutMs(instagram, 30_000), 30_000)
+  assert.equal(tikHubCallTimeoutMs(undefined, 50), 50)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const flush = () => new Promise(resolve => setImmediate(resolve))
+  const aborted = []
+  const adapter = new TikHubAdapter({ apiKey: 'fixture-native-secret', timeoutMs: 30_000, fetchImpl: (url, options) => new Promise((_, reject) => {
+    options.signal.addEventListener('abort', () => { aborted.push(new URL(url).pathname); reject(new DOMException('aborted', 'AbortError')) })
+  }) })
+  const slow = adapter.forwardNative(kuaishou, { params: { keyword: '尊界S800', sort_type: 'newest', publish_time: 'all', duration: 'all' } })
+    .then(() => assert.fail('a hanging call must not succeed'), error => error)
+  const other = adapter.forwardNative(instagram, { params: { username: 'fixture', count: 20 } })
+    .then(() => assert.fail('a hanging call must not succeed'), error => error)
+  await flush()
+  t.mock.timers.tick(30_000)
+  const otherError = await other
+  assert.equal(otherError.evidence.errorCode, 'upstream_deadline_exceeded')
+  assert.deepEqual(aborted, [nativeForwardingEndpoint(instagram).path])
+  t.mock.timers.tick(14_999)
+  await flush()
+  assert.equal(aborted.length, 1, 'Kuaishou search is still waiting just before 45 s')
+  t.mock.timers.tick(1)
+  const slowError = await slow
+  assert.equal(slowError.evidence.outcome, 'unknown')
+  assert.equal(slowError.evidence.errorCode, 'upstream_deadline_exceeded')
+  assert.deepEqual(aborted, [nativeForwardingEndpoint(instagram).path, nativeForwardingEndpoint(kuaishou).path])
 })
 
 async function harness({ key = JKEY, grant = true, enabled = true, outcome = 'success', data = DATA, upstreamResponse } = {}) {

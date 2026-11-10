@@ -58,6 +58,18 @@ export const TIKHUB_MAINLAND_BASE_URL = 'https://api.tikhub.dev'
 const TIKHUB_ALLOWED_BASE_URLS = new Set([TIKHUB_BASE_URL, TIKHUB_MAINLAND_BASE_URL])
 export const TIKHUB_DEFAULT_TIMEOUT_MS = 30_000
 export const TIKHUB_MAX_TIMEOUT_MS = 120_000
+// Built-in per-endpoint floors over the configured timeout. 2026-11-10: Kuaishou
+// App comprehensive search has a p50 of ~4 s, but 1.4–2.7 % of calls on every
+// day from 11-02 to 11-09 ran into the 30 s default while the egress was
+// healthy, and a direct call outside Hub's egress took 31 s. Waiting longer
+// turns those late answers into delivered pages instead of unknown outcomes.
+const TIKHUB_ENDPOINT_MIN_TIMEOUT_MS = Object.freeze({
+  't.kuaishou_app_search_comprehensive': 45_000,
+})
+export function tikHubCallTimeoutMs(key, configuredTimeoutMs = TIKHUB_DEFAULT_TIMEOUT_MS) {
+  const base = Number.isInteger(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : TIKHUB_DEFAULT_TIMEOUT_MS
+  return Math.min(TIKHUB_MAX_TIMEOUT_MS, Math.max(base, TIKHUB_ENDPOINT_MIN_TIMEOUT_MS[key] ?? 0))
+}
 export const TIKHUB_DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 export const TIKHUB_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
@@ -427,12 +439,13 @@ async function requestTikHubJson(
   method = 'GET',
   marketplace = XIAOHONGSHU_PLATFORM,
   allowUnrepresentableRaw = false,
+  timeoutMs = adapter.timeoutMs,
 ) {
   const billedOnHttp200 = [XHS_RESEARCH_ENDPOINTS.note_detail.providerPath, XHS_BLOGGER_NOTES_V2.providerPath].includes(path)
   const url = new URL(path, adapter.baseUrl)
   if (method === 'GET') for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value)
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), adapter.timeoutMs)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   const attemptedAt = capturedAt || new Date()
   try {
     let response
@@ -876,7 +889,8 @@ export class TikHubAdapter {
     if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
     const exchange = await requestTikHubJson(this, request.endpointPath, request.upstreamQuery,
       resolvedCredential, capturedAt, request.endpointVersion, request.method,
-      key.startsWith('wechat.') || request.marketplace === 'kuaishou_ec' ? request.marketplace : undefined, contentSearchProjection)
+      key.startsWith('wechat.') || request.marketplace === 'kuaishou_ec' ? request.marketplace : undefined, contentSearchProjection,
+      tikHubCallTimeoutMs(key, this.timeoutMs))
     const persistence = exchange.persisted('accepted', exchange.acceptedAt)
     if (!Object.hasOwn(exchange.raw, 'data')) throw upstreamError('Native data envelope has no data', {
       outcome: 'succeeded_unusable', httpStatus: exchange.httpStatus, businessCode: 200,
