@@ -3,6 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, statSync, renameSync, symlinkSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVICE_CATALOG, DEFAULT_WORKSPACE, defaultServiceProfile, normalizeServiceProfile } from '../../desktop/service-operations-catalog.js';
@@ -45,6 +46,8 @@ export async function installOperations(options, dependencies = {}) {
     return response.json();
   });
   const log = dependencies.log || console.log;
+  const localAddresses = dependencies.localAddresses || (() => Object.values(networkInterfaces()).flat()
+    .filter(entry => entry && (entry.family === 'IPv4' || entry.family === 4)).map(entry => entry.address));
   const node = dependencies.node || process.execPath;
   const source = dependencies.source || sourceDirectory;
   assert(options.workspace?.startsWith('/') && !/[\r\n%]/.test(options.workspace), 'workspace 必须为绝对路径');
@@ -81,6 +84,10 @@ export async function installOperations(options, dependencies = {}) {
   assert(/^\d{1,3}(?:\.\d{1,3}){3}$/.test(config.bind) && config.bind.split('.').every(n => Number(n) <= 255) && config.bind !== '0.0.0.0', 'bind 必须是明确的主机 IPv4 地址');
   assert(Number.isInteger(config.port) && config.port >= 1024 && config.port <= 65535, 'port 需要 1024–65535');
   assert(!options.connect || !config.bind.startsWith('127.'), 'Kubernetes 接入需要 Pod 可达的主机内网地址；首次部署请设置 MX_SERVICE_OPERATIONS_BIND 或 MX_K8S_APISERVER_ADVERTISE_ADDRESS');
+  // After a LAN renumbering the executor can only crash-loop on its saved address.
+  // Stop before any write/start; the bind is still never silently rewritten.
+  assert(localAddresses().includes(config.bind), `执行器登记的监听地址 ${config.bind} 不在本机网卡上（本次部署检测为 ${options.defaultBind || '未知'}），执行器无法启动。` +
+    `主机地址意外变化时先恢复原地址再重试 deploy；确需迁移时由主机管理员同时更新 ${configFile} 的 bind 与各服务的 API Server 地址`);
   if (!existsSync(tokenFile)) writeFileSync(tokenFile, randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' });
   chmodSync(tokenFile, 0o600);
   const token = readFileSync(tokenFile, 'utf8').trim();
@@ -154,8 +161,11 @@ WantedBy=multi-user.target
   // enable does not restart an already running service; also repairs a disabled unit.
   command('systemctl', ['enable', unitName]);
   let deferred = false;
-  if (!active) command('systemctl', ['start', unitName]);
-  else if (current.runtimeVersion !== version || unitChanged || current.updateRequested) {
+  if (!active) {
+    // A crash loop may leave the unit start-limited; this only clears state of a stopped unit.
+    try { command('systemctl', ['reset-failed', unitName]); } catch { /* Not in a failed state. */ }
+    command('systemctl', ['start', unitName]);
+  } else if (current.runtimeVersion !== version || unitChanged || current.updateRequested) {
     try {
       const drain = await request(config, token, 'lifecycle/update', { runtimeVersion: version });
       deferred = drain.inFlight > 0 || drain.submitting;
@@ -173,7 +183,7 @@ WantedBy=multi-user.target
       } catch { /* systemd may be starting the new process. */ }
       await sleep(dependencies.pollInterval ?? 250);
     } while (Date.now() < deadline);
-    assert(ready, '执行器未在等待期内就绪；保留配置和任务，核对 systemctl status mx-service-operations 后重试 deploy');
+    assert(ready, `执行器未在等待期内就绪（${config.bind}:${config.port}）；保留配置和任务，核对 systemctl status mx-service-operations 与 journalctl -u mx-service-operations -n 50 后重试 deploy`);
   }
   if (options.connect) {
     const secret = {

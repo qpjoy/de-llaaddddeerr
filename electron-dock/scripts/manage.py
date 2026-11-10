@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shlex
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -74,12 +75,24 @@ PROXY 支持 host:port 或 http(s)://host:port；* 是主机占位，不能原�
 显式 PROXY 优先；空值清空本次专用构建代理，未设置时沿用各项目配置。
 不会配置系统代理或 MX-H2I 用户代理。不提供通用 restart/restore；开机不执行 deploy。
 原项目命令继续可用。总入口锁仅保护经它发起的同用户、同主机部署。
+主机内网地址变化导致 admin.conf 指向本机已无的地址时，只有 deploy launcher 交给原脚本修复（先备份）；其他入口停止并提示。
 deploy 成功后自动执行一次 db apply（scripts/postgres-runtime.json）；MX_DB_RUNTIME=0 可跳过。
 """
 
 
 class Stop(Exception):
     pass
+
+
+class AddressDrift(Stop):
+    """admin.conf points at an IPv4 this host no longer owns (LAN renumbered)."""
+    def __init__(self, address, target):
+        self.address = address
+        Stop.__init__(self, (
+            "admin.conf 的 API 地址 {} 不在本机网卡上：主机内网地址变化后，kubeadm 控制面仍是另一地址。"
+            "统一入口的检查与全量部署不修复地址；先运行 bash scripts/manage.sh deploy launcher"
+            "（按 MX_K8S_APISERVER_ADVERTISE_ADDRESS={} 修复控制面，原项目脚本先备份再改写），再部署其他项目").format(
+                address, target or "<本机内网 IPv4>"))
 
 
 class Interrupted(BaseException):
@@ -207,8 +220,8 @@ def wait_dependencies(env, hub=False, proxy=False):
 
 def kube_env(env):
     env = env.copy()
-    if "KUBECONFIG" not in env and Path("/etc/kubernetes/admin.conf").is_file():
-        env["KUBECONFIG"] = "/etc/kubernetes/admin.conf"
+    if "KUBECONFIG" not in env and ADMIN_CONFIG.is_file():
+        env["KUBECONFIG"] = str(ADMIN_CONFIG)
     return env
 
 
@@ -219,17 +232,57 @@ def read_command(command, env, timeout=20):
     except (OSError, subprocess.TimeoutExpired):
         raise Stop(command[0] + " 不可用或只读查询超时；未执行自动修复")
     if result.returncode:
-        raise Stop(command[0] + " 只读查询失败；原始错误已隐藏，请检查目标和权限")
+        # kubectl's last stderr line names the failing address/permission. Other
+        # project scripts may print arbitrary output, so theirs stays hidden.
+        detail = error_summary(result.stderr) if command[0] == "kubectl" else ""
+        raise Stop(command[0] + (" 只读查询失败：" + detail if detail else " 只读查询失败；原始错误已隐藏，请检查目标和权限"))
     return result.stdout.strip()
+
+
+def error_summary(text):
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    line = re.sub(r"(?i)\b(bearer|token|password|secret)\b([=:\s]+)\S+", r"\1\2<redacted>", lines[-1])
+    return re.sub(r"[A-Za-z0-9+/_=-]{32,}", "<redacted>", line)[:240]
 
 
 def kube_read(args, env):
     return read_command(["kubectl", "--request-timeout=15s"] + args, env)
 
 
+def host_owns(address):
+    """True when this host has the IPv4 (binding a UDP probe never sends packets)."""
+    if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", address or ""):
+        return False
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind((address, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def check_apiserver_address(env):
+    # Only this host's kubeadm admin.conf must name a local address; a remote
+    # kubeconfig legitimately points elsewhere. Reads the file, not the API.
+    if env.get("KUBECONFIG") != str(ADMIN_CONFIG):
+        return
+    server = kube_read(["config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}"], env)
+    try:
+        host = urlsplit(server).hostname or ""
+    except ValueError:
+        return
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host) and not host.startswith("127.") and not host_owns(host):
+        raise AddressDrift(host, env.get("MX_K8S_APISERVER_ADVERTISE_ADDRESS", ""))
+
+
 def cluster_check(env):
     say("当前 kubeconfig 的辅助检查；子项目可能另选已保存目标，其原有身份校验仍负责最终发布目标")
     context = kube_read(["config", "current-context"], env)
+    check_apiserver_address(env)
     uid = kube_read(["get", "namespace", "kube-system", "-o", "jsonpath={.metadata.uid}"], env)
     if not context or not uid:
         raise Stop("无法确认当前 Kubernetes context / cluster UID")
@@ -424,7 +477,18 @@ def deploy_step(name, state, fd, bound_env=None, db_env=None):
     try:
         if PROJECTS[name][1]:
             env = kube_env(env)
-            record["preflightTarget"] = cluster_check(db_env or env)
+            try:
+                record["preflightTarget"] = cluster_check(db_env or env)
+            except AddressDrift as drift:
+                # Launcher's own deploy is the documented control-plane address
+                # repair (backups first). Only a single, explicit Launcher deploy
+                # toward an address this host owns may proceed; batches never do.
+                target = env.get("MX_K8S_APISERVER_ADVERTISE_ADDRESS", "")
+                if name != "mx-launcher" or db_env is not None or not host_owns(target):
+                    raise
+                say("admin.conf 仍指向 {}，本机地址为 {}；交由 Launcher 原部署脚本先修复 kubeadm 控制面地址（先备份），"
+                    "API/节点检查由其随后执行".format(drift.address, target))
+                record["preflightTarget"] = {"addressRepair": {"from": drift.address, "to": target}}
         if name == "mx-insight-hub":
             wait_dependencies(env, hub=True)
         record["phase"] = "running"
@@ -529,6 +593,7 @@ def batch_target():
         raise Stop("全量部署 KUBECONFIG 必须指向原 admin.conf")
     env["KUBECONFIG"] = str(ADMIN_CONFIG)
     context = kube_read(["config", "current-context"], env)
+    check_apiserver_address(env)
     uid = kube_read(["get", "namespace", "kube-system", "-o", "jsonpath={.metadata.uid}"], env)
     if not context or not uid:
         raise Stop("无法确认原 Internal 集群身份")

@@ -283,7 +283,8 @@ k8s_apply_requested_os_hostname() {
 }
 
 k8s_existing_node_name() {
-  kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+  # Bounded: after a LAN renumbering admin.conf may name an address this host lost.
+  kubectl --request-timeout=15s get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
 
 k8s_etcd_manifest_node_name() {

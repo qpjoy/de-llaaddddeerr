@@ -58,6 +58,7 @@ def target(): return json.loads((root/'cluster.json').read_text())
 def read(command,env,timeout=20):
     event({'type':'read','args':command,'kubeconfig':env.get('KUBECONFIG')})
     if str(m.RUNTIME_RESOLVER) in command: return options.get('runtime','mx-k8s-containerd.service')
+    if any('cluster.server' in part for part in command): return options.get('server','https://192.0.2.20:6443')
     if 'current-context' in command: return target()['context']
     if 'view' in command:
         return json.dumps({'current-context':'internal-context','contexts':[{'name':'internal-context','context':{'cluster':'fixture','user':'fixture'}}]})
@@ -66,7 +67,9 @@ def read(command,env,timeout=20):
     if 'kube-system' in command: return target()['uid']
     raise AssertionError('unexpected read command '+repr(command))
 m.read_command=read
+m.host_owns=lambda address: address in options.get('owned',['192.0.2.20'])
 def cluster_check(env):
+    m.check_apiserver_address(env)
     event({'type':'cluster','env':{key:env.get(key) for key in ('KUBECONFIG','CONTEXT','KUBE_CONTEXT')}})
     return {'context':target()['context'],'clusterUID':target()['uid']}
 m.cluster_check=cluster_check
@@ -89,12 +92,13 @@ def db_runtime(action,names,summary=None,env=None,lock_fd=None):
     return 7 if options.get('dbFail')==names[0] else 0
 m.db_runtime=db_runtime
 code=1
-try: code=m.main(['plan','all'] if options.get('plan') else ['deploy','all'])
+try: code=m.main(options.get('args') or (['plan','all'] if options.get('plan') else ['deploy','all']))
 except m.Stop as error: print('REFUSED: '+str(error))
 records=[]
 if (root/'state').exists():
     records=[json.loads(path.read_text()) for path in sorted((root/'state').glob('all-*.json'))]
-(root/'result.json').write_text(json.dumps({'records':records,'admin':str(m.ADMIN_CONFIG),'host':host,
+projectRecords=[json.loads(path.read_text()) for path in sorted((root/'state').glob('mx-*.json'))] if (root/'state').exists() else []
+(root/'result.json').write_text(json.dumps({'records':records,'projectRecords':projectRecords,'admin':str(m.ADMIN_CONFIG),'host':host,
                                          'stateExists':(root/'state').exists(),
                                          'snapshotsRemain':list(map(str,(root/'state').glob('db-target-*.kubeconfig')))}))
 sys.exit(code)
@@ -280,4 +284,60 @@ test('HanLP readiness failure occurs before the Hub child and leaves DataPort pe
   assert.equal(result.status, 1)
   assert.deepEqual(result.children.map(row => row.project), order.slice(0, 3))
   assert.deepEqual(result.record.steps.map(row => row.status), ['succeeded', 'succeeded', 'succeeded', 'failed', 'pending'])
+})
+
+// 2026-11-10: the host went 192.168.1.2 → 192.168.0.103 → 192.168.1.2. The
+// interrupted Launcher deploy left admin.conf on an address the host lost.
+const drifted = { server: 'https://198.51.100.7:6443', env: { MX_DB_RUNTIME: '0', MX_K8S_APISERVER_ADVERTISE_ADDRESS: '192.0.2.20' } }
+
+test('deploy launcher hands a drifted admin.conf to the Launcher address repair', t => {
+  const result = run(t, { ...drifted, args: ['deploy', 'launcher'] })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.deepEqual(result.children.map(row => row.project), ['mx-launcher'])
+  assert.equal(result.children[0].env.MX_K8S_APISERVER_ADVERTISE_ADDRESS, '192.0.2.20')
+  assert.deepEqual(result.children[0].args, ['ops', 'internal-production', 'deploy'])
+  assert.deepEqual(result.projectRecords[0].preflightTarget, { addressRepair: { from: '198.51.100.7', to: '192.0.2.20' } })
+  assert.match(result.stdout, /198\.51\.100\.7/)
+})
+
+test('deploy launcher toward an address this host does not own still refuses', t => {
+  const result = run(t, { ...drifted, args: ['deploy', 'launcher'], env: { ...drifted.env, MX_K8S_APISERVER_ADVERTISE_ADDRESS: '203.0.113.5' } })
+  assert.equal(result.status, 1)
+  assert.deepEqual(result.children, [])
+  assert.match(result.stdout, /198\.51\.100\.7 不在本机网卡上/)
+})
+
+test('other projects and deploy all stop on a drifted admin.conf and name the Launcher repair', t => {
+  const hub = run(t, { ...drifted, args: ['deploy', 'hub'] })
+  assert.equal(hub.status, 1)
+  assert.deepEqual(hub.children, [])
+  assert.match(hub.stdout, /deploy launcher/)
+  const all = run(t, drifted)
+  assert.equal(all.status, 1)
+  assert.deepEqual(all.children, [])
+  assert.match(all.stdout, /198\.51\.100\.7 不在本机网卡上/)
+  assert.deepEqual(all.record.steps.map(row => row.status), order.map(() => 'pending'))
+})
+
+test('kubectl failures report the redacted last stderr line; other commands stay hidden', t => {
+  const root = mkdtempSync(join(tmpdir(), 'mx manage read '))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(join(root, 'kubectl'), '#!/bin/sh\necho "E1110 memcache.go:265 discovery failed" >&2\necho "Unable to connect to the server: dial tcp 192.168.0.103:6443: connect: no route to host token=abc123" >&2\nexit 1\n', { mode: 0o755 })
+  writeFileSync(join(root, 'other'), '#!/bin/sh\necho "SECRET_VALUE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" >&2\nexit 1\n', { mode: 0o755 })
+  const script = String.raw`
+import importlib.util, os, sys
+spec=importlib.util.spec_from_file_location('manage',sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+env=dict(os.environ, PATH=sys.argv[2]+':'+os.environ['PATH'])
+for command in (['kubectl','get','nodes'], ['other']):
+    try: m.read_command(command, env)
+    except m.Stop as error: print(error)
+print(m.host_owns('127.0.0.1'), m.host_owns('198.51.100.7'), m.host_owns('not-an-ip'))
+`
+  const result = spawnSync('python3', ['-I', '-B', '-c', script, source, root], { encoding: 'utf8', timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr)
+  const [kubectl, other, owns] = result.stdout.trim().split('\n')
+  assert.equal(kubectl, 'kubectl 只读查询失败：Unable to connect to the server: dial tcp 192.168.0.103:6443: connect: no route to host token=<redacted>')
+  assert.match(other, /原始错误已隐藏/)
+  assert.ok(!other.includes('SECRET_VALUE'))
+  assert.equal(owns, 'True False False')
 })

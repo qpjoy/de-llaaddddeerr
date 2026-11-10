@@ -84,7 +84,13 @@ bash scripts/manage.sh ops internal-production deploy
 | `MX_SERVICE_OPERATIONS_BIND` | 首次默认使用生产部署检测的主机 LAN IPv4（上述命令为 `192.168.1.2`）；后续沿用已有值 |
 | `MX_SERVICE_OPERATIONS_PORT` | 首次默认 `19290`；后续沿用已有值 |
 
-对已有安装显式传入不同 bind/port 会报错，请由主机管理员安排连接配置迁移后再部署，不静默覆盖。端口须对 Launcher Pod 可达，并限定可信管理网络；安装器不改防火墙或证书。在页面应用原 Internal Ops Token 后点击“刷新执行器与任务”。短暂切换断线时查询原任务，不另建部署；新版本会拒绝旧执行器生成但尚未执行的计划，需重新预检。
+对已有安装显式传入不同 bind/port 会报错，请由主机管理员安排连接配置迁移后再部署，不静默覆盖。
+
+**主机内网地址变化（2026-11-10 事件）。** 主机临时从 `192.168.1.2` 改为 `192.168.0.103` 后，用新地址执行 deploy：Launcher 原脚本按设计把 kubeadm 控制面、kube-proxy、Flannel 改写到 `.0.103`，随后执行器仍按 `config.json` 的 `192.168.1.2` 监听，无法启动并反复重启，等待 30 秒后报“执行器未在等待期内就绪”。主机改回 `192.168.1.2` 后：
+
+- 安装器现在先核对登记地址是否在本机网卡上；不在时立即停止并写明两个地址，不写配置、不启动、不登记 Secret，仍不自动改写 bind。启动前先 `systemctl reset-failed`，清除反复重启留下的启动限流，不影响运行中的进程。就绪超时提示 `journalctl -u mx-service-operations -n 50`。
+- 控制面仍停在 `.0.103`，`admin.conf` 指向本机已没有的地址，所有 kubectl 都会失败。统一入口 `electron-dock/scripts/manage.py` 现在会识别这种情况，并显示 kubectl 的末行错误（脱敏）。只有单独执行 `deploy launcher`、且 `MX_K8S_APISERVER_ADVERTISE_ADDRESS` 是本机地址时，才交给 Launcher 原脚本修复地址（先备份）。`deploy all`、其他项目及 `doctor` 停止，并提示先发布 Launcher。
+- 恢复步骤：按原地址（默认 `192.168.1.2`）发布一次 Launcher，可以用原项目命令，也可以用 `bash scripts/manage.sh deploy launcher`。执行器、Secret 与服务档案中的 `192.168.1.2` 本来就正确，无需修改。端口须对 Launcher Pod 可达，并限定可信管理网络；安装器不改防火墙或证书。在页面应用原 Internal Ops Token 后点击“刷新执行器与任务”。短暂切换断线时查询原任务，不另建部署；新版本会拒绝旧执行器生成但尚未执行的计划，需重新预检。
 
 独立安装命令仍可用于准备主机或排查，本身不滚动四个业务服务：
 

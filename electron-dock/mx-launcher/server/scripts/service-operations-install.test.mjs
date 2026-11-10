@@ -24,11 +24,11 @@ function fixture(t, { siblings = false } = {}) {
     cpSync(new URL(`../../scripts/${name}.mjs`, import.meta.url), join(dir, `source/scripts/${name}.mjs`));
   }
   const paths = Object.fromEntries(['root', 'configuration', 'stateDir', 'units'].map(key => [key, join(dir, key)]));
-  let active = false, busy = false, healthy = true, failSecret = false, current = null, boots = 0;
+  let active = false, busy = false, healthy = true, failSecret = false, current = null, boots = 0, local = ['127.0.0.1', '192.168.1.2'];
   const calls = [], requests = [], logs = [];
   const installedVersion = () => JSON.parse(readFileSync(join(paths.root, 'current/release.json'), 'utf8')).runtimeVersion;
   const start = () => { active = true; current = { runtimeVersion: installedVersion(), bootId: String(++boots), updateRequested: null, inFlight: 0, submitting: false }; };
-  const dependencies = { paths, source, log: message => logs.push(message), readyTimeout: 1, pollInterval: 1,
+  const dependencies = { paths, source, log: message => logs.push(message), readyTimeout: 1, pollInterval: 1, localAddresses: () => local,
     command(program, args, extra = {}) {
       calls.push({ program, args, input: extra.input });
       if (program === process.execPath) return execFileSync(program, args);
@@ -55,6 +55,7 @@ function fixture(t, { siblings = false } = {}) {
   return { dir, workspace, paths, source, calls, requests, logs, dependencies,
     install: options => installOperations({ workspace, defaultBind: '192.168.1.2', connect: true, ...options }, dependencies),
     setBusy(value) { busy = value; }, setHealthy(value) { healthy = value; }, failSecret() { failSecret = true; }, finishUpdate: start,
+    setLocal(addresses) { local = addresses; }, crash() { active = false; },
     upgrade() { appendFileSync(join(source, 'service-operations-agent.mjs'), '\n// updated fixture version\n'); }
   };
 }
@@ -148,6 +149,39 @@ test('first startup must become authenticated and ready before any Kubernetes re
   await assert.rejects(f.install(), /未在等待期内就绪/);
   assert.ok(!f.calls.some(c => c.program === 'kubectl'));
   assert.ok(!existsSync(join(f.paths.root, 'install.lock')));
+});
+
+test('renumbered host stops before any write or start; restoring the address recovers a crash-looped unit', async t => {
+  // 2026-11-10: host moved 192.168.1.2 → 192.168.0.103 while config.json kept 192.168.1.2.
+  const f = fixture(t); await f.install();
+  const configPath = join(f.paths.configuration, 'config.json');
+  const before = readFileSync(configPath, 'utf8'); const calls = f.calls.length;
+  f.setLocal(['127.0.0.1', '192.168.0.103']); f.crash();
+  await assert.rejects(f.install({ defaultBind: '192.168.0.103' }), error => {
+    assert.match(error.message, /192\.168\.1\.2 不在本机网卡上（本次部署检测为 192\.168\.0\.103）/); return true;
+  });
+  assert.equal(readFileSync(configPath, 'utf8'), before);
+  assert.ok(f.calls.slice(calls).every(c => c.program !== 'kubectl' && !['start', 'restart', 'stop', 'daemon-reload'].includes(c.args[0])));
+  f.setLocal(['127.0.0.1', '192.168.1.2']);
+  const recovered = await f.install();
+  assert.equal(recovered.deferred, false); assert.equal(recovered.config.bind, '192.168.1.2');
+  const systemctl = f.calls.slice(calls).filter(c => c.program === 'systemctl').map(c => c.args[0]);
+  assert.ok(systemctl.indexOf('reset-failed') >= 0 && systemctl.indexOf('reset-failed') < systemctl.indexOf('start'));
+  assert.ok(f.calls.every(c => !['restart', 'stop'].includes(c.args[0])));
+  const secret = f.calls.filter(c => c.program === 'kubectl').map(c => JSON.parse(c.input)).at(-1);
+  assert.equal(secret.stringData.MX_SERVICE_OPERATIONS_URL, 'http://192.168.1.2:19290');
+  assert.equal(readFileSync(configPath, 'utf8'), before);
+});
+
+test('first install refuses a detected address the host does not own, creating no credentials', async t => {
+  const f = fixture(t); f.setLocal(['127.0.0.1']);
+  await assert.rejects(f.install(), /不在本机网卡上/);
+  assert.ok(!existsSync(join(f.paths.configuration, 'token'))); assert.ok(!existsSync(join(f.paths.configuration, 'config.json')));
+});
+
+test('a timed-out start names the address and journal to inspect', async t => {
+  const f = fixture(t); f.setHealthy(false);
+  await assert.rejects(f.install(), /192\.168\.1\.2:19290.*journalctl -u mx-service-operations/);
 });
 
 test('CLI options are strict and preserve omitted bind/port on repeat deploy', () => {
