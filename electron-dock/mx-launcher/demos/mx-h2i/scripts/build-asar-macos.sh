@@ -13,6 +13,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
 
+node "${PROJECT_DIR}/scripts/build-ui.mjs"
 node "${PROJECT_DIR}/scripts/dev-mode.mjs" ensure
 pnpm --dir "${PROJECT_DIR}" run check
 node "${PROJECT_DIR}/scripts/build-asar-update.mjs" --version "$1" --platform darwin --arch "${2:-universal}"

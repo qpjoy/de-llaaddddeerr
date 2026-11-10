@@ -23,6 +23,7 @@ function fixture({ entitlement = { status: 'active', siteIds: sites }, failRead 
   const requests = [];
   const hydrates = [];
   const context = vm.createContext({
+    MINCAVE_UI_ENABLED: false,
     runtime: { connection: { internalBaseUrl: 'https://internal.example' } },
     normalizeBaseUrl: value => value || null,
     nullableString: value => value || null,
@@ -110,6 +111,7 @@ test('legacy provision IPC only refreshes and ignores reset parameters', async (
   const hydrates = [];
   const runtime = { apps: { h2o: { installed: true, runtime: { activeSubscription: { nodes: 2 } } } } };
   const context = vm.createContext({
+    MINCAVE_UI_ENABLED: false,
     runtime,
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     runtimeHasUserIdentity: () => true,

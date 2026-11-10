@@ -1,3 +1,4 @@
+import { MinCaveModule } from './modules/mincave/mincave.module.js';
 import { Module } from '@nestjs/common';
 
 import { AdminModule } from './modules/admin/admin.module.js';
@@ -22,6 +23,7 @@ import { SharedModule } from './shared.module.js';
 @Module({
   imports: [
     SharedModule,
+    MinCaveModule,
     ApiDocsModule,
     AdminModule,
     PlatformModule,

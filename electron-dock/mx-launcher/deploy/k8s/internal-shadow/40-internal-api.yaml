@@ -175,6 +175,18 @@ spec:
                 secretKeyRef:
                   name: mx-launcher-db
                   key: DATABASE_URL
+            - name: MX_MINCAVE_FEISHU_TENANT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mx-mincave-access
+                  key: tenant-key
+                  optional: true
+            - name: MX_MINCAVE_INITIAL_ADMIN_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mx-mincave-access
+                  key: initial-admin-user-id
+                  optional: true
             - name: MX_FEISHU_APP_ID
               valueFrom:
                 secretKeyRef:

@@ -332,6 +332,14 @@ test('image materialization never preserves runtime subscription secrets', () =>
     for (const name of SUBSCRIPTION_FILES) {
       assert.equal(existsSync(join(domesticRoot, name)), false, `${name} must not exist in image artifacts`);
     }
+    for (const name of ['Caddyfile', 'Caddyfile.public-tls']) {
+      const caddy = execFileSync('tar', ['-xOf', join(domesticRoot, 'mx-domestic-services.tar.gz'), `./${name}`], { encoding: 'utf8' });
+      assert.match(caddy, /@mincaveSession \{\s+method POST\s+path \/internal\/v1\/mincave\/session/);
+      assert.match(caddy, /@mincaveDevices \{\s+method GET\s+path \/internal\/v1\/mincave\/devices/);
+      assert.match(caddy, /@mincaveMembers \{\s+method GET\s+path \/internal\/v1\/mincave\/members/);
+      assert.match(caddy, /@mincaveMemberUpdate \{\s+method PATCH/);
+      assert.doesNotMatch(caddy, /path \/internal\/v1\/mincave\/\*/);
+    }
     const value = readManifest(files.runtime);
     const wireguard = moduleById(value, 'wireguard-config');
     assert.equal(wireguard.status, 'template');

@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
     "typecheck": "tsc -p tsconfig.test.json",
+    "test:mincave": "node --test --import tsx src/modules/mincave/*.test.ts",
     "test:admin-sso": "node --test --import tsx src/admin-sso/*.test.ts",
     "test:identity": "node --test --import tsx src/identity/*.test.ts ../scripts/identity-deploy.test.mjs",
     "test:identity-console": "node --test ../scripts/identity-console.test.mjs ../scripts/identity-app.test.mjs ../scripts/identity-deploy.test.mjs ../scripts/identity-public.test.mjs",

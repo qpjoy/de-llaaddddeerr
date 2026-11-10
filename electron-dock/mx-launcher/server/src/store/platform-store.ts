@@ -1,3 +1,5 @@
+import type { MinCaveDevice, MinCaveDeviceInput } from '../lib/mincave-devices.js';
+import type { MinCaveMember, MinCaveAdmission, MinCaveMemberChange } from '../lib/mincave-access.js';
 import type {
   SystemSubscriptionPublication,
   AnonymousEnrollment,
@@ -257,6 +259,12 @@ export interface PlatformStore {
     snapshot: ConfigSnapshot;
     auditEvent: AuditEvent;
   }>;
+  getUserCenterUser(userId: string): MaybePromise<UserCenterUser | null>;
+  listMinCaveDevices(userId: string): MaybePromise<MinCaveDevice[]>;
+  recordMinCaveDevice(userId: string, device: MinCaveDeviceInput): MaybePromise<void>;
+  listMinCaveMembers(): MaybePromise<MinCaveMember[]>;
+  admitMinCaveMember(input: MinCaveAdmission): MaybePromise<{ user: UserCenterUser; member: MinCaveMember }>;
+  updateMinCaveMember(input: MinCaveMemberChange): MaybePromise<UserCenterUser>;
   bootstrapUserCenter(): MaybePromise<UserCenterBootstrapResult>;
   listUserCenterRoles(): MaybePromise<UserCenterRole[]>;
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;

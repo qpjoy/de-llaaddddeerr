@@ -532,7 +532,7 @@ const visibleRuntime = Function(
   'visibleFeishuAuthFlow',
   'visibleForegroundNetworkOperation',
   'diagnosticLogStatus',
-  `${functionSource(mainSource, 'visibleRuntime')}; return visibleRuntime;`
+  `const MINCAVE_UI_ENABLED = false;\n${functionSource(mainSource, 'visibleRuntime')}; return visibleRuntime;`
 )(
   {},
   (value) => value,
@@ -1735,7 +1735,7 @@ console.log('Feishu loopback OAuth and advanced anonymous-entry safety tests pas
 {
   const { runInNewContext } = await import('node:vm');
   const requests = [];
-  const context = {
+  const context = { MINCAVE_UI_ENABLED: false,
     requestJson: async (url, options) => { requests.push({ url, ...options }); return {}; },
     joinApiUrl: (base, path) => base + path,
     makeRequestId: tag => tag,
@@ -1760,7 +1760,7 @@ console.log('Feishu loopback OAuth and advanced anonymous-entry safety tests pas
       const runtime = { connection: oldConnection, auth: oldAuth, identity: { account: 'old-user' }, config: {} };
       let applied = 0, hydrated = 0;
       const noOp = () => {};
-      const context = {
+      const context = { MINCAVE_UI_ENABLED: false,
         runtime, makeRequestId: tag => tag, nullableString: value => value || null,
         networkMutationEpoch: 0, cancelScheduledWireGuardRecovery: () => {},
         markForegroundNetworkOperationPaused: () => {}, nowIso: () => new Date().toISOString(),
@@ -1807,7 +1807,7 @@ console.log('application-scoped login and failed-admission subscription safety: 
 {
   const { runInNewContext } = await import('node:vm');
   const marker = { code: 'app_access_denied', message: '禁止访问', updatedAt: '2026-10-03T00:00:00Z' };
-  const context = { runtime: { connection: { state: 'forbidden', diagnostics: { applicationAccessDenied: marker } } },
+  const context = { MINCAVE_UI_ENABLED: false, runtime: { connection: { state: 'forbidden', diagnostics: { applicationAccessDenied: marker } } },
     nullableString: value => value || null, nowIso: () => marker.updatedAt, normalizeInternalDirectPeerSync: () => null, normalizeDomesticPeerSync: () => null };
   for (const name of ['normalizeDiagnostics', 'shouldRecoverWireGuardConnection', 'repairSystemNetworkForRuntime', 'restoreH2oRuntimeAfterStartup', 'hydrateH2oSystemSubscriptionsForUser', 'refreshSystemDomainProxyForRuntime']) {
     runInNewContext(functionSource(mainSource, name), context);

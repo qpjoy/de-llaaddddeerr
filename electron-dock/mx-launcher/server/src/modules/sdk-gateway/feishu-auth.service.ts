@@ -168,6 +168,7 @@ export class FeishuAuthService {
       audience: input.audience?.trim() || 'mx-sdk',
       scopes: input.scopes ?? [],
       authProvider: 'feishu',
+      verifiedFeishuIdentity: { tenantKey: identity.subject.split(':')[0], subject: identity.subject },
       appId: input.appId,
       ttlSeconds: FEISHU_TOKEN_TTL_SECONDS,
       requestId: input.requestId ?? null

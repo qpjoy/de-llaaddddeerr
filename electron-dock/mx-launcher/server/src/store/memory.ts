@@ -1,3 +1,5 @@
+import { mincaveDeviceKey, mergeMinCaveDevices, observeMinCaveDevice, type MinCaveDevice, type MinCaveDeviceInput } from '../lib/mincave-devices.js';
+import { admitMinCave, changeMinCaveMember, assertMinCaveTransition, type MinCaveMember, type MinCaveAdmission, type MinCaveMemberChange } from '../lib/mincave-access.js';
 import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -403,6 +405,8 @@ export class MemoryStore implements PlatformStore {
   private readonly tenants = new Map<string, UserCenterTenant>();
   private readonly orgs = new Map<string, UserCenterOrg>();
   private readonly roles = new Map<string, UserCenterRole>();
+  private readonly mincaveDevices = new Map<string, MinCaveDevice>();
+  private readonly mincaveMembers = new Map<string, MinCaveMember>();
   private readonly users = new Map<string, UserCenterUser>();
   private readonly userCredentials = new Map<string, UserCenterUserCredential>();
   private readonly userDeletionTombstones = new Map<string, UserCenterUserDeletionTombstone>();
@@ -892,6 +896,37 @@ export class MemoryStore implements PlatformStore {
     return { enrollment, snapshot, auditEvent };
   }
 
+  getUserCenterUser(userId: string): UserCenterUser | null { return structuredClone(this.users.get(userId) || null); }
+
+  listMinCaveDevices(userId: string): MinCaveDevice[] {
+    return mergeMinCaveDevices(userId, [...this.mincaveDevices.values()], this.listLauncherNetworkLeases('mx-h2i'));
+  }
+
+  recordMinCaveDevice(userId: string, device: MinCaveDeviceInput): void {
+    for (const row of observeMinCaveDevice(userId, device, this.listMinCaveDevices(userId))) {
+      this.mincaveDevices.set(mincaveDeviceKey(userId, row.deviceId), structuredClone(row));
+    }
+  }
+
+  listMinCaveMembers(): MinCaveMember[] { return structuredClone([...this.mincaveMembers.values()]); }
+
+  admitMinCaveMember(input: MinCaveAdmission) {
+    const result = admitMinCave(input, this.config, [...this.users.values()], this.listMinCaveMembers());
+    const first = !this.mincaveMembers.has(input.userId);
+    this.users.set(result.user.userId, result.user);
+    this.mincaveMembers.set(input.userId, result.member);
+    if (first) this.recordAudit({ eventType: 'mincave.member.admitted', actorKind: 'user', userId: input.userId });
+    return structuredClone(result);
+  }
+
+  updateMinCaveMember(input: MinCaveMemberChange): UserCenterUser {
+    const user = changeMinCaveMember(input, [...this.users.values()], this.listMinCaveMembers());
+    this.users.set(user.userId, user);
+    this.recordAudit({ eventType: 'mincave.member.updated', actorKind: 'user', userId: input.actorId,
+      metadata: { targetUserId: input.userId, role: input.role, enabled: input.enabled } });
+    return structuredClone(user);
+  }
+
   bootstrapUserCenter(): UserCenterBootstrapResult {
     const tenant = builtinUserCenterTenant();
     const org = builtinUserCenterOrg();
@@ -979,6 +1014,7 @@ export class MemoryStore implements PlatformStore {
   createUserCenterUser(input: CreateUserInput): UserCenterUser {
     const previous = this.findUserCenterUserForInput(input);
     const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
+    assertMinCaveTransition(previous, draft, [...this.users.values()], this.listMinCaveMembers());
     const previousCredential = this.userCredentials.get(draft.userId) ?? null;
     const credential = input.password !== undefined && input.password !== null
       ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)
@@ -1097,6 +1133,7 @@ export class MemoryStore implements PlatformStore {
     if (!userId) throw new Error('userId is required');
     const user = this.users.get(userId);
     if (!user) throw new Error(`User not found: ${userId}`);
+    assertMinCaveTransition(user, null, [...this.users.values()], this.listMinCaveMembers());
     const protectedReason = userCenterDeleteProtectionReason(user, [...this.users.values()]);
     if (protectedReason) throw new Error(protectedReason);
     const activeLease = [...this.launcherNetworkLeases.values()]

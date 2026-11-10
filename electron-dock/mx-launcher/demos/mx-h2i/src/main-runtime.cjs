@@ -2,6 +2,8 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
+const { mincaveWindowBounds, mincaveWindowMinimum } = require('./mincave-window-policy.cjs');
+const { createMincaveAdminBridge } = require('./mincave-admin.cjs');
 const http = require('node:http');
 const https = require('node:https');
 const dnsPromises = require('node:dns').promises;
@@ -65,6 +67,7 @@ const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: ele
 
 loadDotEnvFiles();
 
+const MINCAVE_UI_ENABLED = process.env.MX_H2I_UI !== 'legacy';
 const APP_ID = 'dev.qpjoy.mx-h2i';
 const STATE_FILE = 'mx-h2i-runtime.json';
 const H2O_RUNTIME_STORE_FILE = 'mx-h2i-h2o-runtime.json';
@@ -250,6 +253,10 @@ let appShutdownRequested = false;
 let appShutdownCompleted = false;
 let appRelaunchRequested = false;
 let pendingFeishuLogin = null;
+let mincaveBridge = null;
+let mincaveDisconnectHandler = null;
+let mincaveAccessTimer = null;
+let mincaveLoginError = null;
 
 const WINDOWS_SPLIT_DNS_DIAGNOSTIC_HOST_MISSING = 'split-dns-diagnostic-host-missing';
 
@@ -285,6 +292,33 @@ app.on('second-instance', () => {
 if (gotSingleInstanceLock) {
   app.whenReady().then(async () => {
     runtime = await loadRuntime();
+    if (MINCAVE_UI_ENABLED) {
+      mincaveBridge = createMincaveAdminBridge({
+        getRuntime: () => runtime,
+        getDevice: () => ({
+          ...runtime.installation,
+          deviceLabel: runtime.installation?.deviceLabel && !/^(MinCave|MX-H2I) Desktop$/.test(runtime.installation.deviceLabel)
+            ? runtime.installation.deviceLabel : os.hostname(),
+          platform: process.platform,
+          osVersion: os.release()
+        }),
+        fetch: (url, options) => electronSession.defaultSession.fetch(url, options),
+        resolveBaseUrl: async () => {
+          const bootstrap = await resolveBootstrapEndpoint(runtime.config, { requireSecureTransport: true });
+          assertSecureFeishuTransport(bootstrap, 'MinCave 权限验证');
+          return bootstrap.baseUrl;
+        },
+        onChange: () => { if (mainWindow) broadcastState(); },
+        onDenied: async (token) => {
+          if (runtime.auth?.accessToken !== token) return true;
+          if (!mincaveDisconnectHandler || activeForegroundNetworkOperation) return false;
+          await mincaveDisconnectHandler();
+          return true;
+        }
+      });
+      // Old disk state never authorizes management or starts a new connection.
+      await mincaveBridge.refresh();
+    }
     if (process.platform === 'darwin' && app.dock) {
       app.dock.setIcon(productIconPath());
     }
@@ -297,7 +331,8 @@ if (gotSingleInstanceLock) {
     });
     await initializeSystemDomainProxy();
     const credentialStorageRecovery = await reconcileCredentialStorageFailureAfterStartup();
-    if (credentialStorageRecovery.blocked !== true && !runtime.connection?.diagnostics?.applicationAccessDenied) {
+    if (credentialStorageRecovery.blocked !== true && !runtime.connection?.diagnostics?.applicationAccessDenied
+      && (!MINCAVE_UI_ENABLED || mincaveBridge.snapshot().status === 'allowed')) {
       await reconcileExistingWireGuardAfterStartup();
       await reconcilePendingNetworkHandoverAfterStartup();
       await settleAnonymousLoginDisabledAfterStartup();
@@ -308,6 +343,10 @@ if (gotSingleInstanceLock) {
       lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
     });
     registerIpc();
+    if (MINCAVE_UI_ENABLED) {
+      mincaveAccessTimer = setInterval(() => { void mincaveBridge.refresh(); }, 60_000);
+      mincaveAccessTimer.unref?.();
+    }
     createTray();
     createMainWindow();
     void refreshLauncherProductPresentation('app-startup');
@@ -319,7 +358,7 @@ if (gotSingleInstanceLock) {
       console.warn('[mx-h2i] startup update bookkeeping failed:', errorMessage(err));
       queueDiagnosticError('startup.update-bookkeeping', err);
     });
-    startTopRevealWatcher();
+    if (!MINCAVE_UI_ENABLED) startTopRevealWatcher();
     if (credentialStorageRecovery.blocked !== true) {
       startWireGuardRecoveryWatcher();
     }
@@ -389,6 +428,8 @@ async function shutdownApplication() {
     relaunch: appRelaunchRequested
   });
   clearPendingFeishuLogin('app-shutdown');
+  if (mincaveAccessTimer) clearInterval(mincaveAccessTimer);
+  mincaveAccessTimer = null;
   stopNetworkChangeWatcher();
   stopWireGuardRecoveryWatcher();
   stopSystemDomainProxyRefreshWatcher();
@@ -568,10 +609,10 @@ function createMainWindow() {
     height: initialBounds.height,
     minWidth: initialMinimum.width,
     minHeight: initialMinimum.height,
-    resizable: false,
-    title: 'MX-H2I',
+    resizable: MINCAVE_UI_ENABLED,
+    title: MINCAVE_UI_ENABLED ? 'MinCave' : 'MX-H2I',
     icon: productIconPath(),
-    backgroundColor: '#242734',
+    backgroundColor: MINCAVE_UI_ENABLED ? '#f7f8fd' : '#242734',
     frame: false,
     hasShadow: true,
     webPreferences: {
@@ -605,16 +646,26 @@ function createMainWindow() {
     mainWindow = null;
   });
   mainWindow.on('focus', () => {
+    if (MINCAVE_UI_ENABLED) void mincaveBridge?.refresh();
     void refreshLauncherProductPresentation('window-focus');
   });
   attachWindowBoundsTracking();
   rememberWindowBoundsForMode('launcher', mainWindow.getBounds());
-  mainWindow.loadFile(path.join(__dirname, 'index.html'));
+  mainWindow.loadFile(path.join(__dirname, MINCAVE_UI_ENABLED ? 'renderer-dist/index.html' : 'index.html'));
 }
 
 function registerIpc() {
+  ipcMain.handle('mx-h2i:mincave-devices', () => mincaveBridge
+    ? mincaveBridge.devices() : { ok: false, error: { code: 'unavailable', message: '设备服务暂不可用。' } });
+  ipcMain.handle('mx-h2i:mincave-admin', (_event, input) => mincaveBridge
+    ? mincaveBridge.request(input) : { ok: false, error: { code: 'unavailable', message: 'MinCave 服务暂不可用。' } });
+  ipcMain.handle('mx-h2i:mincave-access', async () => {
+    await mincaveBridge?.refresh();
+    return visibleRuntime();
+  });
   ipcMain.handle('mx-h2i:get-state', () => visibleRuntime());
   ipcMain.handle('mx-h2i:save-config', async (_event, input) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     runtime.config = normalizeConfig(input);
     runtime.launcherContract = await launcherContract(runtime.config);
     touchRuntime('config saved');
@@ -622,6 +673,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
+    if (MINCAVE_UI_ENABLED) throw new Error('请使用飞书登录 MinCave。');
     const transitionStartedAt = Date.now();
     const transitionId = makeRequestId('visit-connect');
     const foregroundOperation = beginForegroundNetworkOperation('guest-connect', transitionId);
@@ -849,6 +901,7 @@ function registerIpc() {
     }
   });
   ipcMain.handle('mx-h2i:login-employee', async (_event, input) => {
+    if (MINCAVE_UI_ENABLED) throw new Error('请使用飞书登录 MinCave。');
     const account = typeof input?.account === 'string' ? input.account.trim() : '';
     const password = typeof input?.password === 'string' ? input.password : '';
     if (!account || !password) {
@@ -887,7 +940,7 @@ function registerIpc() {
     requestForegroundNetworkOperationCancel(input);
     return visibleRuntime();
   });
-  ipcMain.handle('mx-h2i:disconnect', async () => {
+  ipcMain.handle('mx-h2i:disconnect', mincaveDisconnectHandler = async () => {
     if (wireGuardDisconnectInFlight) return visibleRuntime();
     clearPendingFeishuLogin('network-disconnect');
     wireGuardDisconnectInFlight = true;
@@ -1431,6 +1484,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:install-appcenter', async () => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     if (runtime.connection.state !== 'connected') {
       runtime.feedback = {
         tone: 'warning',
@@ -1467,6 +1521,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:enable-h2o', async () => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     if (!runtime.apps.appcenter.installed) {
       runtime.feedback = {
         tone: 'warning',
@@ -1519,6 +1574,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:launch-h2o', async () => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     if (!runtime.apps.h2o.installed) {
       runtime.feedback = {
         tone: 'warning',
@@ -1660,6 +1716,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:set-h2o-mode', async (_event, mode) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     if (!runtime.apps.h2o.installed) {
       runtime.feedback = {
         tone: 'warning',
@@ -1751,6 +1808,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:select-h2o-node', async (_event, nodeName) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     const name = nullableString(nodeName);
     const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
     if (!name) return visibleRuntime();
@@ -1783,6 +1841,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:update-h2o-runtime', async (_event, patch) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     if (!runtime.apps.h2o.installed) {
       runtime.feedback = {
         tone: 'warning',
@@ -1853,6 +1912,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:issue-h2o-clash-link', async (_event, input = {}) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     try {
       const issued = await issueH2oClashSubscriptionLink(input);
       const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
@@ -1873,6 +1933,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:refresh-h2o-subscription', async (_event, input = {}) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     if (!runtime.apps.h2o.installed) {
       runtime.feedback = {
         tone: 'warning',
@@ -1932,6 +1993,7 @@ function registerIpc() {
   // Compatibility for older renderers: this entry now refreshes subscriptions;
   // only User Center admin controls which sites a user is assigned.
   ipcMain.handle('mx-h2i:provision-h2o-oversea', async () => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     if (!runtime.apps.h2o.installed) {
       runtime.feedback = {
         tone: 'warning',
@@ -1981,6 +2043,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:open-h2o-test-window', async (_event, input = {}) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     try {
       await openH2oTestWindow(input);
     } catch (err) {
@@ -2077,6 +2140,7 @@ function registerIpc() {
   });
   ipcMain.handle('mx-h2i:list-state-backups', async () => listAppsStateBackups());
   ipcMain.handle('mx-h2i:restore-state-backup', async (_event, fileName) => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     const snapshot = await readAppsStateBackup(fileName);
     runtime.apps = normalizeApps(snapshot.apps);
     touchRuntime(`apps state restored from ${snapshot.file}`);
@@ -2100,6 +2164,7 @@ function registerIpc() {
     }
   });
   ipcMain.handle('mx-h2i:repair-network-ownership', async () => {
+    if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
     const result = await windowsOwnershipRecoveryForRuntime('manual-ownership-repair', true);
     runtime.feedback = {
       tone: result.repaired || result.status === 'no-candidates' ? 'success' : 'warning',
@@ -2109,6 +2174,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:open-admin', async () => {
+    if (MINCAVE_UI_ENABLED) throw new Error('请使用 MinCave 内的管理控制台。');
     const baseUrl = runtime.connection?.state === 'connected'
       ? (runtime.connection.internalBaseUrl || runtime.config.internalApiBaseUrl)
       : (runtime.config.bootstrapApiBaseUrl || runtime.config.internalApiBaseUrl);
@@ -2117,6 +2183,7 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle('mx-h2i:set-window-mode', (_event, mode) => {
+    if (MINCAVE_UI_ENABLED) return true;
     resizeWindowForMode(mode === 'appcenter' ? 'appcenter' : 'launcher');
     return true;
   });
@@ -2176,7 +2243,7 @@ function registerIpc() {
       topDockHoldUntil = 0;
       topDockLeaveStartedAt = 0;
       nextBounds.y = Math.max(nextBounds.y, display.workArea.y + Math.round(totalDy));
-    } else if (nextBounds.y <= display.workArea.y + dockActivationDistance(nextBounds, display)) {
+    } else if (!MINCAVE_UI_ENABLED && nextBounds.y <= display.workArea.y + dockActivationDistance(nextBounds, display)) {
       isTopDocked = true;
       topDockHidePending = false;
       nextBounds.y = display.workArea.y + TOP_DOCK_Y;
@@ -2212,7 +2279,7 @@ function registerIpc() {
     const display = electronScreen.getDisplayMatching(bounds);
     const totalDy = Number(input?.totalDy);
     const releaseDock = isTopDocked && Number.isFinite(totalDy) && totalDy >= dockReleaseDistance(bounds, display);
-    const shouldDock = !releaseDock && (isTopDocked || bounds.y <= display.workArea.y + dockActivationDistance(bounds, display));
+    const shouldDock = !MINCAVE_UI_ENABLED && !releaseDock && (isTopDocked || bounds.y <= display.workArea.y + dockActivationDistance(bounds, display));
     if (!shouldDock) {
       isTopDocked = false;
       topDockHidePending = false;
@@ -2344,6 +2411,10 @@ async function promoteEmployeeConnection(options = {}) {
         throw new Error(`${providerLabel}登录没有返回可用的 Internal user token。`);
       }
       assertForegroundNetworkOperationCurrent(foregroundOperation, 'authenticated');
+      if (MINCAVE_UI_ENABLED) {
+        await mincaveBridge.checkLogin(auth, baseUrl);
+        assertForegroundNetworkOperationCurrent(foregroundOperation, 'mincave-admitted');
+      }
       authenticated = auth;
       resolvedBootstrap = bootstrap;
       const account = nullableString(auth.user.email)
@@ -2401,6 +2472,7 @@ async function promoteEmployeeConnection(options = {}) {
         && runtime.auth?.accessToken === auth.accessToken;
     } catch (err) {
       if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
+      if (MINCAVE_UI_ENABLED && err?.mincaveAccessError && activeForegroundNetworkOperation === foregroundOperation) mincaveLoginError = errorMessage(err);
       if (['app_access_denied', 'launcher_product_user_access_denied'].includes(err?.payload?.code)) {
         if (networkFallback) { runtime.connection = networkFallback; runtime.identity = identityFallback; runtime.auth = authFallback; }
         stopAfterApplicationDenial(err, foregroundOperation);
@@ -2449,6 +2521,7 @@ async function promoteEmployeeConnection(options = {}) {
 }
 
 async function startFeishuLogin() {
+  if (MINCAVE_UI_ENABLED) mincaveLoginError = null;
   await ensureCredentialStorageRecoveryReady();
   if (pendingFeishuLogin) {
     runtime.feedback = {
@@ -3079,6 +3152,7 @@ function beginWindowDragSnapshot(inputDragId) {
 // animation, which is how the window used to get permanently wider.
 function windowDragPinnedSize(bounds) {
   if (currentWindowMode !== 'launcher') return null;
+  if (MINCAVE_UI_ENABLED) return { width: bounds.width, height: bounds.height };
   const canonical = defaultWindowBoundsForMode('launcher', bounds);
   return canonical ? { width: canonical.width, height: canonical.height } : null;
 }
@@ -3223,7 +3297,7 @@ function applyWindowModeChrome(mode) {
   const bounds = mainWindow.getBounds();
   const minimum = windowMinimumSizeForMode(mode, bounds);
   mainWindow.setMinimumSize(minimum.width, minimum.height);
-  mainWindow.setResizable(mode === 'appcenter');
+  mainWindow.setResizable(MINCAVE_UI_ENABLED || mode === 'appcenter');
 }
 
 function attachWindowBoundsTracking() {
@@ -3261,6 +3335,7 @@ function shouldPersistWindowBounds() {
   if (activeWindowDrag) return false;
   if (!runtime || !mainWindow || mainWindow.isDestroyed()) return false;
   if (mainWindow.isMinimized()) return false;
+  if (MINCAVE_UI_ENABLED && mainWindow.isMaximized()) return false;
   if (currentWindowMode === 'launcher' && (isTopHidden || isTopHideAnimating || isTopDocked || topDockHidePending || topAnimationTimer)) {
     return false;
   }
@@ -3278,12 +3353,18 @@ function rememberWindowBoundsForMode(mode = currentWindowMode, bounds = null) {
     mode: normalizedMode,
     bounds: {
       ...current.bounds,
-      [normalizedMode]: normalizedBounds
+      ...(MINCAVE_UI_ENABLED ? { mincave: normalizedBounds } : {}),
+      ...(!MINCAVE_UI_ENABLED ? { [normalizedMode]: normalizedBounds } : {})
     }
   };
 }
 
 function windowBoundsForMode(mode) {
+  if (MINCAVE_UI_ENABLED) {
+    const remembered = normalizeWindowState(runtime?.window).bounds.mincave;
+    const display = remembered ? electronScreen.getDisplayMatching(remembered) : electronScreen.getPrimaryDisplay();
+    return mincaveWindowBounds(display.workArea, remembered);
+  }
   const normalizedMode = mode === 'appcenter' ? 'appcenter' : 'launcher';
   const remembered = normalizeWindowState(runtime?.window).bounds[normalizedMode];
   const fallback = defaultWindowBoundsForMode(normalizedMode, remembered || mainWindow?.getBounds());
@@ -3296,6 +3377,7 @@ function defaultWindowBoundsForMode(mode, referenceBounds = null) {
     ? electronScreen.getDisplayMatching(referenceBounds)
     : electronScreen.getPrimaryDisplay();
   const workArea = display.workArea;
+  if (MINCAVE_UI_ENABLED) return mincaveWindowBounds(workArea);
   if (normalizedMode === 'appcenter') {
     const marginX = clamp(Math.round(workArea.width * 0.04), 24, 64);
     const marginY = clamp(Math.round(workArea.height * 0.055), 24, 60);
@@ -3332,6 +3414,7 @@ function constrainWindowBounds(input, mode) {
   const normalized = normalizeWindowBounds(input) || defaultWindowBoundsForMode(normalizedMode);
   const display = electronScreen.getDisplayMatching(normalized);
   const workArea = display.workArea;
+  if (MINCAVE_UI_ENABLED) return mincaveWindowBounds(workArea, normalized);
   const minimum = windowMinimumSizeForMode(normalizedMode, normalized);
   const launcherDefault = normalizedMode === 'launcher'
     ? defaultWindowBoundsForMode('launcher', normalized)
@@ -3353,6 +3436,7 @@ function windowMinimumSizeForMode(mode, referenceBounds = null) {
     ? electronScreen.getDisplayMatching(referenceBounds)
     : electronScreen.getPrimaryDisplay();
   const workArea = display.workArea;
+  if (MINCAVE_UI_ENABLED) return mincaveWindowMinimum(workArea);
   if (mode === 'appcenter') {
     return {
       width: Math.min(980, Math.max(520, workArea.width - 48)),
@@ -3386,10 +3470,10 @@ function sameBounds(a, b) {
 function createTray() {
   if (tray) return;
   tray = new Tray(createTrayIcon());
-  tray.setToolTip('MX-H2I');
+  tray.setToolTip(MINCAVE_UI_ENABLED ? 'MinCave' : 'MX-H2I');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '显示 MX-H2I', click: () => showMainWindow() },
-    { label: '收起到顶部', click: () => hideToTopEdge({ requireReentry: true }) },
+    { label: MINCAVE_UI_ENABLED ? '显示 MinCave' : '显示 MX-H2I', click: () => showMainWindow() },
+    ...(!MINCAVE_UI_ENABLED ? [{ label: '收起到顶部', click: () => hideToTopEdge({ requireReentry: true }) }] : []),
     { type: 'separator' },
     { label: '退出', click: () => app.quit() }
   ]));
@@ -3411,10 +3495,13 @@ function createTrayIcon() {
 }
 
 function productIconPath() {
+  if (process.platform === 'win32') return path.join(__dirname, 'assets', 'mincave.ico');
+  if (process.platform === 'darwin') return path.join(__dirname, 'assets', 'mincave-app.png');
   return path.join(__dirname, 'assets', 'mingxi-logo.png');
 }
 
 function snapToTopEdge() {
+  if (MINCAVE_UI_ENABLED) return false;
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   const bounds = mainWindow.getBounds();
   const display = electronScreen.getDisplayMatching(bounds);
@@ -3436,6 +3523,7 @@ function snapToTopEdge() {
 }
 
 function hideToTopEdge(options = {}) {
+  if (MINCAVE_UI_ENABLED) return;
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (currentWindowMode !== 'launcher' || isTopHidden || isTopHideAnimating) return;
   isTopHideAnimating = true;
@@ -5458,6 +5546,7 @@ function windowsNrptResolutionHint(windowsNrpt) {
 }
 
 async function repairSystemNetworkForRuntime(reason = 'manual-repair', options = {}) {
+  if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
   const foregroundOperation = options.foregroundOperation || null;
   const checkpoint = (stage) => {
     if (foregroundOperation) {
@@ -8329,7 +8418,8 @@ function normalizeWindowState(input) {
     mode: row.mode === 'appcenter' ? 'appcenter' : 'launcher',
     bounds: {
       launcher: normalizeWindowBounds(bounds.launcher),
-      appcenter: normalizeWindowBounds(bounds.appcenter)
+      appcenter: normalizeWindowBounds(bounds.appcenter),
+      mincave: normalizeWindowBounds(bounds.mincave)
     }
   };
 }
@@ -9777,6 +9867,7 @@ function h2oRuntimeWithTunnelStatus(h2oRuntime, tunnelStatus) {
 }
 
 async function restoreH2oRuntimeAfterStartup() {
+  if (MINCAVE_UI_ENABLED && mincaveBridge?.snapshot().status !== 'allowed') return;
   if (runtime.connection?.diagnostics?.applicationAccessDenied) return;
   if (!runtime?.apps?.h2o?.installed) return;
   if (runtimeHasUserIdentity()) {
@@ -14154,6 +14245,12 @@ async function connectLauncherNetwork(input) {
 }
 
 async function connectLauncherNetworkWithLocalIdentityRepair(input, options = {}) {
+  if (MINCAVE_UI_ENABLED) {
+    if (input.identityKind !== 'user' || !input.accessToken) throw new Error('请使用飞书登录 MinCave。');
+    const operation = activeForegroundNetworkOperation;
+    await mincaveBridge.checkLogin({ accessToken: input.accessToken, subject: `user:${input.userId}`, provider: input.authProvider });
+    if (operation) assertForegroundNetworkOperationCurrent(operation, 'mincave-connection-admitted');
+  }
   try {
     return await connectLauncherNetwork(input);
   } catch (err) {
@@ -16407,6 +16504,10 @@ function feedbackIsWireGuardWarning(feedback) {
 }
 
 async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
+  if (MINCAVE_UI_ENABLED) {
+    const access = await mincaveBridge.refresh();
+    if (access.status !== 'allowed') return { skipped: true, reason: 'mincave-access-unverified' };
+  }
   if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) {
     return { ok: true, skipped: true, reason: 'connection-not-desired' };
   }
@@ -18930,6 +19031,8 @@ function visibleRuntime(source = runtime) {
   } = source;
   return {
     ...safeSource,
+    mincaveAccess: MINCAVE_UI_ENABLED ? mincaveBridge?.snapshot() : undefined,
+    mincaveLoginError: MINCAVE_UI_ENABLED ? mincaveLoginError : null,
     installation: visibleInstallation(source.installation),
     connection: visibleConnection(source.connection),
     auth: visibleAuth(source.auth),

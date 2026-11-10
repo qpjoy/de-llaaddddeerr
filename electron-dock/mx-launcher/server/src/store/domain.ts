@@ -282,6 +282,18 @@ export function builtinUserCenterRoles(now = new Date().toISOString()): UserCent
       scopes: ADMIN_SCOPES,
       createdAt: now
     },
+    {
+      roleId: 'mx-mincave-admin',
+      displayName: 'MinCave 管理员',
+      scopes: ['auth.read', 'mx:mincave:use', 'mx:mincave:admin'],
+      createdAt: now
+    },
+    {
+      roleId: 'mx-mincave-employee',
+      displayName: 'MinCave 员工',
+      scopes: ['auth.read', 'mx:mincave:use'],
+      createdAt: now
+    },
     // Application delegation is explicit; mx-admin alone never grants these scopes.
     ...[
       ['mx-hub-admin', 'Hub 管理员', 'mx:hub:admin'],
@@ -1083,6 +1095,7 @@ export function createUserCenterTokenRecord(
     audience: input.audience?.trim() || 'mx-sdk',
     scopes: input.scopes ?? [],
     authProvider: input.authProvider?.trim() || null,
+    verifiedFeishuIdentity: input.authProvider === 'feishu' ? input.verifiedFeishuIdentity ?? null : null,
     ...(input.appId ? { appId: normalizeOptionalAppId(input.appId) } : {}),
     issuer: `mx-user-center:${config.environment}`,
     issuedAt,
@@ -1178,6 +1191,9 @@ export function introspectUserCenterToken(
     },
     scopes,
     authProvider: record.authProvider ?? null,
+    verifiedFeishuIdentity: record.authProvider === 'feishu' ? record.verifiedFeishuIdentity ?? null : null,
+    appId: record.appId ?? null,
+    issuedAt: record.issuedAt,
     expiresAt: record.expiresAt,
     reason: 'token accepted by User Center V1 record'
   };
