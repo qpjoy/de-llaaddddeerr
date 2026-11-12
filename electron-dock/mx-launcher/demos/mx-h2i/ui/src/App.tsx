@@ -228,7 +228,7 @@ function Catalog({ snapshot }: { snapshot: Snapshot }) {
   const [layout, setLayout] = useState<'grid' | 'list'>('grid');
   const [category, setCategory] = useState('all');
   const catalog = [
-    ...workplaceApps,
+    ...(snapshot.access.applications?.map(app => ({ ...app, installed: false, running: false, description: '', action: { action: '', label: '打开', disabled: false } })) ?? workplaceApps),
     ...snapshot.apps.map((app) =>
       app.id === 'h2o'
         ? {
@@ -405,7 +405,7 @@ export default function App() {
   const snapshot = useSyncExternalStore(view.subscribe, view.getSnapshot, view.getSnapshot);
   const [page, setPage] = useState<Page>('home');
   const [mode, setMode] = useState<'portal' | 'admin'>('portal');
-  const [adminPage, setAdminPage] = useState<AdminPage>('members');
+  const [adminPage, setAdminPage] = useState<AdminPage>('overview');
   const [menu, setMenu] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
@@ -527,7 +527,7 @@ export default function App() {
             <WindowControls />
             <button
               className="mincave-brand"
-              onClick={() => (mode === 'admin' ? setAdminPage('members') : navigate('home'))}
+              onClick={() => (mode === 'admin' ? setAdminPage('overview') : navigate('home'))}
               aria-label="MinCave 工作台"
             >
               <img src={snake} alt="" draggable="false" />
@@ -606,7 +606,7 @@ export default function App() {
                     <button
                       onClick={() => {
                         setMode('admin');
-                        setAdminPage('members');
+                        setAdminPage('overview');
                         setMenu(false);
                       }}
                     >
@@ -637,7 +637,7 @@ export default function App() {
                     aria-pressed={mode === 'admin'}
                     onClick={() => {
                       setMode('admin');
-                      setAdminPage('members');
+                      setAdminPage('overview');
                     }}
                   >
                     管理控制台
@@ -671,7 +671,7 @@ export default function App() {
             </header>
             <main ref={contentRef} className={`mincave-content ${mode === 'portal' && page === 'devices' ? 'mincave-devices-page' : ''}`} id="mincave-content">
               {mode === 'admin' && snapshot.access.canManage ? (
-                <AdminConsole page={adminPage} setPage={setAdminPage} />
+                <AdminConsole key={snapshot.access.userId} page={adminPage} setPage={setAdminPage} />
               ) : (
                 <>
                   <div className="mincave-page-heading">

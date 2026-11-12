@@ -1,3 +1,4 @@
+import { defaultMinCaveWorkspace, changeMinCaveWorkspace, mincaveMemberAppGrant, type MinCaveWorkspace, type MinCaveWorkspaceChange } from '../lib/mincave-workspace.js';
 import { mincaveDeviceKey, mergeMinCaveDevices, observeMinCaveDevice, type MinCaveDevice, type MinCaveDeviceInput } from '../lib/mincave-devices.js';
 import { admitMinCave, changeMinCaveMember, assertMinCaveTransition, type MinCaveMember, type MinCaveAdmission, type MinCaveMemberChange } from '../lib/mincave-access.js';
 import type { SystemSubscriptionPublication } from '../types.js';
@@ -384,6 +385,7 @@ function configuredLegacyServiceAccountSecrets(): Array<[string, string]> {
 
 type RecordKind =
   | 'mincave-device'
+  | 'mincave-workspace'
   | 'mincave-member'
   | 'site-heartbeat'
   | 'anonymous-enrollment'
@@ -1050,6 +1052,24 @@ export class PostgresStore implements PlatformStore {
     });
   }
 
+  async getMinCaveWorkspace(tenantKey: string): Promise<MinCaveWorkspace> {
+    return (await this.getRecord<MinCaveWorkspace>('mincave-workspace', tenantKey)) || defaultMinCaveWorkspace();
+  }
+  async updateMinCaveWorkspace(input: MinCaveWorkspaceChange): Promise<MinCaveWorkspace> {
+    return this.dataSource.transaction(async manager => {
+      await accountWriteLock(manager, this.config.environment);
+      const records = manager.getRepository(PlatformRecordEntity);
+      const previous = (await records.findOneBy({ kind: 'mincave-workspace', id: input.tenantKey, environment: this.config.environment }))?.data as unknown as MinCaveWorkspace | undefined;
+      const users = await this.listRecordsFrom<UserCenterUser>(records, 'iam-user');
+      const members = await this.listRecordsFrom<MinCaveMember>(records, 'mincave-member');
+      const next = changeMinCaveWorkspace(previous || defaultMinCaveWorkspace(), input, users, members);
+      await this.saveRecordTo(records, 'mincave-workspace', input.tenantKey, next, this.config.siteId);
+      await this.recordAuditTo(records, { eventType: `mincave.${input.kind}.updated`, actorKind: 'user', userId: input.actorId,
+        metadata: { revision: next.revision, id: input.id || (input.kind === 'application' ? next.applications : next.policies).at(-1)!.id } });
+      return next;
+    });
+  }
+
   async listMinCaveMembers(): Promise<MinCaveMember[]> { return this.listRecords<MinCaveMember>('mincave-member'); }
 
   async admitMinCaveMember(input: MinCaveAdmission) {
@@ -1077,9 +1097,12 @@ export class PostgresStore implements PlatformStore {
       const users = await this.listRecordsFrom<UserCenterUser>(records, 'iam-user');
       const members = await this.listRecordsFrom<MinCaveMember>(records, 'mincave-member');
       const user = changeMinCaveMember(input, users, members);
+      const workspace = (await records.findOneBy({ kind: 'mincave-workspace', id: input.tenantKey, environment: this.config.environment }))?.data as unknown as MinCaveWorkspace | undefined;
+      const member = mincaveMemberAppGrant(members.find(row => row.userId === input.userId)!, input.appIds, workspace || defaultMinCaveWorkspace());
+      await this.saveRecordTo(records, 'mincave-member', input.userId, member, this.config.siteId);
       await this.saveRecordTo(records, 'iam-user', user.userId, user, this.config.siteId);
       await this.recordAuditTo(records, { eventType: 'mincave.member.updated', actorKind: 'user', userId: input.actorId,
-        metadata: { targetUserId: input.userId, role: input.role, enabled: input.enabled } });
+        metadata: { targetUserId: input.userId, role: input.role, enabled: input.enabled, ...(input.appIds !== undefined ? { appIds: input.appIds } : {}) } });
       return user;
     });
   }

@@ -2,7 +2,7 @@
 
 ## MinCave 客户端界面
 
-默认启动 React/TypeScript 的 MinCave 浅色界面。未登录页只提供现有飞书 OAuth 登录；账号密码和匿名底层能力保留在旧界面兼容路径。保留网络修复与取消、AppCenter/H2O 和 Release Center 更新流程；不迁入演示员工选择、今日／月度流量、演示通知、城市网关切换或未实现应用卡片。工作台提供 Delta、Night-All、Hub、Compass、Compass管理后台、Argus 六个真实网页入口；连接就绪后通过既有 HTTP(S) 外部打开逻辑进入系统浏览器，地址维护于 `ui/src/workplaceApps.ts`。顶部提供员工工作台和客户端内管理控制台；管理端使用共享用户中心的 MinCave 专属角色及独立 Bearer 接口，本轮只开放成员与角色管理；员工侧栏仅保留工作台与设备。应用按中台应用（Delta、Hub、Night-All）、产品应用（Compass、Argus）、管理后台（Compass管理后台）、员工福利（海外代理）分类。海外代理为 H2O 工作台卡片显示名，工作台不显示 AppCenter。点击“安装”后在同一次操作中自动准备 AppCenter 依赖，再安装 H2O，界面统一显示“安装中”；已存在的依赖跳过，失败可从同一卡片重试，不自动启动代理。安装完成后卡片仅打开“海外订阅”弹窗，展示经核验的当前账号 Clash 链接及复制操作，不再展示 H2O 模式、规则、端口、节点、日志或流量管理页。新界面移除原型中没有的额外说明、登录通知、恢复步骤面板、技术提示和全局反馈条；真实状态与操作仍由原命令处理器驱动。
+默认启动 React/TypeScript 的 MinCave 浅色界面。未登录页只提供现有飞书 OAuth 登录；账号密码和匿名底层能力保留在旧界面兼容路径。保留网络修复与取消、AppCenter/H2O 和 Release Center 更新流程；不迁入演示员工选择、今日／月度流量、演示通知、城市网关切换或未实现应用卡片。工作台提供 Delta、Night-All、Hub、Compass、Compass管理后台、Argus 六个真实网页入口；连接就绪后通过既有 HTTP(S) 外部打开逻辑进入系统浏览器，初始地址维护于 `ui/src/workplaceApps.ts`，部署管理模块后由服务端应用目录及策略决定展示。顶部提供员工工作台和客户端内管理控制台；管理端使用共享用户中心的 MinCave 专属角色及独立 Bearer 接口，管理台提供总览、应用、成员和策略；员工侧栏仅保留工作台与设备。应用按中台应用（Delta、Hub、Night-All）、产品应用（Compass、Argus）、管理后台（Compass管理后台）、员工福利（海外代理）分类。海外代理为 H2O 工作台卡片显示名，工作台不显示 AppCenter。点击“安装”后在同一次操作中自动准备 AppCenter 依赖，再安装 H2O，界面统一显示“安装中”；已存在的依赖跳过，失败可从同一卡片重试，不自动启动代理。安装完成后卡片仅打开“海外订阅”弹窗，展示经核验的当前账号 Clash 链接及复制操作，不再展示 H2O 模式、规则、端口、节点、日志或流量管理页。新界面移除原型中没有的额外说明、登录通知、恢复步骤面板、技术提示和全局反馈条；真实状态与操作仍由原命令处理器驱动。
 
 在本 demo 目录安装独立 UI 构建依赖（Node.js 22.18+）：
 
@@ -344,7 +344,7 @@ The Electron entry is intentionally light for the reservation phase:
 | `POST /internal/v1/mincave/session` | 校验飞书、企业与当前权限，首次登记成员；可附带本机 `device` 元数据登记账号设备，兼容旧客户端空请求体 |
 | `GET /internal/v1/mincave/devices` | 有 MinCave 使用权限的当前成员读取自己的全部设备历史，不接受其他账号 ID |
 | `GET /internal/v1/mincave/members` | 管理员读取同企业登录过 MinCave 的成员，仅返回必要展示字段 |
-| `PATCH /internal/v1/mincave/members/:userId` | 管理员提交 `{role: admin或employee, enabled: boolean}`；拒绝额外字段 |
+| `PATCH /internal/v1/mincave/members/:userId` | 管理员提交 `{role: admin或employee, enabled: boolean, appIds?: string[]}`；拒绝其他字段 |
 
 登录、启动恢复、新连接、后台恢复及手动修复前验证权限。登录后每 60 秒、窗口激活及管理请求时复核。已经核验并连接的当前会话遇到临时服务故障时保留连接、暂停管理，不允许新连接；明确拒绝时锁定使用并执行原有断开流程。清理被取消或失败后不由每次轮询重复触发系统授权，用户仍可主动重试断开。账号切换丢弃旧响应。
 
@@ -370,3 +370,50 @@ Domestic Caddy 两种制品及管理端配置模板只放行上述精确方法�
 首次附带设备信息的会话会合并并保存当前账号仍可查到的 MX-H2I 员工租约历史，包括已释放和过期记录。仅返回必要展示字段，不返回 WireGuard 公钥、Capability、来源 IP、安装标识或全员资料。旧记录的更新时间属于最近使用信息，不声称为精确登录时间；此前从未记录或已被覆盖／删除的历史无法追溯恢复。之后每台升级后的客户端在登录／恢复校验时登记，因此无需先完成系统网络连接才能记录本次设备。
 
 本功能需先发布共享后端及 Domestic／公网入口的精确 `GET /internal/v1/mincave/devices` 路由，再更新客户端。旧客户端的空 `session` 请求仍兼容；不新增 SQL 表或配置项。服务端未部署时，新设备页会显示读取失败，本地 UI 验收不代表线上设备历史已可用。
+
+
+## MinCave 总览、应用与策略（2026-11-12）
+
+管理员默认进入“管理总览”，侧栏提供总览、应用、成员、策略。总览统计同企业的成员总数、启用成员数、发布的网页应用数及启用策略数；不展示演示流量、在线设备数或延迟。应用页支持搜索、新建、修改名称／地址／分类、发布／下架。六个既有网页入口作为初始目录，原有地址、查询参数和 hash 保留。海外代理仍沿用既有插件及订阅流程，不进入网页应用配置或策略资源列表。
+
+策略页支持新建、编辑、启停；部门来自真实 MinCave 成员，支持全部成员，资源为网页应用。默认展示已发布应用；一个应用存在启用的允许规则时仅向匹配部门展示；匹配的拒绝规则优先。策略管理的是 **MinCave 员工工作台入口**，不代替业务系统自身鉴权，也不增加网络 ACL。员工不能读取管理目录、策略或其他成员信息。管理员修改后刷新当前会话目录；其他已打开客户端在既有权限轮询或窗口重新聚焦时同步。
+
+`GET /internal/v1/mincave/members` 在原有成员结果中增加 `workspace: {revision, applications, policies}`；新增精确 `PATCH /internal/v1/mincave/workspace`，只接受 `{revision, kind: application|policy, id?, value}`。账号和企业从当前飞书 Bearer 核验，客户端不能指定；写入时在原账户写锁下再次检查实时管理员身份，旧 revision 返回 409，刷新后再提交。配置保存在现有 `mx_platform_records` 的 `mincave-workspace` 记录中，按环境与飞书企业隔离，无新增 SQL 表、迁移或环境变量。修改写入审计，仅包含记录 ID 和 revision，不记录 URL、Token 或飞书身份信息。
+
+`POST /internal/v1/mincave/session` 增加 `applications`，只返回当前成员按部门策略可见的已发布应用。旧客户端忽略新增字段仍可登录。新客户端遇到旧后端没有 `workspace` 时，成员页保持可用，其他管理页提示更新服务；旧后端没有 `applications` 时沿用六个原有入口，不能将此状态当作策略已生效。服务已返回空应用列表时必须保持空列表，不能回退展示全部应用。临时离线只保留同一已核验会话上次的允许目录，不恢复已下架入口。
+
+### 发布顺序
+
+1. 发布 Launcher 共享后端中 **MinCave 模块**，保留现有企业及角色配置；无需调整用户的 Launcher 管理权限。
+2. 更新实际 Domestic Caddy 配置及公网入口，确保新增精确 `PATCH /internal/v1/mincave/workspace` 可转发。三处 Caddy 制品模板已同步；仅重发后端镜像不会自动改写线上已挂载的 Caddyfile。既有 session／devices／members 路由继续保留。
+3. 重新构建／更新 MinCave 客户端并重启，加载新主进程 bridge 及渲染资源。
+4. 用真实 MinCave 管理员修改应用、创建部门策略，使用员工账号核验入口同步；同时核验飞书登录与内网连接。
+
+Domestic 新增路由应放在 `@blockedControlPlane` 拦截之前，沿用已有 upstream：
+
+```caddyfile
+  @mincaveWorkspaceUpdate {
+    method PATCH
+    path /internal/v1/mincave/workspace
+  }
+  handle @mincaveWorkspaceUpdate {
+    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {
+      header_up X-MX-Forwarded-By domestic-edge
+    }
+  }
+```
+
+先备份，生成候选配置并在容器内 `caddy validate`；验证后沿用现有 Domestic 发布流程生效。不要放开整个 `/internal/v1/*`。对公网无 Bearer 的 PATCH 探测应返回 MinCave 的 JSON 401，不能返回 edge 的文本 403 或路由 404。本轮只完成本地实现和隔离验证，未操作生产配置。
+
+回退到旧客户端时继续保留后端配置和路由，以便新客户端仍遵守策略；旧客户端没有目录过滤能力。如必须恢复旧版本同时仍要求限制入口，应先停用相应 MinCave 账号或通过业务系统自身权限控制访问，不能宣称旧客户端仍执行新策略。
+
+
+### 成员列表与管理弹窗对齐（2026-11-12）
+
+成员页按原型显示“成员、部门、设备、应用权限、状态、操作”。姓名旁使用浅紫色头像，角色显示在姓名下方；设备来自该成员账号的真实历史记录，仅投影设备名称与平台，不返回设备 ID、安装标识、型号、系统版本或租约 IP。应用权限列显示成员授权与发布状态、部门策略交集后的实际网页入口。停用成员显示无可用入口，历史设备不表示在线状态。
+
+弹窗标题为“管理 某成员”，展示部门、角色、可访问应用及成员启用开关，底部为全宽“保存权限”。部门沿用用户中心资料，客户端只读；不增加原型中的演示部门、入职日期或编辑用户中心资料的权限。与原型一致，管理当前账号时不显示停用自己的开关；后端继续保护最后一位有效管理员。
+
+成员接口新增 `memberPermissions: true` 能力标识及 `devices`、`appIds`、`effectiveAppIds` 展示字段。只有支持该能力的服务才在弹窗提供应用勾选。`PATCH members/:userId` 新增可选 `appIds`；省略时保留原授权和旧客户端行为，空数组表示不允许任何网页应用。未设置过名单的旧成员继续使用现有发布／部门策略；修改角色本身不会固化或清空应用权限。显式授权与部门规则取交集，拒绝优先，不能越过应用下架。授权只影响 MinCave 网页入口，不控制海外代理或外部系统鉴权。
+
+授权保存在现有 `mincave-member` 记录，重复飞书登录保留授权。修改在同一账户写锁内复核管理员身份、成员所属企业和应用 ID，保存用户角色、成员授权及审计；其他用户中心角色和资料保持原值。无新增路由、环境变量或 SQL 迁移；在上一节的后端／网关基础上部署本次后端，重启新客户端即可。

@@ -32,6 +32,7 @@ function harness() {
           canManage: server.role === 'admin',
           role: server.role,
           userId: 'current-user',
+          ...(server.applications !== undefined ? { applications: server.applications } : {}),
         }
       : options.method === 'PATCH'
         ? { saved: true }
@@ -107,7 +108,7 @@ test('member changes whitelist only MinCave role and enabled fields and reject o
     ).ok,
     false,
   );
-  for (const action of ['saveApp', 'savePolicy', 'activity', 'login', 'fetch'])
+  for (const action of ['saveApp', 'activity', 'login', 'fetch'])
     assert.equal((await h.bridge.request({ action })).error.code, 'invalid_action');
   assert.equal(h.calls.filter((call) => call.options.method === 'PATCH').length, count);
 });
@@ -204,4 +205,65 @@ test('device responses are discarded after account switches or if the server ret
   const result = await bridge.devices();
   assert.equal(result.ok, false);
   assert.ok(!JSON.stringify(result).includes('secret-old-device'));
+});
+
+test('app and policy mutations use only the dedicated MinCave workspace route with a revision and current bearer', async () => {
+  const h = harness();
+  for (const [action, value] of [
+    ['saveApplication', { name: 'Delta', url: 'https://example.test/', category: '中台应用', published: false }],
+    ['savePolicy', { name: '部门规则', department: '技术部', appIds: ['web-delta'], action: 'deny', enabled: true }],
+  ]) {
+    const result = await h.bridge.request({ action, id: 'web-delta', revision: 2, value });
+    assert.equal(result.ok, true);
+    const call = h.calls.filter(call => call.options.method === 'PATCH').at(-1);
+    assert.equal(new URL(call.url).pathname, '/internal/v1/mincave/workspace');
+    assert.deepEqual(JSON.parse(call.options.body), { revision: 2, kind: action === 'saveApplication' ? 'application' : 'policy', id: 'web-delta', value });
+    assert.equal((await h.bridge.request({ action, id: '../members/admin', revision: 2, value })).ok, false);
+    assert.equal((await h.bridge.request({ action, revision: 2, value: { ...value, roleIds: ['mx-admin'] } })).ok, false);
+    h.server.role = 'employee';
+    assert.equal((await h.bridge.request({ action, revision: 2, value })).ok, false);
+    h.server.role = 'admin';
+  }
+});
+test('allowed application projection survives a temporary outage but never survives account changes', async () => {
+  const runtime = { auth: { accessToken: 'token', subject: 'user:one', provider: 'feishu' }, connection: { state: 'connected' } };
+  let online = true;
+  const bridge = createMincaveAdminBridge({ getRuntime: () => runtime, resolveBaseUrl: async () => 'https://example.test', fetch: async () => {
+    if (!online) throw new Error('offline');
+    return { ok: true, json: async () => ({ allowed: true, role: 'employee', canManage: false, userId: 'one', applications: [
+      { id: 'good', name: 'Allowed', url: 'https://example.test/', category: '产品应用', icon: 'apps', color: 'purple' },
+      { id: 'unsafe', name: 'Unsafe', url: 'javascript:alert(1)', category: '产品应用' },
+    ] }) };
+  } });
+  await bridge.refresh();
+  assert.deepEqual(bridge.snapshot().applications.map(app => app.id), ['good']);
+  online = false;
+  await bridge.refresh();
+  assert.deepEqual(bridge.snapshot().applications.map(app => app.id), ['good']);
+  runtime.auth = { ...runtime.auth, accessToken: 'new', subject: 'user:two' };
+  assert.equal(bridge.snapshot().applications, undefined);
+  await bridge.refresh();
+  assert.equal(bridge.snapshot().allowed, false);
+});
+
+test('absent catalog supports old servers; malformed or empty catalog never restores all default entries', async () => {
+  const h = harness();
+  await h.bridge.refresh();
+  assert.equal(h.bridge.snapshot().applications, undefined);
+  for (const applications of [null, [], {}, [null, { id: 'bad', name: 'Bad', category: '产品应用', url: 'file:///tmp/local' }]]) {
+    h.server.applications = applications;
+    await h.bridge.refresh();
+    assert.equal(h.bridge.snapshot().allowed, true);
+    assert.deepEqual(h.bridge.snapshot().applications, []);
+  }
+});
+
+test('member application grants use only optional appIds and preserve legacy role-only writes', async () => {
+  const h = harness();
+  const value = { role: 'employee', enabled: true, appIds: ['web-hub'] };
+  assert.equal((await h.bridge.request({ action: 'saveMember', id: 'member-1', value })).ok, true);
+  const patch = h.calls.find(call => call.options.method === 'PATCH');
+  assert.deepEqual(JSON.parse(patch.options.body), value);
+  for (const appIds of ['web-hub', ['../admin'], [null], Array(201).fill('web-hub')])
+    assert.equal((await h.bridge.request({ action: 'saveMember', id: 'member-1', value: { ...value, appIds } })).ok, false);
 });
