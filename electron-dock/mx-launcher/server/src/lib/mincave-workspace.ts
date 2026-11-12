@@ -240,9 +240,10 @@ export function changeMinCaveWorkspace(
 export function mincaveApplications(
   workspace: MinCaveWorkspace,
   department: string,
+  appIds?: string[],
 ): MinCaveApplication[] {
   return workspace.applications.filter((app) => {
-    if (!app.published) return false;
+    if (!app.published || (appIds !== undefined && !appIds.includes(app.id))) return false;
     const rules = workspace.policies.filter((rule) => rule.enabled && rule.appIds.includes(app.id));
     const matches = (rule: MinCavePolicy) =>
       rule.department === '*' || rule.department === department;
@@ -250,4 +251,21 @@ export function mincaveApplications(
     const allows = rules.filter((rule) => rule.action === 'allow');
     return !allows.length || allows.some(matches);
   });
+}
+
+export function mincaveMemberAppGrant(
+  member: MinCaveMember,
+  appIds: unknown,
+  workspace: MinCaveWorkspace,
+): MinCaveMember {
+  if (appIds === undefined) return member;
+  if (
+    !Array.isArray(appIds) ||
+    appIds.length > 200 ||
+    appIds.some(
+      (id) => typeof id !== 'string' || !workspace.applications.some((app) => app.id === id),
+    )
+  )
+    throw new BadRequestException('请选择有效的 MinCave 应用。');
+  return { ...member, appIds: [...new Set(appIds as string[])] };
 }

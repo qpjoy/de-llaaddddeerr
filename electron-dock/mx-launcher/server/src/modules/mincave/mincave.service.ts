@@ -89,7 +89,7 @@ export class MinCaveService {
       canManage: role === 'admin',
       companyName: '明悉科技',
       userId: user.userId,
-      applications: mincaveApplications(await this.store.getMinCaveWorkspace(proof.tenantKey), result.user.profile.department || ''),
+      applications: mincaveApplications(await this.store.getMinCaveWorkspace(proof.tenantKey), result.user.profile.department || '', result.member.appIds),
     };
   }
   async devices(authorization?: string) {
@@ -138,13 +138,21 @@ export class MinCaveService {
     const members = (await this.store.listMinCaveMembers()).filter(
       (row) => row.tenantKey === proof.tenantKey,
     );
+    const workspace = await this.store.getMinCaveWorkspace(proof.tenantKey);
     const rows = await Promise.all(
       members.map(async (member) => {
         const target = await this.store.getUserCenterUser(member.userId);
-        return target ? this.project(target, member) : null;
+        if (!target) return null;
+        const devices = await this.store.listMinCaveDevices(member.userId);
+        return {
+          ...this.project(target, member),
+          devices: devices.map(device => ({ name: device.deviceLabel || (device.platform === 'darwin' ? 'Mac 设备' : device.platform === 'win32' ? 'Windows 设备' : '未命名设备'), platform: device.platform })),
+          appIds: member.appIds ?? workspace.applications.map(app => app.id),
+          effectiveAppIds: activeMinCaveMember(target, member) ? mincaveApplications(workspace, target.profile.department || '', member.appIds).map(app => app.id) : [],
+        };
       }),
     );
-    return { administratorId: user.userId, members: rows.filter((row) => row !== null), workspace: await this.store.getMinCaveWorkspace(proof.tenantKey) };
+    return { administratorId: user.userId, members: rows.filter((row) => row !== null), workspace, memberPermissions: true };
   }
 
   async updateWorkspace(authorization: string | undefined, body: unknown) {
@@ -160,17 +168,19 @@ export class MinCaveService {
       throw new BadRequestException('成员信息不完整。');
     const value = body as Record<string, unknown>;
     if (
-      !['admin', 'employee'].includes(String(value.role)) ||
+      (value.role !== 'admin' && value.role !== 'employee') ||
       typeof value.enabled !== 'boolean' ||
-      Object.keys(value).some((key) => !['role', 'enabled'].includes(key))
+      Object.keys(value).some((key) => !['role', 'enabled', 'appIds'].includes(key)) ||
+      (value.appIds !== undefined && (!Array.isArray(value.appIds) || value.appIds.length > 200 || value.appIds.some(id => typeof id !== 'string')))
     )
-      throw new BadRequestException('只能修改 MinCave 角色和使用权限。');
+      throw new BadRequestException('只能修改 MinCave 角色、使用权限和应用授权。');
     await this.store.updateMinCaveMember({
       actorId: user.userId,
       tenantKey: proof.tenantKey,
       userId,
       role: value.role as 'admin' | 'employee',
       enabled: value.enabled,
+      ...(value.appIds !== undefined ? { appIds: value.appIds as string[] } : {}),
     });
     return { saved: true };
   }

@@ -351,7 +351,7 @@ test('management console restores four sections and preserves MinCave member per
   try {
     await h.click('管理控制台');
     await h.click('成员');
-    assert.match(h.document.body.textContent, /成员与角色/);
+    assert.match(h.document.body.textContent, /成员与设备/);
     assert.match(h.document.body.textContent, /测试成员/);
     const nav = [...h.document.querySelectorAll('nav button')].map((button) =>
       button.textContent.trim(),
@@ -359,12 +359,13 @@ test('management console restores four sections and preserves MinCave member per
     assert.deepEqual(nav, ['总览', '应用', '成员', '策略']);
     assert.ok(!h.calls.includes('openAdmin'));
     await h.click('管理 测试成员');
-    assert.equal(h.document.querySelector('dialog input[type="text"]'), null);
-    const select = h.document.querySelector('select[aria-label="MinCave 角色"]');
+    assert.equal(h.document.querySelector('dialog input[aria-label="部门"]').readOnly, true);
+    assert.equal(h.document.querySelector('dialog input[type="date"]'), null);
+    const select = h.document.querySelector('select[aria-label="角色"]');
     select.value = 'admin';
     select.dispatchEvent(new h.window.Event('change', { bubbles: true }));
     await tick();
-    await h.click('保存');
+    await h.click('保存权限');
     assert.ok(h.calls.includes('admin:saveMember'));
     assert.equal(h.document.querySelector('dialog'), null);
     assert.match(h.document.querySelector('tbody').textContent, /管理员/);
@@ -776,6 +777,42 @@ test('older backend preserves members while new pages request an upgrade, and em
     await tick();
     assert.equal(h.document.querySelector('a[aria-label="打开 Delta"]'), null);
     assert.match(h.document.body.textContent, /海外代理/);
+    assert.deepEqual(h.errors, []);
+  } finally { h.dom.window.close(); }
+});
+
+test('member list matches prototype fields with real devices and permissions; member dialog edits grants and hides unsupported date', async () => {
+  let saved;
+  const data = adminFixture();
+  const h = await mount(runtimeFixture(), true, { mincaveAdmin: async input => {
+    if (input.action === 'workspace') return { ok: true, value: structuredClone(data) };
+    saved = input;
+    Object.assign(data.members[0], input.value);
+    data.members[0].effectiveAppIds = input.value.appIds;
+    return { ok: true, value: { saved: true } };
+  } });
+  try {
+    await h.click('管理控制台');
+    await h.click('成员');
+    assert.deepEqual([...h.document.querySelectorAll('th')].map(el => el.textContent), ['成员', '部门', '设备', '应用权限', '状态', '操作']);
+    const row = h.document.querySelector('tbody');
+    assert.match(row.textContent, /测试成员员工技术部QA MacQA WindowsDeltaHub已授权管理/);
+    assert.doesNotMatch(row.textContent, /2026\/|qa-device|qa-install/);
+    await h.click('管理 测试成员');
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '管理 测试成员');
+    assert.equal(h.document.querySelector('input[type="date"]'), null);
+    assert.equal(h.document.querySelector('select[aria-label="角色"]').value, 'employee');
+    h.document.querySelector('input[aria-label="授权 Delta"]').click();
+    await tick();
+    await h.click('保存权限');
+    assert.deepEqual(JSON.parse(JSON.stringify(saved)), { action: 'saveMember', id: 'usr-1', value: { role: 'employee', enabled: true, appIds: ['web-hub'] } });
+    assert.doesNotMatch(h.document.querySelector('tbody').textContent, /Delta/);
+    assert.match(h.document.querySelector('tbody').textContent, /Hub/);
+    await h.click('管理 测试成员');
+    await h.click('成员启用');
+    await h.click('保存权限');
+    assert.equal(saved.value.enabled, false);
+    assert.match(h.document.querySelector('tbody').textContent, /已停用/);
     assert.deepEqual(h.errors, []);
   } finally { h.dom.window.close(); }
 });

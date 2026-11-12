@@ -1808,3 +1808,39 @@ html[data-platform='win32'] .mincave-topbar {
   .mincave-admin-heading-actions .mincave-search { max-width: 180px; }
 }
 .mincave-admin-panel > .mincave-section-toolbar { padding: 18px 20px; margin-bottom: 0; }
+.mincave-member-toolbar > span { color: #67697c; font-size: 13px; }
+.mincave-member-name { display: flex; align-items: center; gap: 10px; min-width: 110px; }
+.mincave-member-avatar { flex: 0 0 33px; width: 33px; height: 33px; display: grid; place-items: center; border-radius: 12px; background: #ede9ff; color: #111; font-size: 13px; }
+.mincave-member-name strong { display: block; font-weight: 600; }
+.mincave-member-name small { display: block; margin-top: 5px; color: #111; font-size: 10px; }
+.mincave-member-devices { display: flex; flex-direction: column; gap: 5px; min-width: 90px; }
+.mincave-members-table td:nth-child(4) { min-width: 150px; max-width: 310px; }
+.mincave-members-table th:last-child { width: 80px; }
+.mincave-members-table .mincave-status { font-size: 12px; white-space: nowrap; }
+.mincave-members-table .mincave-status.gray i { background: #a8adba; }
+.mincave-member-none { color: #67697c; }
+.mincave-member-form input[readonly] { color: #67697c; background: #f8f9fe; }
+.mincave-member-app-checks { display: grid; gap: 8px; max-height: 280px; overflow-y: auto; }
+.mincave-member-app-choice { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
+.mincave-member-app-choice input { accent-color: #7260f7; }
+.mincave-member-app-choice .mincave-admin-app-icon { height: 30px; width: 30px; border-radius: 9px; }
+.mincave-admin-form > .mincave-member-save { width: 100%; justify-content: center; }
+
+.mincave-members-table tbody td { height: 76px; }
+.mincave-member-modal { padding: 0; width: 440px; max-width: calc(100vw - 32px); max-height: 85vh; border-radius: 21px; box-shadow: 0 22px 80px #15234a26; }
+.mincave-member-modal::backdrop { background: #28345650; backdrop-filter: blur(5px); }
+.mincave-member-modal > .mincave-modal-title { padding: 22px 25px 18px; margin: 0; border-bottom: 1px solid #f0eef7; }
+.mincave-member-modal .mincave-modal-title h2 { font-size: 18px; }
+.mincave-member-modal .mincave-member-form { padding: 25px; gap: 20px; }
+.mincave-member-form > label { font-size: 12px; gap: 10px; }
+.mincave-member-form fieldset { border-color: #e7e6f1; padding: 8px 16px 13px; }
+.mincave-member-form legend { font-size: 12px; padding: 0 5px; }
+.mincave-member-app-checks { gap: 0; }
+.mincave-member-app-choice { min-height: 44px; gap: 12px; padding: 0; }
+.mincave-member-app-choice input { width: 15px; height: 15px; }
+.mincave-member-app-choice .mincave-admin-app-icon { width: 29px; height: 29px; border-radius: 8px; }
+
+.mincave-members-table .mincave-text-button { white-space: nowrap; }
+.mincave-members-table .mincave-admin-tag { border: 0; border-radius: 5px; background: #f1edff; padding: 4px 7px; font-size: 10px; }
+.mincave-member-form select { appearance: none; }
+.mincave-member-form > .mincave-member-save { min-height: 40px; }

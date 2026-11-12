@@ -5,10 +5,12 @@ export default function Modal({
   title,
   children,
   onClose,
+  className = '',
 }: {
   title: string;
   children: ReactNode;
   onClose(): void;
+  className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -23,7 +25,7 @@ export default function Modal({
   return (
     <dialog
       ref={ref}
-      className="mincave-modal"
+      className={`mincave-modal ${className}`}
       aria-label={title}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(e) => {

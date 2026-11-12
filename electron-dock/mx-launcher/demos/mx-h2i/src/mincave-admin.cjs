@@ -199,12 +199,13 @@ function createMincaveAdminBridge({
           !input.value ||
           !['admin', 'employee'].includes(input.value.role) ||
           typeof input.value.enabled !== 'boolean' ||
-          Object.keys(input.value).some((key) => !['role', 'enabled'].includes(key))
+          Object.keys(input.value).some((key) => !['role', 'enabled', 'appIds'].includes(key)) ||
+          (input.value.appIds !== undefined && (!Array.isArray(input.value.appIds) || input.value.appIds.length > 200 || input.value.appIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(id))))
         )
-          throw failure('invalid_input', '只能修改 MinCave 角色和使用权限。');
+          throw failure('invalid_input', '只能修改 MinCave 角色、使用权限和应用授权。');
         value = await json(token, `members/${encodeURIComponent(input.id)}`, {
           method: 'PATCH',
-          body: JSON.stringify({ role: input.value.role, enabled: input.value.enabled }),
+          body: JSON.stringify({ role: input.value.role, enabled: input.value.enabled, ...(input.value.appIds !== undefined ? { appIds: input.value.appIds } : {}) }),
         });
         await refresh();
       }

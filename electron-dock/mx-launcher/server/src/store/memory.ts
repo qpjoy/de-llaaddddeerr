@@ -1,4 +1,4 @@
-import { defaultMinCaveWorkspace, changeMinCaveWorkspace, type MinCaveWorkspace, type MinCaveWorkspaceChange } from '../lib/mincave-workspace.js';
+import { defaultMinCaveWorkspace, changeMinCaveWorkspace, mincaveMemberAppGrant, type MinCaveWorkspace, type MinCaveWorkspaceChange } from '../lib/mincave-workspace.js';
 import { mincaveDeviceKey, mergeMinCaveDevices, observeMinCaveDevice, type MinCaveDevice, type MinCaveDeviceInput } from '../lib/mincave-devices.js';
 import { admitMinCave, changeMinCaveMember, assertMinCaveTransition, type MinCaveMember, type MinCaveAdmission, type MinCaveMemberChange } from '../lib/mincave-access.js';
 import type { SystemSubscriptionPublication } from '../types.js';
@@ -934,9 +934,12 @@ export class MemoryStore implements PlatformStore {
 
   updateMinCaveMember(input: MinCaveMemberChange): UserCenterUser {
     const user = changeMinCaveMember(input, [...this.users.values()], this.listMinCaveMembers());
+    const member = this.listMinCaveMembers().find(row => row.userId === input.userId)!;
+    const updated = mincaveMemberAppGrant(member, input.appIds, this.getMinCaveWorkspace(input.tenantKey));
     this.users.set(user.userId, user);
+    this.mincaveMembers.set(input.userId, updated);
     this.recordAudit({ eventType: 'mincave.member.updated', actorKind: 'user', userId: input.actorId,
-      metadata: { targetUserId: input.userId, role: input.role, enabled: input.enabled } });
+      metadata: { targetUserId: input.userId, role: input.role, enabled: input.enabled, ...(input.appIds !== undefined ? { appIds: input.appIds } : {}) } });
     return structuredClone(user);
   }
 
