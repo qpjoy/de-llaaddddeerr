@@ -7,6 +7,7 @@ import { networkInterfaces } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVICE_CATALOG, DEFAULT_WORKSPACE, defaultServiceProfile, normalizeServiceProfile } from '../../desktop/service-operations-catalog.js';
+import { hasLocalIPv4Route } from '../../scripts/local-ipv4-route.mjs';
 
 const unitName = 'mx-service-operations.service';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
@@ -48,6 +49,7 @@ export async function installOperations(options, dependencies = {}) {
   const log = dependencies.log || console.log;
   const localAddresses = dependencies.localAddresses || (() => Object.values(networkInterfaces()).flat()
     .filter(entry => entry && (entry.family === 'IPv4' || entry.family === 4)).map(entry => entry.address));
+  const hasLocalRoute = dependencies.hasLocalRoute || hasLocalIPv4Route;
   const node = dependencies.node || process.execPath;
   const source = dependencies.source || sourceDirectory;
   assert(options.workspace?.startsWith('/') && !/[\r\n%]/.test(options.workspace), 'workspace 必须为绝对路径');
@@ -84,10 +86,11 @@ export async function installOperations(options, dependencies = {}) {
   assert(/^\d{1,3}(?:\.\d{1,3}){3}$/.test(config.bind) && config.bind.split('.').every(n => Number(n) <= 255) && config.bind !== '0.0.0.0', 'bind 必须是明确的主机 IPv4 地址');
   assert(Number.isInteger(config.port) && config.port >= 1024 && config.port <= 65535, 'port 需要 1024–65535');
   assert(!options.connect || !config.bind.startsWith('127.'), 'Kubernetes 接入需要 Pod 可达的主机内网地址；首次部署请设置 MX_SERVICE_OPERATIONS_BIND 或 MX_K8S_APISERVER_ADVERTISE_ADDRESS');
-  // After a LAN renumbering the executor can only crash-loop on its saved address.
-  // Stop before any write/start; the bind is still never silently rewritten.
-  assert(localAddresses().includes(config.bind), `执行器登记的监听地址 ${config.bind} 不在本机网卡上（本次部署检测为 ${options.defaultBind || '未知'}），执行器无法启动。` +
-    `主机地址意外变化时先恢复原地址再重试 deploy；确需迁移时由主机管理员同时更新 ${configFile} 的 bind 与各服务的 API Server 地址`);
+  if (!localAddresses().includes(config.bind)) {
+    assert(hasLocalRoute(config.bind), `无法确认执行器登记的监听地址 ${config.bind} 属于本机（本次部署检测为 ${options.defaultBind || '未知'}）。` +
+      `请检查 ip -4 route get ${config.bind}；确需迁移时核对 ${configFile} 的 bind 与各服务的 API Server 地址`);
+    log(`执行器监听地址 ${config.bind} 已由内核 local 路由确认`);
+  }
   if (!existsSync(tokenFile)) writeFileSync(tokenFile, randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' });
   chmodSync(tokenFile, 0o600);
   const token = readFileSync(tokenFile, 'utf8').trim();

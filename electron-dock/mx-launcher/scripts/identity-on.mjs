@@ -3,11 +3,13 @@
 import { networkInterfaces } from 'node:os';
 import { createConnection, createServer, isIPv4 } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROFILE, initializeProfile, internalOrigin, readProfile, repairBootstrapCa } from './identity-profile.mjs';
 import { NS, inspectIdentity, run } from './identity-deploy.mjs';
+import { hasLocalIPv4Route } from './local-ipv4-route.mjs';
+
+export { hasLocalIPv4Route };
 
 function privateAddress(address) {
   try { internalOrigin(`https://${address}:18443`); return true; } catch { return false; }
@@ -16,14 +18,6 @@ function privateAddress(address) {
 function localBootId() {
   try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); }
   catch { return null; }
-}
-
-export function hasLocalIPv4Route(address, run = spawnSync) {
-  if (!isIPv4(address)) return false;
-  const result = run('ip', ['-4', 'route', 'get', address], { encoding: 'utf8', timeout: 3000 });
-  if (result.status !== 0 || !result.stdout) return false;
-  const [type, destination] = result.stdout.trim().split(/\s+/, 2);
-  return type === 'local' && destination === address;
 }
 
 export function selectOrigin({ profile, requested, interfaces, nodes, baseUrl, bootId, hasLocalRoute = hasLocalIPv4Route }) {

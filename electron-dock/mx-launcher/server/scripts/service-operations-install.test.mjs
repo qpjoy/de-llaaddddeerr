@@ -28,7 +28,7 @@ function fixture(t, { siblings = false } = {}) {
   const calls = [], requests = [], logs = [];
   const installedVersion = () => JSON.parse(readFileSync(join(paths.root, 'current/release.json'), 'utf8')).runtimeVersion;
   const start = () => { active = true; current = { runtimeVersion: installedVersion(), bootId: String(++boots), updateRequested: null, inFlight: 0, submitting: false }; };
-  const dependencies = { paths, source, log: message => logs.push(message), readyTimeout: 1, pollInterval: 1, localAddresses: () => local,
+  const dependencies = { paths, source, log: message => logs.push(message), readyTimeout: 1, pollInterval: 1, localAddresses: () => local, hasLocalRoute: () => false,
     command(program, args, extra = {}) {
       calls.push({ program, args, input: extra.input });
       if (program === process.execPath) return execFileSync(program, args);
@@ -60,8 +60,10 @@ function fixture(t, { siblings = false } = {}) {
   };
 }
 
-test('first deploy installs available services; repeats preserve secrets, custom config, task data and process', async t => {
+test('first install and redeploy preserve a kernel-local bind address, credentials, task data and process', async t => {
   const f = fixture(t);
+  f.setLocal(['127.0.0.1', '192.168.1.6']);
+  f.dependencies.hasLocalRoute = address => address === '192.168.1.2';
   const first = await f.install({ port: '19300' });
   assert.equal(first.config.instances.length, 1);
   assert.equal(first.config.port, 19300);
@@ -72,7 +74,7 @@ test('first deploy installs available services; repeats preserve secrets, custom
   writeFileSync(configPath, JSON.stringify(config));
   writeFileSync(join(f.paths.stateDir, 'persisted-task'), 'retain');
   const before = readFileSync(configPath, 'utf8');
-  const repeat = await f.install({ defaultBind: '192.168.9.9' });
+  const repeat = await f.install({ defaultBind: '192.168.1.6' });
   assert.equal(repeat.version, first.version); assert.equal(repeat.deferred, false);
   assert.equal(readFileSync(configPath, 'utf8'), before);
   assert.equal(readFileSync(join(f.paths.configuration, 'token'), 'utf8'), token);
@@ -84,6 +86,7 @@ test('first deploy installs available services; repeats preserve secrets, custom
   const manifests = f.calls.filter(c => c.program === 'kubectl').map(c => JSON.parse(c.input));
   assert.deepEqual(manifests.map(m => m.kind), ['Namespace', 'Secret', 'Namespace', 'Secret']);
   assert.equal(manifests[1].stringData.MX_SERVICE_OPERATIONS_URL, 'http://192.168.1.2:19300');
+  assert.equal(manifests[3].stringData.MX_SERVICE_OPERATIONS_URL, 'http://192.168.1.2:19300');
   assert.ok(!JSON.stringify(f.logs).includes(token));
 });
 
@@ -158,7 +161,8 @@ test('renumbered host stops before any write or start; restoring the address rec
   const before = readFileSync(configPath, 'utf8'); const calls = f.calls.length;
   f.setLocal(['127.0.0.1', '192.168.0.103']); f.crash();
   await assert.rejects(f.install({ defaultBind: '192.168.0.103' }), error => {
-    assert.match(error.message, /192\.168\.1\.2 不在本机网卡上（本次部署检测为 192\.168\.0\.103）/); return true;
+    assert.match(error.message, /无法确认.*192\.168\.1\.2.*属于本机/);
+    assert.match(error.message, /本次部署检测为 192\.168\.0\.103/); return true;
   });
   assert.equal(readFileSync(configPath, 'utf8'), before);
   assert.ok(f.calls.slice(calls).every(c => c.program !== 'kubectl' && !['start', 'restart', 'stop', 'daemon-reload'].includes(c.args[0])));
@@ -175,7 +179,7 @@ test('renumbered host stops before any write or start; restoring the address rec
 
 test('first install refuses a detected address the host does not own, creating no credentials', async t => {
   const f = fixture(t); f.setLocal(['127.0.0.1']);
-  await assert.rejects(f.install(), /不在本机网卡上/);
+  await assert.rejects(f.install(), /无法确认.*192\.168\.1\.2.*属于本机/);
   assert.ok(!existsSync(join(f.paths.configuration, 'token'))); assert.ok(!existsSync(join(f.paths.configuration, 'config.json')));
 });
 
