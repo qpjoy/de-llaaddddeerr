@@ -22,7 +22,7 @@ import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
 import { strategySearchGuide } from './data/strategy-search-guide.mjs'
 import { describeResponseFields } from '../shared/field-descriptions.mjs'
-import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from './contracts/night-all-legacy.mjs'
+import { productAllowed } from '../shared/product-access.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml, ipRiskHistoryPaths } from './contracts/ip-risk-docs.mjs'
 import { ecommerceFeedExample } from './examples/ecommerce-feed.mjs'
@@ -2825,10 +2825,12 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         required: ['platform', 'query'],
         allOf: [{ if: { properties: { platform: { enum: ['twitter', 'x'] } }, required: ['platform'] },
           then: { properties: { params: TWITTER_SEARCH_PARAMETERS_SCHEMA } },
-          else: { properties: { params: { not: { anyOf: ['category', 'filters', 'includeTimestamp'].map(name => ({ required: [name] })) } } } } }],
+          else: { properties: { params: { not: { anyOf: ['category', 'filters', 'includeTimestamp'].map(name => ({ required: [name] })) } } } } },
+          { if: { properties: { platform: { const: 'threads' } } }, then: { not: { required: ['params'] } } }],
         properties: {
           platform: { type: 'string', minLength: 1, description: 'One explicit granted platform; wildcards and all are invalid.' },
           query: { type: 'string', minLength: 1, maxLength: 500 },
+          fillPage: { type: 'boolean', description: 'False requests a single source page. Threads always reads one source page per request.' },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: 'Result ceiling, default 20; not a guarantee of a full page. Twitter, Facebook, Bilibili, Douyin, Kuaishou, Zhihu, Reddit and YouTube standard searches fill without a separate default per-request call-count cap; traversal, deadline, retained-page bytes and admission limits still apply. Xiaohongshu supports all valid page sizes through Hub; 20 keeps the established direct connector and other sizes use retained-page buffering.' },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'Opaque nextCursor from the prior page. Return it unchanged with the same path, platform, query and pageSize; preserve params and type as well.' },
           params: { type: 'object', additionalProperties: false, description: 'Platform-specific filters only for the listed platforms. Twitter: category (Top/Latest/Photos/Videos, default Latest), filters (up to 2048 characters), includeTimestamp (default false); query remains required, People and native count/cursor are rejected. Reddit and YouTube standard /data/search reject params, including an empty object; their raw compatibility endpoints retain their existing parameter contract. Facebook: startTime/endTime or startDate/endDate at date precision. Bilibili: order, duration, pubtime_begin_s/pubtime_end_s. Douyin: sort_type, publish_time, filter_duration, content_type. Kuaishou: sort_type, publish_time, duration. Zhihu: show_all_topics, search_source, sort. Fields belonging to another platform are rejected. Continue with the top-level signed Hub cursor; native offsets, sessions and endpoint/provider selection are not public pagination controls.', properties: {
@@ -3446,7 +3448,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                 required: ['pageIndex', 'pageSize', 'returnedCount', 'hasMore', 'nextCursor', 'cursorType'],
                 properties: {
                   pageIndex: { type: 'integer', minimum: 1 }, pageSize: { type: 'integer', minimum: 0, maximum: 100 },
-                  returnedCount: { type: 'integer', minimum: 0, maximum: 100 }, hasMore: { type: 'boolean' },
+                  returnedCount: { type: 'integer', minimum: 0, maximum: 100 }, hasMore: { type: ['boolean', 'null'], description: 'Threads uses null when the source does not establish whether more results exist.' },
                   nextCursor: { type: ['string', 'null'], maxLength: 8192 },
                   cursorType: { type: 'string', enum: ['opaque', 'none'] },
                 },
@@ -6763,6 +6765,8 @@ function normalizedDocsPath(pathname) {
 }
 
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
+const threadsSearchVisible = scopes => scopes == null || scopes.some(scope => scope.platforms.includes('threads'))
+const wechatSearchVisible = scopes => scopes == null || scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
   if (path === '/api/v2/data/search') return scopes.some(scope => scope.platforms.some(platform => DATA_SEARCH_V2_PLATFORMS.includes(platform)))
@@ -6773,7 +6777,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   if (path === '/data/ip/risk/subscription') return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
-  if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
+  if (path === '/data/search') return threadsSearchVisible(scopes) || wechatSearchVisible(scopes)
   if (path === '/data/services/pricing') return postCommentsPlatforms(scopes).length > 0 || scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','youtube','web_search','xiaohongshu'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
@@ -6824,11 +6828,7 @@ const TENANT_PRODUCT_PATHS = {
 const tenantDocsRoute = (route, scopes) => {
   if (TENANT_HIDDEN_DOCS.has(route.key)) return false
   if (scopes == null || ['start', 'rules', 'errors'].includes(route.key)) return true
-  if (route.key === 'strategy-search') {
-    const supported = new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), 'wechat_search', 'wechat_mp', 'telegram'])
-    return scopes.some(scope => scope.platforms.some(platform => supported.has(platform))
-      || (scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search')))
-  }
+  if (route.key === 'strategy-search') return productAllowed('/data-products/strategy-search', scopes)
   if (route.key === 'topic-reports' && !tenantDocumentPathAllowed('/data/topic-reports', scopes)) return false
   if (route.key === 'news-discovery' && !tenantDocumentPathAllowed('/data/news/search', scopes)) return false
   const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
@@ -6837,9 +6837,31 @@ const tenantDocsRoute = (route, scopes) => {
 
 const platformDisplayName = text => text.replace(/JustOne/gi, 'J Platform').replace(/TikHub/gi, 'T Platform')
 
+function tenantDataSearchOperation(document, scopes) {
+  const wechat = wechatDataSearchOperation()
+  if (!threadsSearchVisible(scopes)) return wechat
+  const includeWechat = wechatSearchVisible(scopes)
+  const standard = document.paths['/data/search'].post
+  const { query, cursor, type } = document.components.schemas.SearchRequest.properties
+  const threads = { type: 'object', additionalProperties: false, required: ['platform', 'query'],
+    properties: { platform: { type: 'string', enum: ['threads'] }, query, cursor, type,
+      pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, fillPage: { type: 'boolean' } } }
+  const wechatBody = wechat.requestBody.content['application/json']
+  return { tags: standard.tags, operationId: standard.operationId, summary: includeWechat ? 'Threads 与微信内容搜索' : 'Threads 内容搜索',
+    description: 'Threads 返回 data.items 和 data.pageInfo，每次查询读取一个来源页。' + (includeWechat ? '微信搜索使用独立的原生响应格式。' : ''),
+    ...(includeWechat ? {} : { 'x-mx-required-platform': 'threads' }),
+    parameters: standard.parameters.filter(parameter => parameter.name === 'Idempotency-Key'),
+    requestBody: { required: true, content: { 'application/json': {
+      schema: includeWechat ? { oneOf: [threads, wechatBody.schema] } : threads,
+      examples: { threads: { value: { platform: 'threads', query: '示例关键词', pageSize: 20 } },
+        ...(includeWechat ? { wechat: { value: wechatBody.example } } : {}) },
+    } } },
+    responses: { ...standard.responses, 200: includeWechat ? standard.responses[200] : structuredClone(searchResponse) } }
+}
+
 export function tenantOpenApiDocument(scopes) {
   const document = structuredClone(PUBLIC_OPENAPI_DOCUMENT)
-  document.paths['/data/search'] = { post: wechatDataSearchOperation() }
+  document.paths['/data/search'] = { post: tenantDataSearchOperation(document, scopes) }
   const hidden = new Set(['/data/capabilities', '/data/stored/search', '/data/canonical/search', '/tools/tokenize'])
   document.paths = Object.fromEntries(Object.entries(document.paths).filter(([path]) =>
     !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/night-all/') && (!path.startsWith('/search/') || path === '/search/raw')))

@@ -4,6 +4,7 @@ import { NATIVE_FORWARDING_ENDPOINTS, normalizeNativeForwardingRequest } from '.
 import { normalizeTwitterResponse, validateTwitterUsername, HUB_SOCIAL_VERSION, TWITTER_REPLIES_ENDPOINT_KEY } from './hub-social.mjs'
 import { facebookRow } from './facebook-search.mjs'
 import { normalizeNightAllSocialItem } from './night-all-social-fields.mjs'
+import { parseThreadsAccountPage, parseThreadsProfiles } from './threads.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../../shared/social-account-contract.mjs'
 export { HUB_SOCIAL_COMPAT_PLATFORMS } from '../../shared/social-account-contract.mjs'
 
@@ -90,6 +91,39 @@ const RECIPES = {
     comments: recipe('/api/v1/reddit/app/fetch_user_comments', 'username', 'after', 'cursor', { limit: 'page_size' }),
   },
 }
+// Threads alone has two reviewed account suppliers; routing picks one per
+// request. RapidAPI needs the numeric ID, so usernames resolve through its
+// profile search; TikHub's user pages have no working continuation.
+const THREADS_RECIPES = {
+  rapidapi: {
+    lookup: recipe('/api/search/profiles', 'query', null, 'none'),
+    profile: recipe('/api/user/info', 'id', null, 'none'),
+    posts: recipe('/api/user/posts', 'user_id', 'end_cursor'),
+    replies: recipe('/api/user/replies', 'user_id', 'end_cursor'),
+    reposts: recipe('/api/user/reposts', 'user_id', 'end_cursor'),
+  },
+  tikhub: {
+    profile: recipe('/api/v1/threads/web/fetch_user_info', 'username', null, 'none'),
+    profileById: recipe('/api/v1/threads/web/fetch_user_info_by_id', 'user_id', null, 'none'),
+    posts: recipe('/api/v1/threads/web/fetch_user_posts', 'user_id', null, 'none'),
+    replies: recipe('/api/v1/threads/web/fetch_user_replies', 'user_id', null, 'none'),
+    reposts: recipe('/api/v1/threads/web/fetch_user_reposts', 'user_id', null, 'none'),
+  },
+}
+RECIPES.threads = THREADS_RECIPES.rapidapi
+const recipesFor = (platform, provider) => platform === 'threads' ? THREADS_RECIPES[provider] || THREADS_RECIPES.rapidapi : RECIPES[platform]
+export function threadsAccountRecipe(platform, provider, request) {
+  const recipes = platform === 'threads' && THREADS_RECIPES[provider]
+  if (!recipes) return null
+  const operationKeys = new Set()
+  for (const job of request.jobs) {
+    const first = buildHubSocialCompatDispatch({ ...job, provider }, { pageSize: request.pageSize })
+    operationKeys.add(first.operation)
+    // A successful handle lookup supplies a numeric ID for the final step.
+    if (first.socialCompat.stage === 'resolve') operationKeys.add(recipes[job.activityType].endpoint.operation)
+  }
+  return { provider, operationKeys: [...operationKeys], available: true }
+}
 export const HUB_SOCIAL_COMPAT_ACTIVITIES = Object.freeze(Object.fromEntries(Object.entries(RECIPES).map(([platform, rows]) => [platform, Object.freeze(Object.keys(rows).filter(key => !['profile', 'lookup'].includes(key)))])))
 
 const COMMON = ['platform', 'businessId', 'business_id', 'count', 'pageSize', 'page_size', 'limit', 'page', 'cursor', 'concurrency', 'params', 'includeRaw', 'cacheMaxAgeHours', 'username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'url', 'urls', 'profileUrl', 'profile_url', 'channelId', 'channel_id', 'channelUrl', 'channel_url']
@@ -132,7 +166,7 @@ function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false,
   if (kind === 'url') {
     let url
     try { url = new URL(value) } catch { fail('invalid_social_request', 'Invalid account URL') }
-    const hosts = { twitter: ['twitter.com', 'x.com'], facebook: ['facebook.com'], instagram: ['instagram.com'], bilibili: ['bilibili.com', 'b23.tv'], douyin: ['douyin.com'], kuaishou: ['kuaishou.com'], weibo: ['weibo.com', 'weibo.cn'], xiaohongshu: ['xiaohongshu.com', 'xhslink.com', 'xhslink.cn'], youtube: ['youtube.com', 'youtu.be'], zhihu: ['zhihu.com'], tiktok: ['tiktok.com'], linkedin: ['linkedin.com'], reddit: ['reddit.com'] }[platform]
+    const hosts = { twitter: ['twitter.com', 'x.com'], facebook: ['facebook.com'], instagram: ['instagram.com'], threads: ['threads.com', 'threads.net'], bilibili: ['bilibili.com', 'b23.tv'], douyin: ['douyin.com'], kuaishou: ['kuaishou.com'], weibo: ['weibo.com', 'weibo.cn'], xiaohongshu: ['xiaohongshu.com', 'xhslink.com', 'xhslink.cn'], youtube: ['youtube.com', 'youtu.be'], zhihu: ['zhihu.com'], tiktok: ['tiktok.com'], linkedin: ['linkedin.com'], reddit: ['reddit.com'] }[platform]
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port || !hosts.some(host => url.hostname === host || url.hostname.endsWith(`.${host}`))) fail('invalid_social_request', 'Account URL must use the requested platform host')
     const path = url.pathname.split('/').filter(Boolean)
     const token = platform === 'twitter' || platform === 'instagram' ? path[0]
@@ -141,13 +175,21 @@ function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false,
       : platform === 'reddit' && ['user', 'u'].includes(path[0]) ? path[1]
       : platform === 'youtube' && path[0] === 'channel' ? path[1]
       : platform === 'douyin' && path[0] === 'user' ? path[1]
-      : platform === 'tiktok' && path[0]?.startsWith('@') ? path[0]
+      : ['tiktok', 'threads'].includes(platform) && path[0]?.startsWith('@') ? path[0]
       : platform === 'kuaishou' && path[0] === 'profile' ? path[1]
       : platform === 'xiaohongshu' && path[0] === 'user' && path[1] === 'profile' ? path[2] : null
     if (token) {
       let decoded
       try { decoded = decodeURIComponent(token) } catch { fail('invalid_social_request', 'Invalid account URL encoding') }
-      return normalizeIdentity(platform, ['twitter', 'instagram', 'reddit', 'tiktok'].includes(platform) ? 'username' : 'id', decoded, legacyTwitterIdentity, twitterIdentityMode, true)
+      return normalizeIdentity(platform, ['twitter', 'instagram', 'reddit', 'tiktok', 'threads'].includes(platform) ? 'username' : 'id', decoded, legacyTwitterIdentity, twitterIdentityMode, true)
+    }
+  }
+  if (platform === 'threads') {
+    if (kind === 'url') fail('invalid_social_request', 'Use a Threads profile URL such as https://www.threads.com/@username')
+    if (kind === 'id' && !/^\d{1,30}$/.test(value)) fail('invalid_social_request', 'A Threads user ID must be numeric; use username for a handle')
+    if (kind === 'username') {
+      if (!/^[A-Za-z0-9._]{1,64}$/.test(value)) fail('invalid_social_request', 'Invalid Threads username')
+      value = value.toLowerCase()
     }
   }
   if (platform === 'youtube' && kind === 'username') return { kind: 'url', value: `https://www.youtube.com/@${value}` }
@@ -156,7 +198,7 @@ function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false,
   return { kind, value }
 }
 // Historical identity modes are internal replay verification only, never request fields.
-export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize = 500, businessId = null, legacyTwitterIdentity = false, twitterIdentityMode = 'auto' } = {}) {
+export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize = 500, businessId = null, legacyTwitterIdentity = false, twitterIdentityMode = 'auto', provider: routedProvider = null } = {}) {
   if (!['crawl', 'user-info'].includes(operation)) fail('invalid_social_request', 'Unknown social account operation')
   if (!object(body)) fail('invalid_social_request', 'JSON object body is required')
   const allowed = new Set([...COMMON, ...(operation === 'crawl' ? ['activityTypes'] : [])])
@@ -194,10 +236,12 @@ export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize =
   if (!Array.isArray(activities) || !activities.length || activities.length > 20 || activities.some(value => typeof value !== 'string' || !RECIPES[platform][value] || ['profile', 'lookup'].includes(value) && operation === 'crawl')) fail('unsupported_activity_type', 'Unsupported activity type for this platform')
   if (identities.size * activities.length > 50 || operation === 'crawl' && identities.size * activities.length * pageSize > 5000) fail('social_work_limit_exceeded', 'Account request exceeds the bounded work limit')
   const jobs = [...identities.values()].flatMap(identity => [...new Set(activities)].map(activityType => {
-    const provider = platform === 'twitter' ? 'rapidapi' : platform === 'facebook' ? 'justone' : 'tikhub'
+    const provider = platform === 'threads' ? routedProvider === 'tikhub' ? 'tikhub' : 'rapidapi'
+      : platform === 'twitter' ? 'rapidapi' : platform === 'facebook' ? 'justone' : 'tikhub'
     const job = { platform, provider, operation, activityType, identity, params }
     // Validate all public parameters before any profile lookup can be charged.
-    const recipes = [RECIPES[platform][activityType], RECIPES[platform].profile, RECIPES[platform].lookup].filter(value => object(value))
+    const rows = recipesFor(platform, provider)
+    const recipes = [rows[activityType], rows.profile, rows.lookup].filter(value => object(value))
     const permitted = new Set(recipes.flatMap(row => row.endpoint.parameters.map(value => value.name)))
     if (Object.keys(params).some(key => !permitted.has(key))) fail('unsupported_fields', 'Unsupported account parameter')
     const normalizedJob = { ...job, id: hash(job), query: identity.value }
@@ -220,17 +264,19 @@ function identityParams(row, identity, platform) {
   return { [name]: value }
 }
 export function buildHubSocialCompatDispatch(job, { page = 1, nextParams = null, resolvedIdentity = null, pageSize = 20 } = {}) {
-  const config = RECIPES[job.platform]
+  const config = recipesFor(job.platform, job.provider)
   if (!config) fail('social_platform_not_implemented', 'Unsupported account platform')
   const identity = accountValue(job, resolvedIdentity)
-  const needProfile = job.operation === 'crawl' && !resolvedIdentity?.profileReady
+  // A Threads page names its author, so a numeric ID needs no paid profile call.
+  const needProfile = job.operation === 'crawl' && !resolvedIdentity?.profileReady && !(job.platform === 'threads' && identity.kind === 'id')
   let stage = needProfile ? 'resolve' : 'data', kind = needProfile || job.operation === 'user-info' ? 'profile' : job.activityType
   if (kind === 'profile' && !resolvedIdentity?.lookupComplete && config.lookup && (
-    job.platform === 'youtube' && identity.kind !== 'id' || job.platform === 'xiaohongshu' && identity.kind === 'username' || job.platform === 'douyin' && identity.kind === 'username')) { kind = 'lookup'; stage = 'resolve' }
+    job.platform === 'youtube' && identity.kind !== 'id' || job.platform === 'xiaohongshu' && identity.kind === 'username' || job.platform === 'douyin' && identity.kind === 'username' || job.platform === 'threads' && identity.kind === 'username')) { kind = 'lookup'; stage = 'resolve' }
   const row = kind === 'profile' && job.platform === 'douyin' && identity.kind === 'id' && /^\d+$/.test(identity.value)
     ? recipe('/api/v1/douyin/web/fetch_user_profile_by_uid', 'uid', null, 'none')
     : kind === 'profile' && job.platform === 'linkedin' && identity.kind === 'url' && new URL(identity.value).pathname.startsWith('/company/')
-      ? recipe('/api/v1/linkedin/web_v2/get_company_profile', 'url', null, 'none') : config[kind]
+      ? recipe('/api/v1/linkedin/web_v2/get_company_profile', 'url', null, 'none')
+      : kind === 'profile' && identity.kind === 'id' && config.profileById ? config.profileById : config[kind]
   if (job.platform === 'twitter') {
     const profile = kind === 'profile', replies = kind === 'replies'
     const userId = identity.kind === 'id' ? identity.value : null, username = identity.kind === 'username' ? identity.value : null
@@ -323,7 +369,7 @@ function profileRow(value, platform, capturedAt) {
   if (!userId && !username) return null
   const metric = (...values) => { for (const value of values) if ((typeof value === 'number' || typeof value === 'string' && /^\d+$/.test(value)) && Number.isSafeInteger(Number(value)) && Number(value) >= 0) return Number(value); return null }
   const avatar = text(value.avatar_url, value.avatarUrl, value.avatar, value.profile_pic_url, value.profile_image_url_https, value.profile_image_url, value.face, value.headurl, legacy.profile_image_url_https, value.images, value.image, value.avatar_thumb?.url_list?.[0], value.avatar_medium?.url_list?.[0], basic.imageb, basic.images)
-  const links = { twitter: `https://twitter.com/${username}`, facebook: `https://www.facebook.com/${userId || username}`, instagram: `https://www.instagram.com/${username}/`, bilibili: `https://space.bilibili.com/${userId}`, douyin: `https://www.douyin.com/user/${userId}`, kuaishou: `https://www.kuaishou.com/profile/${userId}`, weibo: `https://weibo.com/u/${userId}`, xiaohongshu: `https://www.xiaohongshu.com/user/profile/${userId}`, youtube: `https://www.youtube.com/channel/${userId}`, zhihu: `https://www.zhihu.com/people/${value.url_token || userId || username}`, tiktok: `https://www.tiktok.com/@${username}`, linkedin: `https://www.linkedin.com/in/${username}`, reddit: `https://www.reddit.com/user/${username}` }
+  const links = { threads: `https://www.threads.com/@${username}`, twitter: `https://twitter.com/${username}`, facebook: `https://www.facebook.com/${userId || username}`, instagram: `https://www.instagram.com/${username}/`, bilibili: `https://space.bilibili.com/${userId}`, douyin: `https://www.douyin.com/user/${userId}`, kuaishou: `https://www.kuaishou.com/profile/${userId}`, weibo: `https://weibo.com/u/${userId}`, xiaohongshu: `https://www.xiaohongshu.com/user/profile/${userId}`, youtube: `https://www.youtube.com/channel/${userId}`, zhihu: `https://www.zhihu.com/people/${value.url_token || userId || username}`, tiktok: `https://www.tiktok.com/@${username}`, linkedin: `https://www.linkedin.com/in/${username}`, reddit: `https://www.reddit.com/user/${username}` }
   const url = text(value.profile_url, value.profileUrl, value.url, value.link, value.channel_url) || links[platform]
   const followers = metric(value.followers_count, value.follower_count, value.fans, value.fans_count, value.followers, value.followerCount, stats.followerCount, stats.follower_count, legacy.followers_count, interactions.fans, interactions.followers)
   const following = metric(value.following_count, value.friends_count, value.following, value.followingCount, stats.followingCount, legacy.friends_count, interactions.follows, interactions.following)
@@ -343,7 +389,7 @@ function validateProfileIdentity(source, profile, desired, platform) {
     source.rest_id, source.id, source.channel_id, source.channelId, source.pk, source.mid].map(String)
   if (desired.kind === 'id' && !stableIds.includes(desired.value)) badResponse('Account profile identity does not match the requested account')
   const fields = {
-    instagram: ['username'], tiktok: ['unique_id', 'uniqueId', 'username'], douyin: ['unique_id', 'uniqueId'],
+    instagram: ['username'], threads: ['username'], tiktok: ['unique_id', 'uniqueId', 'username'], douyin: ['unique_id', 'uniqueId'],
     reddit: ['name', 'username'], zhihu: ['url_token', 'user_url_token'],
     linkedin: ['publicIdentifier', 'username', 'public_identifier', 'universal_name', 'universalName'],
   }[platform]
@@ -502,6 +548,11 @@ export function projectHubSocialCompatResponse(payload, request, { capturedAt = 
       if (exact.length !== 1) badResponse('Account username lookup was unavailable or ambiguous')
       candidates = exact
     }
+    if (kind === 'lookup' && job.platform === 'threads') {
+      // Profile search is fuzzy. Only the exact handle identifies the account.
+      candidates = parseThreadsProfiles(payload).filter(value => typeof value.username === 'string' && value.username.toLowerCase() === job.identity.value)
+      if (candidates.length !== 1) badResponse('Account username lookup was unavailable or ambiguous')
+    }
     let source, profile
     for (const candidate of candidates) { const normalized = profileRow(candidate, job.platform, capturedAt); if (normalized) { source = candidate; profile = normalized; break } }
     if (!profile) badResponse('Account profile has no stable identity')
@@ -513,6 +564,13 @@ export function projectHubSocialCompatResponse(payload, request, { capturedAt = 
     const resolvedIdentity = { kind: ['linkedin'].includes(job.platform) ? 'url' : job.platform === 'reddit' ? 'username' : 'id', value,
       username: profile.user_name, lookupComplete: true, profileReady: kind === 'profile' }
     return { acquiredItems: [], profiles: [modernProfile(profile)], providerPage: { hasMore: false, nextParams: null, nextPage: page + 1 }, ...(stage === 'resolve' ? { resolvedIdentity } : {}) }
+  }
+  if (job.platform === 'threads') {
+    const parsed = parseThreadsAccountPage(payload, { activityType: job.activityType, ownerId: (context.resolvedIdentity || job.identity).value,
+      provider: job.provider, currentCursor: request.upstreamQuery.end_cursor ?? null, capturedAt })
+    const owner = parsed.owner ? profileRow(parsed.owner, 'threads', capturedAt) : null
+    return { acquiredItems: parsed.rows.map(row => modernContent(row, 'threads', job.activityType)),
+      profiles: owner ? [modernProfile(owner)] : [], providerPage: { ...parsed.providerPage, nextPage: page + 1 } }
   }
   const rows = collection(payload, job.platform).map(value => unwrap(value, job.platform))
   const seen = new Set(), acquiredItems = [], profiles = []

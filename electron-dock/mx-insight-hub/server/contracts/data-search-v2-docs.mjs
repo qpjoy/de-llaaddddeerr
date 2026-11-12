@@ -40,7 +40,7 @@ export const DATA_SEARCH_V2_OPENAPI = {
           requestId: { type: 'string', format: 'uuid' }, data: { type: 'object', required: ['contractVersion', 'items', 'pageInfo', 'meta'], properties: {
             contractVersion: { const: DATA_SEARCH_V2_VERSION }, items: { type: 'array', items: { type: 'object' } },
             pageInfo: { type: 'object', required: ['returnedCount', 'hasMore', 'nextCursor'], properties: {
-              returnedCount: { type: 'integer' }, hasMore: { type: 'boolean' }, nextCursor: { type: ['string', 'null'] } } },
+              returnedCount: { type: 'integer' }, hasMore: { type: ['boolean', 'null'], description: 'Threads uses null when the source does not establish whether more results exist.' }, nextCursor: { type: ['string', 'null'] } } },
             status: { type: 'string', enum: ['ok', 'partial'] }, meta: { type: 'object', required: ['requestedWindow', 'effectiveWindow', 'capabilities', 'limitations'],
               properties: { requestedWindow: windowSchema, effectiveWindow: { type: 'object' }, capabilities: { type: 'object', properties: {
                 upstreamFiltering: { enum: ['calendar_date', 'unsupported'] }, deliveryFiltering: { const: 'exact' }, coverageComplete: { const: false }, idempotency: { const: 'permanent' } } },

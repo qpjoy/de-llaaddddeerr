@@ -184,7 +184,8 @@ test('all advertised platforms have reviewed independent profile and content des
   for (const platform of HUB_SOCIAL_COMPAT_PLATFORMS) {
     const input = request(platform), job = input.jobs[0]
     const first = dispatch(job)
-    assert.equal(first.socialCompat.stage, 'resolve', platform)
+    // A Threads page names its author, so a numeric ID needs no paid profile call.
+    assert.equal(first.socialCompat.stage, platform === 'threads' ? 'data' : 'resolve', platform)
     assert.ok(first.endpointKey && first.endpointVersion && first.endpointContractVersion, platform)
     const data = dispatch(job, { resolvedIdentity: resolved(job.identity.kind, job.identity.value, 'sample') })
     assert.equal(data.socialCompat.stage, 'data', platform)

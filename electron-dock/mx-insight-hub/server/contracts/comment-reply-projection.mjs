@@ -5,6 +5,7 @@ import { parseTikHubRedditCommentPage } from './reddit-comment-page.mjs'
 import { parseTikHubKuaishouReplyPage } from './kuaishou-comment-page.mjs'
 import { postCommentItem, postCommentRecord, douyinCommentRows, douyinCursorPage, projectZhihuCommentList,
   bilibiliReplyRows, bilibiliPage } from './post-comment-projection.mjs'
+import { parseThreadsCommentPage } from './threads.mjs'
 
 // Reply parsers, calibrated with live TikHub pages on 2026-11-07 (paid samples
 // authorized by the user; raw pages kept outside the repository):
@@ -23,7 +24,7 @@ import { postCommentItem, postCommentRecord, douyinCommentRows, douyinCursorPage
 //   follow the same platform's comment objects. Zhihu: TikHub rejected the
 //   Zhihu Web endpoints during calibration (unbilled), rows follow comment_v5.
 export const COMMENT_REPLY_PROJECTION_PLATFORMS = Object.freeze(['twitter', 'weibo', 'douyin', 'zhihu', 'reddit', 'kuaishou',
-  'bilibili', 'instagram', 'xiaohongshu'])
+  'bilibili', 'instagram', 'xiaohongshu', 'threads'])
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const scalar = value => typeof value === 'string' && value && value.length <= 8192 && !value.includes('\0') ? value
   : Number.isSafeInteger(value) ? String(value) : null
@@ -46,6 +47,13 @@ function finish(request, { rows, raws, providerPage, capturedAt, provider, conte
   return { projected: { acquiredItems: items, profiles: [], providerPage }, records: saved }
 }
 
+function threads(payload, request, continuation, capturedAt, provider) {
+  let parsed
+  try { parsed = parseThreadsCommentPage(payload, request.commentId, { provider, contentId: request.contentId,
+    currentCursor: continuation?.end_cursor ?? null }) } catch { unusable() }
+  const rows = parsed.comments.map(({ raw, values }) => postCommentItem(itemRequest(request), { ...values, parentCommentId: request.commentId }, raw, capturedAt))
+  return finish(request, { rows, raws: parsed.comments.map(row => row.raw), providerPage: parsed.providerPage, capturedAt, provider })
+}
 function twitter(payload, request, continuation, capturedAt) {
   let parsed
   try { parsed = parseTikHubTwitterCommentPage(payload, request.commentId, continuation) } catch { unusable() }
@@ -186,6 +194,7 @@ export function projectCommentReplyPage(payload, step, { capturedAt }) {
   if (!COMMENT_REPLY_PROJECTION_PLATFORMS.includes(request.platform)) {
     throw new AppError(503, 'external_platform_contract_unverified', 'This platform reply response requires calibration')
   }
+  if (request.platform === 'threads') return threads(payload, request, continuation, capturedAt, step.provider)
   if (!object(payload) || step.provider !== 'tikhub' || payload.code !== 200) unusable()
   if (request.platform === 'twitter') return twitter(payload, request, continuation, capturedAt)
   if (request.platform === 'weibo') return weibo(payload, request, continuation, capturedAt)

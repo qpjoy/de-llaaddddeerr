@@ -103,7 +103,7 @@ export const FACEBOOK_STRATEGY_MODE_LABELS = {
 export const FACEBOOK_SELFHOSTED_LIMITS = { concurrency: [1, 8], requestsPerMinute: [1, 120] }
 
 export function strategyPolicyEditor(interfaceId, row) {
-  if (STRATEGY_COMMENT_INTERFACES.includes(interfaceId)) {
+  if (STRATEGY_COMMENT_INTERFACES.includes(interfaceId) || row?.platform === 'threads') {
     const { providers, modes } = commentRouteOptions(row)
     return providers.includes(row?.policy?.primaryProvider) && modes.includes(row.policy.mode) ? 'comment-route' : null
   }
@@ -141,7 +141,7 @@ export function strategyPolicySummary(interfaceId, row) {
     const current = policy.mode === 'priority'
       ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: `首请求派发前，${primary} 的凭据、操作开关或价格未就绪时改用已就绪的 ${fallback}。已派发后的拒绝、超时、未知结果或不可解析响应不会自动换供应商重买；游标固定原供应商。` }
       : policy.mode === 'paused'
-        ? { title: `暂停新的${interfaceId === 'comment-replies' ? '评论回复' : '帖子评论'}采购`, mode: '暂停', description: '停止新的供应商采购，包括续页需要的后续采购；已完成响应的精确重放和已购缓冲数据仍可交付。' }
+        ? { title: `暂停新的${row.platform === 'threads' && !STRATEGY_COMMENT_INTERFACES.includes(interfaceId) ? `Threads ${STRATEGY_SEARCH_INTERFACES.find(item => item.id === interfaceId)?.label || ''}` : interfaceId === 'comment-replies' ? '评论回复' : '帖子评论'}采购`, mode: '暂停', description: '停止新的供应商采购，包括续页需要的后续采购；已完成响应的精确重放和已购缓冲数据仍可交付。' }
         : { title: `固定 ${primary}`, mode: '固定供应商', description: `新请求仅使用 ${primary}（${level(policy.primaryProvider)}）。该供应商未就绪时返回具体原因，不自动切换。` }
     return { ...current, editor, providers, modes: modes.map(mode => COMMENT_STRATEGY_MODE_LABELS[mode]), revision: policy.revision,
       verification: providers.map(provider => `${providerLabel(provider)}：${level(provider)}`) }

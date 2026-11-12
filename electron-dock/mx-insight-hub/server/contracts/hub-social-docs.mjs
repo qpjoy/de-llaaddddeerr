@@ -27,7 +27,7 @@ const accountContentSchema = { type: 'object', additionalProperties: true, descr
   } }
 const accountPageSchema = { type: 'object', additionalProperties: true, required: ['page', 'pageSize', 'returnedCount', 'hasMore', 'nextCursor'],
   properties: { page: { type: 'integer', minimum: 1, maximum: 15 }, pageIndex: { type: 'integer', minimum: 1, maximum: 15 },
-    pageSize: { type: 'integer', minimum: 1, maximum: 500 }, returnedCount: { type: 'integer', minimum: 0 }, hasMore: { type: 'boolean' },
+    pageSize: { type: 'integer', minimum: 1, maximum: 500 }, returnedCount: { type: 'integer', minimum: 0 }, hasMore: { type: ['boolean', 'null'], description: 'Threads 来源未提供有效分页信息时为 null。' },
     nextCursor: { type: ['string', 'null'], description: '下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。' },
     providerCursor: { type: ['string', 'null'], description: '历史字段名；仅为同一个 Hub nextCursor 的兼容别名，不是原生游标。' },
     nextParams: { type: ['object', 'null'], properties: { cursor: { type: 'string' } } }, nextPage: { type: 'null' }, paginationMode: { const: 'cursor' },

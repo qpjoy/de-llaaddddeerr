@@ -113,7 +113,7 @@ export const commentRepliesPaths = { [COMMENT_REPLIES_PATH.slice('/api/v1'.lengt
 } } }
 
 const LABELS = { twitter: 'Twitter', reddit: 'Reddit', xiaohongshu: '小红书', weibo: '微博', instagram: 'Instagram', douyin: '抖音',
-  bilibili: 'B站', kuaishou: '快手', zhihu: '知乎', tiktok: 'TikTok', linkedin: 'LinkedIn', facebook: 'Facebook', youtube: 'YouTube' }
+  bilibili: 'B站', kuaishou: '快手', zhihu: '知乎', tiktok: 'TikTok', linkedin: 'LinkedIn', facebook: 'Facebook', youtube: 'YouTube', threads: 'Threads' }
 const STATUS = { verified: '可用', sample: '可用', derived: '可用（新接入）', pending: '待校准' }
 const best = recipes => Object.values(recipes || {}).map(row => row.verification)
   .sort((a, b) => ['verified', 'sample', 'derived', 'pending'].indexOf(a) - ['verified', 'sample', 'derived', 'pending'].indexOf(b))[0]

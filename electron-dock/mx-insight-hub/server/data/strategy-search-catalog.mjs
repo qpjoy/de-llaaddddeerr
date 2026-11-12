@@ -8,7 +8,7 @@ const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
   kuaishou: '快手', linkedin: 'LinkedIn', reddit: 'Reddit', telegram: 'Telegram',
   tiktok: 'TikTok', twitter: 'Twitter / X', weibo: '微博', xiaohongshu: '小红书',
-  youtube: 'YouTube', zhihu: '知乎', xianyu: '闲鱼', wechat_search: '微信搜索', wechat_mp: '微信公众号',
+  youtube: 'YouTube', zhihu: '知乎', threads: 'Threads', xianyu: '闲鱼', wechat_search: '微信搜索', wechat_mp: '微信公众号',
 }
 const READ_ONLY_REASON = '此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。'
 
@@ -20,6 +20,16 @@ function historicalPlatform(platform, operation) {
     routeSummary: `Hub 兼容入口转交 Night-All 的 /api/v1/search/${operation}，当前默认供应商为 ${provider === 'rapidapi' ? 'RapidAPI' : provider === 'justone' ? 'JustOne' : 'TikHub'}。供应商可用性由执行时检查。`,
   }
 }
+
+// Threads is routed on every interface, with the same editor as the comments.
+const THREADS_VERIFICATION = Object.freeze({ rapidapi: 'sample', tikhub: 'derived' })
+function threadsPlatform(interfaceId, summary, policies) {
+  const policy = policies.find(row => row.interface === interfaceId && row.platform === 'threads') || null
+  return { platform: 'threads', label: LABELS.threads, editable: true, migrationStatus: 'hub_native',
+    providers: Object.keys(THREADS_VERIFICATION), providerVerification: { ...THREADS_VERIFICATION },
+    allowedModes: ['fixed', 'priority', 'paused'], policy: policy == null ? null : structuredClone(policy), routeSummary: summary }
+}
+const THREADS_ROUTE_NOTE = '优先与保底只在新请求派发前、优先供应商凭据、操作开关或价格未就绪时切换；游标固定原供应商。RapidAPI 响应结构按其官方公开样例校准，TikHub 按其官方文档描述，首个生产页需核对。每次请求只取一个来源页，继续用 nextCursor。'
 
 function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPolicy }) {
   const row = historicalPlatform(platform, 'raw')
@@ -74,7 +84,8 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPoli
   return row
 }
 
-function accountPlatform(platform, operation, accountPolicy = null) {
+function accountPlatform(platform, operation, accountPolicy = null, policies = []) {
+  if (platform === 'threads') return threadsPlatform(operation, `POST /api/v1/data/social/${operation} 由 Hub 直连供应商，返回字段与其他平台账号接口一致。${THREADS_ROUTE_NOTE}`, policies)
   const row = historicalPlatform(platform, operation)
   const legacy = NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation].includes(platform)
   return {
@@ -102,7 +113,7 @@ function commentPlatform(interfaceId, platform, policies) {
     providers: names, providerVerification: { ...providers },
     allowedModes: names.length > 1 ? ['fixed', 'priority', 'paused'] : ['fixed', 'paused'],
     policy: policy == null ? null : structuredClone(policy),
-    routeSummary: `${interfaceId === 'post-comments' ? 'POST /api/v1/data/social/post-comments' : 'POST /api/v1/data/social/comment-replies'} 由 Hub 直连供应商：${names.map(name => `${name === 'tikhub' ? 'TikHub' : name === 'justone' ? 'JustOne' : name}（${VERIFICATION_LABELS[providers[name]]}）`).join('、')}。优先与保底只在首请求派发前、优先供应商凭据、操作开关或价格未就绪时切换；游标固定原供应商，不转 Night-All。`,
+    routeSummary: `${interfaceId === 'post-comments' ? 'POST /api/v1/data/social/post-comments' : 'POST /api/v1/data/social/comment-replies'} 由 Hub 直连供应商：${names.map(name => `${name === 'tikhub' ? 'TikHub' : name === 'justone' ? 'JustOne' : name === 'rapidapi' ? 'RapidAPI' : name}（${VERIFICATION_LABELS[providers[name]]}）`).join('、')}。优先与保底只在首请求派发前、优先供应商凭据、操作开关或价格未就绪时切换；游标固定原供应商，不转 Night-All。`,
   }
 }
 
@@ -110,6 +121,7 @@ function commentPlatform(interfaceId, platform, policies) {
 // The compatibility sets deliberately exclude unsupported operation/platform
 // pairs; provider credential state and paid dispatch remain in their gateways.
 export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null, facebookCrawlPolicy = null, facebookProfilePolicy = null, commentPolicies = [] } = {}) {
+  const threadsSearch = threadsPlatform('search', `POST /api/v1/data/search 与 /api/v2/data/search 由 Hub 直连供应商，返回标准 items/pageInfo。${THREADS_ROUTE_NOTE}`, commentPolicies)
   return {
     interfaces: [
       {
@@ -119,19 +131,19 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
           '/api/v1/data/telegram/search', '/api/v1/data/wechat/search/search'],
         description: '按关键词检索平台内容。路径是本组入口合集，各平台适用范围见路由说明；兼容路径名称不代表一定由 Night-All 执行。本机已核查的 po-infra 源码使用兼容入口，线上已保存的 Instagram 故障请求使用 data/search；不能由本机源码推定生产已全量迁移或仍全走旧路径。',
         platforms: [...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw, ...WECHAT_LEGACY_SEARCH_PLATFORMS, 'telegram']
-          .map(platform => searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPolicy })),
+          .map(platform => searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPolicy })).concat(threadsSearch),
       },
       {
         id: 'crawl', label: '账号内容',
         paths: ['/api/v1/search/crawl', '/api/v1/night-all/search/crawl', '/api/v1/data/social/crawl'],
         description: '按已知账号获取内容。data/social/crawl 由 Hub 执行，要求平台及 social.content.crawl 授权；单页上限 500，仍受 Key 上限约束。旧兼容入口保持原路由和原平台范围，迁移从第一页开始。',
-        platforms: HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS.map(platform => accountPlatform(platform, 'crawl', facebookCrawlPolicy)),
+        platforms: HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS.map(platform => accountPlatform(platform, 'crawl', facebookCrawlPolicy, commentPolicies)),
       },
       {
         id: 'user-info', label: '账号资料',
         paths: ['/api/v1/search/user-info', '/api/v1/night-all/search/user-info', '/api/v1/data/social/user-info'],
         description: '按已知账号获取资料，不是关键词搜账号。data/social/user-info 由 Hub 执行，要求平台及 social.profile.get 授权；旧兼容入口保持原路由和原平台范围。接口可见不会自动增加调用权限。',
-        platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info', facebookProfilePolicy)),
+        platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info', facebookProfilePolicy, commentPolicies)),
       },
       {
         id: 'post-detail', label: '帖子详情',

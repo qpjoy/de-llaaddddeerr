@@ -112,7 +112,7 @@ test('complete paid page remains available for buffering instead of truncating t
 })
 
 test('unknown platform and cross-provider success shapes fail closed', () => {
-  assert.equal(POST_COMMENT_PROJECTION_PLATFORMS.length, 13)
+  assert.equal(POST_COMMENT_PROJECTION_PLATFORMS.length, 14)
   assert.throws(() => project({ comments: [] }, step('unknown', 'post')), { code: 'external_platform_contract_unverified' })
   assert.throws(() => project({ timeline: [] }, step('twitter', 'post')), { code: 'invalid_upstream_contract' })
 })

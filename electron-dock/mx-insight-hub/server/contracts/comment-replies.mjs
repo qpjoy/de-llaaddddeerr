@@ -22,6 +22,8 @@ const definitions = [
   ['instagram', 'tikhub', '/api/v1/instagram/v3/get_comment_replies', { contentId: 'media_id', commentId: 'comment_id' }, ['min_id'], true, false],
   ['bilibili', 'tikhub', '/api/v1/bilibili/web/fetch_comment_reply', { contentId: 'bv_id', commentId: 'rpid' }, ['pn'], true, false],
   ['kuaishou', 'tikhub', '/api/v1/kuaishou/app/fetch_video_sub_comments', { contentId: 'photo_id', commentId: 'root_comment_id' }, ['pcursor'], true, true],
+  ['threads', 'rapidapi', '/api/post/comments', { commentId: 'post_id' }, ['end_cursor'], false, true],
+  ['threads', 'tikhub', '/api/v1/threads/web/fetch_post_comments', { commentId: 'post_id' }, ['end_cursor'], false, true],
 ]
 const recipe = ([platform, provider, path, mapping, continuationFields, contentRequired, manualPagination]) => {
   const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.provider === provider && row.path === path)
@@ -99,6 +101,7 @@ function idFromCommentsUrl(platform, value) {
     : platform === 'reddit' ? match(/\/comments\/([a-z0-9]+)(?:\/|$)/u)
       : platform === 'xiaohongshu' ? match(/\/(?:explore|discovery\/item)\/([a-f0-9]{24})(?:\/|$)/iu)
         : platform === 'instagram' ? match(/\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)(?:\/|$)/u)
+          : platform === 'threads' ? match(/\/post\/([A-Za-z0-9_-]+)(?:\/|$)/u)
           : platform === 'douyin' ? match(/\/video\/(\d+)(?:\/|$)/u)
             : platform === 'kuaishou' ? match(/\/(?:short-video|photo)\/([A-Za-z0-9_-]+)(?:\/|$)/u)
               : platform === 'zhihu' ? match(/\/answer\/(\d+)(?:\/|$)/u)

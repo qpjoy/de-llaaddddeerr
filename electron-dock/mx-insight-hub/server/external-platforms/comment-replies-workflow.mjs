@@ -4,6 +4,7 @@ import { createDataSearchCursorCodec } from './cursor.mjs'
 import { normalizeCommentRepliesRequest, commentReplyRecipe, COMMENT_REPLIES_VERSION,
   COMMENT_REPLIES_CAPABILITY, COMMENT_REPLIES_PATH } from '../contracts/comment-replies.mjs'
 import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
+import { withSinglePage } from '../contracts/single-page-delivery.mjs'
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
@@ -69,7 +70,7 @@ export function commentRepliesPlan({ gateway, context, input, dependencies }) {
       if (request.platform !== input.platform || request.provider !== gateway.providerKey) {
         throw new AppError(503, 'external_platform_unavailable', 'The configured reply supplier does not match this platform')
       }
-      return request
+      return (request = withSinglePage(request, input.singlePage))
     },
     assemble: ({ delivery, deadlineAt, signal }) => runSocialAccountWorkflow({ gateway, context, request, delivery,
       deadlineAt, signal, ...dependencies, workflowKind: 'comment-replies',

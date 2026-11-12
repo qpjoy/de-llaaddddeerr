@@ -17,6 +17,7 @@ import { SocialSearchStateStore } from './social-search-store.mjs'
 import { YOUTUBE_COMMENTS_TRAVERSAL } from '../contracts/youtube-comments.mjs'
 import { POST_COMMENTS_TRAVERSAL } from '../contracts/post-comments.mjs'
 import { COMMENT_REPLIES_TRAVERSAL } from '../contracts/comment-replies.mjs'
+import { THREADS_SEARCH_TRAVERSAL } from '../contracts/threads-search.mjs'
 
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -29,11 +30,16 @@ const uncertain = () => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
-    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline', 'facebook_account_paused', 'comment_acquisition_paused', 'strategy_search_route_unavailable'].includes(error.code))
+    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline', 'facebook_account_paused', 'comment_acquisition_paused', 'threads_acquisition_paused', 'strategy_search_route_unavailable'].includes(error.code))
 const descriptor = request => ({ provider: request.provider, operation: request.operationKey || request.procurementOperation || request.operation,
   endpointKey: request.endpointKey, endpointVersion: request.endpointVersion, contractVersion: request.endpointContractVersion })
 const sourceRows = (projected, operation) => operation === 'user-info' ? projected.profiles : projected.acquiredItems
 const rowId = (row, operation) => operation === 'user-info' || row.objectType === 'user' ? row.user_id : row.content_id
+function commentFailureMessage(subject, outcome) {
+  if (outcome === 'unknown') return `The outcome of the ${subject} request is unknown`
+  if (outcome === 'succeeded_unusable') return `The data source returned unusable ${subject} data`
+  return `The data source rejected the ${subject} request`
+}
 function publicPayload(value, credential) {
   const redact = createCredentialEchoRedactor(credential)
   const visit = item => typeof item === 'string' ? redact(item) : Array.isArray(item) ? item.map(visit)
@@ -87,11 +93,12 @@ export function projectPage(payload, step, operation, capturedAt, traversal = nu
 export async function runSocialAccountWorkflow({ gateway, context, request, delivery, deadlineAt, signal,
   resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse,
   workflowKind = 'social-account' }, { clock = Date.now } = {}) {
-  if (!['social-account', 'youtube-comments', 'post-comments', 'comment-replies'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
+  if (!['social-account', 'youtube-comments', 'post-comments', 'comment-replies', 'threads-search'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
   const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL
     : workflowKind === 'post-comments' ? POST_COMMENTS_TRAVERSAL
-      : workflowKind === 'comment-replies' ? COMMENT_REPLIES_TRAVERSAL : null
-  const manualProviderPagination = ['post-comments', 'comment-replies'].includes(workflowKind) && request.manualProviderPagination === true
+      : workflowKind === 'comment-replies' ? COMMENT_REPLIES_TRAVERSAL
+        : workflowKind === 'threads-search' ? THREADS_SEARCH_TRAVERSAL : null
+  const manualProviderPagination = ['post-comments', 'comment-replies', 'threads-search'].includes(workflowKind) && request.manualProviderPagination === true
   const store = gateway.platformStore, provider = gateway.providerKey
   const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform, workflowKind })
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
@@ -185,6 +192,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
       if (job.upstreamPages >= 15 && next.nextParams && (next.hasMore || manualProviderPagination && next.hasMore == null)) {
         warn('upstream_page_limit_reached', 'The account traversal reached its upstream page limit; restart explicitly.')
       }
+      if (request.platform === 'threads' && (next.hasMore == null || job.done && next.hasMore === true)) job.paginationUnproven = true
       if (next.hasMore == null) {
         warn('pagination_completeness_unknown', 'The upstream response did not prove continuation; no additional page was purchased automatically.')
         job.manualContinuation = true
@@ -194,6 +202,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     // flag. One request consumes one saved or newly acquired page; callers
     // explicitly choose any next purchase, even if this page is short/empty.
     if (manualProviderPagination) job.manualContinuation = true
+    // Single-page delivery (fillPage=false): account lookups above return
+    // early; the first saved or acquired content page answers this request.
+    if (request.singlePage) job.manualContinuation = true
     return added
   }
   try {
@@ -212,7 +223,13 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         const { projected } = projectPage(page.payload, step, request.operation, page.capturedAt, traversal)
         // Acquired public projections exclude credential echoes. A raw replay
         // that differs anywhere (including profiles) cannot serve that buffer.
-        if (hash(projected) !== job.buffer.projectionHash) throw unavailable()
+        if (hash(projected) !== job.buffer.projectionHash) {
+          // Older RapidAPI Threads manifests recorded missing pagination
+          // evidence as false. Keep the original hash check for all rows,
+          // profiles, and every other part of the archived projection.
+          if (request.platform !== 'threads' || provider !== 'rapidapi' || projected.providerPage.hasMore !== null
+            || hash({ ...projected, providerPage: { ...projected.providerPage, hasMore: false } }) !== job.buffer.projectionHash) throw unavailable()
+        }
         consume(projected, { ...page, callId: job.buffer.callId }, job, index, step, job.buffer.offset, job.buffer.hash)
       }
       const tokens = new Set(job.dispatchedTokens); let noProgress = 0, resolves = 0
@@ -224,7 +241,12 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         const step = buildStep(index, job), expected = descriptor(step)
         const callDelivery = { ...delivery, operation: expected.operation }
         const token = hash({ endpoint: step.endpointKey, cursor: job.providerCursor, identity: job.resolvedIdentity })
-        if (tokens.has(token)) { job.done = true; warn('repeated_cursor', 'The upstream repeated its continuation; restart explicitly.'); break }
+        if (tokens.has(token)) {
+          job.done = true
+          if (request.platform === 'threads') job.paginationUnproven = true
+          warn('repeated_cursor', 'The upstream repeated its continuation; restart explicitly.')
+          break
+        }
         if (step.socialCompat.stage === 'resolve' && ++resolves > (traversal?.maxResolves ?? 3)) throw unavailable()
         try {
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
@@ -290,7 +312,8 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           const billed = provider === 'rapidapi' ? null : true
           try {
             result = provider === 'rapidapi'
-              ? await gateway.adapter.execute(step, { credential: credential.credential, encodeCursor: () => null })
+              // Native steps name a reviewed listing route; only Twitter/Facebook use execute.
+              && !step.key ? await gateway.adapter.execute(step, { credential: credential.credential, encodeCursor: () => null })
               : await gateway.adapter.forwardNative(step.key, { params: step.upstreamQuery }, { credential: credential.credential })
             const receipt = result.restrictedResponseArchive
             const payload = receipt?.bodyBytes ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(receipt.bodyBytes).replace(/^\uFEFF/u, '')) : null
@@ -343,7 +366,15 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
               break
             }
             const code = accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
-            const message = accountFailure ? twitterAccountFailureMessage(evidence) : 'Account acquisition failed; inspect its saved outcome'
+            const commentSubject = { 'post-comments': 'post comments', 'comment-replies': 'comment replies' }[workflowKind]
+            let message = accountFailure ? twitterAccountFailureMessage(evidence) : 'Account acquisition failed; inspect its saved outcome'
+            if (commentSubject) {
+              message = commentFailureMessage(commentSubject, evidence.outcome)
+              failureDetails.upstream = {
+                httpStatus: Number.isInteger(evidence.httpStatus) ? evidence.httpStatus : null,
+                businessCode: Number.isSafeInteger(evidence.businessCode) ? evidence.businessCode : null,
+              }
+            }
             const failureBody = { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId }
             // Callers send bare digits for both IDs and handles. When the ID
             // lookup definitely finds no account, settle that call and try the
@@ -403,7 +434,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     const sourceMode = calls ? 'live' : clock() - Date.parse(capturedAt) <= gateway.config.freshTtlMs ? 'fresh_cache' : 'stored_fallback'
     try {
       await stateStore.commitDelivery({ ...identity, delivery, responseBody, sources, capturedAt, sourceMode,
-        usageUnitsActual: 1, latencyMs: Math.round(performance.now() - started), manifest: { version: traversal?.version ?? VERSION,
+        usageUnitsActual: traversal?.usageUnits?.(rowsByJob) ?? 1, latencyMs: Math.round(performance.now() - started), manifest: { version: traversal?.version ?? VERSION,
           scopeHash: request.scopeHash, previousDeliveryId: history.previousDeliveryId, state,
           deliveredIds: rowsByJob.map(rows => rows.map(row => rowId(row, request.operation))) } })
     } catch { await markUnknown(); throw uncertain() }

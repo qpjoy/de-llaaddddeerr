@@ -7,13 +7,19 @@ const PROVIDERS_BY_PLATFORM = Object.freeze({
   instagram: Object.freeze(['justone', 'tikhub']),
   twitter: Object.freeze(['rapidapi', 'tikhub']),
   facebook: Object.freeze(['justone']),
+  threads: Object.freeze(['rapidapi', 'tikhub']),
 })
+// Threads is the one platform whose account interfaces are also routed.
+const THREADS_ROUTED_INTERFACES = Object.freeze(['search', 'crawl', 'user-info'])
+const defaultThreadsRow = interfaceId => ({ interface_key: interfaceId, platform: 'threads', mode: 'priority', primary_provider: 'rapidapi',
+  fallback_provider: 'tikhub', revision: 1, reason: 'default_route', updated_at: null })
 
 // Registered suppliers for one business interface on one platform. Comment
 // interfaces read the reviewed comment catalog; a pending supplier is still
 // registered (selectable once calibrated) but requests fail before dispatch.
 export function strategyRouteProviders(interfaceId, platform) {
   if (COMMENT_INTERFACES.includes(interfaceId)) return Object.keys(commentProviders(interfaceId, platform) || {})
+  if (platform === 'threads') return THREADS_ROUTED_INTERFACES.includes(interfaceId) ? PROVIDERS_BY_PLATFORM.threads : []
   if (platform === 'facebook') return ['crawl', 'user-info'].includes(interfaceId) ? PROVIDERS_BY_PLATFORM.facebook : []
   return interfaceId === 'search' ? PROVIDERS_BY_PLATFORM[platform] || [] : []
 }
@@ -58,6 +64,7 @@ export class StrategySearchRoutingStore {
     for (const interfaceId of COMMENT_INTERFACES) for (const platform of commentRoutePlatforms(interfaceId)) {
       this.policies.set(`${interfaceId}/${platform}`, defaultCommentRow(interfaceId, platform))
     }
+    for (const interfaceId of THREADS_ROUTED_INTERFACES) this.policies.set(`${interfaceId}/threads`, defaultThreadsRow(interfaceId))
     this.events = []
   }
 
@@ -70,6 +77,9 @@ export class StrategySearchRoutingStore {
     // Comment routes without a saved row run on the reviewed default.
     for (const interfaceId of COMMENT_INTERFACES) for (const platform of commentRoutePlatforms(interfaceId)) {
       if (!rows.some(row => row.interface_key === interfaceId && row.platform === platform)) rows.push(defaultCommentRow(interfaceId, platform))
+    }
+    for (const interfaceId of THREADS_ROUTED_INTERFACES) {
+      if (!rows.some(row => row.interface_key === interfaceId && row.platform === 'threads')) rows.push(defaultThreadsRow(interfaceId))
     }
     if (rows.some(row => !validRoute(row))) throw unavailable()
     return rows.map(policy)
@@ -84,6 +94,7 @@ export class StrategySearchRoutingStore {
         : this.policies.get(`${interfaceId}/${platform}`)
     } catch { throw unavailable() }
     if (!row && COMMENT_INTERFACES.includes(interfaceId)) row = defaultCommentRow(interfaceId, platform)
+    if (!row && platform === 'threads') row = defaultThreadsRow(interfaceId)
     if (!validRoute(row)) throw unavailable()
     return policy(row)
   }
@@ -143,9 +154,12 @@ export async function assertFacebookAccountEnabled(store, interfaceId, platform)
 // Comment interfaces: pausing stops new supplier purchases only. Exact replay
 // and already purchased buffered rows stay deliverable, like Facebook accounts.
 export async function assertCommentRouteEnabled(store, request) {
-  if (!COMMENT_INTERFACES.includes(request?.routeInterface)) return
+  const threadsRoute = request?.platform === 'threads' && THREADS_ROUTED_INTERFACES.includes(request.routeInterface)
+  if (!COMMENT_INTERFACES.includes(request?.routeInterface) && !threadsRoute) return
   const route = await store?.get(request.routeInterface, request.platform)
   if (!route) throw unavailable()
+  if (threadsRoute && route.mode === 'paused') throw new AppError(503, 'threads_acquisition_paused', 'Threads acquisition is paused for this interface',
+    { platform: 'threads', interface: request.routeInterface, upstreamDispatched: false })
   if (route.mode === 'paused') throw new AppError(503, 'comment_acquisition_paused',
     request.routeInterface === 'comment-replies' ? 'Comment reply acquisition is paused for this platform' : 'Comment acquisition is paused for this platform',
     { platform: request.platform, interface: request.routeInterface, upstreamDispatched: false })

@@ -690,7 +690,8 @@ export const adminApi = {
   },
   updateTwitterSearchStrategy: (token, body) => request(token, `${ADMIN_ROOT}/strategy-search/search/twitter`, { method: 'PUT', body }),
   updateCommentRoute: (token, interfaceId, platform, body) => {
-    if (!['post-comments', 'comment-replies'].includes(interfaceId)) throw new Error('Unsupported comment interface')
+    if (!['post-comments', 'comment-replies'].includes(interfaceId)
+      && !(platform === 'threads' && ['search', 'crawl', 'user-info'].includes(interfaceId))) throw new Error('Unsupported strategy interface')
     return request(token, `${ADMIN_ROOT}/strategy-search/${interfaceId}/${encodeURIComponent(platform)}`, { method: 'PUT', body })
   },
   ecommerceRouting: token => request(token, `${ADMIN_ROOT}/ecommerce-routing`),

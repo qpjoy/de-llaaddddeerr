@@ -1,5 +1,6 @@
 import { commentRoutePlatforms, COMMENT_REPLY_CONTENT_REQUIRED } from '../server/contracts/comment-routes.mjs'
-import { STRATEGY_SEARCH_PLATFORMS } from './strategy-search-experience-model.js'
+import { STRATEGY_SEARCH_PLATFORMS, strategyFailureRequestId } from './strategy-search-experience-model.js'
+import { diagnosticHref } from './diagnostics-navigation.js'
 
 export const STRATEGY_COMMENT_PATHS = { 'post-comments': '/api/v1/data/social/post-comments', 'comment-replies': '/api/v1/data/social/comment-replies' }
 export const isCommentOperation = operation => Object.hasOwn(STRATEGY_COMMENT_PATHS, operation)
@@ -9,9 +10,39 @@ const ID_HINTS = {
   weibo: '微博数字 ID（mid）或详情链接', instagram: '帖子 shortcode、数字媒体 ID 或帖子链接', douyin: '视频 aweme_id 或 douyin.com/video/… 链接',
   bilibili: 'BV 号、AV 号或视频链接', kuaishou: '作品 photo_id 或作品链接', zhihu: '回答 ID 或 …/answer/… 链接',
   tiktok: '视频 ID 或 tiktok.com/…/video/… 链接', linkedin: 'activity ID 或动态链接', facebook: '帖子 ID 或帖子链接', youtube: '视频 ID 或视频链接',
+  threads: '帖子数字 ID、shortcode 或 threads.com/@…/post/… 链接',
 }
 export const commentIdHint = platform => ID_HINTS[platform] || '帖子 ID 或规范帖子链接'
 export const replyNeedsContent = platform => COMMENT_REPLY_CONTENT_REQUIRED.includes(platform)
+
+export function strategyCommentFailure(failure, { formScope, operation, nextCursor, admin }) {
+  if (!failure || failure.formScope !== formScope || (failure.body.cursor && failure.body.cursor !== nextCursor)) return null
+  const { error } = failure
+  const action = operation === 'post-comments' ? '帖子评论' : '评论回复'
+  const subject = operation === 'post-comments' ? 'post comments' : 'comment replies'
+  // Historical receipts from the shared account workflow used the same text for all outcomes.
+  const messages = {
+    external_platform_rejected: [`The data source rejected the ${subject} request`, `数据源拒绝了本次${action}查询。`],
+    upstream_outcome_unknown: [`The outcome of the ${subject} request is unknown`, `本次${action}查询的结果尚未确认，请保留请求编号以便核对。`],
+    external_platform_response_unusable: [`The data source returned unusable ${subject} data`, `本次${action}查询收到的数据无法解析。`],
+  }
+  // The top-level requestId may only identify the HTTP exchange.
+  const headerId = error.evidence?.headerRequestId, usageId = strategyFailureRequestId(error) || headerId
+  const validId = typeof usageId === 'string' && (!headerId || usageId === headerId)
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(usageId)
+  const upstream = error.details?.upstream
+  const capacityFailure = [error.status, upstream?.httpStatus, upstream?.businessCode].some(value => value === 429 || value === 503)
+  const actionState = {
+    diagnostic: admin && validId ? diagnosticHref(usageId) : null,
+    canRequery: validId && error.code === 'external_platform_rejected' && error.details?.outcome === 'rejected' && !capacityFailure,
+  }
+  const translation = Object.hasOwn(messages, error.code) && messages[error.code]
+  if (!translation || ![translation[0], 'Account acquisition failed; inspect its saved outcome'].includes(error.message)) return { error, ...actionState }
+  const codes = []
+  if (Number.isInteger(upstream?.httpStatus) && upstream.httpStatus >= 100 && upstream.httpStatus <= 599) codes.push(`HTTP ${upstream.httpStatus}`)
+  if (Number.isSafeInteger(upstream?.businessCode)) codes.push(`业务码 ${upstream.businessCode}`)
+  return { error: { ...error, message: translation[1] }, sourceStatus: codes.join('，'), ...actionState }
+}
 
 // Platforms this Key can call for one comment interface: the platform grant and
 // social.comments.list. Without an access snapshot every supported platform shows.

@@ -4,6 +4,7 @@ import { createDataSearchCursorCodec } from './cursor.mjs'
 import { normalizeYoutubeCommentsRequest, buildYoutubeCommentsDispatch, YOUTUBE_COMMENTS_VERSION,
   YOUTUBE_COMMENTS_CAPABILITY, YOUTUBE_COMMENT_PATHS } from '../contracts/youtube-comments.mjs'
 import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
+import { withSinglePage } from '../contracts/single-page-delivery.mjs'
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
@@ -68,7 +69,7 @@ export function youtubeCommentsPlan({ gateway, context, input, dependencies }) {
   let request
   return { input, plan: { operation: YOUTUBE_COMMENTS_CAPABILITY, authorizationPlatform: 'youtube',
     capabilityMessage: 'YouTube comments are not granted for this API key', replayReleasedFailures: true,
-    normalize: ({ policy }) => (request = normalizeYoutubeCommentsDelivery(kind, body, { context, maxPageSize: policy.maxPageSize, codec })),
+    normalize: ({ policy }) => (request = withSinglePage(normalizeYoutubeCommentsDelivery(kind, body, { context, maxPageSize: policy.maxPageSize, codec }), input.singlePage)),
     assemble: ({ delivery, deadlineAt, signal }) => runSocialAccountWorkflow({ gateway, context, request, delivery,
       deadlineAt, signal, ...dependencies, workflowKind: 'youtube-comments',
       buildResponse: values => youtubeCommentsDeliveryBody(request, { ...values, deliveryId: delivery.usageRequestId }) }),

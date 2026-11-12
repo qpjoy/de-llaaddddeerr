@@ -6,7 +6,7 @@ export const STRATEGY_SEARCH_PLATFORMS = [
   ['douyin', '抖音', '抖'], ['bilibili', '哔哩哔哩', 'B'], ['kuaishou', '快手', '快'], ['zhihu', '知乎', '知'],
   ['telegram', 'Telegram', 'TG'], ['twitter', 'Twitter / X', '𝕏'], ['reddit', 'Reddit', 'R'],
   ['xiaohongshu', '小红书', '红'], ['weibo', '微博', '微'], ['instagram', 'Instagram', 'IG'],
-  ['facebook', 'Facebook', 'f'], ['tiktok', 'TikTok', '♪'], ['youtube', 'YouTube', 'YT'],
+  ['facebook', 'Facebook', 'f'], ['tiktok', 'TikTok', '♪'], ['youtube', 'YouTube', 'YT'], ['threads', 'Threads', '@'],
   ['wechat_search', '微信搜一搜', '搜'], ['wechat_mp', '微信公众号', '公'],
 ].map(([platform, label, mark]) => ({ platform, label, mark }))
 

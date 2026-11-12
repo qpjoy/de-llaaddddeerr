@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Check, ArrowDown, ArrowUpRight, ChatCircleText } from '@phosphor-icons/react'
 import { publicDataApi } from './api.js'
 import { DropdownField, ErrorState, formatDate } from './components.jsx'
@@ -7,7 +7,7 @@ import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { requestUuid } from './request-id.js'
 import { safeStrategyUrl } from './strategy-search-experience-model.js'
 import { STRATEGY_COMMENT_PATHS, strategyCommentPlatforms, strategyCommentBody, strategyCommentPage, strategyCommentRows,
-  commentIdHint, replyNeedsContent } from './strategy-comments-model.js'
+  commentIdHint, replyNeedsContent, strategyCommentFailure } from './strategy-comments-model.js'
 import { commentRoutePlatforms } from '../server/contracts/comment-routes.mjs'
 
 const OPERATIONS = [{ value: 'search', label: '内容搜索' }, { value: 'crawl', label: '账号内容' }, { value: 'user-info', label: '账号资料' },
@@ -18,14 +18,14 @@ const statusText = { continuable: '可继续读取下一页', exhausted: '已到
 // Product display for the two comment interfaces. Sending happens only on an
 // explicit click; an identical request reuses its Idempotency-Key so a retry
 // replays instead of buying again.
-export function StrategyCommentsExperience({ operation, onOperationChange, prefill = {}, onOpenReplies }) {
+export function StrategyCommentsExperience({ operation, onOperationChange, prefill = {}, onOpenReplies, admin }) {
   const [key] = useDemoApiKey()
   const identity = useDemoIdentity(), access = useDemoAccessSnapshot()
   const platforms = strategyCommentPlatforms(access, operation)
   const [form, setForm] = useState(() => ({ platform: prefill.platform || platforms[0]?.platform || '', contentId: prefill.contentId || '',
     commentId: prefill.commentId || '', count: 20 }))
-  const [result, setResult] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState(null)
-  const attempts = useRef(new Map())
+  const [result, setResult] = useState(null), [busy, setBusy] = useState(false), [failure, setFailure] = useState(null)
+  const attempts = useRef(new Map()), pending = useRef(false), visible = useRef(null)
   useEffect(() => {
     if (prefill.platform || prefill.contentId || prefill.commentId) setForm(current => ({ ...current,
       ...(prefill.platform ? { platform: prefill.platform } : {}), contentId: prefill.contentId ?? current.contentId,
@@ -35,20 +35,34 @@ export function StrategyCommentsExperience({ operation, onOperationChange, prefi
   let body = null, validation = ''
   try { body = strategyCommentBody(operation, form, platforms) } catch (failure) { validation = failure.message }
   const path = STRATEGY_COMMENT_PATHS[operation]
-  const change = patch => { setForm(current => ({ ...current, ...patch })); setError(null) }
-  async function send(requestBody) {
-    if (!key || !requestBody || busy) return
-    const input = { method: 'POST', path, body: requestBody }, scope = JSON.stringify([identity, input])
-    const attempt = attempts.current.get(scope) || { idempotencyKey: requestUuid() }
-    attempts.current.set(scope, attempt)
-    setBusy(true); setError(null)
-    try {
-      const response = await publicDataApi.productRequest(key, input, attempt.idempotencyKey)
-      setResult({ ...response, identity, input })
-    } catch (failure) { setError(failure) } finally { setBusy(false) }
-  }
-  const rows = result?.identity === identity && result.input?.path === path ? strategyCommentRows(result.payload) : null
+  const formScope = JSON.stringify([identity, path, body])
+  const rows = result?.formScope === formScope ? strategyCommentRows(result.payload) : null
   const page = rows ? strategyCommentPage(result.payload) : null
+  const nextCursor = page?.nextCursor
+  const feedback = strategyCommentFailure(failure, { formScope, operation, nextCursor, admin })
+  const rejected = feedback?.canRequery ? failure : null
+  useLayoutEffect(() => {
+    visible.current = { formScope, nextCursor, rejected }
+    return () => { visible.current = null }
+  }, [formScope, nextCursor, rejected])
+  const change = patch => { setForm(current => ({ ...current, ...patch })); setFailure(null) }
+  async function send(requestBody, replace = null) {
+    if (!key || !requestBody || pending.current || visible.current?.formScope !== formScope
+      || (requestBody.cursor && requestBody.cursor !== visible.current.nextCursor)) return
+    const input = { method: 'POST', path, body: requestBody }, scope = JSON.stringify([identity, input])
+    const originalKey = attempts.current.get(scope)
+    if (replace && (replace !== visible.current.rejected || replace.idempotencyKey !== originalKey)) return
+    const idempotencyKey = replace || !originalKey ? requestUuid() : originalKey
+    attempts.current.set(scope, idempotencyKey)
+    pending.current = true
+    setBusy(true); setFailure(null)
+    try {
+      const response = await publicDataApi.productRequest(key, input, idempotencyKey)
+      if (visible.current?.formScope === formScope) setResult({ ...response, formScope, input })
+    } catch (error) {
+      if (visible.current?.formScope === formScope) setFailure({ error, formScope, body: requestBody, idempotencyKey })
+    } finally { pending.current = false; setBusy(false) }
+  }
   const replies = operation === 'comment-replies'
   return <div className="mih-strategy-experience">
     <section className="qp-panel mih-panel mih-strategy-composer" aria-label="评论产品展示">
@@ -75,10 +89,15 @@ export function StrategyCommentsExperience({ operation, onOperationChange, prefi
             options={[10, 20, 50, 100].map(value => ({ value: String(value), label: `${value} 条` }))} />
           <button className="qp-button qp-button--primary" disabled={!key || !body || busy}><ChatCircleText size={18} aria-hidden="true" />{busy ? '正在查询…' : replies ? '查看回复' : '查看评论'}</button>
         </div>
-        <p className="mih-strategy-search-note">仅点击查询或下一页时调用，按当前账户价格计量；相同参数沿用原请求标识，重试会回放已有结果。Twitter、Reddit、快手、微博每次只取一页来源数据，条数可能少于每页数量。</p>
+        <p className="mih-strategy-search-note">查询和下一页按当前账户价格计量。相同参数会回放原请求已保存的结果；点击「重新查询」会发起新的计费请求。Twitter、Reddit、快手、微博每次只取一页来源数据，条数可能少于每页数量。</p>
         {(form.contentId || form.commentId) && validation ? <p role="status">{validation}</p> : null}
       </form>
-      {error ? <ErrorState error={error} /> : null}
+      {feedback ? <><ErrorState error={feedback.error} />
+        {feedback.sourceStatus ? <p>数据源返回 {feedback.sourceStatus}</p> : null}
+        {feedback.error.evidence?.idempotentReplay ? <p>本次回放原请求已保存的失败结果。</p> : null}
+        {feedback.diagnostic ? <p><a href={feedback.diagnostic}>查看原请求诊断</a></p> : null}
+        {rejected ? <button type="button" className="qp-button qp-button--outline" disabled={!key || busy}
+          onClick={() => send(rejected.body, rejected)}>重新查询（按新请求计费）</button> : null}</> : null}
     </section>
     {rows ? <section className="qp-panel mih-panel mih-strategy-results" aria-label={replies ? '评论回复结果' : '帖子评论结果'}>
       <header><div><p className="qp-kicker">{platforms.find(row => row.platform === result.payload?.data?.platform)?.label || result.payload?.data?.platform}</p>

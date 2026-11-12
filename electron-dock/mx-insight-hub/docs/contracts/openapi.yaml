@@ -43,7 +43,7 @@ paths:
       tags: [社媒与内容数据]
       operationId: social_post_comments
       summary: 按帖子获取评论
-      x-mx-platform-options: [twitter, reddit, kuaishou, instagram, weibo, douyin, tiktok, zhihu, linkedin, bilibili, facebook, xiaohongshu, youtube]
+      x-mx-platform-options: [twitter, reddit, kuaishou, instagram, weibo, douyin, tiktok, zhihu, linkedin, bilibili, facebook, xiaohongshu, youtube, threads]
       x-mx-required-capabilities: [social.comments.list]
       x-mx-meter-key: social.comments.list
       x-mx-doc-path: /docs/social-content
@@ -86,7 +86,7 @@ paths:
               properties:
                 platform:
                   type: string
-                  enum: [twitter, reddit, kuaishou, instagram, weibo, douyin, tiktok, zhihu, linkedin, bilibili, facebook, xiaohongshu, youtube]
+                  enum: [twitter, reddit, kuaishou, instagram, weibo, douyin, tiktok, zhihu, linkedin, bilibili, facebook, xiaohongshu, youtube, threads]
                   description: 目标平台；支持别名 x、xhs、小红书、抖音、快手、知乎、微博、b站。
                 contentId: {type: string, minLength: 1, maxLength: 8192, description: 帖子 ID（推荐）。B站接受 AV/BV 号，Instagram 接受 shortcode 或数字媒体 ID，知乎为回答 ID，Reddit 为帖子 ID（可带 t3_）。}
                 url: {type: string, minLength: 1, maxLength: 8192, description: 规范帖子链接，Hub 从中解析 ID；短链接不解析。}
@@ -471,7 +471,7 @@ paths:
       tags: [社媒与内容数据]
       operationId: social_comment_replies
       summary: 按评论获取回复（楼中楼）
-      x-mx-platform-options: [twitter, weibo, douyin, zhihu, reddit, xiaohongshu, instagram, bilibili, kuaishou]
+      x-mx-platform-options: [twitter, weibo, douyin, zhihu, reddit, xiaohongshu, instagram, bilibili, kuaishou, threads]
       x-mx-required-capabilities: [social.comments.list]
       x-mx-meter-key: social.comments.list
       x-mx-doc-path: /docs/social-content
@@ -492,7 +492,7 @@ paths:
               properties:
                 platform:
                   type: string
-                  enum: [twitter, weibo, douyin, zhihu, reddit, xiaohongshu, instagram, bilibili, kuaishou]
+                  enum: [twitter, weibo, douyin, zhihu, reddit, xiaohongshu, instagram, bilibili, kuaishou, threads]
                   description: 目标平台；可省略并由 replyRef.platform 提供。
                 replyRef:
                   type: object
@@ -914,7 +914,7 @@ paths:
               properties:
                 platform:
                   type: string
-                  enum: [facebook, twitter, instagram, reddit, weibo, bilibili, douyin, kuaishou, zhihu, youtube, tiktok, xiaohongshu]
+                  enum: [facebook, twitter, instagram, reddit, weibo, bilibili, douyin, kuaishou, zhihu, youtube, tiktok, xiaohongshu, threads]
                 query: {type: string, minLength: 1, maxLength: 500}
                 pageSize: {type: integer, minimum: 1, maximum: 100, default: 20}
                 type: {type: string, enum: [fresh, stable], default: fresh}
@@ -937,6 +937,66 @@ paths:
             capabilities/limitations. capabilities.coverageComplete=false;
             missing publication times are excluded and disclosed. Original
             source evidence and acquisition billing units remain unchanged.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, requestId]
+                properties:
+                  requestId: {type: string, format: uuid}
+                  data:
+                    type: object
+                    required: [contractVersion, items, pageInfo, meta]
+                    properties:
+                      contractVersion: {const: mx-insight-hub.data-search.v2}
+                      items:
+                        type: array
+                        items: {type: object}
+                      pageInfo:
+                        type: object
+                        required: [returnedCount, hasMore, nextCursor]
+                        properties:
+                          returnedCount: {type: integer}
+                          hasMore:
+                            type: [boolean, 'null']
+                            description: Threads uses null when the source does not establish whether more results exist.
+                          nextCursor:
+                            type: [string, 'null']
+                      status:
+                        type: string
+                        enum: [ok, partial]
+                      meta:
+                        type: object
+                        required: [requestedWindow, effectiveWindow, capabilities, limitations]
+                        properties:
+                          requestedWindow:
+                            type: object
+                            additionalProperties: false
+                            required: [from, to, timezone, boundary]
+                            properties:
+                              from: {type: string, format: date-time}
+                              to: {type: string, format: date-time}
+                              timezone:
+                                type: string
+                                examples: [Asia/Shanghai]
+                              boundary: {const: '[from,to)'}
+                          effectiveWindow: {type: object}
+                          capabilities:
+                            type: object
+                            properties:
+                              upstreamFiltering:
+                                enum: [calendar_date, unsupported]
+                              deliveryFiltering: {const: exact}
+                              coverageComplete: {const: false}
+                              idempotency: {const: permanent}
+                          limitations:
+                            type: array
+                            items:
+                              type: object
+                              required: [code]
+                              properties:
+                                code: {type: string}
+                                message: {type: string}
         '400': {description: Invalid window, fields, idempotency key or version-bound cursor}
         '401': {description: API key required}
         '403': {description: Existing Live key/platform/operation grants required}
@@ -9577,7 +9637,7 @@ paths:
       tags: [社媒与内容数据]
       operationId: hubSocial_crawl
       summary: 账号内容（Hub 账号接口）
-      x-mx-platform-options: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+      x-mx-platform-options: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, threads, reddit]
       x-mx-required-capabilities: [social.content.crawl]
       x-mx-category: 账号数据
       x-mx-meter-key: social.content.crawl
@@ -9600,7 +9660,7 @@ paths:
               properties:
                 platform:
                   type: string
-                  enum: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+                  enum: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, threads, reddit]
                   description: 一次请求只选择一个平台；已发布的平台别名继续兼容，响应使用规范平台名。
                 businessId: {type: string, deprecated: true, description: 历史兼容字段；可省略。提交时必须等于当前认证消费者绑定的值，不能改变调用身份。}
                 business_id: {type: string, deprecated: true, description: businessId 的历史别名；同样受当前认证身份绑定。}
@@ -9818,7 +9878,7 @@ paths:
                           pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
                           pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
                           returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
-                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          hasMore: {type: [boolean, "null"], description: Threads 来源未提供有效分页信息时为 null。}
                           nextCursor:
                             type: [string, 'null']
                             description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
@@ -9842,7 +9902,7 @@ paths:
                           pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
                           pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
                           returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
-                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          hasMore: {type: [boolean, "null"], description: Threads 来源未提供有效分页信息时为 null。}
                           nextCursor:
                             type: [string, 'null']
                             description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
@@ -10017,7 +10077,7 @@ paths:
                                 pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
                                 pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
                                 returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
-                                hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                                hasMore: {type: [boolean, "null"], description: Threads 来源未提供有效分页信息时为 null。}
                                 nextCursor:
                                   type: [string, 'null']
                                   description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
@@ -10051,7 +10111,7 @@ paths:
       tags: [社媒与内容数据]
       operationId: hubSocial_user_info
       summary: 账号资料（Hub 账号接口）
-      x-mx-platform-options: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+      x-mx-platform-options: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, threads, reddit]
       x-mx-required-capabilities: [social.profile.get]
       x-mx-category: 账号数据
       x-mx-meter-key: social.profile.get
@@ -10074,7 +10134,7 @@ paths:
               properties:
                 platform:
                   type: string
-                  enum: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, reddit]
+                  enum: [twitter, facebook, instagram, bilibili, douyin, kuaishou, weibo, xiaohongshu, youtube, zhihu, tiktok, linkedin, threads, reddit]
                   description: 一次请求只选择一个平台；已发布的平台别名继续兼容，响应使用规范平台名。
                 businessId: {type: string, deprecated: true, description: 历史兼容字段；可省略。提交时必须等于当前认证消费者绑定的值，不能改变调用身份。}
                 business_id: {type: string, deprecated: true, description: businessId 的历史别名；同样受当前认证身份绑定。}
@@ -10218,7 +10278,7 @@ paths:
                           pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
                           pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
                           returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
-                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          hasMore: {type: [boolean, "null"], description: Threads 来源未提供有效分页信息时为 null。}
                           nextCursor:
                             type: [string, 'null']
                             description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
@@ -10242,7 +10302,7 @@ paths:
                           pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
                           pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
                           returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
-                          hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                          hasMore: {type: [boolean, "null"], description: Threads 来源未提供有效分页信息时为 null。}
                           nextCursor:
                             type: [string, 'null']
                             description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
@@ -10348,7 +10408,7 @@ paths:
                                 pageIndex: {type: integer, minimum: 1, maximum: 15, description: 本次交付页序号，从 1 开始。}
                                 pageSize: {type: integer, minimum: 1, maximum: 500, description: 本次请求的每页条数。}
                                 returnedCount: {type: integer, minimum: 0, description: 本页实际返回条数。}
-                                hasMore: {type: boolean, description: true 有后续页；false 已结束；null 不确定（不要自动补页）。}
+                                hasMore: {type: [boolean, "null"], description: Threads 来源未提供有效分页信息时为 null。}
                                 nextCursor:
                                   type: [string, 'null']
                                   description: 下一页不透明游标；无可继续页面时为 null。若 warnings 含 pagination_completeness_unknown，无法继续不等于确认耗尽。
@@ -14014,10 +14074,11 @@ components:
       type: object
       additionalProperties: false
       required: [platform, query]
-      allOf: [{"if": {"properties": {"platform": {"enum": ["twitter", "x"]}}, "required": ["platform"]}, "then": {"properties": {"params": {"type": "object", "additionalProperties": false, "description": "Twitter content-search options only. New searches default to Latest; query remains required even with filters. People returns accounts and is unsupported. Native count is no longer supported; use Hub pageSize. Return only the signed Hub nextCursor in the top-level cursor. The selected route must support every supplied option or fail before acquisition; options are never silently dropped.", "properties": {"category": {"type": "string", "enum": ["Top", "Latest", "Photos", "Videos"], "default": "Latest"}, "filters": {"type": "string", "maxLength": 2048, "pattern": "^[^\\u0000]*$", "description": "Optional native filter expression; surrounding whitespace is trimmed and an empty value is omitted."}, "includeTimestamp": {"type": "boolean", "default": false}}}}}, "else": {"properties": {"params": {"not": {"anyOf": [{"required": ["category"]}, {"required": ["filters"]}, {"required": ["includeTimestamp"]}]}}}}}]
+      allOf: [{"if": {"properties": {"platform": {"enum": ["twitter", "x"]}}, "required": ["platform"]}, "then": {"properties": {"params": {"type": "object", "additionalProperties": false, "description": "Twitter content-search options only. New searches default to Latest; query remains required even with filters. People returns accounts and is unsupported. Native count is no longer supported; use Hub pageSize. Return only the signed Hub nextCursor in the top-level cursor. The selected route must support every supplied option or fail before acquisition; options are never silently dropped.", "properties": {"category": {"type": "string", "enum": ["Top", "Latest", "Photos", "Videos"], "default": "Latest"}, "filters": {"type": "string", "maxLength": 2048, "pattern": "^[^\\u0000]*$", "description": "Optional native filter expression; surrounding whitespace is trimmed and an empty value is omitted."}, "includeTimestamp": {"type": "boolean", "default": false}}}}}, "else": {"properties": {"params": {"not": {"anyOf": [{"required": ["category"]}, {"required": ["filters"]}, {"required": ["includeTimestamp"]}]}}}}}, {"if": {"properties": {"platform": {"const": "threads"}}}, "then": {"not": {"required": ["params"]}}}]
       properties:
         platform: { type: string, pattern: "^(?![Aa][Ll][Ll]$|\\*$)[A-Za-z0-9_:-]+$", description: One explicit platform; `all` (case-insensitive) and `*` are forbidden., example: xiaohongshu }
         query: { type: string, minLength: 1, maxLength: 500, description: Non-blank search query; surrounding whitespace is trimmed. }
+        fillPage: { type: boolean, description: False requests a single source page. Threads always reads one source page per request. }
         pageSize: {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Result ceiling, default 20; not a guarantee of a full page. Twitter, Facebook, Bilibili, Douyin, Kuaishou, Zhihu, Reddit and YouTube standard searches fill without a separate default per-request call-count cap; traversal, deadline, retained-page bytes and admission limits still apply. Xiaohongshu supports all valid page sizes through Hub; 20 keeps the established direct connector and other sizes use retained-page buffering."}
         cursor: {"type": "string", "minLength": 1, "maxLength": 8192, "description": "Opaque nextCursor from the prior page. Return it unchanged with the same path, platform, query and pageSize; preserve params and type as well."}
         params: {"type": "object", "additionalProperties": false, "description": "Platform-specific filters only for the listed platforms. Twitter: category (Top/Latest/Photos/Videos, default Latest), filters (up to 2048 characters), includeTimestamp (default false); query remains required, People and native count/cursor are rejected. Reddit and YouTube standard /data/search reject params, including an empty object; their raw compatibility endpoints retain their existing parameter contract. Facebook: startTime/endTime or startDate/endDate at date precision. Bilibili: order, duration, pubtime_begin_s/pubtime_end_s. Douyin: sort_type, publish_time, filter_duration, content_type. Kuaishou: sort_type, publish_time, duration. Zhihu: show_all_topics, search_source, sort. Fields belonging to another platform are rejected. Continue with the top-level signed Hub cursor; native offsets, sessions and endpoint/provider selection are not public pagination controls.", "properties": {"startTime": {"type": "string"}, "endTime": {"type": "string"}, "startDate": {"type": "string"}, "endDate": {"type": "string"}, "order": {"type": "string"}, "duration": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 0}]}, "pubtime_begin_s": {"type": "integer", "minimum": 0}, "pubtime_end_s": {"type": "integer", "minimum": 0}, "sort_type": {"type": "string"}, "publish_time": {"type": "string"}, "filter_duration": {"type": "string"}, "content_type": {"type": "string"}, "show_all_topics": {"type": "integer", "minimum": 0}, "search_source": {"type": "string"}, "sort": {"type": "string"}, "category": {"type": "string", "enum": ["Top", "Latest", "Photos", "Videos"], "default": "Latest"}, "filters": {"type": "string", "maxLength": 2048, "pattern": "^[^\\u0000]*$", "description": "Optional native filter expression; surrounding whitespace is trimmed and an empty value is omitted."}, "includeTimestamp": {"type": "boolean", "default": false}}}
@@ -15150,7 +15211,7 @@ components:
         pageIndex: { type: integer, minimum: 1 }
         pageSize: { type: integer, minimum: 0, maximum: 100 }
         returnedCount: { type: integer, minimum: 0, maximum: 100 }
-        hasMore: { type: boolean }
+        hasMore: { type: [boolean, "null"], description: Threads uses null when the source does not establish whether more results exist. }
         nextCursor: { type: [string, "null"], maxLength: 8192, description: Opaque cursor for the next page; search callers return it unchanged. }
         cursorType: { type: string, enum: [opaque, none] }
     NightAllDataSearchWarning:

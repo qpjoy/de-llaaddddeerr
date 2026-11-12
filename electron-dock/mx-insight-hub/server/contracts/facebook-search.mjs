@@ -73,6 +73,7 @@ export function normalizeFacebookSearch(normalized, codec, dataSearch = null, no
   if (state.startDate > state.endDate) invalid('Search start must not be after end')
   return { ...state, platform: 'facebook', query, pageSize, scopeHash: scope, resultType: dataSearch?.resultType,
     standardSearch: Boolean(dataSearch), marketplace: 'facebook', deliveryMode: 'live_only',
+    ...(dataSearch && normalized.fillPage === false ? { singlePage: true } : {}),
     fingerprintBody: dataSearch ? { ...normalized, type: dataSearch.resultType }
       : { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...body },
     forProvider(provider) {

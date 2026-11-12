@@ -65,6 +65,8 @@ export function normalizeContentSearchDelivery(normalized, { dataSearch, codec, 
   return { ...placeholder, platform, recipe, queries, params: searchParameters ? twitterTikHubParameters(searchParameters) : params, pageSize, totalLimit: queries.length * pageSize,
     ...(searchParameters ? { twitterSearchParameters: searchParameters } : {}),
     standard: Boolean(dataSearch),
+    // fillPage=false: one content page per request (never part of scopeHash).
+    singlePage: Boolean(dataSearch) && body.fillPage === false,
     resultType: dataSearch?.resultType || 'raw', body, scopeHash, page, expiresAt, previousDeliveryId,
     restartRequired, unsupportedNativeCursor, fingerprintBody, deliveryMode: 'live_only',
     encodeNext: deliveryId => codec.encode({ version: TIKHUB_CONTENT_SEARCH_VERSION, platform, provider: 'tikhub',
@@ -77,13 +79,14 @@ export function contentSearchDeliveryBody(request, rowsByJob, state, { calls, wa
   const more = remaining && request.page < 15
   const nextCursor = more ? request.encodeNext(deliveryId) : null
   if (remaining && request.page === 15) warnings.push({ code: 'page_limit_reached', message: 'The content-search traversal reached its page limit; restart explicitly.' })
-  const page = { page: request.page, pageSize: request.pageSize, returnedCount: all.length, hasMore: more,
+  const hasMore = !more && request.platform === 'threads' && (remaining || state.jobs.some(job => job.paginationUnproven)) ? null : more
+  const page = { page: request.page, pageSize: request.pageSize, returnedCount: all.length, hasMore,
     nextCursor, providerCursor: nextCursor, nextParams: more ? { cursor: nextCursor } : null,
     nextPage: null, paginationMode: more ? 'composite' : 'cursor' }
   const status = warnings.length ? 'partial' : 'ok'
   if (request.resultType !== 'raw') return { data: { contractVersion: 'night-all.data-search.v1', platform: request.platform,
     query: request.queries[0], items: all.map(contentSearchDataItem), pageInfo: { pageIndex: request.page,
-      pageSize: request.pageSize, returnedCount: all.length, hasMore: more, nextCursor, cursorType: more ? 'opaque' : 'none' },
+      pageSize: request.pageSize, returnedCount: all.length, hasMore, nextCursor, cursorType: more ? 'opaque' : 'none' },
     status, warnings, meta: { capability: 'search_posts', capabilityStatus: 'ready', paginationMode: 'cursor', providerCalls: calls } }, requestId: deliveryId }
   const legacy = all.map(contentSearchLegacyRow)
   const authors = [...new Map(all.filter(row => row.author_id).map(row => [row.author_id, {

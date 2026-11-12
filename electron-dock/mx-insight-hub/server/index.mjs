@@ -42,7 +42,10 @@ import { FACEBOOK_SELFHOSTED_ENDPOINT, FACEBOOK_SELFHOSTED_PROVIDER } from './co
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
-import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
+import { normalizeHubSocialCompatRequest, threadsAccountRecipe } from './contracts/hub-social-compat.mjs'
+import { threadsSearchRecipe } from './contracts/threads-search.mjs'
+import { threadsSearchCursorProvider } from './external-platforms/threads-search-workflow.mjs'
+import { socialAccountCursorProvider, threadsAccountReceiptProvider } from './external-platforms/social-account-delivery.mjs'
 import { normalizePostCommentsRequest, POST_COMMENTS_RECIPES, POST_COMMENT_PROVIDER_RECIPES, POST_COMMENTS_PATH,
   postCommentRecipe, postCommentsPlatform } from './contracts/post-comments.mjs'
 import { COMMENT_REPLY_PROVIDER_RECIPES, COMMENT_REPLIES_PATH, commentReplyRecipe } from './contracts/comment-replies.mjs'
@@ -478,6 +481,14 @@ export async function createRuntime(config = loadConfig()) {
     credentialStore: tikHubCredentialStore,
   })
   const nativeSearchGateway = (platform, providerKey) => {
+    // A RapidAPI listing shares the key but keeps its own breaker, so a Threads
+    // outage cannot pause Twitter or Facebook.
+    if (providerKey === 'rapidapi') return new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies, usageStore: store,
+      platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey, authorizationPlatform: platform, providerCircuit: 'marketplace',
+        circuitFailureThreshold: rapidConfig.circuitFailureThreshold, circuitOpenMs: rapidConfig.circuitOpenMs }),
+      adapter: rapidApiAdapter, config: rapidConfig, providerKey, credentialStore: rapidApiCredentialStore,
+      operationControlStore: externalPlatformControlStore, apiKeyPepper: config.apiKeyPepper,
+      reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
     const justone = providerKey === 'justone'
     const providerConfig = justone ? config.justOne : config.tikHub
     return new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
@@ -511,8 +522,23 @@ export async function createRuntime(config = loadConfig()) {
   const twitterSearch = createTwitterSearchRouter({ usageStore: store, rapidGateway: hubSocialGateway,
     tikHubGateway: nativeSearchGateways.twitter, apiKeyPepper: config.apiKeyPepper, policyStore: strategySearchRoutingStore,
     resolveProvider: async context => (await resolveTwitterSearchRoute({ consumerId: context.consumer.id })).provider })
-  const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
+  const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.filter(platform => platform !== 'threads').map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
+  // Threads alone is routed on every interface; each supplier keeps one gateway.
+  const threadsGateways = { rapidapi: nativeSearchGateway('threads', 'rapidapi'), tikhub: nativeSearchGateway('threads', 'tikhub') }
+  const threadsRouter = options => createCommentRouter({ gateways: { threads: threadsGateways }, policyStore: strategySearchRoutingStore,
+    platformFor: () => 'threads', ...options })
+  const threadsSearch = threadsRouter({ interfaceId: 'search', recipeFor: threadsSearchRecipe,
+    cursorProvider: (input, options) => threadsSearchCursorProvider(input, options),
+    bodyFor: input => input.normalized, invoke: (gateway, context, input) => gateway.searchThreads(context, input) })
+  const threadsAccount = Object.fromEntries(['crawl', 'user-info'].map(operation => [operation, threadsRouter({ interfaceId: operation,
+    recipeFor: threadsAccountRecipe, bodyFor: input => input.normalized, cursorProvider: socialAccountCursorProvider(operation),
+    invoke: (gateway, context, input) => gateway.socialAccountData(context, input) })]))
+  async function routeThreadsAccount(context, input, normalized) {
+    const provider = await threadsAccountReceiptProvider(store, context, input, normalized)
+    if (provider) return threadsGateways[provider].socialAccountData(context, input)
+    return threadsAccount[input.operation](context, { ...input, normalized })
+  }
   socialAccountDataGateways.facebook.strategySearchRoutingStore = strategySearchRoutingStore
   // Baseline gateways keep their historical shape; routing adds one gateway per
   // other registered supplier, sharing usage, ledger and archive stores.
@@ -553,6 +579,7 @@ export async function createRuntime(config = loadConfig()) {
     // exact replay even when their meaning or accepted bounds have changed.
     if (typeof input.body?.platform === 'string' && ['twitter', 'x', 'tw'].includes(input.body.platform.trim().toLowerCase())) return hubSocialGateway.socialAccountData(context, input)
     const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, { businessId: context.consumer?.businessId })
+    if (normalized.platform === 'threads') return routeThreadsAccount(context, input, normalized)
     return socialAccountDataGateways[normalized.platform].socialAccountData(context, input)
   } }
   const instagramSearchGateways = Object.fromEntries(['justone', 'tikhub'].map(provider => [provider, nativeSearchGateway('instagram', provider)]))
@@ -715,6 +742,7 @@ export async function createRuntime(config = loadConfig()) {
         && TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
+      : input.normalized.platform === 'threads' ? threadsSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
       : input.normalized.platform === 'twitter' ? twitterSearch(context, input)
       : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform]
@@ -840,6 +868,7 @@ export async function createRuntime(config = loadConfig()) {
     enterpriseGateway,
     socialAccountGateway,
     socialAccountTikHubGateway,
+    threadsNativeGateway: threadsGateways.rapidapi,
     // Comments reserve usage in the YouTube domain, not account search's social domain.
     youtubeCommentsGateway: socialAccountDataGateways.youtube,
     commentRepliesGateway: { commentReplies },
@@ -866,7 +895,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways, socialAccountDataGateways, postCommentsGateways, postCommentProviderGateways, commentReplyGateways,
+    nativeSearchGateways, socialAccountDataGateways, threadsGateways, postCommentsGateways, postCommentProviderGateways, commentReplyGateways,
     socialDataGateway, strategySearchRoutingStore,
   }
 }

@@ -1,0 +1,96 @@
+{
+  "_source": "Anonymized structure of the public example responses on rapidapi.com/Lundehund/api/threads-api4, read 2026-11-11. Not a live paid page.",
+  "searchRecent": {
+    "data": { "searchResults": {
+      "inform_module": null,
+      "edges": [
+        { "node": { "thread": { "id": "3587657939753764305", "thread_items": [ { "post": {
+          "id": "3587657939753764305_33022838", "pk": "3587657939753764305", "code": "DHJ6-NSogXR",
+          "user": { "pk": "33022838", "id": "33022838", "username": "sample_author", "is_verified": false, "profile_pic_url": "https://example.invalid/avatar.jpg?sig=1" },
+          "caption": { "pk": "18355490461180557", "text": "bitcoin sample post" },
+          "like_count": 7, "taken_at": 1741902175, "media_type": 1,
+          "image_versions2": { "candidates": [ { "height": 499, "url": "https://example.invalid/photo.webp", "width": 769 } ] },
+          "video_versions": null, "carousel_media": null,
+          "text_post_app_info": { "direct_reply_count": 2, "repost_count": 3, "quote_count": 1, "is_reply": false, "reply_to_author": null }
+        } } ] } }, "cursor": "" },
+        { "node": { "thread": { "id": "3587657939753764306", "thread_items": [ { "post": {
+          "id": "3587657939753764306_33022839", "pk": "3587657939753764306", "code": "DHJ6-NSogXS",
+          "user": { "pk": "33022839", "username": "video_author", "profile_pic_url": "https://example.invalid/avatar2.jpg" },
+          "caption": null, "like_count": 0, "taken_at": 1741902180, "media_type": 2,
+          "image_versions2": { "candidates": [ { "url": "https://example.invalid/poster.jpg" } ] },
+          "video_versions": [ { "type": 101, "url": "https://example.invalid/video.mp4" } ],
+          "text_post_app_info": { "direct_reply_count": 0, "repost_count": 0, "quote_count": 0, "text_fragments": { "fragments": [ { "fragment_type": "plaintext", "plaintext": "fragment " }, { "fragment_type": "link", "plaintext": "text" } ] } }
+        } } ] } } }
+      ],
+      "page_info": { "end_cursor": null, "has_next_page": false, "has_previous_page": false, "start_cursor": null }
+    } },
+    "extensions": { "is_final": true },
+    "status": "ok"
+  },
+  "userPosts": {
+    "data": { "mediaData": {
+      "edges": [ { "node": { "thread_header_context": null, "thread_items": [ { "post": {
+        "id": "3423248872904765000_60762270900", "pk": "3423248872904765000", "code": "C-BaaaaaaaA",
+        "user": { "pk": "60762270900", "username": "owner_account", "is_verified": true, "profile_pic_url": "https://example.invalid/owner.jpg" },
+        "caption": { "text": "own post" }, "like_count": 10, "taken_at": 1722347954, "media_type": 19,
+        "image_versions2": { "candidates": [] },
+        "text_post_app_info": { "direct_reply_count": 4, "repost_count": 5, "quote_count": 0 }
+      } } ] } } ],
+      "page_info": { "end_cursor": "QVFDRlNSV0k3eDdPTm9CSHFreGRO", "has_next_page": true, "has_previous_page": false, "start_cursor": null }
+    } },
+    "extensions": { "is_final": true }
+  },
+  "userReplies": {
+    "data": { "mediaData": {
+      "edges": [ { "node": { "id": "3423248872904765395", "thread_type": "thread", "thread_items": [
+        { "line_type": "squiggle", "post": {
+          "id": "3423235000000000000_16237313029", "pk": "3423235000000000000", "code": "C-BbbbbbbbB",
+          "user": { "pk": "16237313029", "username": "other_account" },
+          "caption": { "text": "the post being answered" }, "like_count": 409, "taken_at": 1722300474, "media_type": 2,
+          "text_post_app_info": { "direct_reply_count": 9, "repost_count": 1, "quote_count": 0 }
+        } },
+        { "line_type": "line", "post": {
+          "id": "3423248872904765395_60762270900", "pk": "3423248872904765395", "code": "C-B0rZ3Pq_T",
+          "user": { "pk": "60762270900", "username": "owner_account", "is_verified": true },
+          "caption": { "text": "the owner reply" }, "like_count": 150, "taken_at": 1722303087, "media_type": 19,
+          "text_post_app_info": { "direct_reply_count": 0, "repost_count": 0, "quote_count": 0, "is_reply": true, "reply_to_author": { "username": "other_account" } }
+        } }
+      ] } } ],
+      "page_info": { "end_cursor": "QVFDMWZWbkUzRTBm", "has_next_page": true }
+    } },
+    "extensions": { "is_final": true }
+  },
+  "postComments": {
+    "data": { "data": {
+      "edges": [
+        { "cursor": "", "node": { "__typename": "XDTThread", "id": "3390920896561588969", "thread_type": "thread", "thread_items": [ { "line_type": "none", "post": {
+          "id": "3390920896561588969_290023231", "pk": "3390920896561588969", "code": "C8O-JbtAKrp",
+          "user": { "pk": "290023231", "username": "post_author" }, "caption": { "text": "root post" }, "like_count": 2635, "taken_at": 1718449292,
+          "text_post_app_info": { "direct_reply_count": 8, "repost_count": 22, "quote_count": 0 }
+        } } ] } },
+        { "cursor": "", "node": { "__typename": "XDTThread", "id": "3390930071274677885", "thread_type": "thread", "thread_items": [ { "line_type": "none", "post": {
+          "id": "3390930071274677885_2116739155", "pk": "3390930071274677885", "code": "C8PAO8UhGZ9",
+          "user": { "pk": "2116739155", "username": "commenter", "profile_pic_url": "https://example.invalid/c.jpg" },
+          "caption": { "text": "first level comment" }, "like_count": 3, "taken_at": 1718450386, "media_type": 19,
+          "image_versions2": { "candidates": [] },
+          "text_post_app_info": { "direct_reply_count": 1, "repost_count": 0, "quote_count": 0, "is_reply": true, "reply_to_author": { "username": "post_author" } }
+        } } ] } }
+      ],
+      "page_info": { "end_cursor": "GBxkb3dud2FyZF9tb3Jl", "has_next_page": true, "has_previous_page": false, "start_cursor": null, "show_unavailable_replies_disclaimer": false }
+    } },
+    "extensions": { "is_final": true }
+  },
+  "userInfo": {
+    "data": { "user": { "pk": "63625256886", "id": "63625256886", "username": "sample_news", "full_name": "Sample News", "biography": "bio", "is_verified": true,
+      "profile_pic_url": "https://example.invalid/profile.jpg", "follower_count": 1083901, "text_post_app_is_private": false } },
+    "extensions": { "is_final": true }
+  },
+  "searchProfiles": {
+    "data": { "xdt_api__v1__users__search_connection": { "edges": [
+      { "node": { "pk": "45321619558", "id": "45321619558", "username": "sample_newsish", "full_name": "Near Match", "is_verified": false } },
+      { "node": { "pk": "63625256886", "id": "63625256886", "username": "sample_news", "full_name": "Sample News", "is_verified": true, "profile_pic_url": "https://example.invalid/profile.jpg" } }
+    ] } },
+    "extensions": { "is_final": true },
+    "status": "ok"
+  }
+}

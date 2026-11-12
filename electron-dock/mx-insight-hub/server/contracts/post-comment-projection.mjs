@@ -8,12 +8,13 @@ import { parseTikHubTwitterCommentPage } from './twitter-comment-page.mjs'
 import { parseTikHubRedditCommentPage } from './reddit-comment-page.mjs'
 import { parseTikHubKuaishouCommentPage } from './kuaishou-comment-page.mjs'
 import { parseTikHubWeiboCommentPage } from './weibo-comment-page.mjs'
+import { parseThreadsCommentPage } from './threads.mjs'
 
 // Instagram: anonymous observed shape in instagram-native.test.mjs, request
 // d24f7dcf-7508-427e-b273-ac18ab161ca6. XHS/YouTube reuse their released parsers.
 // A documented request endpoint alone does not verify a response projection.
 export const POST_COMMENT_PROJECTION_PLATFORMS = Object.freeze(['xiaohongshu', 'instagram', 'youtube',
-  'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'])
+  'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook', 'threads'])
 // Platforms each supplier has a reviewed parser for.
 const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu', 'douyin', 'bilibili'])
 const JUSTONE_PLATFORMS = new Set(['twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'])
@@ -358,6 +359,15 @@ function justOne(payload, step, capturedAt) {
     records: rows.map((row, index) => canonical(row, raws[index], capturedAt, 'justone')) }
 }
 
+function threadsComments(payload, step, capturedAt) {
+  const { request, continuation = null } = step.postComments
+  let parsed
+  try { parsed = parseThreadsCommentPage(payload, request.postId, { provider: step.provider, currentCursor: continuation?.end_cursor ?? null }) } catch { unusable() }
+  const rows = parsed.comments.map(({ raw, values }) => item(request, values, raw, capturedAt))
+  return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
+    records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, step.provider)) }
+}
+
 export function projectPostCommentPage(payload, step, { capturedAt }) {
   const { request, continuation = null } = step.postComments
   if (!POST_COMMENT_PROJECTION_PLATFORMS.includes(request.platform)) {
@@ -367,6 +377,7 @@ export function projectPostCommentPage(payload, step, { capturedAt }) {
   // The dispatched step names its supplier; the routing policy decided it
   // before any call. A supplier without a parser for this platform fails closed.
   const provider = step.provider
+  if (request.platform === 'threads') return threadsComments(payload, step, capturedAt)
   if (!JUSTONE_PLATFORMS.has(request.platform) && provider === 'justone' || !TIKHUB_PLATFORMS.has(request.platform) && provider === 'tikhub'
     || !['justone', 'tikhub'].includes(provider)) unusable()
   if (provider === 'justone') return justOne(payload, step, capturedAt)

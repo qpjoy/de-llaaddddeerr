@@ -93,7 +93,7 @@ const PLATFORM_GROUPS = [
     members: [
       'xiaohongshu', 'weibo', 'douyin', 'kuaishou', 'bilibili', 'zhihu',
       'wechat_mp', 'wechat_search', 'telegram',
-      'tiktok', 'instagram', 'youtube', 'twitter', 'facebook', 'linkedin', 'reddit',
+      'tiktok', 'instagram', 'youtube', 'twitter', 'facebook', 'linkedin', 'reddit', 'threads',
     ],
   },
   {
@@ -136,6 +136,7 @@ const PLATFORM_CATALOG = [
   'douyin',
   'zhihu',
   'reddit',
+  'threads',
   'tiktok',
   'instagram',
   'linkedin',

@@ -2,7 +2,7 @@
 export const DIAGNOSTIC_PLATFORMS = [
   ['reddit', 'Reddit'], ['facebook', 'Facebook'], ['instagram', 'Instagram'], ['twitter', 'Twitter / X'],
   ['youtube', 'YouTube'], ['xiaohongshu', '小红书'], ['douyin', '抖音'], ['kuaishou', '快手'],
-  ['bilibili', '哔哩哔哩'], ['weibo', '微博'], ['zhihu', '知乎'], ['tiktok', 'TikTok'],
+  ['bilibili', '哔哩哔哩'], ['weibo', '微博'], ['zhihu', '知乎'], ['tiktok', 'TikTok'], ['threads', 'Threads'],
   ['telegram', 'Telegram'], ['wechat', '微信'], ['ecommerce', '电商'], ['other', '其他平台'],
 ].map(([id, label]) => ({ id, label, specialized: id === 'reddit' }))
 

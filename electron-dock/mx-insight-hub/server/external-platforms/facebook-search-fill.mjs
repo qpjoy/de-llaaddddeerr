@@ -113,6 +113,9 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
       consume(full, { ...archived, callId: request.buffer.callId }, providerCursor, request.buffer.offset, request.buffer.hash)
     }
     while (rows.length < request.pageSize && !buffer) {
+      // Single-page delivery: the saved or first acquired page is the answer.
+      // A supplier switch after a failed attempt still runs (no source yet).
+      if (request.singlePage && sources.length) break
       if (providerCursor && tokens.has(providerCursor)) { stopReason = 'repeated_cursor'; providerCursor = null; break }
       if (upstreamPages >= MAX_PAGES) { stopReason = 'upstream_page_limit'; break }
       if (sources.length && !providerCursor) break

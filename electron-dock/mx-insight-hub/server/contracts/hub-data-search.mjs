@@ -41,7 +41,9 @@ export function normalizeHubDataSearch(body, codec, resultType, historicalCodec,
     normalized.providerRequest.allowOverflow = true
   }
   // Keep the exact pre-cutover data/search identity, including fresh/stable.
-  return { ...normalized, pageSize, resultType, fingerprintBody: { ...body, type: resultType } }
+  // fillPage=false is already in body (and so in the fingerprint) when sent.
+  return { ...normalized, pageSize, resultType, fingerprintBody: { ...body, type: resultType },
+    ...(platform === 'twitter' && body.fillPage === false ? { singlePage: true } : {}) }
 }
 
 // Social items use a different schema from the raw rows consumed by standard
@@ -111,7 +113,7 @@ export function projectDataSearch(result, request) {
     source: { provider: null, endpointId: null },
   }))
   const warnings = [...(raw.warnings || [])]
-  if (request.platform === 'twitter' && request.pageSize > request.providerRequest.count) warnings.push({
+  if (request.platform === 'twitter' && request.pageSize > request.providerRequest.count && !request.singlePage) warnings.push({
     code: 'provider_page_size_limit',
     message: 'Twitter no longer guarantees the native count hint; Hub fills the requested pageSize while continuation and acquisition controls allow, retaining buffered overflow.',
   })

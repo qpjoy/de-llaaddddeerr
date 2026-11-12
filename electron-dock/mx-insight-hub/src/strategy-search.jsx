@@ -39,7 +39,7 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
     {pendingSearch ? <p role="status">有平台的原查询正在执行或结果待核实。产品展示可切换其他平台；接口调试暂不可发送新请求。可回到原平台只读核对。</p> : null}
     <div hidden={tab !== 'debug'}><ProductApiConsole product={productForPath('/data-products/strategy-search')} token={token} initialEndpoint={query.get('endpoint')} onResult={setResult} blocked={pendingSearch} attemptStore={searchState.consoleAttempts} onAttempt={event => recordStrategyAttempt(cell, event)} /></div>
     <div hidden={tab !== 'product'}>{isCommentOperation(selected.id)
-      ? <StrategyCommentsExperience operation={selected.id} onOperationChange={interfaceId => setQuery({ interface: interfaceId })}
+      ? <StrategyCommentsExperience admin={admin} operation={selected.id} onOperationChange={interfaceId => setQuery({ interface: interfaceId })}
         prefill={{ platform: query.get('platform') || undefined, contentId: query.get('contentId') || undefined, commentId: query.get('commentId') || undefined }}
         onOpenReplies={ref => setQuery({ view: 'product', interface: 'comment-replies', platform: ref.platform, contentId: ref.contentId || null, commentId: ref.commentId })} />
       : <StrategySearchExperience strategySession={searchSession} initialResult={result} onResult={setResult}
@@ -97,7 +97,7 @@ function CommentRoutePolicyForm({ token, row, notify, onSaved, interfaceId, labe
   }
   const providerOption = value => ({ value, label: `${supplier(value)} · ${COMMENT_VERIFICATION_LABELS[row.providerVerification?.[value]] || '未登记'}` })
   return <form className="mih-strategy-policy-form" onSubmit={save}>
-    <p>适用范围：{row.label || row.platform} 的 <code>{interfaceId === 'comment-replies' ? '/api/v1/data/social/comment-replies' : '/api/v1/data/social/post-comments'}</code>{interfaceId === 'post-comments' ? '（含两个 search/post-comments 别名）' : ''}。其他平台和业务接口不受影响。</p>
+    <p>适用范围：{row.label || row.platform} 的 <code>{STRATEGY_SEARCH_INTERFACES.find(item => item.id === interfaceId)?.paths[0]}</code>{interfaceId === 'post-comments' ? '（含两个 search/post-comments 别名）' : ''}。其他平台和业务接口不受影响。</p>
     <div className="mih-external-two-column">
       <DropdownField label="策略方式" value={mode} disabled={busy || conflict} onChange={setMode}
         options={options.modes.map(value => ({ value, label: COMMENT_STRATEGY_MODE_LABELS[value] }))} />

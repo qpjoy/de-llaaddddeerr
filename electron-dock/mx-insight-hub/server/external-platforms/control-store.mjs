@@ -99,6 +99,8 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
       endpointKeys: Object.freeze([JUSTONE_ENDPOINTS.taobao.endpointKey]),
       optionalEndpointKeys: Object.freeze([JUSTONE_ENDPOINTS.jd.endpointKey]),
     }),
+    // Threads listing: one reviewed price and state per read route.
+    ...nativeForwardingOperations('rapidapi'),
   ]),
   qixin: Object.freeze(QIXIN_OPERATIONS),
   'baidu-ip': Object.freeze([{ operationKey:'ip.risk.query.v2',label:'IP 风险画像 · 百度 v2',

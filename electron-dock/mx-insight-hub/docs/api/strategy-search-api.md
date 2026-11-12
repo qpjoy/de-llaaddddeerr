@@ -1,6 +1,6 @@
 # 策略搜索使用手册
 
-更新：2026-11-08
+更新：2026-11-11
 
 策略搜索提供监测策略要用的数据接口：内容搜索、账号内容、账号资料、帖子评论、评论回复，以及旧客户端的兼容入口。调用方只传业务字段，不传供应商；走哪个供应商由管理端配置（见第九节）。
 
@@ -29,6 +29,7 @@
 | youtube | ✓ | ✓ | ✓ | ✓ | — |
 | reddit | ✓ | ✓ | ✓ | ✓ | ✓（需 contentId） |
 | linkedin | — | ✓ | ✓ | ✓ | — |
+| threads | ✓ | ✓ | ✓ | ✓ | ✓ |
 | douyin | ✓ | ✓ | ✓ | ✓ | ✓（需 contentId） |
 | kuaishou | ✓ | ✓ | ✓ | ✓ | ✓（需 contentId） |
 | xiaohongshu | ✓ | ✓ | ✓ | ✓ | ✓（需 contentId） |
@@ -63,6 +64,7 @@ export HUB_KEY="<Hub API Key>"
 - 首页不传 `cursor`；下一页把返回的 `nextCursor` 原样放进顶层 `cursor`，其他字段不变，换新的 Idempotency-Key。
 - 游标 24 小时有效，最多 15 页，绑定 Key 和查询条件，不同接口之间不能互换。
 - 页大小是上限，不保证条数。只在 `nextCursor` 非空时继续翻页；`hasMore=null` 表示不确定，不要自动循环。
+- 默认会连续调用上游直到凑满页大小。请求体加 `"fillPage": false` 后，每次请求最多取一页上游结果就返回，见第三节第 4 小节。
 - 指标未提供为 `null`，真实为 0 才是 `0`。
 - 超时或 5xx 不代表没扣费、没调用上游。先查请求状态（第八节），不要直接换新键重发。
 
@@ -104,7 +106,7 @@ params：
 | douyin | `sort_type`、`publish_time`、`filter_duration`、`content_type` | |
 | kuaishou | `sort_type`、`publish_time`、`duration` | |
 | zhihu | `show_all_topics`、`search_source`、`sort` | |
-| reddit、youtube、tiktok | 不支持 | 传 params（包括空对象）返回 400 |
+| reddit、youtube、tiktok、threads | 不支持 | 传 params（包括空对象）返回 400 |
 
 cURL：
 
@@ -228,6 +230,15 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/search" \
 
 返回 `contractVersion=mx-insight-hub.social-data.v1`，`data` 含 `items`、`raw_info`、`raw_data`、`page`、`pageInfo`、`meta`、`status`，字段同账号内容（第四节）。要点：每次只采一页，不自动补页；游标不能与 `/data/search` 互换。新接入建议用统一内容搜索。
 
+### 4. 单次返回（`fillPage=false`，2026-11-11）
+
+内容搜索（v1、v2）、账号内容、帖子评论、评论回复、YouTube 评论都支持在请求体里加 `"fillPage": false`。加了以后，Hub 每次请求最多取一页上游结果就返回，避免为凑满页连续调用上游而超时；不传或传 `true` 时行为不变。
+
+- 本页条数可能少于 pageSize，也可能为 0；只按 `nextCursor` 是否为空决定是否继续翻页。
+- 两种模式的游标可以互相接着用；同一个 Idempotency-Key 不能同时用于两种模式，否则返回 `409 idempotency_conflict`。
+- 非布尔值返回 `400 invalid_fill_page`；走旧兼容通道的平台返回 `400 fill_page_unsupported`；兼容接口（第六节）不支持此字段。
+- 各接口、各平台的具体行为和仍会发生的额外调用，见《Hub 策略搜索单次返回接口说明》。
+
 ## 四、账号
 
 ### 1. 账号内容 `POST /api/v1/data/social/crawl`
@@ -249,6 +260,7 @@ activityTypes：
 | 平台 | 可选值 |
 | --- | --- |
 | twitter | `posts`、`replies`（该账号自己发的回复） |
+| threads | `posts`、`replies`（该账号自己发的回复）、`reposts` |
 | instagram | `posts`、`reels`、`stories`、`tagged_posts`、`highlights`、`followers`、`following` |
 | tiktok | `posts`、`likes`、`reposts` |
 | reddit | `posts`、`comments` |
@@ -333,6 +345,8 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \
 
 ## 五、评论
 
+帖子评论和评论回复遇到 `502 external_platform_rejected` 时，原 `Idempotency-Key` 会回放已保存的失败。新回执的 `error.details.upstream` 提供数据源的 `httpStatus` 和 `businessCode`，缺失的值为 `null`。管理员可以从产品展示打开原请求诊断。页面提供「重新查询（按新请求计费）」时，点击会用相同参数和新标识发送一次查询，按当前账户价格计量。对于结果未知的请求，请保留原标识核对状态。
+
 ### 1. 帖子评论 `POST /api/v1/data/social/post-comments`
 
 旧路径 `/api/v1/search/post-comments`、`/api/v1/night-all/search/post-comments` 是同一个接口。
@@ -357,6 +371,7 @@ contentId 格式：
 | zhihu | 回答 ID |
 | reddit | 帖子 ID，可带 `t3_` |
 | linkedin | activity ID |
+| threads | 数字帖子 ID 或短码 |
 | 其他 | 平台帖子、视频或笔记 ID |
 
 ```bash
@@ -674,6 +689,8 @@ export HUB_ADMIN_TOKEN="<Admin Token>"
 curl -sS "$HUB_ADMIN_URL/internal/v1/admin/strategy-search" \
   -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN"
 ```
+
+Threads 的五个接口都可切换或暂停，默认 RapidAPI 优先、TikHub 保底，详见 [Threads 接口手册](threads-api.md)。
 
 修改一个组合（`{interface}` 为 search、crawl、user-info、post-comments、comment-replies）：
 

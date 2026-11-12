@@ -14,7 +14,7 @@ test('canonical comments and both aliases expose the actual count and identity c
     assert.equal(schema.properties.count.default, 20)
     assert.equal(schema.properties.count.maximum, 100)
     assert.ok(schema.properties.contentId)
-    assert.equal(schema.properties.platform.enum.length, 13)
+    assert.equal(schema.properties.platform.enum.length, 14)
     assert.equal(operation.responses[200].content['application/json'].schema.properties.contractVersion.const, 'mx-insight-hub.post-comments.v1')
     assert.equal(servicePriceDefinition('/api/v1' + path).meterKey, 'social.comments.list')
   }

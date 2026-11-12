@@ -4,6 +4,7 @@ import { createDataSearchCursorCodec } from './cursor.mjs'
 import { normalizePostCommentsRequest, POST_COMMENTS_VERSION, POST_COMMENTS_CAPABILITY, POST_COMMENTS_PATH,
   POST_COMMENTS_RECIPES, postCommentRecipe } from '../contracts/post-comments.mjs'
 import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
+import { withSinglePage } from '../contracts/single-page-delivery.mjs'
 import { commentRoutePlatforms } from '../contracts/comment-routes.mjs'
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -19,7 +20,7 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
   // registered supplier. A signed cursor resumes only the supplier that
   // issued it; historical receipt fingerprints stay put. The baseline
   // supplier of an unmigrated platform keeps its original scope identity.
-  const migratedProvider = ['twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu'].includes(request.platform)
+  const migratedProvider = ['twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu', 'threads'].includes(request.platform)
     || recipe.provider !== POST_COMMENTS_RECIPES[request.platform].provider
   const scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
     ...(migratedProvider ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
@@ -45,7 +46,8 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
     previousDeliveryId, importedContinuation, legacyProviderCursor, deliveryMode: 'live_only',
     // TikHub pages without a trusted end flag buy one page per request. Zhihu
     // still relays Zhihu's own is_end, so it keeps filling count as before.
-    manualProviderPagination: ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform) && recipe.provider === 'tikhub',
+    // Threads: no live page has proven end_cursor yet, so never auto-buy one.
+    manualProviderPagination: ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform) && recipe.provider === 'tikhub' || request.platform === 'threads',
     fingerprintBody: { ...identity, initialParams: request.initialParams ?? null, cursor: request.cursor ?? null },
     encodeNext: deliveryId => codec.encode({ version: POST_COMMENTS_VERSION, scopeHash, provider: recipe.provider,
       page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }
@@ -99,7 +101,7 @@ export function postCommentsPlan({ gateway, context, input, dependencies }) {
       if (request.platform !== input.platform || request.provider !== gateway.providerKey) {
         throw new AppError(503, 'external_platform_unavailable', 'The configured comments provider does not match this platform')
       }
-      return request
+      return (request = withSinglePage(request, input.singlePage))
     },
     assemble: ({ delivery, deadlineAt, signal }) => {
       // Normalize happens before the gateway's immutable historical replay.

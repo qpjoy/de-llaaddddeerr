@@ -47,6 +47,7 @@ import { normalizeHubDataSearch, projectDataSearch, projectTwitterSearchFillDeli
 import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
 import { socialAccountPlan } from './social-account-delivery.mjs'
+import { threadsSearchPlan } from './threads-search-workflow.mjs'
 import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
 import { postCommentsPlan } from './post-comments-workflow.mjs'
 import { commentRepliesPlan } from './comment-replies-workflow.mjs'
@@ -980,6 +981,24 @@ export class ExternalPlatformGateway {
       normalize: ({ policy }) => (normalized = normalizeHubSocialRequest(operation, body, { maxPageSize: policy.maxPageSize, decodeCursor: codec.decode })),
       dispatch: ({ credential }) => this.adapter.execute(normalized, { ...credential, encodeCursor: codec.encode }),
     })
+  }
+
+  async searchThreads(context, input) {
+    const revalidateIdentity = async ({ totalLimit }) => {
+      const current = await this.#revalidateWaitingIdentity(context, 'threads', { platformSearch: true })
+      const policy = await this.usageStore.getPolicy(current.consumer.id, 'threads')
+      const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, 'threads')
+      if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
+      context = current
+      return current
+    }
+    const prepared = threadsSearchPlan({ gateway: this, context, input, dependencies: {
+      resolveCredential: () => this.#resolvedCredential(), revalidateIdentity,
+      enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
+      leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
+    } })
+    return this.#deliver(context, prepared.input, prepared.plan)
   }
 
   async searchContent(context, input, { finalizeXiaohongshu = null, assertSearchDispatchAllowed = null, twitterFallback = null } = {}) {

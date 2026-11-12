@@ -5,10 +5,10 @@ import { normalizePostCommentsRequest, buildPostCommentsDispatch, POST_COMMENTS_
 const fixtures = { twitter: '2117082385997250767', reddit: '1q4aqti', kuaishou: '3xfake', instagram: 'fixtureCode',
   weibo: '5277757077719364', douyin: '7222964143060520251', tiktok: '7566514353940204807', zhihu: '89226347214',
   linkedin: '7267273010393358336', bilibili: '751305050', facebook: '943942181111136',
-  xiaohongshu: '675d277d000000000600e655', youtube: 'dQw4w9WgXcQ' }
+  xiaohongshu: '675d277d000000000600e655', youtube: 'dQw4w9WgXcQ', threads: '3390920896561588969' }
 
-test('all thirteen platform recipes dispatch a minimal request with server-owned provider identity', () => {
-  assert.equal(Object.keys(POST_COMMENTS_RECIPES).length, 13)
+test('all fourteen platform recipes dispatch a minimal request with server-owned provider identity', () => {
+  assert.equal(Object.keys(POST_COMMENTS_RECIPES).length, 14)
   for (const [platform, postId] of Object.entries(fixtures)) {
     const request = normalizePostCommentsRequest({ platform, postId })
     const dispatch = buildPostCommentsDispatch(request)

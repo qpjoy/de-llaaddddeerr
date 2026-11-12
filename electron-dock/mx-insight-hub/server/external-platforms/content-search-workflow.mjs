@@ -164,6 +164,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
         job.manualContinuation = true
       } else job.manualContinuation = false
     }
+    // Single-page delivery: this saved or newly acquired page is the answer,
+    // even when short or empty. The caller buys the next one with nextCursor.
+    if (request.singlePage) job.manualContinuation = true
   }
   try {
     if (inheritedTwitterLease) {

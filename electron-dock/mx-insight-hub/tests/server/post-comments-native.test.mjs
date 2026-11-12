@@ -78,7 +78,8 @@ async function harness({ payload = () => comments(['c1']), granted = true, contr
   const fetchImpl = async url => {
     const parsed = new URL(url), call = { path: parsed.pathname, params: Object.fromEntries(parsed.searchParams) }
     calls.push(call)
-    return Response.json(payload(call, calls.length))
+    const result = payload(call, calls.length)
+    return result instanceof Response ? result : Response.json(result)
   }
   const adapter = provider === 'justone' ? new JustOneAdapter({ token: SECRET, timeoutMs: 100, fetchImpl })
     : new TikHubAdapter({ apiKey: SECRET, timeoutMs: 100, fetchImpl })
@@ -214,6 +215,46 @@ test('Twitter comments use the pinned TikHub recipe and exclude original-post co
     assert.deepEqual(replay.body, result.body)
   }
   assert.equal(h.calls.length, 1)
+})
+
+test('Twitter comments keep the original rejection on replay and can recover under an explicit new request', async () => {
+  const postId = TWITTER_POST
+  const recovered = { code: 200, data: { id: postId, conversation_id: postId, replies: 2,
+    thread: ['2120793900000000001', '2120793900000000002'].map(id => twitterComment(id, postId)), cursor: 'opaque' } }
+  const h = await harness({ platform: 'twitter', payload: (_call, ordinal) => ordinal === 1 ? Response.json({
+    detail: { code: 400, message: 'private provider diagnostic' },
+  }, { status: 400 }) : recovered })
+  const body = { platform: 'twitter', contentId: postId, count: 20 }
+  const key = 'twitter-comments-rejected'
+  let originalId
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(h.invoke(body, key), error => {
+      assert.equal(error.status, 502)
+      assert.equal(error.code, 'external_platform_rejected')
+      assert.match(error.message, /data source rejected the post comments request/i)
+      assert.deepEqual(error.details.upstream, { httpStatus: 400, businessCode: 400 })
+      assert.equal(error.details.outcome, 'rejected')
+      assert.equal(error.details.retryable, false)
+      assert.ok(error.details.requestId)
+      if (attempt === 0) originalId = error.details.requestId
+      else assert.equal(error.details.requestId, originalId)
+      assert.doesNotMatch(JSON.stringify(error.details), /private provider/)
+      return true
+    })
+  }
+  assert.deepEqual(h.calls, [{ path: '/api/v1/twitter/web/fetch_post_comments', params: { tweet_id: postId } }])
+  assert.equal(h.platformStore.ingestJobs.length, 0)
+  assert.equal(h.store.requests.size, 1)
+  const freshKey = 'twitter-comments-explicit-new-query'
+  const fresh = await h.invoke(body, freshKey)
+  assert.equal(fresh.status, 200)
+  assert.notEqual(fresh.requestId, originalId)
+  assert.equal(fresh.body.data.items.length, 2)
+  assert.equal(fresh.body.data.meta.providerCalls, 1)
+  assert.equal((await h.invoke(body, freshKey)).requestId, fresh.requestId)
+  await assert.rejects(h.invoke(body, key), { code: 'external_platform_rejected' })
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.store.requests.size, 2)
 })
 
 test('Twitter keeps all 36 paid comments and drains overflow without automatic supplier continuation', async () => {

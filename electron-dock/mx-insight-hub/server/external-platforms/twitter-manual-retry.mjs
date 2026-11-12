@@ -19,7 +19,8 @@ export function normalizedTwitterRetryBody(snapshot) {
   const body = snapshot?.body
   if (snapshot?.method !== 'POST' || snapshot.path !== PATH || Object.hasOwn(snapshot, 'bodyOmitted')
     || !body || typeof body !== 'object' || Array.isArray(body)
-    || Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'cursor', 'type', 'params'].includes(key))) throw twitterRetryDenied()
+    || Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'cursor', 'type', 'params', 'fillPage'].includes(key))
+    || body.fillPage !== undefined && typeof body.fillPage !== 'boolean') throw twitterRetryDenied()
   const platform = typeof body.platform === 'string' ? body.platform.trim().toLowerCase() : ''
   const query = typeof body.query === 'string' ? body.query.trim() : ''
   const pageSize = body.pageSize ?? 20, type = body.type ?? 'fresh'
@@ -34,7 +35,7 @@ export function normalizedTwitterRetryBody(snapshot) {
   let params
   try { if (body.params !== undefined) params = normalizeTwitterSearchParameters(body.params) } catch { throw twitterRetryDenied() }
   return { platform: 'twitter', query, pageSize, ...(cursor ? { cursor } : {}),
-    ...(params !== undefined ? { params } : {}), type }
+    ...(params !== undefined ? { params } : {}), ...(body.fillPage === false ? { fillPage: false } : {}), type }
 }
 
 function requestRow(row) {

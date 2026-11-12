@@ -13,7 +13,7 @@ const searchablePlatforms = new Set([
   'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce',
 ])
 const savedRecordCategory = platform => /^data_center_saved_records_[a-z][a-z0-9_]*$/.test(platform)
-const strategySearchPlatforms = new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), 'wechat_mp', 'wechat_search', 'telegram'])
+const strategySearchPlatforms = new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), 'wechat_mp', 'wechat_search', 'telegram', 'threads'])
 export const PRODUCT_ACCESS = {
   '/data-products/web-search': {platform:'web_search',any:['web.search'],docs:'web-search'},
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [`/data-products/${product.key}`, { platform: 'social', any: wechatServices(product).map(row => row.operation), docs: product.key } ])),
@@ -36,7 +36,7 @@ export const PRODUCT_ACCESS = {
   '/data-products/topic-insights': { platform: 'topic_reports', docs: 'topic-reports' },
 }
 export function productAllowed(path, scopes = []) {
-  if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.some(platform => ['youtube', 'xiaohongshu', 'instagram', 'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'].includes(platform)) && scope.capabilities?.includes('social.comments.list'))) return true
+  if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.some(platform => ['youtube', 'xiaohongshu', 'instagram', 'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'threads', 'bilibili', 'facebook'].includes(platform)) && scope.capabilities?.includes('social.comments.list'))) return true
   if (path === '/data-products/web-search') return scopes.some(s=>s.platforms?.includes('web_search') && s.capabilities?.includes('web.search') && s.capabilities.some(c=>c.startsWith('web.search.provider.')))
 
   if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.includes('twitter') && ['social.content.search', 'social.content.crawl', 'social.profile.get'].some(capability => scope.capabilities?.includes(capability)))) return true

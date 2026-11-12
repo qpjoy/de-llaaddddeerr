@@ -34,6 +34,7 @@ export const COMMENT_PROVIDER_CATALOG = Object.freeze({
     facebook: { justone: 'sample' },
     xiaohongshu: { tikhub: 'verified' },
     youtube: { tikhub: 'verified' },
+    threads: { rapidapi: 'sample', tikhub: 'derived' },
   }),
   'comment-replies': freeze({
     // Live paid samples 2026-11-07 (see comment-reply-projection.mjs header).
@@ -46,6 +47,8 @@ export const COMMENT_PROVIDER_CATALOG = Object.freeze({
     weibo: { tikhub: 'derived' },
     xiaohongshu: { tikhub: 'derived' },
     zhihu: { tikhub: 'derived' },
+    // A Threads reply is itself a post: its replies use the comments endpoint.
+    threads: { rapidapi: 'derived', tikhub: 'derived' },
   }),
 })
 
@@ -66,7 +69,10 @@ export const commentProviderAvailable = (interfaceId, platform, provider) => {
 // Reviewed exceptions to the preference order. Bilibili's TikHub comment list
 // returned only 3 rows on page 1 of 240,390 (live, 2026-11-07), so its full
 // JustOne cursor list stays the default; TikHub remains selectable in Admin.
-const DEFAULT_OVERRIDES = Object.freeze({ 'post-comments/bilibili': Object.freeze({ mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null }) })
+// Threads is RapidAPI first by decision (2026-11-11), TikHub as its guarantee.
+const THREADS_ROUTE = Object.freeze({ mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub' })
+const DEFAULT_OVERRIDES = Object.freeze({ 'post-comments/bilibili': Object.freeze({ mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null }),
+  'post-comments/threads': THREADS_ROUTE, 'comment-replies/threads': THREADS_ROUTE })
 
 export function defaultCommentRoute(interfaceId, platform) {
   const providers = commentProviders(interfaceId, platform)

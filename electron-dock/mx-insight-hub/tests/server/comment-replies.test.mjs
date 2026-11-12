@@ -29,7 +29,7 @@ test('every target platform has comments and replies, and deployment defaults ma
     assert(POST_COMMENT_PROVIDER_RECIPES[platform], `${platform} comments`)
     assert(COMMENT_REPLY_PROVIDER_RECIPES[platform], `${platform} replies`)
   }
-  const sql = readFileSync(new URL('../../migrations/181_comment_strategy_routes.sql', import.meta.url), 'utf8')
+  const sql = ['181_comment_strategy_routes', '188_threads_strategy_routes'].map(name => readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8')).join('\n')
   const seeded = [...sql.matchAll(/\('(post-comments|comment-replies)','([a-z]+)','(fixed|priority)','([a-z]+)',(NULL|'[a-z]+')/gu)]
     .map(([, id, platform, mode, primary, fallback]) => `${id}/${platform}:${mode}:${primary}:${fallback === 'NULL' ? null : fallback.slice(1, -1)}`)
   const expected = ['post-comments', 'comment-replies'].flatMap(id => commentRoutePlatforms(id).map(platform => {

@@ -4,6 +4,7 @@ import { NATIVE_FORWARDING_ENDPOINTS, normalizeNativeForwardingRequest } from '.
 import { youtubeCommentVideoId } from './youtube-comments.mjs'
 import { projectPostCommentPage, POST_COMMENT_PROJECTION_PLATFORMS } from './post-comment-projection.mjs'
 import { COMMENT_PROVIDER_CATALOG, commentProviderAvailable } from './comment-routes.mjs'
+import { threadsPostId } from './threads.mjs'
 
 export const POST_COMMENTS_VERSION = 'mx-insight-hub.post-comments.v1'
 export const POST_COMMENTS_CAPABILITY = 'social.comments.list'
@@ -25,6 +26,7 @@ const definitions = [
   ['facebook', 'justone', '/api/facebook/get-post-comments/v1', 'postId', ['cursor'], []],
   ['xiaohongshu', 'tikhub', '/api/v1/xiaohongshu/app_v2/get_note_comments', 'note_id', ['cursor', 'index', 'pageArea'], ['sort_strategy']],
   ['youtube', 'tikhub', '/api/v1/youtube/web_v2/get_video_comments', 'video_id', ['continuation_token'], ['sort_by', 'language_code', 'country_code']],
+  ['threads', 'rapidapi', '/api/post/comments', 'post_id', ['end_cursor'], []],
 ]
 // Alternative suppliers selectable through Strategy Search routing. JustOne
 // rows reuse the layouts calibrated from its official samples on 2026-11-02.
@@ -36,6 +38,7 @@ const alternatives = [
   ['zhihu', 'justone', '/api/zhihu/get-answer-comments/v1', 'answerId', ['offset'], ['orderBy']],
   ['douyin', 'tikhub', '/api/v1/douyin/app/v3/fetch_video_comments', 'aweme_id', ['cursor'], []],
   ['bilibili', 'tikhub', '/api/v1/bilibili/web/fetch_video_comments', 'bv_id', ['pn'], []],
+  ['threads', 'tikhub', '/api/v1/threads/web/fetch_post_comments', 'post_id', ['end_cursor'], []],
 ]
 // Reddit continues a post's comments with the comment tree's load-more cursor,
 // answered by fetch_comment_replies in the same forest shape (live 2026-11-07).
@@ -122,6 +125,7 @@ export function postId(platform, value) {
   const text = scalar(value)?.trim()
   if (!text || text.length > 256) invalid('Post identifiers must be nonempty strings or safe integers')
   if (platform === 'youtube') { const id = youtubeCommentVideoId(text); if (!id) invalid('Invalid YouTube video ID'); return id }
+  if (platform === 'threads') { const id = threadsPostId(text); if (!id) invalid('Use a Threads post ID, shortcode or post URL'); return id }
   if (platform === 'reddit') {
     if (!/^(?:t3_)?[a-z0-9]{1,17}$/u.test(text)) invalid('Invalid Reddit post ID')
     return text.startsWith('t3_') ? text : `t3_${text}`
@@ -164,6 +168,7 @@ function idFromUrl(platform, value, hasId = false) {
     : platform === 'reddit' ? match(['reddit.com'], /\/comments\/([a-z0-9]+)(?:\/|$)/u)
       : platform === 'xiaohongshu' ? match(['xiaohongshu.com'], /\/(?:explore|discovery\/item)\/([a-f0-9]{24})(?:\/|$)/iu)
         : platform === 'instagram' ? match(['instagram.com'], /\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)(?:\/|$)/u)
+          : platform === 'threads' ? match(['threads.com', 'threads.net'], /\/post\/([A-Za-z0-9_-]+)(?:\/|$)/u)
           : platform === 'youtube' ? youtubeCommentVideoId(value)
             : platform === 'douyin' ? match(['douyin.com'], /\/video\/(\d+)(?:\/|$)/u)
               : platform === 'tiktok' ? match(['tiktok.com'], /\/video\/(\d+)(?:\/|$)/u)

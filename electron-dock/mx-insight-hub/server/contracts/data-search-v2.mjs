@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { normalizeTwitterSearchParameters } from './twitter-search-parameters.mjs'
 import { requestFingerprint } from '../core/crypto.mjs'
+import { fillPageOption } from './single-page-delivery.mjs'
 
 export const DATA_SEARCH_V2_PATH = '/api/v2/data/search'
 export const DATA_SEARCH_V1_PATH = '/api/v1/data/search'
 export const DATA_SEARCH_V2_VERSION = 'mx-insight-hub.data-search.v2'
 export const DATA_SEARCH_V2_PLATFORMS = Object.freeze(['facebook', 'twitter', 'instagram', 'reddit',
-  'weibo', 'bilibili', 'douyin', 'kuaishou', 'zhihu', 'youtube', 'tiktok', 'xiaohongshu'])
-const fields = new Set(['platform', 'query', 'pageSize', 'type', 'cursor', 'timeWindow', 'params'])
+  'weibo', 'bilibili', 'douyin', 'kuaishou', 'zhihu', 'youtube', 'tiktok', 'xiaohongshu', 'threads'])
+const fields = new Set(['platform', 'query', 'pageSize', 'type', 'cursor', 'timeWindow', 'params', 'fillPage'])
 const plain = value => value && typeof value === 'object' && !Array.isArray(value)
 const invalid = message => { throw new AppError(400, 'invalid_time_window', message) }
 const iso = value => {
@@ -41,11 +42,13 @@ export function normalizeDataSearchV2(body, canonicalPlatform = value => value) 
     throw new AppError(400, 'invalid_cursor', 'v2 requires its own unchanged mxds2 continuation')
   }
   return { platform, query: body.query.trim(), pageSize, type, timeWindow,
-    ...(params !== undefined ? { params } : {}), ...(body.cursor ? { cursor: body.cursor } : {}) }
+    ...(params !== undefined ? { params } : {}), ...(body.cursor ? { cursor: body.cursor } : {}),
+    ...(fillPageOption(body) ? {} : { fillPage: false }) }
 }
 
 export function dataSearchV2Scope(body) {
-  const { cursor: _, ...scope } = body
+  // fillPage only changes how much one request buys; a traversal may switch.
+  const { cursor: _, fillPage: _fillPage, ...scope } = body
   return requestFingerprint({ method: 'POST', path: DATA_SEARCH_V2_PATH, body: scope })
 }
 export const dataSearchQueryHash = query => createHash('sha256').update(query.trim()).digest('hex')
@@ -65,7 +68,7 @@ export function prepareDataSearchV2(body, codec, now = Date.now()) {
   // remains available only to unchanged v1 callers.
   const upstream = { platform: body.platform, query: body.query, pageSize: body.pageSize, type: 'stable',
     ...(body.platform === 'twitter' && body.params !== undefined ? { params: body.params } : {}),
-    ...(state.cursor ? { cursor: state.cursor } : {}) }
+    ...(state.cursor ? { cursor: state.cursor } : {}), ...(body.fillPage === false ? { fillPage: false } : {}) }
   if (body.platform === 'facebook') upstream.params = {
     startDate: new Date(Date.parse(body.timeWindow.from) + 28800000).toISOString().slice(0, 10),
     endDate: new Date(Date.parse(body.timeWindow.to) + 28800000).toISOString().slice(0, 10),
@@ -75,8 +78,9 @@ export function prepareDataSearchV2(body, codec, now = Date.now()) {
 
 export function projectDataSearchV2(result, body, prepared, codec) {
   const source = result?.body?.data, page = source?.pageInfo
+  const unknownThreadsPage = body.platform === 'threads' && page?.hasMore === null && page.nextCursor === null
   if (source?.platform !== body.platform || source.query !== body.query || !Array.isArray(source?.items)
-    || source.items.length > body.pageSize || !plain(page) || typeof page.hasMore !== 'boolean'
+    || source.items.length > body.pageSize || !plain(page) || (typeof page.hasMore !== 'boolean' && !unknownThreadsPage)
     || page.hasMore && (typeof page.nextCursor !== 'string' || !page.nextCursor)) {
     throw new AppError(502, 'search_v2_projection_unavailable', 'The saved underlying search does not have a standard page')
   }
@@ -91,7 +95,7 @@ export function projectDataSearchV2(result, body, prepared, codec) {
     return true
   })
   const bounded = prepared.state.page >= 15 && page.hasMore
-  const hasMore = page.hasMore && !bounded
+  const hasMore = bounded && body.platform === 'threads' ? null : page.hasMore && !bounded
   const nextCursor = hasMore ? codec.encode({ ...prepared.state, page: prepared.state.page + 1, cursor: page.nextCursor }) : null
   const upstreamFiltering = body.platform === 'facebook' ? 'calendar_date' : 'unsupported'
   const limitations = [{ code: 'source_coverage_not_guaranteed', message: 'Search results are a bounded source traversal, not proof of complete historical coverage.' }]

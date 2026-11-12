@@ -172,6 +172,8 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       consume(publicBody,{...archived,callId:request.buffer.callId},providerCursor,request.buffer.offset,request.buffer.hash)
     }
     while(items.length<request.pageSize && !buffer) {
+      // Single-page delivery: the saved or first acquired page is the answer.
+      if(request.singlePage && sources.length) break
       if(providerCursor && tokens.has(providerCursor)) { stopReason='repeated_cursor';providerCursor=null;break }
       if(upstreamPages>=MAX_UPSTREAM_PAGES) { stopReason='upstream_page_limit'; break }
       if(sources.length && !providerCursor) break

@@ -1001,7 +1001,18 @@
     "native.j.api_6800a2dab6a17786",
     "native.j.api_5880c9deb8db4ef2",
     "native.j.api_d6aa0881a589d80a",
-    "native.j.api_76beedf3eaf204d1"
+    "native.j.api_76beedf3eaf204d1",
+    "native.r.threads_user_info",
+    "native.r.threads_user_posts",
+    "native.r.threads_user_reposts",
+    "native.r.threads_user_replies",
+    "native.r.threads_post_get_id",
+    "native.r.threads_post_detail",
+    "native.r.threads_post_related",
+    "native.r.threads_post_comments",
+    "native.r.threads_search_top",
+    "native.r.threads_search_recent",
+    "native.r.threads_search_profiles"
   ],
   "ecommerce": [
     "native.j.xianyu_search_v1",

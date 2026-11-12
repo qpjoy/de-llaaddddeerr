@@ -727,6 +727,24 @@ test('Facebook initial confirmed 429 permits five successful fill pages with one
   assert.ok(h.calls.slice(6).every(row => row.provider === 'justone'), 'continuation never sends a JustOne cursor to RapidAPI')
 })
 
+test('Facebook fillPage=false returns the first acquired page and still switches supplier after a confirmed 429', async () => {
+  const h = await harness({ respond: ({ provider, ordinal }) => provider === 'rapidapi'
+    ? facebookResponse(provider, [], null, 429)
+    : facebookResponse(provider, fixturePosts((ordinal - 2) * 4, 4), `justone-${ordinal}`) })
+  const body = { platform: 'facebook', query: 'fixture', pageSize: 20, type: 'stable', fillPage: false }
+  const first = await invokeStandard(h, body, 'fb-single-page-first')
+  assert.deepEqual(h.calls.map(row => row.provider), ['rapidapi', 'justone'])
+  assert.deepEqual(first.body.data.items.map(row => row.id), fixturePosts(0, 4).map(row => row.post_id))
+  assert.equal(first.body.data.meta.providerCalls, 2)
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.equal(first.body.data.warnings.some(row => row.code === 'FACEBOOK_PAGE_FILL_STOPPED'), false)
+  const second = await invokeStandard(h, { ...body, cursor: first.body.data.pageInfo.nextCursor }, 'fb-single-page-second')
+  assert.deepEqual(second.body.data.items.map(row => row.id), fixturePosts(4, 4).map(row => row.post_id))
+  assert.deepEqual(h.calls.map(row => row.provider), ['rapidapi', 'justone', 'justone'])
+  await assert.rejects(invokeStandard(h, { platform: 'facebook', query: 'fixture', pageSize: 20, type: 'stable' }, 'fb-single-page-first'),
+    { code: 'idempotency_conflict' })
+})
+
 test('Facebook standard fills an empty or duplicate intermediate page without returning duplicates', async () => {
   const h = await harness({ mode: 'rapidapi', respond: ({ provider, ordinal }) => facebookResponse(provider,
     ordinal === 1 ? fixturePosts(0, 7) : ordinal === 2 ? [] : [...fixturePosts(4, 3), ...fixturePosts(7, 13)],

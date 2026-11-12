@@ -2,10 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
+import { THREADS_RAPIDAPI_ENDPOINTS } from '../../server/contracts/threads-rapidapi-endpoints.mjs'
 import { StrategySearchRoutingStore } from '../../server/external-platforms/strategy-search-routing.mjs'
 
 const change = (patch = {}) => ({ mode: 'fixed', primaryProvider: 'tikhub', fallbackProvider: null,
   expectedRevision: 1, reason: 'Reviewed compatible supplier', ...patch })
+
+async function persistedRouteKeys(db) {
+  const { rows } = await db.query('SELECT interface_key, platform FROM control.strategy_search_routes ORDER BY interface_key, platform')
+  return rows.map(row => `${row.interface_key}/${row.platform}`)
+}
 
 test('strategy search seeds Twitter priority, preserves Instagram and keeps unrelated policies outside this store', async () => {
   const store = new StrategySearchRoutingStore()
@@ -96,7 +102,7 @@ test('SQL migration, CAS and audit failure rollback preserve the last reviewed s
   await db.exec(await readFile(new URL('../../migrations/150_strategy_search_routes.sql', import.meta.url), 'utf8'))
   const pool = { query: (sql, values) => db.query(sql, values), connect: async () => ({ query: (sql, values) => db.query(sql, values), release() {} }) }
   const store = new StrategySearchRoutingStore(pool)
-  assert.equal((await store.list()).length, 1)
+  assert.deepEqual(await persistedRouteKeys(db), ['search/instagram'])
   assert.equal((await store.get('search','instagram')).primaryProvider, 'justone')
   const result = await store.update('search','instagram', change({ mode: 'priority', fallbackProvider: 'justone', reason: ' Reviewed priority ' }))
   assert.equal(result.revision, 2)
@@ -140,7 +146,7 @@ test('Twitter migration seeds once, preserves reviewed strategies and enforces p
   assert.equal(seed.primaryProvider, 'rapidapi')
   assert.equal(seed.fallbackProvider, 'tikhub')
   assert.equal(seed.mode, 'priority')
-  assert.equal((await store.list()).length, 2)
+  assert.deepEqual(await persistedRouteKeys(db), ['search/instagram', 'search/twitter'])
   const twitter = await store.update('search', 'twitter', change({ mode: 'paused' }))
   await db.exec(migration)
   assert.deepEqual(await store.get('search', 'twitter'), twitter)
@@ -193,7 +199,7 @@ test('Facebook migration preserves other routes, enforces business scope and aud
   await store.update('crawl', 'facebook', change({ mode: 'paused', primaryProvider: 'justone' }))
   assert.equal((await store.get('user-info', 'facebook')).mode, 'fixed')
   assert.equal((await store.get('search', 'twitter')).mode, 'priority')
-  assert.equal((await store.list()).length, 4)
+  assert.deepEqual(await persistedRouteKeys(db), ['crawl/facebook', 'search/instagram', 'search/twitter', 'user-info/facebook'])
   await db.exec(await readFile(new URL('../../migrations/170_facebook_account_business_pause.sql', import.meta.url), 'utf8'))
   assert.equal((await store.get('crawl', 'facebook')).mode, 'paused')
   assert.equal((await store.get('crawl', 'facebook')).revision, 2)
@@ -206,4 +212,68 @@ test('Facebook migration preserves other routes, enforces business scope and aud
   assert.equal(audit.rows.length, 3)
   assert.equal(audit.rows[2].policy.interface, 'crawl')
   assert.equal(audit.rows[2].policy.mode, 'paused')
+})
+
+test('Threads migration seeds five audited routes and eleven disabled operations, preserving pauses on reapplication', {
+  skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE,
+}, async t => {
+  const { PGlite } = await import(pathToFileURL(process.env.MX_INSIGHT_TEST_PGLITE_MODULE).href)
+  const db = new PGlite()
+  t.after(() => db.close())
+  const migration = name => readFile(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8')
+  await db.exec('CREATE SCHEMA control')
+  const schema = await migration('060_external_platform_operation_control')
+  await db.exec(schema.slice(schema.indexOf('CREATE TABLE IF NOT EXISTS control.external_platform_provider_price_books'),
+    schema.indexOf('CREATE OR REPLACE FUNCTION control.reject_external_platform_append_only_mutation')))
+  await db.exec("INSERT INTO control.external_platform_provider_price_books(provider_key,version,source,status) VALUES('rapidapi',0,'legacy_environment','inherited')")
+  for (const name of ['150_strategy_search_routes', '160_twitter_strategy_search', '170_facebook_account_business_pause', '181_comment_strategy_routes']) {
+    await db.exec(await migration(name))
+  }
+  const legacyRoutes = () => db.query("SELECT * FROM control.strategy_search_routes WHERE platform <> 'threads' ORDER BY interface_key,platform")
+  const previous = (await legacyRoutes()).rows
+  assert.equal(previous.length, 26)
+  const threads = await migration('188_threads_strategy_routes')
+  await db.exec(threads)
+  const interfaces = ['comment-replies', 'crawl', 'post-comments', 'search', 'user-info']
+  const routeRows = () => db.query("SELECT * FROM control.strategy_search_routes WHERE platform='threads' ORDER BY interface_key")
+  const routeEvents = () => db.query("SELECT * FROM control.strategy_search_route_events WHERE platform='threads' ORDER BY interface_key,revision")
+  const seeded = (await routeRows()).rows
+  assert.deepEqual(seeded.map(row => [row.interface_key, row.mode, row.primary_provider, row.fallback_provider, row.revision]),
+    interfaces.map(id => [id, 'priority', 'rapidapi', 'tikhub', 1]))
+  assert.deepEqual((await routeEvents()).rows.map(row => [row.interface_key, row.actor, row.revision, row.policy.mode]),
+    interfaces.map(id => [id, 'migration-188', 1, 'priority']))
+
+  const operations = () => db.query(`SELECT r.operation_key, r.provider_key, r.release_revision, r.endpoint_keys, r.price_book_version, r.status,
+    p.control_source, p.desired_state, p.revision, e.actor, e.revision AS event_revision, e.desired_state AS event_state, e.event_id
+    FROM control.external_platform_operation_releases r
+    LEFT JOIN control.external_platform_operation_policies p USING(provider_key,operation_key,release_revision)
+    LEFT JOIN control.external_platform_operation_policy_events e USING(provider_key,operation_key)
+    ORDER BY r.operation_key`)
+  const native = (await operations()).rows
+  const expectedKeys = THREADS_RAPIDAPI_ENDPOINTS.map(row => row.operation).sort()
+  assert.equal(expectedKeys.length, 11)
+  assert.deepEqual(native.map(row => row.operation_key), expectedKeys)
+  for (const row of native) {
+    assert.deepEqual([row.provider_key, row.release_revision, row.endpoint_keys, row.price_book_version, row.status],
+      ['rapidapi', 1, [row.operation_key], 0, 'released'])
+    assert.deepEqual([row.control_source, row.desired_state, row.revision, row.actor, row.event_revision, row.event_state],
+      ['database', 'disabled', 1, 'migration-188', 1, 'disabled'])
+  }
+
+  const query = (sql, values) => db.query(sql, values)
+  const store = new StrategySearchRoutingStore({ query, connect: async () => ({ query, release() {} }) })
+  const paused = await store.update('crawl', 'threads', change({ mode: 'paused', primaryProvider: 'rapidapi' }))
+  const reviewed = (await routeRows()).rows
+  const events = (await routeEvents()).rows
+  assert.deepEqual(events.map(row => [row.interface_key, row.actor, row.revision, row.policy.mode]), [
+    ['comment-replies', 'migration-188', 1, 'priority'], ['crawl', 'migration-188', 1, 'priority'],
+    ['crawl', 'admin-token', 2, 'paused'], ['post-comments', 'migration-188', 1, 'priority'],
+    ['search', 'migration-188', 1, 'priority'], ['user-info', 'migration-188', 1, 'priority'],
+  ])
+  await db.exec(threads)
+  assert.deepEqual(await store.get('crawl', 'threads'), paused)
+  assert.deepEqual((await routeRows()).rows, reviewed)
+  assert.deepEqual((await routeEvents()).rows, events)
+  assert.deepEqual((await operations()).rows, native)
+  assert.deepEqual((await legacyRoutes()).rows, previous)
 })

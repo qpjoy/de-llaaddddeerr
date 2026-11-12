@@ -74,6 +74,7 @@ export function classifyExternalPlatformIngest(payload) {
         || ['twitter', 'reddit', 'kuaishou'].includes(payload.platform) && payload.providerKey === 'justone'))
     || (['justone', 'rapidapi', 'night-all-a'].includes(payload?.providerKey)
       && payload.platform === 'facebook' && payload.datasetId === 'night-all.search.v1')
+    || (['rapidapi', 'tikhub'].includes(payload?.providerKey) && payload.platform === 'threads' && payload.datasetId === 'night-all.search.v1')
     || (payload?.providerKey === 'tikhub'
       && ['bilibili', 'douyin', 'kuaishou', 'zhihu', 'reddit', 'youtube', 'tiktok'].includes(payload.platform)
       && payload.datasetId === 'night-all.search.v1')

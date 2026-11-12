@@ -194,7 +194,9 @@ import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
 import { canRouteRawSearch } from './contracts/raw-search.mjs'
 import { canRouteDataSearch } from './contracts/hub-data-search.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
+import { threadsSearchRecipe } from './contracts/threads-search.mjs'
 import { normalizeTwitterSearchParameters } from './contracts/twitter-search-parameters.mjs'
+import { FILL_PAGE_FIELD, fillPageOption, takeFillPage } from './contracts/single-page-delivery.mjs'
 import { normalizeSearchContent } from './contracts/search-content.mjs'
 import {
   capNightAllCompatibilityTraversal,
@@ -1708,6 +1710,22 @@ export class HubService {
       catch { this.logger?.warn?.('[twitter] Search capability state is unavailable') }
       const row = payload.data.platforms.find(row => row.platform === 'twitter')
       if (row) row.search = { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
+    }
+    if (canonicalGrants.includes('threads')) {
+      let ready = false
+      try {
+        if (!isTestApiKey(context.apiKey) && this.externalDataSearch && this.externalNativeCapabilities) {
+          const route = await this.strategySearchRoutingStore.get('search', 'threads')
+          if (route && route.mode !== 'paused') {
+            const providers = route.mode === 'priority' ? [route.primaryProvider, route.fallbackProvider] : [route.primaryProvider]
+            const operationKeys = providers.map(provider => `native.${threadsSearchRecipe('threads', provider).key}`)
+            const states = await this.externalNativeCapabilities({ consumerId: context.consumer.id, operationKeys })
+            ready = operationKeys.some(key => states[key] === true)
+          }
+        }
+      } catch { this.logger?.warn?.('[threads] Search capability state is unavailable') }
+      payload.data.platforms.push({ platform: 'threads', source: 'hub', servingMode: 'live_only', ready,
+        search: { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' } })
     }
     // Twitter resolves its selected supplier above. A metadata failure for an
     // unrelated TikHub platform must not overwrite an available Rapid route.
@@ -5036,7 +5054,9 @@ export class HubService {
     }
     if (responseFormat === 'raw') return this.#nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path, signal })
     if (!dedicatedTelegramSearch && wechatSearchPlatform(body?.platform)) {
-      const mapped = normalizeWechatDataSearch(body)
+      // WeChat search already returns one supplier page per request; its
+      // strict alias contract never sees the validated fillPage option.
+      const mapped = normalizeWechatDataSearch(takeFillPage(body).body)
       assert(this.externalWechatSearch, 503, 'external_platform_unavailable', 'WeChat data service is unavailable')
       return this.externalWechatSearch(context, { ...mapped, idempotencyKey })
     }
@@ -5050,11 +5070,13 @@ export class HubService {
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
     const requestedPlatform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     const facebookSearch = requestedPlatform === 'facebook'
-    const directContentSearch = Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, requestedPlatform)
-    const contentSearchParams = requestedPlatform === 'twitter' || directContentSearch && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
+    // Threads has its own routed workflow and no public supplier parameters.
+    const directContentSearch = Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, requestedPlatform) || requestedPlatform === 'threads'
+    const contentSearchParams = requestedPlatform === 'twitter' || directContentSearch && requestedPlatform !== 'threads' && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
     const unsupportedFields = dedicatedTelegramSearch
       ? []
-      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !((facebookSearch || contentSearchParams) && field === 'params'))
+      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && field !== FILL_PAGE_FIELD
+        && !((facebookSearch || contentSearchParams) && field === 'params'))
     assert(unsupportedFields.length === 0, 400, 'unsupported_fields', `Unsupported public fields: ${unsupportedFields.join(', ')}`)
     const platform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
@@ -5113,6 +5135,9 @@ export class HubService {
       ...(cursor ? { cursor } : {}),
       ...((facebookSearch || contentSearchParams) && body.params !== undefined
         ? { params: platform === 'twitter' ? normalizeTwitterSearchParameters(body.params) : body.params } : {}),
+      // Opt-in single-page delivery. Absent or true keeps the existing body,
+      // fingerprint and page filling; only false is carried to the workflows.
+      ...(!dedicatedTelegramSearch && !fillPageOption(body) ? { [FILL_PAGE_FIELD]: false } : {}),
     }
     const resultType = resolveResultType(body)
     let fingerprintQuery = telegramQuery ?? upstreamBody
@@ -5155,7 +5180,9 @@ export class HubService {
     ) {
       assert(this.externalSocialSearch, 503, 'content_search_unavailable', 'Hub Xiaohongshu search is unavailable')
       return this.externalSocialSearch(context, {
-        body: upstreamBody,
+        // This route already buys one supplier page per request. Its strict
+        // contract never sees fillPage; the fingerprint below still records it.
+        body: takeFillPage(upstreamBody).body,
         ...(signal ? { signal } : {}),
         idempotencyKey,
         path,
@@ -5167,6 +5194,10 @@ export class HubService {
         replayWindowMs: replayWindowFor(resultType),
       })
     }
+    // The Hub workflows above honor fillPage=false. The historical
+    // compatibility adapter below assembles its own pages; Telegram is local.
+    assert(upstreamBody[FILL_PAGE_FIELD] !== false || platform === 'telegram', 400, 'fill_page_unsupported',
+      'fillPage=false is not supported for this platform')
     // Every non-local request below is served by the historical compatibility
     // adapter. Keep its opaque continuation inside a Hub-authenticated cursor
     // so no provider can bypass the shared 15-page acquisition boundary.

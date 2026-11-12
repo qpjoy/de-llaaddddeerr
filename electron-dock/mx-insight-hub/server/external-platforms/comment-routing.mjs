@@ -7,14 +7,14 @@ import { AppError } from '../core/errors.mjs'
 //   price) and the fallback is; it never retries after a supplier was called.
 // - A paused policy still routes to the primary so exact replays and bought
 //   buffered rows stay readable; the workflow refuses new purchases.
-export function createCommentRouter({ interfaceId, gateways, policyStore, platformFor, recipeFor, cursorProvider, invoke, logger = null }) {
-  async function ready(platform, provider, context) {
-    const recipe = recipeFor(platform, provider), gateway = gateways[platform]?.[provider]
+export function createCommentRouter({ interfaceId, gateways, policyStore, platformFor, recipeFor, cursorProvider, invoke, bodyFor = input => input.body, logger = null }) {
+  async function ready(platform, provider, context, body) {
+    const recipe = recipeFor(platform, provider, body), gateway = gateways[platform]?.[provider]
     if (!recipe?.available || !gateway) return false
-    const operation = `native.${recipe.key}`
+    const operationKeys = recipe.operationKeys ?? [`native.${recipe.key}`]
     try {
-      const readiness = await gateway.nativeReadiness({ consumerId: context.consumer.id, operationKeys: [operation] })
-      return readiness[operation] === true
+      const readiness = await gateway.nativeReadiness({ consumerId: context.consumer.id, operationKeys })
+      return operationKeys.every(key => readiness[key] === true)
     } catch (error) {
       logger?.warn?.(`[comment-routing] readiness unavailable for ${platform}/${provider}: ${error.code || error.name}`)
       return false
@@ -31,13 +31,13 @@ export function createCommentRouter({ interfaceId, gateways, policyStore, platfo
     }
     const route = await policyStore.get(interfaceId, platform)
     if (!route) throw new AppError(503, 'strategy_search_route_unavailable', 'Comment routing configuration is unavailable')
-    if (route.mode === 'priority' && route.fallbackProvider && !await ready(platform, route.primaryProvider, context)
-      && await ready(platform, route.fallbackProvider, context)) return { provider: route.fallbackProvider, reason: 'fallback' }
+    if (route.mode === 'priority' && route.fallbackProvider && !await ready(platform, route.primaryProvider, context, body)
+      && await ready(platform, route.fallbackProvider, context, body)) return { provider: route.fallbackProvider, reason: 'fallback' }
     return { provider: route.primaryProvider, reason: route.mode }
   }
   return async (context, input) => {
     const platform = platformFor(input.body)
-    const { provider, reason } = await select(context, platform, input.body)
+    const { provider, reason } = await select(context, platform, bodyFor(input))
     const gateway = gateways[platform]?.[provider]
     if (!gateway) throw new AppError(503, 'strategy_search_route_unavailable', 'The selected comment supplier is unavailable', { platform, provider })
     return invoke(gateway, context, { ...input, platform, routing: { interface: interfaceId, provider, reason } })

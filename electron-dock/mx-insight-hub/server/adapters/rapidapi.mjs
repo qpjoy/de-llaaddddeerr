@@ -7,6 +7,7 @@ import { AppError } from '../core/errors.mjs'
 import { FACEBOOK_HOST, FACEBOOK_ENDPOINT, projectFacebookSearch } from '../contracts/facebook-search.mjs'
 import { rapidQuotaObservation } from '../external-platforms/platform-search-policy.mjs'
 import { twitterAccountFailure } from '../contracts/twitter-account-failure.mjs'
+import { nativeForwardingEndpoint, nativeForwardingPayload, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
 
 export const TWITTER_AIO_HOST = 'twitter-aio.p.rapidapi.com'
 const TWITTER_ENDPOINTS = new Set([...Object.values(HUB_SOCIAL_ENDPOINTS).map(endpoint => endpoint.endpointKey), TWITTER_REPLIES_ENDPOINT_KEY])
@@ -101,6 +102,66 @@ export class RapidApiAdapter {
   }
   async resolveCredential() {
     return this.credentialResolver ? await this.credentialResolver() : this.apiKey || null
+  }
+  // Reviewed single-call reads on their own listing host, such as Threads. The
+  // raw page is returned for the caller's projection and archived as evidence.
+  async forwardNative(key, body, { credential } = {}) {
+    const endpoint = nativeForwardingEndpoint(key)
+    if (endpoint?.provider !== 'rapidapi' || !endpoint.host) throw new TypeError('Unsupported native endpoint')
+    const request = normalizeNativeForwardingRequest(key, body)
+    const apiKey = credential === undefined ? await this.resolveCredential() : credential
+    if (typeof apiKey !== 'string' || !apiKey) throw new Error('External credential is unavailable')
+    const url = new URL(endpoint.path, `https://${endpoint.host}`)
+    for (const [name, value] of Object.entries(request.upstreamQuery)) url.searchParams.set(name, String(value))
+    const controller = new AbortController()
+    let deadlineExceeded = false
+    const timer = setTimeout(() => { deadlineExceeded = true; controller.abort() }, this.timeoutMs)
+    const startedAt = performance.now(), capturedAt = new Date().toISOString(), scrub = createCredentialEchoRedactor(apiKey)
+    let response, bytes, raw, bodyText, failure = null, phase = 'request', parsed = false
+    const requestId = () => scrub(response?.headers.get('x-rapidapi-request-id') || response?.headers.get('x-request-id') || '') || null
+    const persistence = state => ({
+      upstreamEvidence: { requestId: requestId() },
+      responseArchive: response || failure ? { contractState: state, httpStatus: response?.status ?? null, businessCode: null,
+        contentType: response?.headers.get('content-type') ?? null, bodySize: bytes?.length ?? null,
+        payloadSha256: bytes ? createHash('sha256').update(bytes).digest('hex') : null,
+        rawPayload: { response: { httpStatus: response?.status ?? null, requestId: requestId(), ...(failure ? { transportFailure: failure } : {}) } }, capturedAt } : null,
+      restrictedResponseArchive: bytes ? { state, capturedAt, httpStatus: response.status, contentType: response.headers.get('content-type'),
+        bodySize: bytes.length, bodySha256: createHash('sha256').update(bytes).digest('hex'), bodyBytes: bytes,
+        bodyText: isPostgresSafeText(bodyText) ? bodyText : null, jsonParsed: parsed, parsedPayload: parsed && isPostgresSafeJsonValue(raw) ? raw : null } : null,
+    })
+    try {
+      response = await this.fetch(url, { method: 'GET', redirect: 'error', signal: controller.signal,
+        headers: { 'x-rapidapi-host': endpoint.host, 'x-rapidapi-key': apiKey, 'user-agent': HUB_USER_AGENT } })
+      phase = 'body'
+      bytes = await readBody(response, controller)
+      phase = 'decode'
+      bodyText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+      try { raw = JSON.parse(bodyText.replace(/^﻿/, '')); parsed = true } catch { /* preserved exact bytes below */ }
+      if (!response.ok) {
+        // RapidAPI's own gateway answers an unsubscribed key or exhausted quota
+        // before the listing runs, so that refusal is certainly not billed.
+        const gateway = response.headers.get('x-rapidapi-proxy-response') === 'true'
+        throw new RapidApiUpstreamError({ outcome: response.status < 500 ? 'rejected' : 'unknown', billed: gateway ? false : null,
+          httpStatus: response.status, businessCode: null, errorCode: response.status === 429 ? 'upstream_rate_limited' : 'social_upstream_rejected',
+          affectsCircuit: response.status >= 500 }, persistence('rejected'))
+      }
+      if (!parsed || !isPostgresSafeJsonValue(raw)) throw new Error('invalid_response_json')
+      const safe = value => typeof value === 'string' ? scrub(value) : Array.isArray(value) ? value.map(safe)
+        : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([name, item]) => [scrub(name), safe(item)])) : value
+      const result = { publicBody: nativeForwardingPayload(safe(raw), request, capturedAt), items: [], records: [], archiveObjects: [], ...persistence('accepted') }
+      Object.defineProperty(result, 'restrictedResponseArchive', { value: result.restrictedResponseArchive, enumerable: false })
+      return result
+    } catch (error) {
+      if (error instanceof RapidApiUpstreamError) throw error
+      if (phase === 'request' || phase === 'body') failure = transportFailure(error, phase, deadlineExceeded, startedAt, this.timeoutMs)
+      if (error instanceof AppError && ['proxy_route_unavailable', 'proxy_routes_unreachable'].includes(error.code)) {
+        throw new RapidApiUpstreamError({ outcome: 'rejected', billed: false, httpStatus: null, businessCode: null,
+          errorCode: 'social_egress_unavailable', affectsCircuit: false }, persistence('not_dispatched'))
+      }
+      const state = response?.ok ? 'succeeded_unusable' : 'unknown'
+      throw new RapidApiUpstreamError({ outcome: state, billed: null, httpStatus: response?.status ?? null, businessCode: null,
+        errorCode: controller.signal.aborted ? 'social_upstream_timeout_or_size_limit' : 'social_upstream_response_unusable' }, persistence(state))
+    } finally { clearTimeout(timer) }
   }
   async execute(request, { credential, encodeCursor } = {}) {
     const facebook = request.endpointKey === FACEBOOK_ENDPOINT

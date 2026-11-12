@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url)
 const environment = { identity: 'original-key', key: 'synthetic-key', access: { platforms: ['kuaishou', 'zhihu', 'bilibili'], capabilities: [] } }
 globalThis.__strategyInteraction = environment
 const view = build({
-  stdin: { contents: "export { StrategySearchExperience } from './strategy-search-experience.jsx'", loader: 'js', resolveDir: fileURLToPath(new URL('../../src/', import.meta.url)) },
+  stdin: { contents: "export { StrategySearchExperience } from './strategy-search-experience.jsx'; export { StrategyCommentsExperience } from './strategy-comments.jsx'", loader: 'js', resolveDir: fileURLToPath(new URL('../../src/', import.meta.url)) },
   bundle: true, format: 'esm', jsx: 'automatic', platform: 'node', write: false,
   plugins: [{ name: 'interaction-boundaries', setup(builder) {
     builder.onResolve({ filter: /^react\/jsx-runtime$/ }, args => ({ path: pathToFileURL(require.resolve(args.path)).href, external: true }))
@@ -18,8 +18,15 @@ const view = build({
     builder.onResolve({ filter: /\/(?:demo-credentials|api|components|wechat-product|admin-execution-evidence)\.(?:jsx|js)$/ }, args => ({ path: args.path, namespace: 'fixture' }))
     builder.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => {
       let contents
-      if (path === 'hooks') contents = 'export const useRef = value => ({current:value}), useEffect = () => {}, useState = value => [value,()=>{}], useSyncExternalStore = (_,get) => get()'
-      else if (path === 'icons') contents = 'export const Check=()=>null, MagnifyingGlass=()=>null, ArrowDown=()=>null, ArrowUpRight=()=>null, Image=()=>null'
+      if (path === 'hooks') contents = `const env = globalThis.__strategyInteraction
+        export const useState = initial => {
+          if (!env.hooks) return [initial, () => {}]
+          const cells = env.hooks, i = env.hookIndex++
+          if (!(i in cells)) cells[i] = typeof initial === 'function' ? initial() : initial
+          return [cells[i], value => { cells[i] = typeof value === 'function' ? value(cells[i]) : value }]
+        }
+        export const useRef = value => useState({current:value})[0], useEffect = () => {}, useLayoutEffect = run => run(), useSyncExternalStore = (_,get) => get()`
+      else if (path === 'icons') contents = 'export const Check=()=>null, MagnifyingGlass=()=>null, ArrowDown=()=>null, ArrowUpRight=()=>null, Image=()=>null, ChatCircleText=()=>null'
       else if (path.includes('demo-credentials')) contents = 'const env=globalThis.__strategyInteraction; export const useDemoApiKey=()=>[env.key],useDemoIdentity=()=>env.identity,useDemoAccessSnapshot=()=>env.access'
       else if (path.includes('api.js')) contents = 'const env=globalThis.__strategyInteraction; export const publicDataApi={productRequest:(...args)=>env.send(...args),requestByIdempotencyKey:(...args)=>env.lookup(...args)}'
       else contents = 'export const DropdownField=()=>null,ErrorState=()=>null,formatDate=value=>value,WechatResult=()=>null,AdminExecutionEvidence=()=>null'
@@ -53,6 +60,75 @@ async function fixture() {
   const query = value => nodes(render()).find(node => node.type === 'input' && node.props.placeholder?.includes('搜索关键词')).props.onChange({ target: { value } })
   return { session, sent, lookups, render, submit, select, query }
 }
+
+test('comment controls replace only an explicitly rejected request and preserve page, identity and replay keys', async t => {
+  const { StrategyCommentsExperience } = await view
+  const savedEnvironment = { ...environment }
+  t.after(() => { delete environment.hooks; delete environment.hookIndex; Object.assign(environment, savedEnvironment) })
+  Object.assign(environment, { hooks: [], identity: 'original-key', access: { platforms: ['twitter'], capabilities: ['social.comments.list'] } })
+  const contentId = '2117082385997250767', cursor = 'mxds1.original-cursor', sent = []
+  const failure = Object.assign(new Error('Account acquisition failed; inspect its saved outcome'), {
+    code: 'external_platform_rejected', status: 502, details: { outcome: 'rejected', requestId: '10000000-0000-4000-8000-000000000001' },
+  })
+  const success = nextCursor => ({ payload: { data: { items: [], postId: contentId, platform: 'twitter', page: { nextCursor } } } })
+  let reply = () => { throw failure }
+  environment.send = async (key, input, idem) => { sent.push({ key, input, idem }); return reply(input.body) }
+  const render = () => {
+    environment.hookIndex = 0
+    return StrategyCommentsExperience({ operation: 'post-comments', prefill: { platform: 'twitter', contentId }, admin: true })
+  }
+  const submit = async () => { nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush() }
+  const setPost = value => nodes(render()).find(node => node.type === 'input').props.onChange({ target: { value } })
+  const rebuild = () => button(render(), '重新查询（按新请求计费）')
+  const next = () => button(render(), '读取下一页')
+  await submit()
+  await submit()
+  assert.equal(sent[1].idem, sent[0].idem, 'ordinary submit replays the original failure')
+  assert.deepEqual(sent[0].input.body, { platform: 'twitter', contentId, count: 20 })
+  let resolve
+  reply = () => new Promise(done => { resolve = done })
+  const oldClick = rebuild().props.onClick
+  const pending = oldClick()
+  await oldClick()
+  assert.equal(sent.length, 3, 'a rapid duplicate click creates only one new request')
+  assert.notEqual(sent[2].idem, sent[0].idem)
+  assert.deepEqual(sent[2].input, sent[0].input)
+  environment.identity = 'other-key'
+  assert.equal(rebuild(), undefined)
+  resolve(success(cursor)); await pending
+  environment.identity = 'original-key'
+  assert.equal(next(), undefined, 'a response that finished under a different view was discarded')
+  await oldClick()
+  assert.equal(sent.length, 3, 'the superseded rejection cannot create another attempt')
+
+  reply = body => { if (body.cursor) throw failure; return success(cursor) }
+  await submit()
+  assert.equal(sent[3].idem, sent[2].idem, 'ordinary submit reuses the replacement key')
+  await next().props.onClick()
+  const pageAttempt = sent[4], pageRetry = rebuild().props.onClick
+  assert.deepEqual(pageAttempt.input.body, { ...sent[0].input.body, cursor })
+  environment.identity = 'other-key'
+  assert.equal(rebuild(), undefined)
+  await pageRetry()
+  environment.identity = 'original-key'
+  setPost('999')
+  assert.equal(next(), undefined, 'old content cannot supply a cursor for a different post')
+  assert.equal(rebuild(), undefined)
+  await pageRetry()
+  assert.equal(sent.length, 5, 'stale controls cannot charge either caller or another post')
+  setPost(contentId)
+  await next().props.onClick()
+  assert.equal(sent[5].idem, pageAttempt.idem)
+  reply = body => success(body.cursor ? null : cursor)
+  await rebuild().props.onClick()
+  assert.notEqual(sent[6].idem, pageAttempt.idem)
+  assert.deepEqual(sent[6].input, pageAttempt.input, 'manual requery preserves the exact continuation')
+  assert.equal(rebuild(), undefined)
+  await submit()
+  await next().props.onClick()
+  assert.equal(sent[7].idem, sent[2].idem, 'replacing page two does not rotate the first-page key')
+  assert.equal(sent[8].idem, sent[6].idem)
+})
 
 test('actual composer handlers keep unknown original intent locked while other platform cards and explicit searches work', async () => {
   const h = await fixture()

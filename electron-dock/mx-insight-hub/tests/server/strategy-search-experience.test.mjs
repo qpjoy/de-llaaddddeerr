@@ -2,9 +2,59 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { strategySearchPlatforms, strategySearchBody, strategySearchForm, strategyPageInfo, uncertainStrategySearch, safeStrategyUrl } from '../../src/strategy-search-experience-model.js'
 import { strategyAccountPlatforms, strategyAccountBody, strategyAccountForm, strategyOperationPath, strategyResultMatches } from '../../src/strategy-search-experience-model.js'
+import { strategyCommentFailure } from '../../src/strategy-comments-model.js'
 
 const access = { platforms: ['tiktok', 'social', 'xiaohongshu', 'telegram'], capabilities: ['native.wechat.search.search'] }
 const platforms = strategySearchPlatforms(access)
+
+test('comment failure display preserves the saved receipt and links only the matching admin view to durable usage', () => {
+  const id = '10000000-0000-4000-8000-000000000001'
+  const view = { formScope: 'post-scope', operation: 'post-comments', admin: true }
+  const generic = 'Account acquisition failed; inspect its saved outcome'
+  const error = Object.assign(new Error(generic), { code: 'external_platform_rejected', requestId: id, status: 502, details: { outcome: 'rejected' },
+    evidence: { headerRequestId: id, idempotentReplay: true } })
+  const failure = { formScope: view.formScope, body: { platform: 'twitter', contentId: '123', count: 20 }, error }
+  const shown = strategyCommentFailure(failure, view)
+  assert.match(shown.error.message, /拒绝.*帖子评论/u)
+  assert.equal(shown.error.code, error.code)
+  assert.equal(shown.error.requestId, id)
+  assert.equal(shown.error.evidence.idempotentReplay, true)
+  assert.equal(error.message, generic)
+  assert.equal(shown.sourceStatus, '')
+  assert.equal(shown.canRequery, true)
+  assert.equal(shown.diagnostic, `#/diagnostics?view=requests&requestId=${id}`)
+  assert.equal(strategyCommentFailure(failure, { ...view, admin: false }).diagnostic, null)
+  assert.equal(strategyCommentFailure(failure, { ...view, formScope: 'other-scope' }), null)
+  assert.equal(strategyCommentFailure({ ...failure, body: { ...failure.body, cursor: 'page-2' } }, { ...view, nextCursor: 'page-3' }), null)
+  for (const overrides of [{ code: 'external_platform_response_unusable' }, { code: 'external_platform_busy' }, { status: 429 }, { status: 503 },
+    { details: { outcome: 'unknown' } }, { details: { outcome: 'succeeded_unusable' } }, { details: {} }, { evidence: {} },
+    { details: { outcome: 'rejected', upstream: { httpStatus: 429 } } }, { details: { outcome: 'rejected', upstream: { businessCode: 429 } } },
+    { details: { outcome: 'rejected', requestId: '11111111-2222-4333-8444-555555555555' } }]) {
+    assert.equal(strategyCommentFailure({ ...failure, error: { ...error, ...overrides } }, view).canRequery, false)
+  }
+  const replies = { ...view, formScope: 'reply-scope', operation: 'comment-replies' }
+  const replyFailure = { ...failure, formScope: replies.formScope, body: { platform: 'twitter', commentId: '456', count: 20 } }
+  const unknown = { ...error, code: 'upstream_outcome_unknown', message: generic, evidence: {} }
+  const uncertain = strategyCommentFailure({ ...replyFailure, error: unknown }, replies)
+  assert.match(uncertain.error.message, /评论回复.*尚未确认/u)
+  assert.equal(uncertain.diagnostic, null, 'an HTTP correlation ID alone is not a usage ID')
+  for (const [code, message, expected] of [
+    ['external_platform_rejected', 'The data source rejected the comment replies request', /拒绝.*评论回复/u],
+    ['upstream_outcome_unknown', 'The outcome of the comment replies request is unknown', /评论回复.*尚未确认/u],
+    ['external_platform_response_unusable', 'The data source returned unusable comment replies data', /评论回复.*无法解析/u],
+  ]) {
+    const saved = { ...error, code, message, details: { upstream: { httpStatus: 400, businessCode: 400 } } }
+    const feedback = strategyCommentFailure({ ...replyFailure, error: saved }, replies)
+    assert.match(feedback.error.message, expected)
+    assert.equal(feedback.sourceStatus, 'HTTP 400，业务码 400')
+  }
+  for (const [details, hasLink] of [[{ requestId: id }, true], [{ requestId: 'not-a-uuid' }, false]]) {
+    const precise = { ...unknown, message: '这一条帖子的评论暂不可用。', details }
+    const result = strategyCommentFailure({ ...failure, error: precise }, view)
+    assert.equal(result.error.message, precise.message)
+    assert.equal(Boolean(result.diagnostic), hasLink)
+  }
+})
 
 test('strategy platform cards follow effective Key grants and independent operation scopes', () => {
   assert.deepEqual(platforms.map(row => row.platform), ['telegram', 'tiktok', 'wechat_search', 'wechat_mp'])
