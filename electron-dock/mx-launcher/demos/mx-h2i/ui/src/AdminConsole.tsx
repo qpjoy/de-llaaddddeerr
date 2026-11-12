@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import AdminWorkspacePages from './AdminWorkspacePages';
+import { adminPages, type AdminRequest } from './admin';
 import { view } from './bridge';
 import Icon from './Icon';
 import Modal from './Modal';
@@ -6,7 +8,13 @@ import type { AdminPage, AdminWorkspace, AdminMember } from './admin';
 
 const roleName = (role: AdminMember['role']) =>
   role === 'admin' ? '管理员' : role === 'employee' ? '员工' : '已停用';
-export default function AdminConsole(_props: { page: AdminPage; setPage(page: AdminPage): void }) {
+export default function AdminConsole({
+  page,
+  setPage,
+}: {
+  page: AdminPage;
+  setPage(page: AdminPage): void;
+}) {
   const [data, setData] = useState<AdminWorkspace | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
@@ -34,6 +42,25 @@ export default function AdminConsole(_props: { page: AdminPage; setPage(page: Ad
       epoch.current++;
     };
   }, []);
+  useEffect(() => {
+    setEditing(null);
+    setError('');
+  }, [page]);
+  async function mutate(input: AdminRequest) {
+    const turn = epoch.current;
+    setBusy(true);
+    setError('');
+    const result = await view.admin(input);
+    if (turn !== epoch.current) return false;
+    if (!result.ok) {
+      setError(result.error.message);
+      setBusy(false);
+      return false;
+    }
+    await load();
+    return true;
+  }
+  const title = adminPages.find((item) => item.id === page)!.title;
   async function save() {
     if (!editing) return;
     setBusy(true);
@@ -55,7 +82,7 @@ export default function AdminConsole(_props: { page: AdminPage; setPage(page: Ad
     return (
       <section className="mincave-admin-access">
         <Icon name="users" size={38} />
-        <h1>成员与角色</h1>
+        <h1>{title}</h1>
         <p role="status">{busy ? '正在加载' : error}</p>
         {!busy && (
           <button className="mincave-button" onClick={() => void load()}>
@@ -72,71 +99,86 @@ export default function AdminConsole(_props: { page: AdminPage; setPage(page: Ad
   return (
     <>
       <div className="mincave-page-heading">
-        <h1>成员与角色</h1>
+        <h1>{title}</h1>
       </div>
-      <section className="mincave-panel">
-        <div className="mincave-section-toolbar">
-          <h2>
-            成员 <span>{data.members.length}</span>
-          </h2>
-          <label className="mincave-search">
-            <Icon name="search" size={18} />
-            <input
-              type="search"
-              aria-label="搜索成员"
-              placeholder="搜索成员"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </label>
-        </div>
-        {error && !editing && <p role="alert">{error}</p>}
-        <div className="mincave-admin-table-wrap">
-          <table className="mincave-admin-table">
-            <thead>
-              <tr>
-                <th>成员</th>
-                <th>部门</th>
-                <th>MinCave 角色</th>
-                <th>使用权限</th>
-                <th>最近使用</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {members.map((member) => (
-                <tr key={member.id}>
-                  <td>{member.name}</td>
-                  <td>{member.department || '—'}</td>
-                  <td>{roleName(member.role)}</td>
-                  <td>{member.enabled ? '已启用' : '已停用'}</td>
-                  <td>
-                    {member.lastSeenAt
-                      ? new Date(member.lastSeenAt).toLocaleString('zh-CN', { hour12: false })
-                      : '—'}
-                  </td>
-                  <td>
-                    <button
-                      className="mincave-text-button"
-                      aria-label={`管理 ${member.name}`}
-                      disabled={busy}
-                      onClick={() => {
-                        setEditing(member);
-                        setRole(member.role || 'employee');
-                        setEnabled(member.enabled);
-                        setError('');
-                      }}
-                    >
-                      管理
-                    </button>
-                  </td>
+      {page !== 'members' ? (
+        <AdminWorkspacePages
+          key={page}
+          page={page}
+          data={data}
+          busy={busy}
+          error={error}
+          save={mutate}
+          reload={() => void load()}
+          setPage={setPage}
+        />
+      ) : (
+        <section className="mincave-panel">
+          <div className="mincave-section-toolbar">
+            <h2>
+              成员 <span>{data.members.length}</span>
+            </h2>
+            <label className="mincave-search">
+              <Icon name="search" size={18} />
+              <input
+                type="search"
+                aria-label="搜索成员"
+                placeholder="搜索成员"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </label>
+          </div>
+          {error && !editing && <p role="alert">{error}</p>}
+          <div className="mincave-admin-table-wrap">
+            <table className="mincave-admin-table">
+              <thead>
+                <tr>
+                  <th>成员</th>
+                  <th>部门</th>
+                  <th>MinCave 角色</th>
+                  <th>使用权限</th>
+                  <th>最近使用</th>
+                  <th>操作</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {!members.length && <div className="mincave-empty">暂无成员</div>}
-      </section>
+              </thead>
+              <tbody>
+                {members.map((member) => (
+                  <tr key={member.id}>
+                    <td>{member.name}</td>
+                    <td>{member.department || '—'}</td>
+                    <td>{roleName(member.role)}</td>
+                    <td>{member.enabled ? '已启用' : '已停用'}</td>
+                    <td>
+                      {member.lastSeenAt
+                        ? new Date(member.lastSeenAt).toLocaleString('zh-CN', {
+                            hour12: false,
+                          })
+                        : '—'}
+                    </td>
+                    <td>
+                      <button
+                        className="mincave-text-button"
+                        aria-label={`管理 ${member.name}`}
+                        disabled={busy}
+                        onClick={() => {
+                          setEditing(member);
+                          setRole(member.role || 'employee');
+                          setEnabled(member.enabled);
+                          setError('');
+                        }}
+                      >
+                        管理
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!members.length && <div className="mincave-empty">暂无成员</div>}
+        </section>
+      )}
       {editing && (
         <Modal
           title="成员权限"

@@ -263,3 +263,57 @@ test('released legacy leases are recovered by exact owner/product/device and per
   const retained = await f.service.devices(f.bearer(f.employee.token));
   assert.equal(retained.devices.length, 2, 'persisted bindings outlive changes in the lease inventory');
 });
+
+test('workspace applications persist, reject unsafe writes, isolate tenants and protect concurrent edits', async () => {
+  const f = fixture();
+  await f.service.session(f.bearer(f.admin.token));
+  await f.service.session(f.bearer(f.employee.token));
+  const before = (await f.service.members(f.bearer(f.admin.token))).workspace;
+  assert.equal(before.applications.length, 6);
+  assert.equal(before.revision, 0);
+  const app = before.applications.find(row => row.id === 'web-hub')!;
+  const edit = { revision: 0, kind: 'application', id: app.id, value: { name: 'Updated Hub', url: app.url, category: app.category, published: false } };
+  await assert.rejects(f.service.updateWorkspace(f.bearer(f.employee.token), edit), ForbiddenException);
+  for (const url of ['javascript:alert(1)', 'file:///etc/passwd', 'https://user:pass@example.com/', 'https://example.com/\n']) {
+    await assert.rejects(f.service.updateWorkspace(f.bearer(f.admin.token), { ...edit, value: { ...edit.value, url } }), BadRequestException);
+  }
+  await assert.rejects(f.service.updateWorkspace(f.bearer(f.admin.token), { ...edit, actorId: 'employee' }), BadRequestException);
+  await assert.rejects(f.service.updateWorkspace(f.bearer(f.admin.token), { ...edit, value: { ...edit.value, roleIds: ['mx-admin'] } }), BadRequestException);
+  await f.service.updateWorkspace(f.bearer(f.admin.token), edit);
+  await assert.rejects(f.service.updateWorkspace(f.bearer(f.admin.token), edit), ConflictException);
+  const saved = f.store.getMinCaveWorkspace('minsight-tenant');
+  assert.equal(saved.revision, 1);
+  assert.equal(saved.applications.find(row => row.id === app.id)!.url, app.url, 'query and fragment are preserved');
+  assert.equal((await f.service.session(f.bearer(f.employee.token))).applications.some(row => row.id === app.id), false);
+  assert.equal(f.store.getMinCaveWorkspace('another-tenant').revision, 0);
+  saved.applications.length = 0;
+  assert.equal(f.store.getMinCaveWorkspace('minsight-tenant').applications.length, 6);
+  assert.throws(() => f.store.updateMinCaveWorkspace({ ...edit, revision: 1, kind: 'application', actorId: 'admin', tenantKey: 'another-tenant' }), ForbiddenException);
+});
+test('department policies change same-token workbench entries, with deny precedence and reversible disable', async () => {
+  const f = fixture();
+  f.user('sales');
+  f.store.createUserCenterUser({ userId: 'sales', account: 'sales', profile: { department: '销售' } });
+  const sales = f.bearer(f.issue('sales').token);
+  const admin = f.bearer(f.admin.token);
+  const employee = f.bearer(f.employee.token);
+  await f.service.session(admin);
+  await f.service.session(employee);
+  await f.service.session(sales);
+  const allow = { name: '研发使用 Delta', department: '研发', appIds: ['web-delta'], action: 'allow', enabled: true };
+  await f.service.updateWorkspace(admin, { revision: 0, kind: 'policy', value: allow });
+  assert.ok((await f.service.session(employee)).applications.some(row => row.id === 'web-delta'));
+  assert.ok(!(await f.service.session(sales)).applications.some(row => row.id === 'web-delta'));
+  const deny = { name: '暂停 Delta', department: '*', appIds: ['web-delta'], action: 'deny', enabled: true };
+  await f.service.updateWorkspace(admin, { revision: 1, kind: 'policy', value: deny });
+  assert.ok(!(await f.service.session(employee)).applications.some(row => row.id === 'web-delta'));
+  const policy = f.store.getMinCaveWorkspace('minsight-tenant').policies.find(row => row.action === 'deny')!;
+  await f.service.updateWorkspace(admin, { revision: 2, kind: 'policy', id: policy.id, value: { ...deny, enabled: false } });
+  assert.ok((await f.service.session(employee)).applications.some(row => row.id === 'web-delta'));
+  assert.ok(!(await f.service.session(sales)).applications.some(row => row.id === 'web-delta'));
+  for (const value of [{ ...allow, appIds: ['unknown'] }, { ...allow, appIds: [] }, { ...allow, department: '外部不存在部门' }, { ...allow, action: 'admin' }])
+    await assert.rejects(f.service.updateWorkspace(admin, { revision: 3, kind: 'policy', value }), BadRequestException);
+  await f.service.update(admin, 'sales', { role: 'admin', enabled: true });
+  await f.service.update(sales, 'admin', { role: 'employee', enabled: true });
+  assert.throws(() => f.store.updateMinCaveWorkspace({ actorId: 'admin', tenantKey: 'minsight-tenant', revision: 3, kind: 'policy', value: allow }), ForbiddenException);
+});

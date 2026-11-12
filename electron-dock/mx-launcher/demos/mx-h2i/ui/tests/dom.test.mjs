@@ -118,6 +118,16 @@ async function mount(initial, withBridge = true, methods = {}) {
           );
           return { ok: true, value: { saved: true } };
         }
+        if (input.action === 'saveApplication' || input.action === 'savePolicy') {
+          assert.equal(input.revision, management.workspace.revision);
+          const list = input.action === 'saveApplication' ? management.workspace.applications : management.workspace.policies;
+          const previous = list.find(row => row.id === input.id);
+          if (previous) Object.assign(previous, input.value);
+          else list.push({ ...input.value, id: 'test-new', icon: 'apps', color: 'purple' });
+          management.workspace.revision++;
+          emit({ mincaveAccess: { ...runtime.mincaveAccess, applications: management.workspace.applications.filter(row => row.published) } });
+          return { ok: true, value: { saved: true } };
+        }
         return { ok: true, value: {} };
       },
       ...methods,
@@ -262,7 +272,7 @@ test('employee navigation and real web apps preserve exact URLs and connection g
     }
     await h.click('管理控制台');
     assert.deepEqual(h.calls, ['admin:workspace']);
-    assert.match(h.document.body.textContent, /成员与角色/);
+    assert.match(h.document.body.textContent, /管理总览/);
     await h.click('员工工作台');
     for (const [category, expected] of [
       ['中台应用 3', ['Delta', 'Hub', 'Night-All']],
@@ -336,16 +346,17 @@ test('overseas card presents one install while preparing both underlying compone
   }
 });
 
-test('management console contains only members and saves only MinCave permission changes', async () => {
+test('management console restores four sections and preserves MinCave member permission changes', async () => {
   const h = await mount(runtimeFixture());
   try {
     await h.click('管理控制台');
+    await h.click('成员');
     assert.match(h.document.body.textContent, /成员与角色/);
     assert.match(h.document.body.textContent, /测试成员/);
     const nav = [...h.document.querySelectorAll('nav button')].map((button) =>
       button.textContent.trim(),
     );
-    assert.deepEqual(nav, ['成员']);
+    assert.deepEqual(nav, ['总览', '应用', '成员', '策略']);
     assert.ok(!h.calls.includes('openAdmin'));
     await h.click('管理 测试成员');
     assert.equal(h.document.querySelector('dialog input[type="text"]'), null);
@@ -373,6 +384,7 @@ test('employee cannot see management entries and role revocation ejects an open 
   );
   try {
     assert.ok(!h.document.body.textContent.includes('管理控制台'));
+    await tick();
     h.document.querySelector('.mincave-account').click();
     await tick();
     assert.ok(
@@ -384,7 +396,7 @@ test('employee cannot see management entries and role revocation ejects an open 
     h.document.querySelector('.mincave-account').click();
     await tick();
     await h.click('管理控制台');
-    assert.ok(h.document.querySelector('.mincave-admin-table'));
+    assert.ok(h.document.querySelector('.mincave-admin-metrics'));
     h.emit({
       mincaveAccess: { status: 'allowed', allowed: true, canManage: false, role: 'employee' },
     });
@@ -691,5 +703,79 @@ test('switching accounts clears previous device data and discards a late respons
     assert.equal(h.document.querySelectorAll('.mincave-device').length, 0);
     assert.ok(!h.document.querySelector('main').textContent.includes('QA Mac'));
     assert.match(h.document.querySelector('main').textContent, /暂无设备记录/);
+  } finally { h.dom.window.close(); }
+});
+
+test('overview shows real counts; app edits and publishing update workbench without exposing plugin controls', async () => {
+  const h = await mount(runtimeFixture());
+  try {
+    await h.click('管理控制台');
+    const metrics = [...h.document.querySelectorAll('.mincave-admin-metrics article')].map(row => row.textContent);
+    assert.deepEqual(metrics, ['成员总数1', '已启用成员1', '已发布应用2', '启用策略0']);
+    assert.doesNotMatch(h.document.body.textContent, /今日流量|月度用量|平均延迟|在线设备/);
+    await h.click('管理应用');
+    assert.equal(h.document.querySelectorAll('tbody tr').length, 3);
+    await h.click('配置 Delta');
+    await h.input('input[aria-label="应用名称"]', 'Delta 测试');
+    await h.input('input[aria-label="应用地址"]', 'https://delta.example.test/new?admin=1#/data');
+    await h.click('保存');
+    assert.equal(h.document.querySelector('dialog'), null);
+    assert.match(h.document.querySelector('tbody').textContent, /Delta 测试/);
+    assert.ok(h.calls.includes('admin:saveApplication'));
+    await h.click('发布 Delta 测试');
+    assert.equal(h.button('发布 Delta 测试').getAttribute('aria-checked'), 'false');
+    await h.click('员工工作台');
+    assert.equal(h.document.querySelector('a[aria-label="打开 Delta 测试"]'), null);
+    assert.equal(h.document.querySelector('a[aria-label="打开 Compass"]'), null);
+    assert.equal(h.document.querySelector('a[aria-label="打开 Hub"]').href, 'https://hub.example.test/');
+    assert.match(h.document.body.textContent, /海外代理/);
+    assert.deepEqual(h.errors, []);
+  } finally { h.dom.window.close(); }
+});
+test('policy form uses real departments and app resources, creates, edits and disables a policy', async () => {
+  const h = await mount(runtimeFixture());
+  try {
+    await h.click('管理控制台');
+    await h.click('策略');
+    assert.match(h.document.body.textContent, /暂无策略/);
+    await h.click('新建策略');
+    assert.equal(h.button('保存').disabled, true);
+    await h.input('input[aria-label="策略名称"]', '技术部应用');
+    const department = h.document.querySelector('select[aria-label="适用部门"]');
+    assert.deepEqual([...department.options].map(option => option.textContent), ['全部成员', '技术部']);
+    department.value = '技术部';
+    department.dispatchEvent(new h.window.Event('change', { bubbles: true }));
+    h.document.querySelector('fieldset input').click();
+    await tick();
+    await h.click('保存');
+    assert.equal(h.document.querySelector('dialog'), null);
+    assert.match(h.document.querySelector('tbody').textContent, /技术部应用技术部Delta允许/);
+    await h.click('编辑 技术部应用');
+    const action = h.document.querySelector('select[aria-label="策略动作"]');
+    action.value = 'deny';
+    action.dispatchEvent(new h.window.Event('change', { bubbles: true }));
+    await tick();
+    await h.click('保存');
+    assert.match(h.document.querySelector('tbody').textContent, /拒绝/);
+    await h.click('启用 技术部应用');
+    assert.equal(h.button('启用 技术部应用').getAttribute('aria-checked'), 'false');
+    await h.click('总览');
+    assert.match(h.document.querySelector('.mincave-admin-metrics').textContent, /启用策略0/);
+    assert.deepEqual(h.errors, []);
+  } finally { h.dom.window.close(); }
+});
+test('older backend preserves members while new pages request an upgrade, and empty allowed catalog never falls back to static apps', async () => {
+  const h = await mount(runtimeFixture(), true, { mincaveAdmin: async () => ({ ok: true, value: { administratorId: 'qa-employee', members: adminFixture().members } }) });
+  try {
+    await h.click('管理控制台');
+    assert.match(h.document.body.textContent, /请更新 MinCave 管理服务/);
+    await h.click('成员');
+    assert.match(h.document.querySelector('tbody').textContent, /测试成员/);
+    await h.click('员工工作台');
+    h.emit({ mincaveAccess: { status: 'allowed', allowed: true, canManage: false, role: 'employee', applications: [] } });
+    await tick();
+    assert.equal(h.document.querySelector('a[aria-label="打开 Delta"]'), null);
+    assert.match(h.document.body.textContent, /海外代理/);
+    assert.deepEqual(h.errors, []);
   } finally { h.dom.window.close(); }
 });

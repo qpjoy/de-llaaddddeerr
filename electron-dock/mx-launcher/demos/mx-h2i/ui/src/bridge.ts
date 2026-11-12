@@ -44,6 +44,7 @@ export interface MinCaveAccess {
   allowed: boolean;
   canManage: boolean;
   role: 'admin' | 'employee' | null;
+  applications?: Pick<CatalogApp, 'id' | 'name' | 'url' | 'category' | 'icon' | 'color'>[];
   userId?: string;
   code?: string;
   message?: string;

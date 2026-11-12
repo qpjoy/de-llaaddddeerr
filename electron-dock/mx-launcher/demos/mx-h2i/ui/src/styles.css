@@ -1785,3 +1785,26 @@ html[data-platform='win32'] .mincave-topbar {
   font-size: 12px;
   color: var(--danger);
 }
+
+.mincave-admin-metrics article > span { display: flex; align-items: center; gap: 8px; }
+.mincave-admin-overview-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.mincave-admin-summary-list { padding: 0 20px 8px; }
+.mincave-admin-summary-list > div { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 0; border-top: 1px solid #edf0f7; font-size: 13px; }
+.mincave-admin-summary-list strong { font-weight: 500; }
+.mincave-admin-summary-list small { font-weight: 400; color: var(--muted); }
+.mincave-admin-app-name { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.mincave-admin-app-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: #7358ed; background: #efebff; }
+.mincave-admin-app-icon.blue { background: #eaf0ff; color: #4b78e8; }
+.mincave-admin-app-icon.mint { background: #e2f7ef; color: #2b9975; }
+.mincave-admin-app-icon.indigo { background: #ebebff; color: #5a5ad1; }
+.mincave-admin-decision { border-radius: 6px; padding: 4px 8px; font-size: 11px; }
+.mincave-admin-decision.allow { background: #eaf8f1; color: #25875e; }
+.mincave-admin-decision.deny { background: #fff0f0; color: #ba4b4b; }
+.mincave-admin-policy-help { margin: 0; color: #67697c; font-size: 12px; line-height: 1.6; }
+.mincave-toggle:disabled { cursor: default; opacity: .5; }
+@media (max-width: 900px) {
+  .mincave-admin-overview-panels { grid-template-columns: 1fr; }
+  .mincave-admin-heading-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .mincave-admin-heading-actions .mincave-search { max-width: 180px; }
+}
+.mincave-admin-panel > .mincave-section-toolbar { padding: 18px 20px; margin-bottom: 0; }

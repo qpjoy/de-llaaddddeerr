@@ -4,6 +4,22 @@ const failure = (code, message, status = 0) => Object.assign(new Error(message),
 const userId = (auth) => String(auth?.subject || '').replace(/^user:/, '');
 const emptyAccess = () => ({ status: 'checking', allowed: false, canManage: false, role: null });
 
+function projectApplications(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 200).filter(app => {
+    try {
+      const url = new URL(app.url);
+      return typeof app.id === 'string' && typeof app.name === 'string' &&
+        typeof app.category === 'string' && typeof app.url === 'string' &&
+        ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+    } catch { return false; }
+  }).map(({ id, name, category, url, icon, color }) => ({
+    id, name, category, url,
+    icon: ['apps', 'triangle', 'layers', 'moon', 'compass', 'search', 'shield'].includes(icon) ? icon : 'apps',
+    color: ['blue', 'purple', 'indigo', 'mint'].includes(color) ? color : 'purple',
+  }));
+}
+
 // Bearer remains in the main process. These are MinCave routes, not Launcher SSO/BFF routes.
 function createMincaveAdminBridge({
   getRuntime,
@@ -67,6 +83,7 @@ function createMincaveAdminBridge({
         canManage: result.canManage,
         role: result.role,
         userId: result.userId,
+        ...(result.applications !== undefined ? { applications: projectApplications(result.applications) } : {}),
       },
     };
     cleanupToken = null;
@@ -108,6 +125,7 @@ function createMincaveAdminBridge({
           allowed: Boolean(retained),
           canManage: false,
           role: retained ? verified.access.role : null,
+          ...(retained && verified.access.applications ? { applications: verified.access.applications } : {}),
           code: error.code || 'unavailable',
           message: rejected ? error.message : 'MinCave 服务暂不可用，请稍后重试。',
         };
@@ -153,7 +171,7 @@ function createMincaveAdminBridge({
   async function request(input) {
     const token = getRuntime().auth?.accessToken;
     try {
-      if (!input || !['workspace', 'saveMember'].includes(input.action))
+      if (!input || !['workspace', 'saveMember', 'saveApplication', 'savePolicy'].includes(input.action))
         throw failure('invalid_action', '不支持此操作。');
       const access = await refresh();
       current(token);
@@ -161,7 +179,19 @@ function createMincaveAdminBridge({
         throw failure('management_forbidden', '暂无 MinCave 管理权限。');
       let value;
       if (input.action === 'workspace') value = await json(token, 'members');
-      else {
+      else if (input.action === 'saveApplication' || input.action === 'savePolicy') {
+        const keys = input.action === 'saveApplication' ? ['name', 'url', 'category', 'published'] : ['name', 'department', 'appIds', 'action', 'enabled'];
+        if (!Number.isSafeInteger(input.revision) || input.revision < 0 ||
+            (input.id !== undefined && (typeof input.id !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(input.id))) ||
+            !input.value || typeof input.value !== 'object' || Array.isArray(input.value) ||
+            Object.keys(input.value).some(key => !keys.includes(key)))
+          throw failure('invalid_input', '管理信息不完整。');
+        value = await json(token, 'workspace', { method: 'PATCH', body: JSON.stringify({
+          revision: input.revision, kind: input.action === 'saveApplication' ? 'application' : 'policy',
+          ...(input.id ? { id: input.id } : {}), value: input.value,
+        }) });
+        await refresh();
+      } else {
         if (
           typeof input.id !== 'string' ||
           !input.id ||

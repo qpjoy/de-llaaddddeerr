@@ -1,3 +1,4 @@
+import type { MinCaveWorkspace, MinCaveWorkspaceChange } from '../lib/mincave-workspace.js';
 import type { MinCaveDevice, MinCaveDeviceInput } from '../lib/mincave-devices.js';
 import type { MinCaveMember, MinCaveAdmission, MinCaveMemberChange } from '../lib/mincave-access.js';
 import type {
@@ -262,6 +263,8 @@ export interface PlatformStore {
   getUserCenterUser(userId: string): MaybePromise<UserCenterUser | null>;
   listMinCaveDevices(userId: string): MaybePromise<MinCaveDevice[]>;
   recordMinCaveDevice(userId: string, device: MinCaveDeviceInput): MaybePromise<void>;
+  getMinCaveWorkspace(tenantKey: string): MaybePromise<MinCaveWorkspace>;
+  updateMinCaveWorkspace(input: MinCaveWorkspaceChange): MaybePromise<MinCaveWorkspace>;
   listMinCaveMembers(): MaybePromise<MinCaveMember[]>;
   admitMinCaveMember(input: MinCaveAdmission): MaybePromise<{ user: UserCenterUser; member: MinCaveMember }>;
   updateMinCaveMember(input: MinCaveMemberChange): MaybePromise<UserCenterUser>;

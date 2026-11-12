@@ -1,3 +1,4 @@
+import { mincaveApplications, mincaveWorkspaceChange } from '../../lib/mincave-workspace.js';
 import { mincaveSessionDevice } from '../../lib/mincave-devices.js';
 import {
   BadRequestException,
@@ -88,6 +89,7 @@ export class MinCaveService {
       canManage: role === 'admin',
       companyName: '明悉科技',
       userId: user.userId,
+      applications: mincaveApplications(await this.store.getMinCaveWorkspace(proof.tenantKey), result.user.profile.department || ''),
     };
   }
   async devices(authorization?: string) {
@@ -142,7 +144,14 @@ export class MinCaveService {
         return target ? this.project(target, member) : null;
       }),
     );
-    return { administratorId: user.userId, members: rows.filter((row) => row !== null) };
+    return { administratorId: user.userId, members: rows.filter((row) => row !== null), workspace: await this.store.getMinCaveWorkspace(proof.tenantKey) };
+  }
+
+  async updateWorkspace(authorization: string | undefined, body: unknown) {
+    const { user, proof } = await this.administrator(authorization);
+    const change = mincaveWorkspaceChange(body);
+    await this.store.updateMinCaveWorkspace({ ...change, actorId: user.userId, tenantKey: proof.tenantKey });
+    return { saved: true };
   }
 
   async update(authorization: string | undefined, userId: string, body: unknown) {
