@@ -317,3 +317,33 @@ test('department policies change same-token workbench entries, with deny precede
   await f.service.update(sales, 'admin', { role: 'employee', enabled: true });
   assert.throws(() => f.store.updateMinCaveWorkspace({ actorId: 'admin', tenantKey: 'minsight-tenant', revision: 3, kind: 'policy', value: allow }), ForbiddenException);
 });
+
+test('member grants survive repeat login and role changes, intersect department rules, and project only safe device fields', async () => {
+  const f = fixture();
+  const admin = f.bearer(f.admin.token), employee = f.bearer(f.employee.token);
+  await f.service.session(admin);
+  await f.service.session(employee, { device: { deviceId: 'private-device', deviceLabel: '真实 Mac', platform: 'darwin', deviceModel: 'private-model', osVersion: 'private-version' } });
+  const profile = structuredClone(f.store.getUserCenterUser('employee')!.profile);
+  await f.service.update(admin, 'employee', { role: 'employee', enabled: true, appIds: ['web-delta'] });
+  assert.deepEqual((await f.service.session(employee)).applications.map(app => app.id), ['web-delta']);
+  assert.deepEqual((await f.service.session(employee)).applications.map(app => app.id), ['web-delta']);
+  await f.service.update(admin, 'employee', { role: 'admin', enabled: true });
+  assert.deepEqual((await f.service.session(employee)).applications.map(app => app.id), ['web-delta']);
+  await f.service.updateWorkspace(admin, { revision: 0, kind: 'policy', value: { name: '拒绝 Delta', department: '研发', appIds: ['web-delta'], action: 'deny', enabled: true } });
+  assert.deepEqual((await f.service.session(employee)).applications, []);
+  const management = await f.service.members(admin);
+  const member = management.members.find(row => row.id === 'employee')!;
+  assert.deepEqual(member.appIds, ['web-delta']);
+  assert.deepEqual(member.effectiveAppIds, []);
+  assert.deepEqual(member.devices, [{ name: '真实 Mac', platform: 'darwin' }]);
+  assert.ok(!JSON.stringify(management).includes('private-device'));
+  assert.ok(!JSON.stringify(management).includes('private-model'));
+  assert.ok(!JSON.stringify(management).includes('private-version'));
+  for (const appIds of [['unknown'], 'web-hub', [null], Array(201).fill('web-hub')])
+    await assert.rejects(f.service.update(admin, 'employee', { role: 'employee', enabled: true, appIds }), BadRequestException);
+  await f.service.update(admin, 'employee', { role: 'employee', enabled: true, appIds: [] });
+  assert.deepEqual((await f.service.session(employee)).applications, []);
+  await assert.rejects(f.service.update(employee, 'employee', { role: 'employee', enabled: true, appIds: ['web-hub'] }), ForbiddenException);
+  assert.deepEqual(f.store.getUserCenterUser('employee')!.profile, profile);
+  assert.deepEqual((await f.service.session(admin)).applications.map(app => app.id), ['web-hub', 'web-night-all', 'web-compass', 'web-argus', 'web-compass-admin']);
+});

@@ -48,6 +48,9 @@ test(
       const writes = await Promise.allSettled([store.updateMinCaveWorkspace(draft), store.updateMinCaveWorkspace(draft)]);
       assert.equal(writes.filter(row => row.status === 'fulfilled').length, 1);
       assert.equal((await store.getMinCaveWorkspace('minsight')).revision, 1);
+      await store.updateMinCaveMember({ actorId: 'admin', userId: 'other', tenantKey: 'minsight', role: 'admin', enabled: true, appIds: ['web-hub'] });
+      await store.admitMinCaveMember({ userId: 'other', tenantKey: 'minsight', feishuSubject: 'minsight:ou_other' });
+      assert.deepEqual((await store.listMinCaveMembers()).find(row => row.userId === 'other')!.appIds, ['web-hub']);
       const results = await Promise.allSettled([
         store.updateMinCaveMember({
           actorId: 'admin',
@@ -83,6 +86,7 @@ test(
       const reopened = await PostgresStore.create(config);
       try {
         assert.deepEqual(await reopened.listMinCaveDevices('admin'), devices);
+        assert.deepEqual((await reopened.listMinCaveMembers()).find(row => row.userId === 'other')!.appIds, ['web-hub']);
         const workspace = await reopened.getMinCaveWorkspace('minsight');
         assert.equal(workspace.revision, 1);
         assert.equal(workspace.applications.find(row => row.id === 'web-delta')!.published, false);

@@ -8,6 +8,7 @@ export interface MinCaveMember {
   userId: string;
   tenantKey: string;
   feishuSubject: string;
+  appIds?: string[];
   firstSeenAt: string;
   lastSeenAt: string;
 }
@@ -22,6 +23,7 @@ export interface MinCaveMemberChange {
   userId: string;
   role: MinCaveRole;
   enabled: boolean;
+  appIds?: string[];
 }
 export function mincaveRole(user: UserCenterUser | undefined | null): MinCaveRole | null {
   if (user?.roleIds.includes(MINCAVE_ADMIN)) return 'admin';
@@ -107,7 +109,7 @@ export function admitMinCave(
       }
     : user;
   if (!mincaveRole(updated)) throw new ForbiddenException('MinCave 使用权限已被停用。');
-  const member = { ...input, firstSeenAt: previous?.firstSeenAt || now, lastSeenAt: now };
+  const member = { ...previous, ...input, firstSeenAt: previous?.firstSeenAt || now, lastSeenAt: now };
   return { user: updated, member };
 }
 export function changeMinCaveMember(

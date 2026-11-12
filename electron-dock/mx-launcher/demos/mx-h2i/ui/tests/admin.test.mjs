@@ -257,3 +257,13 @@ test('absent catalog supports old servers; malformed or empty catalog never rest
     assert.deepEqual(h.bridge.snapshot().applications, []);
   }
 });
+
+test('member application grants use only optional appIds and preserve legacy role-only writes', async () => {
+  const h = harness();
+  const value = { role: 'employee', enabled: true, appIds: ['web-hub'] };
+  assert.equal((await h.bridge.request({ action: 'saveMember', id: 'member-1', value })).ok, true);
+  const patch = h.calls.find(call => call.options.method === 'PATCH');
+  assert.deepEqual(JSON.parse(patch.options.body), value);
+  for (const appIds of ['web-hub', ['../admin'], [null], Array(201).fill('web-hub')])
+    assert.equal((await h.bridge.request({ action: 'saveMember', id: 'member-1', value: { ...value, appIds } })).ok, false);
+});
