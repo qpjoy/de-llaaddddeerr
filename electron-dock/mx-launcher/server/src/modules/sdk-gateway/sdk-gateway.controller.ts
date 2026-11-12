@@ -305,11 +305,14 @@ export class SdkGatewayController {
   }
 
   private async issueUserToken(body: Record<string, unknown>, sourceIp?: string) {
-    const username = nullableString(body.username) ?? nullableString(body.account) ?? nullableString(body.email);
+    const byUserId = body.username_kind === 'user_id';
+    if (body.username_kind !== undefined && !byUserId) throw new BadRequestException('Unsupported username_kind');
+    const username = byUserId ? nullableString(body.username)
+      : nullableString(body.username) ?? nullableString(body.account) ?? nullableString(body.email);
     const password = nullableString(body.password);
     if (!username || !password) throw new UnauthorizedException('username and password are required');
-    const users = await this.store.listUserCenterUsers();
-    const user = resolveUserCenterUserForLogin(users, username);
+    const user = byUserId ? await this.store.getUserCenterUser(username)
+      : resolveUserCenterUserForLogin(await this.store.listUserCenterUsers(), username);
     await this.assertOAuthAttemptRateLimit({
       grantType: 'password',
       sourceIp,

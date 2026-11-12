@@ -218,6 +218,7 @@ KUBECONFIG=/etc/kubernetes/admin.conf node scripts/k8s-login-diagnose.mjs SQB
 | 现象 | 此次证据 / 先查项 | 已有处理与边界 |
 | --- | --- | --- |
 | Node NotReady / 地址仍是 `.4` | kubelet 旧证书与当前 CA 不匹配，部分配置残留旧 IP | deploy 校验节点/CA/证书时间，按当前 API 地址修复已识别配置；不 reset 集群或更换 CA |
+| Node 已 Ready，随后个人 SSO 预检报节点或内网 IP 不匹配 | 固定 InternalIP 可由 Linux 本地路由承载，网卡地址列表可能未列出它 | 按下方步骤核对节点启动 ID 和目标地址的实际路由 |
 | `mx-launcher-db missing` | PGDATA 还在，当前 etcd 没有原 Secret | 匹配检查点时补缺失 Secret；没有原值时停止，不用随机密码初始化已有库 |
 | 员工 `invalid credentials` / 用户少了 | 本次实际连接到旧目录，SMH/SQB 不在旧库 | 先核对数据源及业务记录；不能归因于 PVC key，也不能先重置密码 |
 | 飞书 `OAuth is not configured` | 缺少原 `mx-feishu-oauth` | 本次从最新 etcd 副本提取原配置；生产 deploy 默认要求 local-password、feishu 两种登录 |
@@ -231,6 +232,30 @@ KUBECONFIG=/etc/kubernetes/admin.conf node scripts/k8s-login-diagnose.mjs SQB
 | Caddy upstream patch 失败 | 配置中有两段带 block 的 reverse_proxy | 两段一起更新并保留转发头策略；不为此重写宿主 Nginx 或抢占其端口 |
 | 错误密码也能连 PG | 当时测的是本地连接，不能证明 Service 认证链路 | 后续用 Service 连接做负向验证；没有改 `pg_hba.conf` |
 | 查询成功但 Pod IP 校验失败 | `inet_server_addr()::text` 带 `/32` 或 `/128` | 已改用 `host(inet_server_addr())` 比较裸 IP；不是重新切库的理由 |
+
+**个人 SSO 预检的只读核对。** 以下命令可在部署主机上运行。节点名取自本次日志的 `node/<名称> condition met`。最后一项只输出 Kubernetes 记录与本机的启动 ID 是否一致。
+
+```bash
+mx_kubectl=(kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=10s)
+"${mx_kubectl[@]}" get nodes -o wide
+read -r -p '本次 Ready 检查的节点名：' mx_node
+"${mx_kubectl[@]}" get node "$mx_node" -o jsonpath='{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}'
+ip -brief address show
+ip -4 route get 192.168.1.2
+mx_node_boot=$("${mx_kubectl[@]}" get node "$mx_node" -o jsonpath='{.status.nodeInfo.bootID}')
+mx_host_boot=$(cat /proc/sys/kernel/random/boot_id)
+if [[ -z "$mx_node_boot" || -z "$mx_host_boot" ]]; then
+  echo '启动 ID 核对未完成'
+elif [[ "$mx_node_boot" == "$mx_host_boot" ]]; then
+  echo '节点与本机启动 ID 一致'
+else
+  echo '节点与本机启动 ID 不一致'
+fi
+```
+
+本例的单节点上报 `InternalIP=192.168.1.2`，启动 ID 与部署主机一致。`local 192.168.1.2 dev lo src 192.168.1.2` 表示内核将这个固定地址交付本机。更新到支持本地路由核验的脚本后，可保留 `MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2`，重跑原部署命令。SSO 继续使用档案中原有的私网入口，如 `https://10.88.88.88:18443`。
+
+若输出含 `via <网关>`，流量会转发至网关。此时应核对当前主机与控制面目标。启动 ID 缺失或不一致时，应先核实 kubeconfig 和选中的节点。
 
 此前提到的 GPU 驱动问题没有被此次日志证实为根因；若宿主驱动、磁盘或硬件异常，需要单独处理，
 deploy 不承诺自动修复所有系统故障。详细实现和阶段日志见 [重启恢复手册](docs/31-internal-reboot-recovery.md)。

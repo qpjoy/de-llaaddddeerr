@@ -5,11 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { spawnSync } from 'node:child_process';
-import { inspectPorts, prepareIdentity, probePort, selectOrigin } from './identity-on.mjs';
+import { hasLocalIPv4Route, inspectPorts, prepareIdentity, probePort, selectOrigin } from './identity-on.mjs';
 import { resources } from './identity-deploy.mjs';
 
-const nodes = [{ metadata: { name: 'internal' }, status: { addresses: [{ type: 'InternalIP', address: '192.168.1.2' }] } }];
+const bootId = '558a5d15-fc0c-4f86-8b59-c599f3330084';
+const nodes = [{ metadata: { name: 'internal' }, status: {
+  addresses: [{ type: 'InternalIP', address: '192.168.1.2' }], nodeInfo: { bootID: bootId }
+} }];
 const interfaces = { eth0: [{ family: 'IPv4', address: '192.168.1.2' }], wg0: [{ family: 'IPv4', address: '10.88.88.88' }] };
+const changedInterfaces = { ...interfaces, eth0: [{ family: 'IPv4', address: '192.168.1.6' }] };
 const baseUrl = 'http://10.88.88.88:18090';
 const origin = 'https://10.88.88.88:18443';
 function fixture(t) {
@@ -39,6 +43,45 @@ test('address discovery prefers the current local gateway, retains issuer, and r
   assert.throws(() => selectOrigin({ ...input, nodes: [...nodes, ...nodes] }), /单节点/);
 });
 
+test('only a successful ip route lookup for the exact local destination proves ownership', () => {
+  const address = '192.168.1.2';
+  const local = 'local 192.168.1.2 dev lo src 192.168.1.2 uid 0\n    cache <local>';
+  const lookup = result => hasLocalIPv4Route(address, (command, args) => {
+    assert.equal(command, 'ip');
+    assert.deepEqual(args, ['-4', 'route', 'get', address]);
+    return result;
+  });
+  assert.equal(lookup({ status: 0, stdout: local }), true);
+  assert.equal(lookup({ status: 0, stdout: '192.168.1.2 via 192.168.1.1 dev eth0 src 192.168.1.6' }), false);
+  assert.equal(lookup({ status: 0, stdout: 'local 192.168.1.20 dev lo src 192.168.1.20' }), false);
+  assert.equal(lookup({ status: 1, stdout: local }), false);
+  assert.equal(lookup({ status: null, error: new Error('ip is unavailable') }), false);
+});
+
+test('a node IP missing from interfaces requires both the same boot and a kernel-local route', () => {
+  const node = { ...nodes[0], metadata: { name: 'mx-internal-server' } };
+  const input = { nodes: [node], interfaces: changedInterfaces, baseUrl, bootId, hasLocalRoute: ip => ip === '192.168.1.2' };
+  for (const override of [
+    { hasLocalRoute: () => false },
+    { bootId: '975c17b9-0196-4e50-91ea-04a5deaa6ca3' },
+    { bootId: '' },
+    { nodes: [{ ...node, status: { addresses: node.status.addresses } }] }
+  ]) {
+    assert.throws(() => selectOrigin({ ...input, profile: { origin }, ...override }), error => {
+      assert.match(error.message, /mx-internal-server/);
+      assert.match(error.message, /192\.168\.1\.2/);
+      assert.match(error.message, /本机|宿主机/);
+      return true;
+    });
+  }
+  assert.throws(() => selectOrigin({ ...input, nodes: [] }), /单节点/);
+  assert.throws(() => selectOrigin({ ...input, nodes: [node, node] }), /单节点/);
+  assert.equal(selectOrigin(input).origin, origin, 'fresh install prefers the existing SSO gateway');
+  const fixedOrigin = 'https://192.168.1.2:18443';
+  assert.equal(selectOrigin({ ...input, profile: { origin: fixedOrigin } }).origin, fixedOrigin);
+  assert.throws(() => selectOrigin({ ...input, profile: { origin: 'https://192.168.1.99:18443' } }), /不在本机/);
+});
+
 test('on creates one durable profile after checks; retry and subsequent deploy keep all credentials', async t => {
   const f = fixture(t); const probes = []; const logs = [];
   const options = { ...f, enable: true, probe: async (...args) => probes.push(args), log: line => logs.push(line) };
@@ -53,8 +96,11 @@ test('on creates one durable profile after checks; retry and subsequent deploy k
   f.live.set('pods', [{ metadata: { namespace: 'mx-internal-shadow', name: 'identity-pod', ownerReferences: [{ kind: 'ReplicaSet', controller: true, uid: 'identity-rs' }] },
     spec: { nodeName: 'internal', containers: live.deployment.spec.template.spec.containers }, status: { phase: 'Running' } }]);
   assert.deepEqual(await prepareIdentity({ ...options, enable: false }), p, 'ordinary deploy maintains the profile');
+  const fixedAddressPreflight = { ...options, enable: false, interfaces: changedInterfaces, bootId,
+    hasLocalRoute: ip => ip === '192.168.1.2' };
+  assert.deepEqual(await prepareIdentity(fixedAddressPreflight), p, 'preflight keeps the deployed profile when the fixed node IP is kernel-local');
   assert.equal(readFileSync(f.file, 'utf8'), bytes);
-  assert.deepEqual(probes, [[origin, false], [origin, false], [origin, true]]);
+  assert.deepEqual(probes, [[origin, false], [origin, false], [origin, true], [origin, true]]);
   assert.ok(!logs.join('').includes(p.clientSecret));
   await assert.rejects(prepareIdentity({ ...options, requested: 'https://192.168.1.2:18443' }), /迁移/);
   assert.equal(readFileSync(f.file, 'utf8'), bytes);

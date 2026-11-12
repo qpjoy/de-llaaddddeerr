@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Called inside the production deploy lock, before image build or workload changes.
 import { networkInterfaces } from 'node:os';
-import { createConnection, createServer } from 'node:net';
-import { writeFileSync } from 'node:fs';
+import { createConnection, createServer, isIPv4 } from 'node:net';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROFILE, initializeProfile, internalOrigin, readProfile, repairBootstrapCa } from './identity-profile.mjs';
@@ -12,13 +13,38 @@ function privateAddress(address) {
   try { internalOrigin(`https://${address}:18443`); return true; } catch { return false; }
 }
 
-export function selectOrigin({ profile, requested, interfaces, nodes, baseUrl }) {
+function localBootId() {
+  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); }
+  catch { return null; }
+}
+
+export function hasLocalIPv4Route(address, run = spawnSync) {
+  if (!isIPv4(address)) return false;
+  const result = run('ip', ['-4', 'route', 'get', address], { encoding: 'utf8', timeout: 3000 });
+  if (result.status !== 0 || !result.stdout) return false;
+  const [type, destination] = result.stdout.trim().split(/\s+/, 2);
+  return type === 'local' && destination === address;
+}
+
+export function selectOrigin({ profile, requested, interfaces, nodes, baseUrl, bootId, hasLocalRoute = hasLocalIPv4Route }) {
   const addresses = new Set(Object.values(interfaces).flat().filter(row =>
     (row.family === 'IPv4' || row.family === 4) && privateAddress(row.address)).map(row => row.address));
   // Production recovery targets a local single-node cluster; never prepare an
   // address on this host for a different kubectl context or another cluster node.
-  if (nodes.length !== 1 || !nodes[0].status?.addresses?.some(row => row.type === 'InternalIP' && addresses.has(row.address))) {
-    throw new Error('身份自动开启要求当前主机的单节点集群；请检查节点内网 IP 与 kubeconfig');
+  if (nodes.length !== 1) {
+    throw new Error(`身份部署要求单节点集群，当前 kubeconfig 返回 ${nodes.length} 个节点；请核对部署目标`);
+  }
+  const internalIps = (nodes[0].status?.addresses ?? []).filter(row => row.type === 'InternalIP').map(row => row.address);
+  // Linux can own the node's fixed IP via a local route without listing it on a NIC.
+  // Only trust that route for the node reporting this host's current boot.
+  if (bootId && bootId === nodes[0].status?.nodeInfo?.bootID) {
+    for (const ip of internalIps) {
+      if (!addresses.has(ip) && isIPv4(ip) && privateAddress(ip) && hasLocalRoute(ip)) addresses.add(ip);
+    }
+  }
+  const localNodeIps = internalIps.filter(ip => addresses.has(ip));
+  if (!localNodeIps.length) {
+    throw new Error(`无法确认节点 ${nodes[0].metadata.name} 的 InternalIP（${internalIps.join(', ') || '未上报'}）属于当前主机；请核对本机网卡、节点启动 ID 和 ip -4 route get 的本地路由`);
   }
   let origin = profile?.origin;
   if (requested) {
@@ -29,8 +55,7 @@ export function selectOrigin({ profile, requested, interfaces, nodes, baseUrl })
   if (!origin) {
     let gateway;
     try { gateway = new URL(baseUrl).hostname; } catch { /* A fresh install may have no ConfigMap yet. */ }
-    const nodeAddresses = nodes[0].status.addresses.filter(row => row.type === 'InternalIP' && addresses.has(row.address));
-    const address = addresses.has(gateway) ? gateway : nodeAddresses.length === 1 ? nodeAddresses[0].address : null;
+    const address = addresses.has(gateway) ? gateway : localNodeIps.length === 1 ? localNodeIps[0] : null;
     if (!address) throw new Error('无法确定唯一的内网地址；请使用 ops identity on https://本机内网IP:18443');
     origin = internalOrigin(`https://${address}:18443`);
   }
@@ -79,7 +104,7 @@ export async function probePort(origin, managedPort = false) {
 }
 
 export async function prepareIdentity({ enable = false, requested, file = PROFILE, execute = run,
-  interfaces = networkInterfaces(), probe = probePort, log = console.log } = {}) {
+  interfaces = networkInterfaces(), bootId = localBootId(), hasLocalRoute = hasLocalIPv4Route, probe = probePort, log = console.log } = {}) {
   let p;
   try { p = readProfile(file); }
   catch {
@@ -98,7 +123,7 @@ export async function prepareIdentity({ enable = false, requested, file = PROFIL
   const get = args => JSON.parse(execute([...args, '-o', 'json']) || '{}');
   const nodes = get(['get', 'nodes']).items ?? [];
   const config = get(['-n', NS, 'get', 'configmap', 'mx-launcher-internal-config', '--ignore-not-found']);
-  const selected = selectOrigin({ profile: p, requested, interfaces, nodes, baseUrl: config.data?.MX_PUBLIC_BASE_URL });
+  const selected = selectOrigin({ profile: p, requested, interfaces, nodes, baseUrl: config.data?.MX_PUBLIC_BASE_URL, bootId, hasLocalRoute });
   const pods = get(['get', 'pods', '--all-namespaces']).items ?? [];
   const replicaSets = deployment || publicDeployment ? get(['-n', NS, 'get', 'replicasets']).items ?? [] : [];
   const managedPort = inspectPorts({ ...selected, pods, replicaSets, deployment });

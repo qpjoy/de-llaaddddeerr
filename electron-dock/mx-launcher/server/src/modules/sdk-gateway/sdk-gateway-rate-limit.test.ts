@@ -73,7 +73,8 @@ test('password aliases share one canonical user limiter before password verifica
   await assert.rejects(
     harness.controller.token({
       grant_type: 'password',
-      username: 'alice@example.com',
+      username: activeUser.userId,
+      username_kind: 'user_id',
       password: 'wrong'
     }, '203.0.113.8'),
     (error) => statusOf(error) === 429
@@ -189,6 +190,7 @@ function controllerHarness(): {
   let rateLimitConsumes = 0;
   const store = {
     listUserCenterUsers: async () => [activeUser],
+    getUserCenterUser: async (id: string) => id === activeUser.userId ? activeUser : null,
     consumeAuthenticationRateLimits: async (inputs: AuthenticationRateLimitInput[]) => {
       rateLimitConsumes += 1;
       return inputs.map((input) => {

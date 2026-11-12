@@ -85,6 +85,32 @@ test('SDK Gateway password login returns the exact-case user principal', async (
   );
 });
 
+test('a bound user ID authenticates with its current password even when another user has that legacy ID', async () => {
+  const store = new MemoryStore(loadConfig());
+  store.createUserCenterUser({
+    userId: 'legacy-owner', account: 'legacy-account', externalIds: { legacyUserId: '1' }, password: 'legacy-password'
+  });
+  store.createUserCenterUser({ userId: '1', account: 'test2', password: 'previous-password' });
+  store.updateUserCenterPassword({ userId: '1', password: 'updated-password' });
+  const controller = new SdkGatewayController(store, {} as FeishuAuthService);
+  const login = { grant_type: 'password', username: '1', password: 'updated-password' };
+  const bound = { ...login, username_kind: 'user_id' };
+
+  assert.equal((await controller.token(bound)).token.subject, 'user:1');
+  assert.equal((await controller.token({ ...login, username: 'test2', appId: 'mx-h2i' })).token.subject, 'user:1');
+  for (const invalid of [
+    login, // Existing clients still reject ambiguous login aliases.
+    { ...bound, password: 'previous-password' },
+    { ...bound, password: 'legacy-password' },
+    { ...bound, username: 'test2' }, // An account name must never resolve as a bound ID.
+    { ...bound, username: '', account: '1' }
+  ]) {
+    await assert.rejects(controller.token(invalid), (error) => statusOf(error) === 401);
+  }
+  await assert.rejects(controller.token({ ...login, username: 'test2', username_kind: 'unknown' }),
+    (error) => statusOf(error) === 400);
+});
+
 test('SDK Gateway password update requires an active Bearer writer', async () => {
   const harness = controllerHarness(activeAuth(writerPrincipal, ['sdk.user.write']));
 

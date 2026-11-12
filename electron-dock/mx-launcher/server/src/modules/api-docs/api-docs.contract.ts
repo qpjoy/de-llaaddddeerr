@@ -672,7 +672,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '获取用户或服务账号 token',
-        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。开发者服务账号使用数据库中的 scrypt verifier 校验账号独立 client secret；明文只在创建或轮换时返回一次。全局 Internal ops token 仅保留给内置 svc_sdk_gateway 的迁移兼容，禁止分发。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。password 可传 appId 指明应用（MX-H2I 使用 mx-h2i）；身份验证后若在该用户 deniedAppIds 中则返回 403 / app_access_denied，public 或管理员通行不能覆盖明确禁止。带应用上下文的令牌在 introspection 时重验禁止名单；不传 appId 的旧通用身份令牌保持兼容，资源入口仍必须验证实际目标应用。',
+        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。开发者服务账号使用数据库中的 scrypt verifier 校验账号独立 client secret；明文只在创建或轮换时返回一次。全局 Internal ops token 仅保留给内置 svc_sdk_gateway 的迁移兼容，禁止分发。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。已绑定 MX 用户的服务端可在 password 请求中传 username_kind=user_id，username 填绑定的规范 userId，按该 ID 精确验密。省略 username_kind 时按现有账号、邮箱和历史标识解析，同名冲突返回 401。password 可传 appId 指明应用（MX-H2I 使用 mx-h2i）；身份验证后若在该用户 deniedAppIds 中则返回 403 / app_access_denied，public 或管理员通行不能覆盖明确禁止。带应用上下文的令牌在 introspection 时重验禁止名单；不传 appId 的旧通用身份令牌保持兼容，资源入口仍必须验证实际目标应用。',
         operationId: 'issueSdkToken',
         routeId: 'sdk.oauth.token',
         auth: 'public',
