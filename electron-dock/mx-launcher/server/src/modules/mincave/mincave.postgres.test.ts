@@ -44,6 +44,10 @@ test(
         });
         await service.session(`Bearer ${issued.token}`);
       }
+      const draft = { actorId: 'admin', tenantKey: 'minsight', revision: 0, kind: 'application' as const, id: 'web-delta', value: { name: 'Delta', url: 'https://delta.example.test/', category: '中台应用', published: false } };
+      const writes = await Promise.allSettled([store.updateMinCaveWorkspace(draft), store.updateMinCaveWorkspace(draft)]);
+      assert.equal(writes.filter(row => row.status === 'fulfilled').length, 1);
+      assert.equal((await store.getMinCaveWorkspace('minsight')).revision, 1);
       const results = await Promise.allSettled([
         store.updateMinCaveMember({
           actorId: 'admin',
@@ -79,6 +83,9 @@ test(
       const reopened = await PostgresStore.create(config);
       try {
         assert.deepEqual(await reopened.listMinCaveDevices('admin'), devices);
+        const workspace = await reopened.getMinCaveWorkspace('minsight');
+        assert.equal(workspace.revision, 1);
+        assert.equal(workspace.applications.find(row => row.id === 'web-delta')!.published, false);
       } finally {
         reopened.onModuleDestroy();
         await Reflect.get(reopened, 'dataSource').destroy();

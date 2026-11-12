@@ -1,3 +1,4 @@
+import { defaultMinCaveWorkspace, changeMinCaveWorkspace, type MinCaveWorkspace, type MinCaveWorkspaceChange } from '../lib/mincave-workspace.js';
 import { mincaveDeviceKey, mergeMinCaveDevices, observeMinCaveDevice, type MinCaveDevice, type MinCaveDeviceInput } from '../lib/mincave-devices.js';
 import { admitMinCave, changeMinCaveMember, assertMinCaveTransition, type MinCaveMember, type MinCaveAdmission, type MinCaveMemberChange } from '../lib/mincave-access.js';
 import type { SystemSubscriptionPublication } from '../types.js';
@@ -906,6 +907,18 @@ export class MemoryStore implements PlatformStore {
     for (const row of observeMinCaveDevice(userId, device, this.listMinCaveDevices(userId))) {
       this.mincaveDevices.set(mincaveDeviceKey(userId, row.deviceId), structuredClone(row));
     }
+  }
+
+  private mincaveWorkspaces = new Map<string, MinCaveWorkspace>();
+  getMinCaveWorkspace(tenantKey: string): MinCaveWorkspace {
+    return structuredClone(this.mincaveWorkspaces.get(tenantKey) || defaultMinCaveWorkspace());
+  }
+  updateMinCaveWorkspace(input: MinCaveWorkspaceChange): MinCaveWorkspace {
+    const next = changeMinCaveWorkspace(this.getMinCaveWorkspace(input.tenantKey), input, [...this.users.values()], this.listMinCaveMembers());
+    this.mincaveWorkspaces.set(input.tenantKey, next);
+    this.recordAudit({ eventType: `mincave.${input.kind}.updated`, actorKind: 'user', userId: input.actorId,
+      metadata: { revision: next.revision, id: input.id || (input.kind === 'application' ? next.applications : next.policies).at(-1)!.id } });
+    return structuredClone(next);
   }
 
   listMinCaveMembers(): MinCaveMember[] { return structuredClone([...this.mincaveMembers.values()]); }

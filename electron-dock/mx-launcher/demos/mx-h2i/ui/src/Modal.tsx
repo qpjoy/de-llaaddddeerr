@@ -25,7 +25,7 @@ export default function Modal({
       ref={ref}
       className="mincave-modal"
       aria-label={title}
-      onCancel={onClose}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

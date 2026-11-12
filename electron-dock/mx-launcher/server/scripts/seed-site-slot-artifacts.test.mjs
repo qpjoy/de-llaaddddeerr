@@ -338,6 +338,7 @@ test('image materialization never preserves runtime subscription secrets', () =>
       assert.match(caddy, /@mincaveDevices \{\s+method GET\s+path \/internal\/v1\/mincave\/devices/);
       assert.match(caddy, /@mincaveMembers \{\s+method GET\s+path \/internal\/v1\/mincave\/members/);
       assert.match(caddy, /@mincaveMemberUpdate \{\s+method PATCH/);
+      assert.match(caddy, /@mincaveWorkspaceUpdate \{\s+method PATCH\s+path \/internal\/v1\/mincave\/workspace/);
       assert.doesNotMatch(caddy, /path \/internal\/v1\/mincave\/\*/);
     }
     const value = readManifest(files.runtime);

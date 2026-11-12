@@ -89,6 +89,11 @@ export const idleFixture = () =>
 export function adminFixture() {
   return {
     administratorId: 'qa-employee',
+    workspace: { revision: 0, policies: [], applications: [
+      { id: 'web-delta', name: 'Delta', category: '中台应用', url: 'https://delta.example.test/', published: true, icon: 'triangle', color: 'purple' },
+      { id: 'web-hub', name: 'Hub', category: '中台应用', url: 'https://hub.example.test/', published: true, icon: 'layers', color: 'blue' },
+      { id: 'web-compass', name: 'Compass', category: '产品应用', url: 'https://compass.example.test/', published: false, icon: 'compass', color: 'mint' },
+    ] },
     members: [
       {
         id: 'usr-1',

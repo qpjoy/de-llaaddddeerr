@@ -33,6 +33,11 @@ class MinCaveController {
   members(@Headers('authorization') authorization?: string) {
     return this.service.members(authorization);
   }
+  @Patch('workspace')
+  @Header('Cache-Control', 'no-store')
+  workspace(@Headers('authorization') authorization: string | undefined, @Body() body: unknown) {
+    return this.service.updateWorkspace(authorization, body);
+  }
   @Patch('members/:userId')
   @Header('Cache-Control', 'no-store')
   update(
