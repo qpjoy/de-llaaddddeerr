@@ -816,3 +816,23 @@ test('member list matches prototype fields with real devices and permissions; me
     assert.deepEqual(h.errors, []);
   } finally { h.dom.window.close(); }
 });
+
+test('macOS reserves the native titlebar without duplicate HTML controls; Windows controls retain their IPC actions', async () => {
+  for (const runtime of [idleFixture(), runtimeFixture()]) {
+    const h = await mount(runtime);
+    try {
+      assert.ok(h.document.querySelector('.mincave-window-bar[data-window-drag="true"]'));
+      assert.equal(h.document.querySelector('[data-window-control]'), null);
+      assert.deepEqual(h.errors, []);
+    } finally { h.dom.window.close(); }
+  }
+  const h = await mount(runtimeFixture(), true, { platform: 'win32' });
+  try {
+    assert.deepEqual([...h.document.querySelectorAll('[data-window-control]')].map(button => button.dataset.windowControl), ['close', 'minimize', 'zoom']);
+    await h.click('最小化窗口');
+    await h.click('放大或还原窗口');
+    await h.click('关闭窗口');
+    assert.deepEqual(h.calls, ['window:minimize', 'window:zoom', 'window:close']);
+    assert.deepEqual(h.errors, []);
+  } finally { h.dom.window.close(); }
+});

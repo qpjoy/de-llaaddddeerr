@@ -95,3 +95,33 @@ test('unavailable MinCave authorization never triggers a background recovery or 
   assert.equal(result.skipped, true);
   await assert.rejects(context.repairSystemNetworkForRuntime('manual-repair'));
 });
+
+test('native macOS titlebar is enabled only for MinCave while legacy and other platforms stay frameless', () => {
+  const start = source.indexOf('function createMainWindow()');
+  const end = source.indexOf('\nfunction registerIpc()', start);
+  assert.ok(start > 0 && end > start);
+  for (const [platform, enabled, native] of [['darwin', true, true], ['darwin', false, false], ['win32', true, false], ['linux', true, false]]) {
+    let options;
+    class Window {
+      constructor(value) { options = value; this.webContents = { setWindowOpenHandler() {} }; }
+      removeMenu() {}
+      on() {}
+      once() {}
+      loadFile() {}
+      getBounds() { return { width: 1120, height: 760 }; }
+    }
+    const context = vm.createContext({
+      BrowserWindow: Window, MINCAVE_UI_ENABLED: enabled, process: { platform }, mainWindow: null,
+      windowBoundsForMode: () => ({ width: 1120, height: 760 }),
+      windowMinimumSizeForMode: () => ({ width: 520, height: 480 }),
+      productIconPath: () => '/test/icon', attachWindowBoundsTracking() {}, rememberWindowBoundsForMode() {},
+      path: { join: (...parts) => parts.join('/') }, __dirname: '/test',
+    });
+    vm.runInContext(source.slice(start, end) + '\ncreateMainWindow();', context);
+    assert.equal(options.frame, native, `${platform}/${enabled}`);
+    assert.equal(options.titleBarStyle, native ? 'hiddenInset' : undefined);
+    assert.equal(options.resizable, enabled);
+    assert.equal(options.webPreferences.contextIsolation, true);
+    assert.equal(options.webPreferences.nodeIntegration, false);
+  }
+});
