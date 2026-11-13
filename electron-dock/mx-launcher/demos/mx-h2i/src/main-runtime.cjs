@@ -602,6 +602,7 @@ function createMainWindow() {
   currentWindowMode = 'launcher';
   const initialBounds = windowBoundsForMode('launcher');
   const initialMinimum = windowMinimumSizeForMode('launcher', initialBounds);
+  const nativeMacControls = MINCAVE_UI_ENABLED && process.platform === 'darwin';
   mainWindow = new BrowserWindow({
     x: initialBounds.x,
     y: initialBounds.y,
@@ -613,7 +614,8 @@ function createMainWindow() {
     title: MINCAVE_UI_ENABLED ? 'MinCave' : 'MX-H2I',
     icon: productIconPath(),
     backgroundColor: MINCAVE_UI_ENABLED ? '#f7f8fd' : '#242734',
-    frame: false,
+    frame: nativeMacControls,
+    ...(nativeMacControls ? { titleBarStyle: 'hiddenInset' } : {}),
     hasShadow: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),

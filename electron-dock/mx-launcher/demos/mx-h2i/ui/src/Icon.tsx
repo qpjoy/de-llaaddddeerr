@@ -1,4 +1,6 @@
 export type IconName =
+  | 'minus'
+  | 'window-expand'
   | 'home'
   | 'device'
   | 'settings'
@@ -22,6 +24,8 @@ export type IconName =
   | 'refresh'
   | 'x';
 const paths: Record<IconName, string[]> = {
+  minus: ['M5 12h14'],
+  'window-expand': ['M9 3H3v6', 'm3 3 6 6', 'M15 21h6v-6', 'm21 21-6-6'],
   refresh: ['M20 7v5h-5', 'M4 17v-5h5', 'M6.1 7a7 7 0 0 1 11.5-1L20 9', 'M4 15l2.4 3A7 7 0 0 0 17.9 17'],
   bell: ['M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9', 'M10 21h4'],
   users: [

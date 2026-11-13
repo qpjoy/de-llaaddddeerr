@@ -14,19 +14,22 @@ import UpdateNotifications, { hasUpdateNotification } from './UpdateNotification
 type Page = 'home' | 'devices' | 'settings' | 'updates' | 'advanced' | 'apps';
 
 function WindowControls() {
+  const nativeMacControls = document.documentElement.dataset.platform === 'darwin';
   return (
     <div className="mincave-window-bar" data-window-drag="true">
-      <div className="mincave-window-controls">
-        <button data-window-control="close" aria-label="关闭窗口">
-          <span>×</span>
-        </button>
-        <button data-window-control="minimize" aria-label="最小化窗口">
-          <span>−</span>
-        </button>
-        <button data-window-control="zoom" aria-label="放大或还原窗口">
-          <span>□</span>
-        </button>
-      </div>
+      {!nativeMacControls && (
+        <div className="mincave-window-controls">
+          <button type="button" data-window-control="close" aria-label="关闭窗口">
+            <Icon name="x" size={8} />
+          </button>
+          <button type="button" data-window-control="minimize" aria-label="最小化窗口">
+            <Icon name="minus" size={8} />
+          </button>
+          <button type="button" data-window-control="zoom" aria-label="放大或还原窗口">
+            <Icon name="window-expand" size={8} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
