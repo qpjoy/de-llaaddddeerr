@@ -108,38 +108,46 @@ html[data-platform='win32'] .mincave-topbar {
 .mincave-window-controls {
   display: flex;
   gap: 8px;
-  padding: 17px 18px;
+  padding: 16px 18px;
   width: max-content;
   -webkit-app-region: no-drag;
 }
 .mincave-window-controls button {
-  height: 11px;
-  width: 11px;
+  height: 12px;
+  width: 12px;
+  flex: 0 0 auto;
   padding: 0;
   display: grid;
   place-items: center;
   border-radius: 50%;
-  border: 1px solid #bbc4d3;
-  background: #dbe0e9;
+  border: 1px solid;
+  color: #4b211d;
 }
-.mincave-window-controls span {
+.mincave-window-controls button[data-window-control='close'] {
+  background: #ff5f57;
+  border-color: #e0443e;
+}
+.mincave-window-controls button[data-window-control='minimize'] {
+  background: #febc2e;
+  border-color: #dea123;
+  color: #6b4700;
+}
+.mincave-window-controls button[data-window-control='zoom'] {
+  background: #28c840;
+  border-color: #1aab29;
+  color: #075313;
+}
+.mincave-window-controls svg {
   opacity: 0;
-  font: 10px/10px sans-serif;
+  stroke-width: 3;
+  pointer-events: none;
 }
-.mincave-window-controls:hover span {
-  opacity: 0.7;
+.mincave-window-controls:hover svg,
+.mincave-window-controls:focus-within svg {
+  opacity: 1;
 }
-.mincave-window-controls:hover button:nth-child(1) {
-  background: #ed939d;
-  border-color: #e78792;
-}
-.mincave-window-controls:hover button:nth-child(2) {
-  background: #e8c36f;
-  border-color: #dcaf5b;
-}
-.mincave-window-controls:hover button:nth-child(3) {
-  background: #8ecba6;
-  border-color: #80ba98;
+.mincave-window-controls button:active {
+  filter: brightness(0.88);
 }
 .mincave-brand {
   display: flex;
