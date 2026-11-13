@@ -198,7 +198,10 @@ The direct enrichment policy is:
 - `enrichConcurrency`, comment controls and comment fan-out remain on the historical Night-All route;
 - the default covers all 20 candidates in one search page and the hard limit is also 20;
 - comments are never folded into this enrichment budget;
-- an exact fresh detail snapshot is used before provider admission and creates no provider-call row;
+- an exact fresh detail snapshot is used before provider admission and creates no provider-call row.
+  Buffered standard search also checks later preview candidates in the delivered page for fresh details
+  belonging to the same consumer. Live lookups remain limited to the first configured candidates.
+  Setting the enrichment limit to zero disables both steps.
 - every actual search or detail dispatch consumes the common TikHub provider-rate budget.
 
 The response and canonical mapping retain one of these body states per item:
@@ -216,9 +219,10 @@ Search snapshots use `MX_INSIGHT_TIKHUB_SEARCH_FRESH_TTL_MS` (5 minutes by defau
 `MX_INSIGHT_TIKHUB_SEARCH_STALE_TTL_MS` (24 hours by default). Automatic preview repair uses
 `MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS=20` and
 `MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY=2`. The former closes the known 60-character gap for an entire
-20-item page when detail evidence is available; the shared provider token bucket, bounded workers and request
-deadline still protect QPS and may return an explicitly partial result instead of silently claiming complete
-text. Existing note-detail snapshots continue to use `MX_INSIGHT_TIKHUB_FRESH_TTL_MS` (24 hours by default) and
+20-item page when detail evidence is available. Within one request, workers use the available enrichment
+slots in the current process. With one slot they process candidates in sequence. The shared provider token
+bucket and request deadline can still yield a partial result. Existing note-detail snapshots use
+`MX_INSIGHT_TIKHUB_FRESH_TTL_MS` (24 hours by default) and
 `MX_INSIGHT_TIKHUB_STALE_TTL_MS` (30 days by default).
 
 ## 5. Multi-call ledger and provider admission

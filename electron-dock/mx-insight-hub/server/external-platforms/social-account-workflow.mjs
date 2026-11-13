@@ -46,14 +46,14 @@ function publicPayload(value, credential) {
     : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).map(([key, nested]) => [redact(key), visit(nested)])) : item
   return visit(value)
 }
-function archiveObjects(result, step, callId) {
+function archiveObjects(result, step, callId, marketplace = step.platform) {
   if (result.archiveObjects?.length) return result.archiveObjects.map(({ rawItem, rawPayloadSha256, ...row }) => ({ ...row,
     payloadSha256: row.payloadSha256 ?? rawPayloadSha256, rawPayload: row.rawPayload ?? rawItem ?? null }))
   const archive = result.responseArchive
   if (!archive?.payloadSha256) return []
-  return [{ kind: 'response', marketplace: step.platform, endpointVersion: step.endpointVersion,
+  return [{ kind: 'response', marketplace, endpointVersion: step.endpointVersion,
     capturedDate: new Date(archive.capturedAt).toISOString().slice(0, 10),
-    archivePath: `${step.provider}/${step.platform}/${descriptor(step).operation}/${callId}`,
+    archivePath: `${step.provider}/${marketplace}/${descriptor(step).operation}/${callId}`,
     envelopePointer: '$', sourceKey: callId, payloadSha256: archive.payloadSha256, rawPayload: archive.rawPayload }]
 }
 function persistedEvidence(source) {
@@ -227,7 +227,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           // Older RapidAPI Threads manifests recorded missing pagination
           // evidence as false. Keep the original hash check for all rows,
           // profiles, and every other part of the archived projection.
-          if (request.platform !== 'threads' || provider !== 'rapidapi' || projected.providerPage.hasMore !== null
+          if (request.platform !== 'threads' || provider !== 'rapidapi' || request.routeProvider || projected.providerPage.hasMore !== null
             || hash({ ...projected, providerPage: { ...projected.providerPage, hasMore: false } }) !== job.buffer.projectionHash) throw unavailable()
         }
         consume(projected, { ...page, callId: job.buffer.callId }, job, index, step, job.buffer.offset, job.buffer.hash)
@@ -239,7 +239,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         if (bytes + (provider === 'rapidapi' ? 4194304 : 8388608) > 12582912) { stop('archive_byte_limit'); break }
         if (!enoughTime()) { stop('deadline'); break }
         const step = buildStep(index, job), expected = descriptor(step)
-        const callDelivery = { ...delivery, operation: expected.operation }
+        const listingMarketplace = workflowKind === 'threads-search' && request.routeProvider ? step.marketplace : undefined
+        const marketplace = listingMarketplace ?? request.platform
+        const callDelivery = { ...delivery, operation: expected.operation, ...(listingMarketplace ? { marketplace } : {}) }
         const token = hash({ endpoint: step.endpointKey, cursor: job.providerCursor, identity: job.resolvedIdentity })
         if (tokens.has(token)) {
           job.done = true
@@ -253,10 +255,10 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
           await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
           await assertCommentRouteEnabled(gateway.strategySearchRoutingStore, request)
-          const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, request.platform)])
+          const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, marketplace)])
           if (provider === 'tikhub' || isHubRateLimitExempt(context)) states[0] = internalCircuitState(gateway.usageStore, context, states[0])
           const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
-            message: 'Account acquisition is temporarily unavailable', marketplace: request.platform })
+            message: 'Account acquisition is temporarily unavailable', marketplace })
           if (blocked) throw blocked
           const credential = await resolveCredential()
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Account acquisition is unavailable')
@@ -299,7 +301,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           currentEvidence = null
           currentCall = await store.beginProviderCall({ ...delivery, operation: expected.operation,
             contractVersion: expected.contractVersion, endpointKey: expected.endpointKey, endpointVersion: expected.endpointVersion,
-            marketplace: request.platform, callOrdinal: calls, callRole: calls ? 'enrichment' : 'primary',
+            marketplace, callOrdinal: calls, callRole: calls ? 'enrichment' : 'primary',
             dispatchFingerprint: delivery.fingerprint, costControl: cost.costMinor === 0 ? null : cost,
             costReservationId: costReservation.id, operationControl: control })
           // The username lookup now owns the outcome.
@@ -336,7 +338,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
                 ...(accountNotFound ? {} : { reason: evidence.accountReason || 'unavailable' }) } : {}), outcome: evidence.outcome, retryable: false }
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
-              ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id) }
+              ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id, listingMarketplace) }
             // TikHub's Zhihu profile endpoint can fail while its content
             // endpoints still answer (2026-11-08: fetch_user_info returned 400
             // "不扣费" for every input, including its docs example, while
@@ -395,7 +397,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           currentEvidence = { callId: currentCall.id, delivery: callDelivery, outcome: 'succeeded', billed, httpStatus: 200, businessCode,
             costMinor: cost.costMinor, costKind: cost.costKind, currency: cost.currency,
             latencyMs: Math.round(performance.now() - callStart), itemCount: sourceRows(projected, request.operation).length,
-            ...persistedEvidence(result), archiveObjects: archiveObjects(result, step, currentCall.id), affectsCircuit: false }
+            ...persistedEvidence(result), archiveObjects: archiveObjects(result, step, currentCall.id, listingMarketplace), affectsCircuit: false }
           if (!receipt || receipt.bodySize > 8388608) throw unavailable()
           await store.stageProviderEvidence(currentEvidence)
           await store.finishProviderStep({ ...currentEvidence, ingestJob: { payload: { kind: 'external-platform-result', providerKey: provider,

@@ -105,7 +105,7 @@ const postTime = post => {
 
 // The flat row shared by content search and account content, using the field
 // names the other platforms' rows already expose to callers.
-export function threadsPostRow(post, capturedAt) {
+export function threadsPostRow(post, capturedAt, missingReplyFlag = false) {
   const id = postPk(post)
   if (!id) fail('post_identity')
   const user = object(post.user) ? post.user : {}, info = object(post.text_post_app_info) ? post.text_post_app_info : {}
@@ -122,7 +122,8 @@ export function threadsPostRow(post, capturedAt) {
     quote_count: count(info.quote_count), view_count: null, bookmark_count: null, collect_count: null,
     cover_url: cover, image_urls: JSON.stringify(images), video_urls: JSON.stringify(videos),
     media: { images: images.map(value => ({ url: value, type: 'image' })), videos: videos.map(value => ({ url: value, playUrl: value })) },
-    metadata: JSON.stringify({ code: typeof post.code === 'string' ? post.code : null, isReply: info.is_reply === true,
+    metadata: JSON.stringify({ code: typeof post.code === 'string' ? post.code : null,
+      isReply: typeof info.is_reply === 'boolean' ? info.is_reply : missingReplyFlag,
       replyToUsername: typeof info.reply_to_author?.username === 'string' ? info.reply_to_author.username : null }) }
 }
 
@@ -145,6 +146,36 @@ export function parseThreadsSearchPage(payload, { provider, currentCursor = null
   // Later items of a thread are the author's continuation, not search matches.
   const rows = distinct(entries.map(entry => threadPosts(entry)[0]).filter(object).map(post => threadsPostRow(post, capturedAt)))
   return { rows, providerPage: threadsContinuation(pageInfo, provider, currentCursor) }
+}
+
+// Threads Scraper returns source edges directly under data.results. Edge cursors
+// belong to the source graph; only the outer data.cursor continues this listing.
+export function parseThreadsScraperSearchPage(payload, { currentCursor = null, capturedAt }) {
+  assertSucceeded(payload)
+  if (payload.status !== 'ok') fail('scraper_status')
+  const data = payload.data
+  if (!object(data) || !Array.isArray(data.results)) fail('scraper_results')
+  const rowsById = new Map()
+  for (const edge of data.results) {
+    const node = edge?.node
+    if (!object(node)) fail('scraper_edge')
+    // Source thread edges in the existing Threads examples wrap the thread
+    // or use it directly as the node. An envelope or node ID is not a post ID.
+    const items = (node.thread ?? node).thread_items
+    const post = Array.isArray(items) ? items[0]?.post : null
+    if (!object(post)) fail('scraper_post')
+    const row = threadsPostRow(post, capturedAt, null)
+    if (!rowsById.has(row.content_id)) rowsById.set(row.content_id, row)
+  }
+  const rows = [...rowsById.values()]
+  const cursor = data.cursor
+  let providerPage = { hasMore: null, nextParams: null, nextPage: null }
+  if (!rows.length || cursor === null) providerPage.hasMore = false
+  else if (typeof cursor === 'string' && cursor.trim() && cursor.length <= 8192 && !cursor.includes('\0')) {
+    if (cursor === currentCursor) providerPage.stopReason = 'repeated_cursor'
+    else providerPage = { hasMore: true, nextParams: { cursor }, nextPage: null }
+  }
+  return { rows, providerPage }
 }
 
 // The replies timeline pairs each reply with the post it answers. A self-thread

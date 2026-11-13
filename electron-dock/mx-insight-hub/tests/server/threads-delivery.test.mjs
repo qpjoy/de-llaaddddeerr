@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
+import { createRapidApiProxyFetch } from '../../server/external-platforms/proxy.mjs'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
 import { loadConfig } from '../../server/config.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../../server/contracts/native-forwarding.mjs'
@@ -46,17 +47,31 @@ test('public Threads routes deliver all five interfaces and replay each purchase
   t.after(async () => { runtime.agent.close(); await store.close() })
   const fixtures = {
     '/api/search/recent': samples.searchRecent, '/api/user/posts': samples.userPosts, '/api/user/info': samples.userInfo,
+    '/api/v1/posts/search': null, // Generated below so page two can assert cursor ownership.
     '/api/post/comments': samples.postComments, '/api/search/profiles': samples.searchProfiles,
   }
   const calls = []
-  const adapter = new RapidApiAdapter({ apiKey, fetchImpl: async input => {
+  const fixtureFetch = async (input, options) => {
     const url = new URL(input)
-    assert.equal(url.hostname, THREADS_RAPIDAPI_HOST)
     calls.push(url.pathname + url.search)
+    if (url.pathname === '/api/v1/posts/search') {
+      assert.equal(url.hostname, 'threads-scraper.p.rapidapi.com')
+      assert.equal(options.headers['x-rapidapi-host'], url.hostname)
+      if (url.searchParams.get('query') === 'rejected') return Response.json({ message: 'You are not subscribed to this API.' },
+        { status: 403, headers: { 'x-rapidapi-proxy-response': 'true' } })
+      const cursor = url.searchParams.get('cursor')
+      assert.ok(cursor === null || cursor === 'opaque +/=', 'Scraper cursor must round-trip unchanged')
+      return Response.json({ status: 'ok', data: { results: [samples.searchRecent.data.searchResults.edges[cursor ? 1 : 0]],
+        cursor: cursor ? null : 'opaque +/=' } })
+    }
+    assert.equal(url.hostname, THREADS_RAPIDAPI_HOST)
     assert.ok(Object.hasOwn(fixtures, url.pathname), url.pathname)
     return Response.json(url.pathname === '/api/post/comments' && url.searchParams.get('post_id') === commentId
       ? replyPage() : fixtures[url.pathname])
-  } })
+  }
+  const adapter = new RapidApiAdapter({ apiKey, fetchImpl: createRapidApiProxyFetch({
+    route: async () => ({ proxyUrls: [], directFallback: true }),
+  }, { fetchImpl: fixtureFetch }) })
   // The memory runtime omits credentialed transports. Use the real adapter and
   // injected response fixtures on the same gateways as the production router.
   const accountGateway = runtime.threadsGateways.rapidapi
@@ -73,7 +88,7 @@ test('public Threads routes deliver all five interfaces and replay each purchase
     await runtime.externalPlatformControlStore.updatePolicy(endpoint.provider, endpoint.operation, {
       expectedRevision: 1, desiredState: 'active', reason: 'Offline Threads fixture',
       priceBook: { currency: 'USD', pricingAsOf: '2026-11-11T00:00:00Z', monthlyBudgetMinor: 1000, monthlySubsidyBudgetMinor: 1000,
-        unitCostMinorByEndpoint: { [endpoint.endpointKey]: 1 } },
+        unitCostMinorByEndpoint: { [endpoint.endpointKey]: endpoint.key === 'r.threads_scraper_search_posts' ? 2 : 1 } },
     }, { runtime: { config: runtime.threadsGateways[endpoint.provider].config, credentialConfigured: true } })
   }
   const tenant = await service.createTenant({ name: 'Threads fixture' })
@@ -169,5 +184,44 @@ test('public Threads routes deliver all five interfaces and replay each purchase
       assert.equal(calls.length, before)
       assert.deepEqual(store.customerCharges, charges)
     }
+  })
+
+  await t.test('switching search listings preserves receipts, cursor ownership and separate procurement costs', async () => {
+    const select = (primaryProvider, expectedRevision, fallbackProvider = null) => runtime.strategySearchRoutingStore.update('search', 'threads', {
+      mode: fallbackProvider ? 'priority' : 'fixed', primaryProvider, fallbackProvider, expectedRevision, reason: 'Compare Threads listings',
+    })
+    const scraper = 'rapidapi-threads-scraper'
+    const query = { query: 'bitcoin', pageSize: 20 }
+    const before = calls.length
+    await select(scraper, 1, 'rapidapi')
+    const old = await send('search', query)
+    assert.equal(old.headers.get('idempotent-replay'), 'true')
+    assert.deepEqual(await old.json(), search)
+    assert.equal(calls.length, before)
+    const refused = await send('search', { query: 'rejected' }, 'fixture-threads-refusal')
+    assert.equal(refused.status, 502, JSON.stringify(await refused.json()))
+    assert.deepEqual(calls.slice(before), ['/api/v1/posts/search?query=rejected'], 'no second purchase after a 403')
+    const read = async (body, key) => {
+      const response = await send('search', body, key), result = await response.json()
+      assert.equal(response.status, 200, JSON.stringify(result))
+      return result
+    }
+    const first = await read(query, 'fixture-scraper-first')
+    assert.equal(first.data.items[0].text, 'bitcoin sample post')
+    const own = id => [...accountGateway.platformStore.calls.values()].find(call => call.usageRequestId === id)
+    assert.deepEqual([own(first.requestId).operation, own(search.requestId).operation],
+      ['native.r.threads_scraper_search_posts', 'native.r.threads_search_recent'])
+    assert.deepEqual([own(first.requestId).marketplace, own(first.requestId).costMinor, own(search.requestId).costMinor], ['threads-scraper', 2, 1])
+    assert.equal(own(first.requestId).archiveObjects[0].marketplace, 'threads-scraper')
+    const ingested = accountGateway.platformStore.ingestJobs.find(job => job.payload.providerCallId === own(first.requestId).id)
+    assert.deepEqual([ingested.payload.providerKey, ingested.payload.platform], ['rapidapi', 'threads'])
+    await select('rapidapi', 2)
+    assert.match(first.data.pageInfo.nextCursor, /^mxds1\./u)
+    const next = await read({ ...query, cursor: first.data.pageInfo.nextCursor }, 'fixture-scraper-next')
+    assert.equal(next.data.items[0].text, 'fragment text')
+    assert.equal(next.data.pageInfo.hasMore, false)
+    await read(query, 'fixture-legacy-again')
+    assert.deepEqual(calls.slice(before + 1), ['/api/v1/posts/search?query=bitcoin',
+      '/api/v1/posts/search?query=bitcoin&cursor=opaque+%2B%2F%3D', '/api/search/recent?query=bitcoin'])
   })
 })

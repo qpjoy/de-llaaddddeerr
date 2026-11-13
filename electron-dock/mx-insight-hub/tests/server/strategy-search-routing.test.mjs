@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { THREADS_RAPIDAPI_ENDPOINTS } from '../../server/contracts/threads-rapidapi-endpoints.mjs'
 import { StrategySearchRoutingStore } from '../../server/external-platforms/strategy-search-routing.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 
 const change = (patch = {}) => ({ mode: 'fixed', primaryProvider: 'tikhub', fallbackProvider: null,
   expectedRevision: 1, reason: 'Reviewed compatible supplier', ...patch })
@@ -45,6 +46,20 @@ test('Twitter strategies support fixed, reversed priority and pause without acce
   assert.equal(paused.mode, 'paused')
   assert.equal(store.events.length, 3)
   assert.equal((await store.get('search', 'instagram')).revision, 1)
+})
+
+test('the second RapidAPI listing is independently selectable only for Threads content search', async () => {
+  const store = new StrategySearchRoutingStore()
+  const fixed = await store.update('search', 'threads', change({ primaryProvider: THREADS_SCRAPER_ROUTE }))
+  assert.equal(fixed.primaryProvider, THREADS_SCRAPER_ROUTE)
+  const priority = await store.update('search', 'threads', change({ mode: 'priority', primaryProvider: 'rapidapi',
+    fallbackProvider: THREADS_SCRAPER_ROUTE, expectedRevision: fixed.revision }))
+  assert.equal(priority.fallbackProvider, THREADS_SCRAPER_ROUTE)
+  const paused = await store.update('search', 'threads', change({ mode: 'paused', primaryProvider: THREADS_SCRAPER_ROUTE, expectedRevision: priority.revision }))
+  assert.equal(paused.mode, 'paused')
+  for (const [interfaceId, platform] of [['search','twitter'], ['crawl','threads'], ['user-info','threads'], ['post-comments','threads'], ['comment-replies','threads']]) {
+    await assert.rejects(store.update(interfaceId, platform, change({ primaryProvider: THREADS_SCRAPER_ROUTE })), { code: 'invalid_strategy_search_route' })
+  }
 })
 
 test('strategy changes use revision CAS and record a separate immutable snapshot', async () => {
@@ -214,7 +229,7 @@ test('Facebook migration preserves other routes, enforces business scope and aud
   assert.equal(audit.rows[2].policy.mode, 'paused')
 })
 
-test('Threads migration seeds five audited routes and eleven disabled operations, preserving pauses on reapplication', {
+test('Threads migrations preserve reviewed routes and register the Scraper operation only for search', {
   skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE,
 }, async t => {
   const { PGlite } = await import(pathToFileURL(process.env.MX_INSIGHT_TEST_PGLITE_MODULE).href)
@@ -275,5 +290,26 @@ test('Threads migration seeds five audited routes and eleven disabled operations
   assert.deepEqual((await routeRows()).rows, reviewed)
   assert.deepEqual((await routeEvents()).rows, events)
   assert.deepEqual((await operations()).rows, native)
+  assert.deepEqual((await legacyRoutes()).rows, previous)
+
+  const scraper = await migration('189_threads_scraper_search')
+  await db.exec(scraper)
+  assert.deepEqual((await routeRows()).rows, reviewed)
+  const operationKey = 'native.r.threads_scraper_search_posts'
+  const migrated = (await operations()).rows
+  assert.deepEqual(migrated.filter(row => row.operation_key !== operationKey), native)
+  const operation = migrated.find(row => row.operation_key === operationKey)
+  assert.deepEqual([operation.provider_key, operation.endpoint_keys, operation.desired_state, operation.actor],
+    ['rapidapi', [operationKey], 'disabled', 'migration-189'])
+  await store.update('search', 'threads', change({ primaryProvider: THREADS_SCRAPER_ROUTE }))
+  const selected = await store.update('search', 'threads', change({ mode: 'priority', primaryProvider: 'tikhub', fallbackProvider: THREADS_SCRAPER_ROUTE, expectedRevision: 2 }))
+  for (const column of ['primary_provider', 'fallback_provider']) {
+    await assert.rejects(db.query(`UPDATE control.strategy_search_routes SET ${column}=$1 WHERE interface_key='user-info' AND platform='threads'`, [THREADS_SCRAPER_ROUTE]))
+    await assert.rejects(db.query(`UPDATE control.strategy_search_routes SET ${column}=$1 WHERE interface_key='search' AND platform='twitter'`, [THREADS_SCRAPER_ROUTE]))
+  }
+  await db.exec(scraper)
+  assert.deepEqual((await operations()).rows, migrated)
+  assert.deepEqual(await store.get('search', 'threads'), selected)
+  assert.deepEqual(await store.get('crawl', 'threads'), paused)
   assert.deepEqual((await legacyRoutes()).rows, previous)
 })

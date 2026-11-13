@@ -2,7 +2,7 @@ import snapshot from '../data/night-all-provider-inventory.json' with { type: 'j
 import official from '../data/provider-official-contracts.json' with { type: 'json' }
 import wechat from '../data/wechat-contracts.json' with { type: 'json' }
 import { AppError } from '../core/errors.mjs'
-import { THREADS_RAPIDAPI_ENDPOINTS } from './threads-rapidapi-endpoints.mjs'
+import { THREADS_RAPIDAPI_ENDPOINTS, THREADS_SCRAPER_SEARCH_ENDPOINT } from './threads-rapidapi-endpoints.mjs'
 
 export const NATIVE_FORWARDING_VERSION = 'mx-insight-hub.native-forwarding.v1'
 const PRIVATE_PARAMS = new Set(['cookie', 'token', 'api_key', 'authorization', 'password', 'proxy'])
@@ -98,6 +98,7 @@ export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
   ...tikHubCommerce,
   ...wechat.endpoints.map(row => Object.freeze({ ...row, operation: `native.${row.key}`, endpointKey: `native.${row.key}` })),
   ...THREADS_RAPIDAPI_ENDPOINTS,
+  THREADS_SCRAPER_SEARCH_ENDPOINT,
   ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))
     .map(row => Object.freeze({ ...row, id: row.key, operation: `native.${row.key}`, endpointKey: `native.${row.key}`,
       hubPath: `/api/v1/data/native/${row.key}`, schemaVersion: official.version,
@@ -173,7 +174,7 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
   return Object.freeze({
     key, maxPageSize, contractVersion: NATIVE_FORWARDING_VERSION, endpointContractVersion: NATIVE_FORWARDING_VERSION,
     operation: endpoint.operation, endpointKey: endpoint.endpointKey, endpointVersion: endpoint.schemaVersion || snapshot.version,
-    endpointPath: endpoint.path, method: endpoint.method, marketplace: endpoint.platform,
+    endpointPath: endpoint.path, method: endpoint.method, marketplace: endpoint.marketplace ?? endpoint.platform,
     deliveryMode: 'live_only', upstreamQuery: Object.freeze(query),
     fingerprintBody: { contractVersion: NATIVE_FORWARDING_VERSION, key, params: query, deliveryMode: 'live_only' },
   })

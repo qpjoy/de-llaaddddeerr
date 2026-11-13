@@ -798,6 +798,17 @@ export class MemoryExternalPlatformStore {
     return clone(found)
   }
 
+  async freshDetailBodiesFor(consumerId, fingerprints, at = new Date()) {
+    const bodies = new Map()
+    for (const fingerprint of fingerprints) {
+      const snapshot = this.snapshots.get(snapshotKey({ consumerId, operation: 'social.posts.resolve', fingerprint }))
+      if (snapshot?.providerKey === this.providerKey && new Date(snapshot.freshUntil) >= at) {
+        bodies.set(fingerprint, clone(snapshot.responseBody))
+      }
+    }
+    return bodies
+  }
+
   async sharedDetailSnapshotFor(fingerprint, at = new Date()) {
     return clone([...this.snapshots.values()].filter(row => row.providerKey === this.providerKey
       && row.operation === 'social.posts.analytics' && row.fingerprint === fingerprint
@@ -2628,6 +2639,16 @@ export class PostgresExternalPlatformStore {
       ],
     )
     return pgSnapshot(rows[0])
+  }
+
+  async freshDetailBodiesFor(consumerId, fingerprints, at = new Date()) {
+    const { rows } = await this.pool.query(
+      `SELECT request_fingerprint, response_body FROM external_platform.response_snapshots
+        WHERE consumer_id = $1 AND operation = 'social.posts.resolve' AND provider_key = $2
+          AND request_fingerprint = ANY($3::char(64)[]) AND fresh_until >= $4`,
+      [consumerId, this.providerKey, fingerprints, at],
+    )
+    return new Map(rows.map(row => [row.request_fingerprint, row.response_body]))
   }
 
   async sharedDetailSnapshotFor(fingerprint, at = new Date()) {

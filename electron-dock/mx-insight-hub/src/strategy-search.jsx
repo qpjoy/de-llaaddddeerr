@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { productForPath } from '../shared/product-workbenches.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../shared/threads-search-routing.mjs'
 import { ProductApiConsole } from './product-workbench.jsx'
 import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
 import { StrategySearchExperience, useStrategySearchState } from './strategy-search-experience.jsx'
@@ -8,7 +9,7 @@ import { adminApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, PageHeading, useRemoteData } from './components.jsx'
 import { StrategyDataStatistics } from './strategy-data-statistics.jsx'
 import { FacebookSearchPolicyForm } from './platform-search-policy.jsx'
-import { STRATEGY_SEARCH_INTERFACES, STRATEGY_PROVIDER_LABELS, INSTAGRAM_STRATEGY_MODE_LABELS, TWITTER_STRATEGY_MODE_LABELS,
+import { STRATEGY_SEARCH_INTERFACES, strategySupplierLabel as supplier, INSTAGRAM_STRATEGY_MODE_LABELS, TWITTER_STRATEGY_MODE_LABELS,
   STRATEGY_MIGRATION_LABELS, instagramStrategyOptions, instagramStrategyUpdate, twitterStrategyOptions, twitterStrategyUpdate, strategyPolicySummary,
   COMMENT_STRATEGY_MODE_LABELS, COMMENT_VERIFICATION_LABELS, commentRouteOptions, commentRouteUpdate } from './strategy-search-model.js'
 import { StrategyCommentsExperience } from './strategy-comments.jsx'
@@ -17,7 +18,6 @@ import { recordStrategyAttempt } from './strategy-search-experience-model.js'
 import './strategy-search.css'
 
 const icons = { search: MagnifyingGlass, crawl: Users, 'user-info': User, 'post-comments': ChatCircleText, 'comment-replies': ChatsCircle }
-const supplier = value => STRATEGY_PROVIDER_LABELS[value] || value
 const migration = value => STRATEGY_MIGRATION_LABELS[value] || value || '状态未提供'
 
 export function StrategySearchPage({ token, session, query, setQuery, onUnauthorized, notify, strategySession }) {
@@ -95,7 +95,7 @@ function CommentRoutePolicyForm({ token, row, notify, onSaved, interfaceId, labe
     try { await adminApi.updateCommentRoute(token, interfaceId, row.platform, draft); onSaved(); notify?.(`${row.label || row.platform}${label}策略已保存`) }
     catch (failure) { setError(failure) } finally { setBusy(false) }
   }
-  const providerOption = value => ({ value, label: `${supplier(value)} · ${COMMENT_VERIFICATION_LABELS[row.providerVerification?.[value]] || '未登记'}` })
+  const providerOption = value => ({ value, label: `${supplier(value, row.platform)} · ${COMMENT_VERIFICATION_LABELS[row.providerVerification?.[value]] || '未登记'}` })
   return <form className="mih-strategy-policy-form" onSubmit={save}>
     <p>适用范围：{row.label || row.platform} 的 <code>{STRATEGY_SEARCH_INTERFACES.find(item => item.id === interfaceId)?.paths[0]}</code>{interfaceId === 'post-comments' ? '（含两个 search/post-comments 别名）' : ''}。其他平台和业务接口不受影响。</p>
     <div className="mih-external-two-column">
@@ -109,7 +109,7 @@ function CommentRoutePolicyForm({ token, row, notify, onSaved, interfaceId, labe
     {pendingChoice ? <p role="status">所选供应商的返回结构尚待校准：该平台的新请求会在派发前返回 external_platform_contract_unverified（不调用供应商、不计费）。完成一次校准样本并发布后即可选择。</p> : null}
     <p>{mode === 'priority' ? '只在首请求尚未派发、优先供应商凭据、操作开关或价格未就绪时改用保底供应商；已派发后的拒绝、超时、未知结果与不可解析响应不会换供应商重买。'
       : mode === 'paused' ? '暂停新的供应商采购（含续页需要的后续采购）；精确重放和已购缓冲仍可交付。' : '新请求只使用所选供应商；未就绪时返回具体原因，不自动切换。'}
-      已有游标继续绑定原供应商。已校准可选：{selectable.map(supplier).join(' / ') || '暂无'}。</p>
+      已有游标继续绑定原供应商。已校准可选：{selectable.map(value => supplier(value, row.platform)).join(' / ') || '暂无'}。</p>
     <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy || conflict} onChange={event => setReason(event.target.value)} placeholder="记录此次策略调整的原因" /></Field>
     {error ? <ErrorState error={error} /> : null}
     {conflict ? <p role="alert">策略已被其他管理员修改，本次未覆盖。<button className="qp-button qp-button--outline" type="button" onClick={onSaved}>刷新策略并重新填写</button></p> : null}
@@ -229,6 +229,7 @@ function StrategySearchManagement({ token, session, query, setQuery, onUnauthori
   const rows = selected?.platforms || []
   const row = rows.find(item => item.platform === query.get('platform')) || rows.find(item => item.platform === 'instagram') || rows[0]
   const summary = strategyPolicySummary(selected?.id, row)
+  const credentialProviders = [...new Set((row?.providers || []).map(value => value === THREADS_SCRAPER_ROUTE ? 'rapidapi' : value))]
   const configurable = (interfaces.find(item => item.id === 'search')?.platforms || []).filter(item => strategyPolicySummary('search', item).editor)
   const chooseInterface = interfaceId => {
     const next = interfaces.find(item => item.id === interfaceId)?.platforms || []
@@ -253,7 +254,7 @@ function StrategySearchManagement({ token, session, query, setQuery, onUnauthori
       {selected && row ? <section className="qp-panel mih-panel mih-strategy-route-panel" aria-label={`${row.label || row.platform}当前策略与配置`}>
         <header className="mih-strategy-route-heading"><div><p className="qp-kicker">{selected.label} / {row.label || row.platform}</p><h2>当前已保存策略</h2></div><div className="mih-strategy-route-badges"><span className="qp-tag">{migration(row.migrationStatus)}</span><span className="qp-tag">{summary.editor ? '可修改策略' : '只读路由'}</span></div></header>
         <div className="mih-strategy-effective-policy"><strong>{summary.title}</strong><p>{summary.description}</p>
-          <dl><div><dt>策略方式</dt><dd>{summary.mode}</dd></div><div><dt>{summary.editor ? '可选供应商' : '登记供应商'}</dt><dd>{summary.providers.length ? summary.providers.map(supplier).join(' / ') : '不适用'}</dd></div>{summary.revision ? <div><dt>当前修订</dt><dd>#{summary.revision}</dd></div> : null}</dl>
+          <dl><div><dt>策略方式</dt><dd>{summary.mode}</dd></div><div><dt>{summary.editor ? '可选供应商' : '登记供应商'}</dt><dd>{summary.providers.length ? summary.providers.map(value => supplier(value, row.platform)).join(' / ') : '不适用'}</dd></div>{summary.revision ? <div><dt>当前修订</dt><dd>#{summary.revision}</dd></div> : null}</dl>
         </div>
         {summary.editor ? <div className="mih-strategy-editor">
           <header><h3>修改 {row.label || row.platform} {selected.label}策略</h3><p>以下为待保存配置；填写修改原因并保存后生效。可用方式：{summary.modes.join('；')}。</p></header>
@@ -264,7 +265,7 @@ function StrategySearchManagement({ token, session, query, setQuery, onUnauthori
             : <FacebookSearchPolicyForm key={`${row.platform}:${row.policy.revision}`} {...{ token, notify }} row={row.policy} allowedModes={row.allowedModes} onSaved={remote.refresh} />}
         </div> : <div className="mih-strategy-readonly"><strong>{row.editable ? '策略尚未就绪' : '当前未开放供应商切换'}</strong><p>{row.readOnlyReason || summary.description}</p><p>供应商目录、凭据或某个平台的其他接口已接入，并不代表当前业务接口具有可切换的兼容适配器。</p></div>}
         <details className="mih-strategy-route-details"><summary>接口范围与执行路由</summary><p>{row.routeSummary || '尚未提供当前路由信息。'}</p><p>{selected.description}</p><div className="mih-strategy-paths">{selected.paths.map(path => <code key={path}>{path}</code>)}</div></details>
-        {(row.providers || []).length ? <p className="mih-strategy-provider-links">{row.providers.map(provider => <a key={provider} href={`#/external-platforms?provider=${encodeURIComponent(provider)}`}>{supplier(provider)} 凭据与运行状态 ↗</a>)}</p> : null}
+        {credentialProviders.length ? <p className="mih-strategy-provider-links">{credentialProviders.map(provider => <a key={provider} href={`#/external-platforms?provider=${encodeURIComponent(provider)}`}>{supplier(provider)} 凭据与运行状态 ↗</a>)}</p> : null}
         <p className="mih-strategy-policy-boundary">已有分页沿用原游标合同，已绑定供应商的分页不能跨供应商转换。策略变更只影响各接口允许的新请求；授权、价格与历史账本继续使用现有规则。</p>
       </section> : <p>尚未读取到业务接口与目标平台，请检查部署版本。</p>}
       {selected ? <section className="qp-panel mih-panel mih-strategy-contract"><h2>{selected.label} · 平台策略与迁移总览</h2><div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table">

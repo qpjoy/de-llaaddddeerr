@@ -5,10 +5,24 @@ import { STRATEGY_SEARCH_PATH, STRATEGY_SEARCH_INTERFACES, strategySearchLink,
 import { productCategory } from '../../shared/product-navigation.mjs'
 import { productForPath, productForDocs } from '../../shared/product-workbenches.mjs'
 import { productAllowed } from '../../shared/product-access.mjs'
+import { strategySearchCatalog } from '../../server/data/strategy-search-catalog.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 
 const row = { platform: 'instagram', editable: true, providers: ['justone', 'tikhub'], allowedModes: ['fixed', 'priority', 'paused'],
   policy: { mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null, revision: 4 } }
 const draft = { mode: 'fixed', primaryProvider: 'justone', reason: '  Reviewed route change  ' }
+
+test('Threads content search identifies each RapidAPI subscription in the saved strategy', () => {
+  const policy = { interface: 'search', platform: 'threads', mode: 'priority', primaryProvider: THREADS_SCRAPER_ROUTE, fallbackProvider: 'rapidapi', revision: 2 }
+  const catalog = strategySearchCatalog({ commentPolicies: [policy] })
+  const containsScraper = catalog.interfaces.flatMap(group => group.platforms.filter(row => row.providers.includes(THREADS_SCRAPER_ROUTE))
+    .map(row => [group.id, row.platform]))
+  assert.deepEqual(containsScraper, [['search', 'threads']])
+  const row = catalog.interfaces.find(group => group.id === 'search').platforms.find(row => row.platform === 'threads')
+  const summary = strategyPolicySummary('search', row)
+  assert.equal(summary.editor, 'comment-route')
+  assert.match(summary.title, /优先 RapidAPI · Threads Scraper → 保底 RapidAPI · Threads API（threads-api4）/)
+})
 
 test('Facebook account editors require an independent saved business policy', () => {
   const account = { platform: 'facebook', editable: true, providers: ['justone'], allowedModes: ['fixed', 'paused'],

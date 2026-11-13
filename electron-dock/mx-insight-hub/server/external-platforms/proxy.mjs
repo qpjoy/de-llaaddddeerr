@@ -5,7 +5,7 @@ import { AppError } from '../core/errors.mjs'
 import { resolveProviderProxyRoute } from '../agent/control-store.mjs'
 import { relayRequestUrl } from './egress-relay.mjs'
 import { RAPIDAPI_PRODUCT_SEARCH_HOSTS } from '../contracts/justone.mjs'
-import { THREADS_RAPIDAPI_HOST } from '../contracts/threads-rapidapi-endpoints.mjs'
+import { THREADS_RAPIDAPI_HOST, THREADS_SCRAPER_RAPIDAPI_HOST } from '../contracts/threads-rapidapi-endpoints.mjs'
 
 // Probe policy defaults. A probe only has to prove that the egress reaches the
 // target origin, so its deadline must accommodate a healthy but high-latency
@@ -31,6 +31,7 @@ const ROUTE_FAILURE_STATUSES = new Set([407, 502, 503, 504])
 const RAPIDAPI_LISTING_ORIGINS = Object.freeze([...new Set([
   'https://facebook-scraper3.p.rapidapi.com',
   `https://${THREADS_RAPIDAPI_HOST}`,
+  `https://${THREADS_SCRAPER_RAPIDAPI_HOST}`,
   ...Object.values(RAPIDAPI_PRODUCT_SEARCH_HOSTS).map(host => `https://${host}`),
 ])])
 

@@ -48,7 +48,10 @@ TikHub 普通 400 或 unknown 推断为 TikHub 超额；不改变回退交付、
 诊断不返回请求参数、响应正文、签名、Headers、凭据、堆栈、URL 或任意供应商文本。
 Qixin 非成功调用的受限归档仅允许 SQL 投影两条已核实的固定消息：
 “未授权调用该接口”和“未添加IP白名单”，且只对 `provider=qixin/outcome=rejected`
-生效；应用层再次白名单校验。其他消息显示“受限响应已保存，消息未开放”，保留业务码。
+生效。RapidAPI 的 Threads 内容搜索仅在操作为 `native.r.threads_search_recent` 或 `native.r.threads_scraper_search_posts`、结果为
+`rejected`、HTTP 403 且归档顶层 `message` 精确等于 `You are not subscribed to this API.`
+时显示这条固定消息。它描述当时的拒绝，不代表当前订阅状态。两类消息均由应用层再次校验。
+其他消息显示“受限响应已保存，消息未开放”，保留业务码。
 这不是通用 raw-response 接口，也不解除已有受限原始响应访问规则。
 
 Night-All legacy 兼容调用的明确 HTTP 拒绝，自 migration 102 起补充结构化错误链：

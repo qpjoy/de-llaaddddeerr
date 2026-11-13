@@ -1,7 +1,8 @@
 import { AppError } from '../core/errors.mjs'
 import { COMMENT_INTERFACES, commentProviders, commentRoutePlatforms, defaultCommentRoute } from '../contracts/comment-routes.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 
-export const STRATEGY_SEARCH_PROVIDERS = Object.freeze(['justone', 'tikhub', 'rapidapi'])
+export const STRATEGY_SEARCH_PROVIDERS = Object.freeze(['justone', 'tikhub', 'rapidapi', THREADS_SCRAPER_ROUTE])
 export const STRATEGY_SEARCH_MODES = Object.freeze(['fixed', 'priority', 'paused'])
 const PROVIDERS_BY_PLATFORM = Object.freeze({
   instagram: Object.freeze(['justone', 'tikhub']),
@@ -11,6 +12,7 @@ const PROVIDERS_BY_PLATFORM = Object.freeze({
 })
 // Threads is the one platform whose account interfaces are also routed.
 const THREADS_ROUTED_INTERFACES = Object.freeze(['search', 'crawl', 'user-info'])
+const THREADS_SEARCH_PROVIDERS = Object.freeze(['rapidapi', THREADS_SCRAPER_ROUTE, 'tikhub'])
 const defaultThreadsRow = interfaceId => ({ interface_key: interfaceId, platform: 'threads', mode: 'priority', primary_provider: 'rapidapi',
   fallback_provider: 'tikhub', revision: 1, reason: 'default_route', updated_at: null })
 
@@ -19,6 +21,7 @@ const defaultThreadsRow = interfaceId => ({ interface_key: interfaceId, platform
 // registered (selectable once calibrated) but requests fail before dispatch.
 export function strategyRouteProviders(interfaceId, platform) {
   if (COMMENT_INTERFACES.includes(interfaceId)) return Object.keys(commentProviders(interfaceId, platform) || {})
+  if (platform === 'threads' && interfaceId === 'search') return THREADS_SEARCH_PROVIDERS
   if (platform === 'threads') return THREADS_ROUTED_INTERFACES.includes(interfaceId) ? PROVIDERS_BY_PLATFORM.threads : []
   if (platform === 'facebook') return ['crawl', 'user-info'].includes(interfaceId) ? PROVIDERS_BY_PLATFORM.facebook : []
   return interfaceId === 'search' ? PROVIDERS_BY_PLATFORM[platform] || [] : []

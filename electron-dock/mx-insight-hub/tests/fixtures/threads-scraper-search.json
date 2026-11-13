@@ -1,0 +1,15 @@
+{
+  "_source": "Derived fixture, not a live response or a provider-published example. The Threads Scraper listing documents status, data.results source edges and data.cursor. Post edge shapes are taken from the existing anonymized Threads source examples.",
+  "status": "ok",
+  "data": {
+    "results": [
+      { "node": { "thread": { "thread_items": [
+        { "post": { "pk": "30", "caption": { "text": "first result" }, "like_count": 0, "user": { "username": "sample" }, "code": "A" } },
+        { "post": { "pk": "40", "caption": { "text": "continuation of first post" } } }
+      ] } } },
+      { "node": { "thread_items": [{ "post": { "pk": "20", "taken_at": 100, "text_post_app_info": { "is_reply": false } } }] } },
+      { "node": { "thread": { "thread_items": [{ "post": { "pk": "30", "caption": { "text": "later duplicate" } } }] } } }
+    ],
+    "cursor": "opaque +/%="
+  }
+}

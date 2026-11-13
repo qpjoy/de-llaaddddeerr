@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { pathToFileURL } from 'node:url'
 import { lookupRequestDiagnostics } from '../../server/acquisitions/diagnostics.mjs'
 import { UpstreamAmbiguousError } from '../../server/core/errors.mjs'
 import { nightAllFailureEvidence } from '../../server/data/night-all-failure-evidence.mjs'
 
 const id = 'a227f54a-0ac6-43f5-9d23-687fc369f2ae'
-function fixture({ status = 'released', responseStatus = 502, errorCode = 'enterprise_query_rejected', hasResponseBody = true, gateway = null, providers, connectors = [], matches = [{ id }], fail } = {}) {
+function fixture({ platform = 'enterprise', status = 'released', responseStatus = 502, errorCode = 'enterprise_query_rejected', hasResponseBody = true, gateway = null, providers, connectors = [], matches = [{ id }], fail } = {}) {
   const queries = []
   let released = false
   const pool = { async connect() { return {
@@ -14,7 +15,7 @@ function fixture({ status = 'released', responseStatus = 502, errorCode = 'enter
       assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/)
       if (fail && sql.includes('request-diagnostics:usage')) throw Object.assign(new Error('secret connection data'), { code: fail })
       if (sql.includes('request-diagnostics:lookup')) return { rows: matches }
-      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform: 'enterprise', status, error_code: errorCode, response_status: responseStatus, has_response_body: hasResponseBody, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
+      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform, status, error_code: errorCode, response_status: responseStatus, has_response_body: hasResponseBody, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
       if (sql.includes('request-diagnostics:gateway')) return { rows: gateway ? [gateway] : [] }
       if (sql.includes('request-diagnostics:providers')) return { rows: providers || [{ id: 'call', provider_key: 'qixin', outcome: 'rejected', http_status: 200, business_code: 105, reviewed_message: '未授权调用该接口', has_restricted_archive: true, billed: null, cost_kind: 'estimated', cost_minor: '15', currency: 'CNY', raw_payload: { secret: 'hidden' } }] }
       if (sql.includes('request-diagnostics:connectors')) return { rows: connectors }
@@ -120,6 +121,77 @@ test('arbitrary archive messages never cross the diagnostic boundary; unknown ou
   assert.equal(run.providerCalls[0].messageEvidence, 'restricted_message_not_exposed')
   assert.match(run.guidance, /不自动重发/)
   assert.doesNotMatch(JSON.stringify(run), /SECRET|private.test/)
+})
+
+const threadsOperation = 'native.r.threads_search_recent'
+const subscriptionMessage = 'You are not subscribed to this API.'
+const threadsCall = { id: 'call', provider_key: 'rapidapi', operation: threadsOperation, endpoint_key: threadsOperation,
+  outcome: 'rejected', http_status: 403, error_code: 'social_upstream_rejected', billed: false,
+  has_restricted_archive: true, reviewed_message: subscriptionMessage }
+const threadsRequest = { platform: 'threads', status: 'committed', responseStatus: 502, errorCode: 'external_platform_rejected' }
+
+test('Threads diagnostics reports the reviewed RapidAPI subscription rejection only for the matching call', async () => {
+  const diagnose = async patch => (await lookupRequestDiagnostics(fixture({
+    ...threadsRequest, providers: [{ ...threadsCall, ...patch }],
+  }).pool, id)).runs[0]
+  const run = await diagnose({})
+  assert.equal(run.providerCalls[0].message, subscriptionMessage)
+  assert.equal(run.providerCalls[0].messageEvidence, 'reviewed_archive_message')
+  assert.match(run.guidance, /明确返回“未订阅此 API”/u)
+  assert.match(run.guidance, /生产 RapidAPI Key.*threads-api4/u)
+  const scraper = await diagnose({ operation: 'native.r.threads_scraper_search_posts' })
+  assert.equal(scraper.providerCalls[0].message, subscriptionMessage)
+  assert.match(scraper.guidance, /生产 RapidAPI Key.*Threads Scraper/u)
+  assert.doesNotMatch(scraper.guidance, /threads-api4/u)
+  for (const patch of [
+    { provider_key: 'tikhub' }, { operation: 'native.r.threads_search_profiles' },
+    { outcome: 'unknown' }, { http_status: 401 }, { reviewed_message: null },
+    { reviewed_message: subscriptionMessage + ' private credentials' },
+  ]) {
+    const other = await diagnose(patch)
+    assert.equal(other.providerCalls[0].message, null)
+    assert.equal(other.providerCalls[0].messageEvidence, 'restricted_message_not_exposed')
+    assert.doesNotMatch(JSON.stringify(other), /You are not subscribed|明确返回“未订阅此 API”|private credentials/u)
+  }
+})
+
+const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
+test('the provider SQL projection admits only the top-level Threads subscription message for a rejected RapidAPI 403', {
+  skip: !pgliteModule && 'Set MX_INSIGHT_TEST_PGLITE_MODULE',
+}, async t => {
+  const { PGlite } = await import(pathToFileURL(pgliteModule).href)
+  const db = new PGlite()
+  t.after(() => db.close())
+  await db.exec(`CREATE SCHEMA external_platform; CREATE SCHEMA control;
+    CREATE TABLE external_platform.provider_calls (id integer PRIMARY KEY, usage_request_id uuid, provider_key text,
+      operation text, endpoint_key text, outcome text, http_status int, business_code int, error_code text,
+      upstream_request_id text, billed boolean, cost_minor int, cost_kind text, currency text, latency_ms int,
+      started_at timestamptz, completed_at timestamptz);
+    CREATE TABLE external_platform.response_archives (id integer, provider_call_id integer, content_type text, body_size int);
+    CREATE TABLE control.external_platform_restricted_raw_responses (id integer, provider_call_id integer, parsed_payload jsonb);`)
+  const cases = [
+    [{}, { message: subscriptionMessage, debug: 'private credentials' }],
+    [{}, { message: subscriptionMessage + ' private credentials' }],
+    [{}, { error: { message: subscriptionMessage } }],
+    [{ provider_key: 'tikhub' }, { message: subscriptionMessage }],
+    [{ operation: 'native.r.threads_search_profiles' }, { message: subscriptionMessage }],
+    [{ http_status: 401 }, { message: subscriptionMessage }],
+    [{ outcome: 'unknown' }, { message: subscriptionMessage }],
+  ]
+  for (const [i, [patch, payload]] of cases.entries()) {
+    const call = { ...threadsCall, ...patch }
+    await db.query(`INSERT INTO external_platform.provider_calls
+      (id,usage_request_id,provider_key,operation,endpoint_key,outcome,http_status) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [i, id, call.provider_key, call.operation, call.endpoint_key, call.outcome, call.http_status])
+    await db.query('INSERT INTO control.external_platform_restricted_raw_responses VALUES ($1,$1,$2)',
+      [i, JSON.stringify(payload)])
+  }
+  const f = fixture(threadsRequest)
+  await lookupRequestDiagnostics(f.pool, id)
+  const { sql, params } = f.queries.find(q => q.sql.includes('request-diagnostics:providers'))
+  const { rows } = await db.query(sql, params)
+  assert.deepEqual(rows.map(row => row.reviewed_message), cases.map((_, i) => i === 0 ? subscriptionMessage : null))
+  assert.doesNotMatch(JSON.stringify(rows), /private credentials/u)
 })
 
 test('connector failures preserve correlation while committed fallback remains a submitted response', async () => {

@@ -690,7 +690,7 @@ curl -sS "$HUB_ADMIN_URL/internal/v1/admin/strategy-search" \
   -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN"
 ```
 
-Threads 的五个接口都可切换或暂停，默认 RapidAPI 优先、TikHub 保底，详见 [Threads 接口手册](threads-api.md)。
+Threads 的五个接口都可切换或暂停，默认 RapidAPI 的 Threads API 优先、TikHub 保底。内容搜索还可单独选用 RapidAPI 的 Threads Scraper；两项订阅和采购价独立，管理端操作见 [Threads 接口手册](threads-api.md)。
 
 修改一个组合（`{interface}` 为 search、crawl、user-info、post-comments、comment-replies）：
 

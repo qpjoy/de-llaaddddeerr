@@ -1012,7 +1012,8 @@
     "native.r.threads_post_comments",
     "native.r.threads_search_top",
     "native.r.threads_search_recent",
-    "native.r.threads_search_profiles"
+    "native.r.threads_search_profiles",
+    "native.r.threads_scraper_search_posts"
   ],
   "ecommerce": [
     "native.j.xianyu_search_v1",

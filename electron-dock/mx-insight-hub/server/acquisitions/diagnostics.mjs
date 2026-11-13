@@ -6,7 +6,20 @@ import { FAILURE_EVIDENCE_WINDOW_MS } from '../external-platforms/availability-e
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const LIMIT = 20
 const CALL_LIMIT = 50
-const MESSAGES = new Set(['未授权调用该接口', '未添加IP白名单'])
+const QIXIN_MESSAGES = new Set(['未授权调用该接口', '未添加IP白名单'])
+const THREADS_LISTINGS = new Map([
+  ['native.r.threads_search_recent', 'Lundehund 的 threads-api4'],
+  ['native.r.threads_scraper_search_posts', 'Threads Scraper（threads-scraper）'],
+])
+const NOT_SUBSCRIBED = 'You are not subscribed to this API.'
+const threadsSearch403 = p => p.provider_key === 'rapidapi' && THREADS_LISTINGS.has(p.operation)
+  && p.outcome === 'rejected' && p.http_status === 403
+function reviewedMessage(p) {
+  if (!p.has_restricted_archive) return null
+  if (threadsSearch403(p) && p.reviewed_message === NOT_SUBSCRIBED) return NOT_SUBSCRIBED
+  if (p.provider_key === 'qixin' && p.outcome === 'rejected' && QIXIN_MESSAGES.has(p.reviewed_message)) return p.reviewed_message
+  return null
+}
 const text = value => typeof value === 'string' && /^[\w.:/-]{1,191}$/.test(value) ? value : null
 const HISTORY_GUIDANCE = '请先通过只读历史查询核对已保存的响应与账本。重新发送业务请求（包括 POST）受各接口幂等规则与回放窗口限制；沿用同一幂等标识也可能重新采集并再次计费。'
 
@@ -48,6 +61,12 @@ function advice(request, providers, connectors, gateway, refusal = null) {
   if (qixin?.business_code === 105) return '启信宝拒绝接口授权。核对当次 AppKey 所属应用的接口开通与授权有效期；不能据此判断未开通、过期或应用不匹配。'
   if (qixin?.business_code === 104) return '启信宝返回白名单拒绝。核对该应用访问供应商时的实际出口 IP。'
   if (request.status === 'unknown' || providers.some(p => p.outcome === 'unknown')) return '存在未知调用结果。保留原请求身份，先核对上游记录与结算，不自动重发。'
+  const threads = providers.find(p => reviewedMessage(p) === NOT_SUBSCRIBED) || providers.find(threadsSearch403)
+  if (threads) {
+    const reason = reviewedMessage(threads) === NOT_SUBSCRIBED
+      ? 'RapidAPI 当时明确返回“未订阅此 API”。' : 'RapidAPI 返回 HTTP 403，已存证据未确认具体拒绝原因。'
+    return `${reason}请核对 Hub 生产 RapidAPI Key 所属应用、账号或团队在调用时是否已开通 ${THREADS_LISTINGS.get(threads.operation)}。客户扣费另见结算账本。${HISTORY_GUIDANCE}`
+  }
   if (request.status === 'released' && request.error_code === 'external_platform_busy'
     && gateway?.error_code === 'external_platform_busy' && gateway.response_status === 429
     && gateway.source_mode === 'unavailable' && gateway.succeeded === false && !gateway.provider_call_id
@@ -74,7 +93,7 @@ function advice(request, providers, connectors, gateway, refusal = null) {
 
 // Explicit projection, independent of successful-delivery replay. This module
 // never returns raw/request bodies, headers, credentials, or arbitrary provider
-// text. Reviewed Qixin messages are selected inside SQL before crossing the
+// text. Reviewed messages are selected inside SQL before crossing the
 // restricted archive boundary; other messages remain unavailable, not guessed.
 export async function lookupRequestDiagnostics(pool, input) {
   const identifier = diagnosticIdentifier(input)
@@ -139,11 +158,14 @@ export async function lookupRequestDiagnostics(pool, input) {
           r.id IS NOT NULL AS has_restricted_archive,
           CASE WHEN p.provider_key = 'qixin' AND p.outcome = 'rejected'
             AND r.parsed_payload->>'message' IN ('未授权调用该接口', '未添加IP白名单')
-            THEN r.parsed_payload->>'message' ELSE NULL END AS reviewed_message
+            THEN r.parsed_payload->>'message'
+            WHEN p.provider_key = 'rapidapi' AND p.operation = ANY($2::text[]) AND p.outcome = 'rejected'
+              AND p.http_status = 403 AND r.parsed_payload->>'message' = $3::text THEN $3::text
+            ELSE NULL END AS reviewed_message
         FROM external_platform.provider_calls p
         LEFT JOIN external_platform.response_archives a ON a.provider_call_id = p.id
         LEFT JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id = p.id
-        WHERE p.usage_request_id = $1 ORDER BY p.started_at, p.id LIMIT 51`, [id])).rows
+        WHERE p.usage_request_id = $1 ORDER BY p.started_at, p.id LIMIT 51`, [id, [...THREADS_LISTINGS.keys()], NOT_SUBSCRIBED])).rows
       const connectors = (await client.query(`/* request-diagnostics:connectors */
         SELECT id, operation, platform, outcome, http_status, failure_kind,
           error_code, upstream_request_id, upstream_trace_id, upstream_latency_ms,
@@ -158,8 +180,8 @@ export async function lookupRequestDiagnostics(pool, input) {
         id: p.id, provider: text(p.provider_key), operation: text(p.operation), endpoint: text(p.endpoint_key),
         outcome: text(p.outcome), httpStatus: p.http_status, businessCode: p.business_code,
         errorCode: text(p.error_code), upstreamRequestId: text(p.upstream_request_id),
-        message: MESSAGES.has(p.reviewed_message) ? p.reviewed_message : null,
-        messageEvidence: MESSAGES.has(p.reviewed_message) ? 'reviewed_archive_message'
+        message: reviewedMessage(p),
+        messageEvidence: reviewedMessage(p) ? 'reviewed_archive_message'
           : p.has_restricted_archive ? 'restricted_message_not_exposed' : 'not_recorded',
         hasArchive: p.has_archive, hasRestrictedArchive: p.has_restricted_archive,
         bodySize: p.body_size, billed: p.billed, costMinor: p.cost_minor,

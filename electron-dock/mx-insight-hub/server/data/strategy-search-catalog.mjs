@@ -3,6 +3,7 @@ import { WECHAT_LEGACY_SEARCH_PLATFORMS } from '../contracts/wechat-search-alias
 import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../../shared/social-account-contract.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
 import { COMMENT_PROVIDER_CATALOG, commentRoutePlatforms } from '../contracts/comment-routes.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 
 const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
@@ -25,8 +26,11 @@ function historicalPlatform(platform, operation) {
 const THREADS_VERIFICATION = Object.freeze({ rapidapi: 'sample', tikhub: 'derived' })
 function threadsPlatform(interfaceId, summary, policies) {
   const policy = policies.find(row => row.interface === interfaceId && row.platform === 'threads') || null
+  const verification = interfaceId === 'search'
+    ? { rapidapi: 'sample', [THREADS_SCRAPER_ROUTE]: 'derived', tikhub: 'derived' }
+    : { ...THREADS_VERIFICATION }
   return { platform: 'threads', label: LABELS.threads, editable: true, migrationStatus: 'hub_native',
-    providers: Object.keys(THREADS_VERIFICATION), providerVerification: { ...THREADS_VERIFICATION },
+    providers: Object.keys(verification), providerVerification: verification,
     allowedModes: ['fixed', 'priority', 'paused'], policy: policy == null ? null : structuredClone(policy), routeSummary: summary }
 }
 const THREADS_ROUTE_NOTE = '优先与保底只在新请求派发前、优先供应商凭据、操作开关或价格未就绪时切换；游标固定原供应商。RapidAPI 响应结构按其官方公开样例校准，TikHub 按其官方文档描述，首个生产页需核对。每次请求只取一个来源页，继续用 nextCursor。'
@@ -121,7 +125,7 @@ function commentPlatform(interfaceId, platform, policies) {
 // The compatibility sets deliberately exclude unsupported operation/platform
 // pairs; provider credential state and paid dispatch remain in their gateways.
 export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null, facebookCrawlPolicy = null, facebookProfilePolicy = null, commentPolicies = [] } = {}) {
-  const threadsSearch = threadsPlatform('search', `POST /api/v1/data/search 与 /api/v2/data/search 由 Hub 直连供应商，返回标准 items/pageInfo。${THREADS_ROUTE_NOTE}`, commentPolicies)
+  const threadsSearch = threadsPlatform('search', 'RapidAPI 的 Threads API（threads-api4）和 Threads Scraper 分别订阅。请选择当前 RapidAPI 应用已开通的服务；选用 TikHub 时使用 TikHub 凭据。后续页沿用首次查询的服务。', commentPolicies)
   return {
     interfaces: [
       {

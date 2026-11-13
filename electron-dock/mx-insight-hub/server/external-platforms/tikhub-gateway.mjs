@@ -600,12 +600,19 @@ export class TikHubGateway {
       maxWaitMs: currentAdmissionLimits(this).maxWaitMs }
   }
 
+  #availableEnrichmentSlots(context) {
+    if (bypassesSupplierLimits(context)) return Infinity
+    const { maxConcurrency, maxConsumerConcurrency } = currentAdmissionLimits(this)
+    const slots = Math.min(maxConcurrency - this.active,
+      Math.max(1, maxConcurrency - DEFAULT_CONCURRENCY_QUEUE.reservedForeground) - this.activeEnrichment)
+    if (isLcySupplierPriority(context) || isInternalTraffic(this.usageStore, context)) return slots
+    return Math.min(slots, maxConsumerConcurrency - (this.activeByConsumer.get(context.consumer.id) || 0))
+  }
+
   #enter(context, enrichment = false) {
-    const reserved = Math.min(currentAdmissionLimits(this).maxConcurrency - 1, DEFAULT_CONCURRENCY_QUEUE.reservedForeground)
+    if (enrichment && this.#availableEnrichmentSlots(context) <= 0) return false
     if (isHubRateLimitExempt(context)) {
       if (!isLcySupplierPriority(context)) return 'exempt'
-      // Enrichment never takes the foreground reserve, priority or not.
-      if (enrichment && this.activeEnrichment >= currentAdmissionLimits(this).maxConcurrency - reserved) return false
       const entered = enterPriority(this, context.consumer.id, currentAdmissionLimits(this).maxConcurrency)
       if (entered && enrichment) this.activeEnrichment += 1
       return entered
@@ -616,7 +623,7 @@ export class TikHubGateway {
       || this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
       return false
     }
-    if (enrichment && (this.concurrencyQueue.entries.length || this.activeEnrichment >= currentAdmissionLimits(this).maxConcurrency - reserved)) return false
+    if (enrichment && this.concurrencyQueue.entries.length) return false
     this.active += 1
     if (enrichment) this.activeEnrichment += 1
     this.activeByConsumer.set(consumerId, consumerActive + 1)
@@ -2270,7 +2277,7 @@ export class TikHubGateway {
     const resolved = upstream.detailCandidates.length ? await this.#credential() : { value: null, revision: null }
     const detail = await this.#enrichSearchNotes({ context, delivery, upstream, credential: resolved.value,
       credentialRevision: resolved.revision, enrichmentPolicy: searchEnrichmentPolicy({}, this.config),
-      firstCallOrdinal, deadlineAt: deadlineAt - 15000, revalidateIdentity: revalidate })
+      firstCallOrdinal, deadlineAt: deadlineAt - 15000, revalidateIdentity: revalidate, reuseCachedOverflow: true })
     return projectTikHubXiaohongshuSearch(upstream, { detailResults: detail.results,
       detailFailureCount: detail.failureCount, providerCalls: responseBody.data.meta.providerCalls + detail.providerCalls }).publicBody
   }
@@ -2285,6 +2292,7 @@ export class TikHubGateway {
     firstCallOrdinal,
     deadlineAt,
     revalidateIdentity = null,
+    reuseCachedOverflow = false,
   }) {
     const allItems = upstream.publicBody?.data?.items || []
     const requested = enrichmentPolicy.mode === 'all'
@@ -2293,7 +2301,10 @@ export class TikHubGateway {
     const candidates = [...new Map(requested
       .filter((item) => item?.externalId && item?.url)
       .map((item) => [item.externalId, item])).values()]
-    const selected = candidates.slice(0, enrichmentPolicy.maxItems)
+    // A buffered page can span several supplier pages. Past the live lookup
+    // limit only reuse fresh details already acquired for this consumer.
+    const selected = reuseCachedOverflow && enrichmentPolicy.maxItems > 0
+      ? candidates : candidates.slice(0, enrichmentPolicy.maxItems)
     const results = []
     let failureCount = candidates.length - selected.length
     let providerCalls = 0
@@ -2322,16 +2333,15 @@ export class TikHubGateway {
         },
       }
     })
+    if (!plans.length) return { results, failureCount, providerCalls }
+    const cached = await this.platformStore.freshDetailBodiesFor(context.consumer.id, plans.map(plan => plan.detailFingerprint))
     const livePlans = []
-    await Promise.all(plans.map(async (plan) => {
-      const snapshot = await this.platformStore.snapshotFor({
-        consumerId: context.consumer.id,
-        operation: XIAOHONGSHU_POST_OPERATION,
-        fingerprint: plan.detailFingerprint,
-      }, new Date())
-      if (freshDetailItem(snapshot)) results.push({ publicBody: snapshot.responseBody })
-      else livePlans.push(plan)
-    }))
+    for (const plan of plans) {
+      const body = cached.get(plan.detailFingerprint)
+      if (body?.data?.item?.externalId === plan.candidate.externalId) results.push({ publicBody: body })
+      else if (plan.index < enrichmentPolicy.maxItems) livePlans.push(plan)
+      else failureCount += 1
+    }
     if (livePlans.length === 0) return { results, failureCount, providerCalls }
 
     let costReservation = null
@@ -2710,9 +2720,12 @@ export class TikHubGateway {
       }
     }
     try {
+      // Workers on the same search share the available slots. An extra worker
+      // would discard pending previews while its sibling owns the only slot.
       const workerCount = Math.min(
         livePlans.length,
         Math.max(1, Math.min(5, this.config.searchEnrichConcurrency ?? 2)),
+        Math.max(1, this.#availableEnrichmentSlots(context)),
       )
       let nextIndex = 0
       const workers = Array.from({ length: workerCount }, async () => {

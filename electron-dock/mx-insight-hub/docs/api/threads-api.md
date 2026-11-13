@@ -1,10 +1,10 @@
 # Threads 接口手册
 
-更新于 2026-11-12
+更新于 2026-11-13
 
 Hub 已实现 Threads 的五类策略搜索接口。调用方使用现有业务路径，并传入 `platform: "threads"`。持有平台授权的 Key 可通过 `GET /api/v1/data/capabilities` 查看 `threads.search.ready`，租户 OpenAPI 和策略搜索指南也会显示相应入口。就绪值来自 Hub 配置与操作控制，供应商订阅需另行验证。
 
-> **生产验收待完成。** 2026-11-12 18:26（上海时间），使用项目样例 Key 对 `threads-api4` 发起一次 `GET /api/search/recent`，返回 HTTP 403 和 `You are not subscribed to this API.`。生产 Hub 从数据库读取 RapidAPI 凭据，尚未确认是否与样例 Key 相同。当天生产策略目录中未见 Threads 五个入口。五类接口均已通过使用固定供应商样例的本地 Hub HTTP 交付和重放测试。
+> **生产验收待完成。** 11 月 12 日的样例 Key 在 `threads-api4` 上收到明确的未订阅 403；11 月 13 日生产查询也在该渠道收到 403，具体拒绝原因需核对该次归档。新增 Threads Scraper 使用独立操作，已做本地 Hub HTTP 交付、切换和重放测试，尚未用生产 Key 验证该产品。
 
 ## 一、接口总览
 
@@ -34,7 +34,7 @@ Hub 已实现 Threads 的五类策略搜索接口。调用方使用现有业务�
 | `type` | string | 否 | `fresh`（默认）或 `stable` |
 | `fillPage` | boolean | 否 | 可传，Threads 始终按单页返回 |
 
-不支持 `params`，传了返回 400。结果按最新排序。`/api/v2/data/search` 另需 `timeWindow`，见策略搜索手册。
+不支持 `params`，传了返回 400。Threads API 使用最新内容搜索；Threads Scraper 保留供应商返回的顺序，不保证按发布时间排序。`/api/v2/data/search` 另需 `timeWindow`，见策略搜索手册。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/search" \
@@ -253,13 +253,45 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/comment-replies" \
 
 帖子详情、相关帖子、链接转 ID、热门搜索等其余 RapidAPI 接口可通过 `POST /api/v1/data/native/r.threads_*` 原样调用。
 
-**上线顺序（顺序很重要）：**
+**使用已开通的 Threads Scraper 做关键词搜索：**
+
+1. 发布包含迁移 189 的 Hub。迁移登记独立操作 `native.r.threads_scraper_search_posts`，保留现有路由和价格。两个 RapidAPI 渠道使用同一供应商凭据、分别订阅。确认生产 Key 所属应用可访问 [Threads Scraper](https://rapidapi.com/premium-apis-oanor/api/threads-scraper/playground/List%20User%20Posts)。
+2. 在「上游供应商 → RapidAPI」核对新操作的启用状态、采购价和预算。报价按操作分别维护；部署时填入的默认估价不是供应商账单。比价时按操作区分 Scraper 和原来的 `native.r.threads_search_recent`，不要把客户扣款或预估采购价当作供应商实扣。
+3. 在「策略搜索 → 管理 → 内容搜索 → Threads」选择固定供应商 **RapidAPI · Threads Scraper**，填变更原因并保存。需切回时选择 **RapidAPI · Threads API（threads-api4）**；也可保留 TikHub 或配置优先、保底。改动只影响新内容搜索，账号和评论仍使用各自的策略。旧请求保留原收据，已有游标沿原渠道继续。
+4. 使用「新建相同查询」进行一次明确的新查询验证；它可能计费。供关键词搜索使用的是该产品的 [Search Posts](https://rapidapi.com/premium-apis-oanor/api/threads-scraper/playground/apiendpoint_b999a4ee-9518-4668-9b6c-0057d2c433c3)：`GET /api/v1/posts/search?query=…`，其 `data.cursor` 由 Hub 封装成 `nextCursor`。同一产品的 List User Posts 是按用户名取发帖列表。
+
+**原有五类接口上线顺序：**
 
 1. 在 RapidAPI 控制台切换到生产 Key 对应的账号或团队，在订阅列表核对 `threads-api4`。也可在该服务的 Endpoints 页面选用生产应用，对 `/api/search/recent` 发起一次最小查询。HTTP 200 且响应含可解析的搜索结果可验证该 Key 的搜索访问权。HTTP 403 且明确提示未订阅，可确认该 Key 缺少该服务的访问权。[RapidAPI 官方测试说明](https://docs.rapidapi.com/docs/connecting-to-an-api)
 2. 准备包含迁移 188 的 Hub 发布。迁移写入五个路由、十一项默认禁用的 RapidAPI 操作；现有部署脚本中的默认定价步骤可随即启用这些操作。开放租户流量前核对实际采购价、预算、路由模式和目标租户的授权。
 3. 通过部署后的 Hub 做五类业务验收，含账号 ID 与用户名、三种账号活动、两级评论归属，以及带有效游标的后续页。TikHub 作为保底时也需以实际凭据校验。完成后再按已验收的接口开放流量。
 
 未订阅就部署时，默认的 RapidAPI 优先路由会把请求发给 RapidAPI 并得到 403，返回 502 `external_platform_rejected`，**不会**自动转 TikHub（保底只在派发前生效）。这种情况请先把策略改为固定 TikHub 或暂停。
+
+**已经开通但内容搜索返回 403：** 在诊断中心按 Hub 请求 ID 核对当次操作及归档。只有匹配固定的未订阅消息，才能确认 RapidAPI 当时是以未订阅为由拒绝。检查「上游供应商 → RapidAPI → API Key 管理」的来源和更新时间，再到该应用所属账号或团队核对对应产品和订阅生效时间。`native.r.threads_search_recent` 对应 [Lundehund 的 Threads API](https://rapidapi.com/Lundehund/api/threads-api4)，`native.r.threads_scraper_search_posts` 对应 Threads Scraper。如果订阅晚于原请求，重放已保存的失败不能验证新权限。
+
+旧版诊断中心只显示“受限响应已保存”。可在有生产 kubectl 权限的服务器执行以下只读查询，把第一行替换为 Hub 请求 ID。它只返回固定分类，不输出正文或凭据，不发起采购，无需部署新版 Hub：
+
+```bash
+hub_request_id='替换为 Hub 请求 ID'
+kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+  psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 -v rid="$hub_request_id" <<'SQL'
+BEGIN READ ONLY;
+SET LOCAL statement_timeout = '3s';
+SELECT p.operation, CASE
+  WHEN r.id IS NULL THEN 'archive_missing'
+  WHEN r.parsed_payload->>'message' = 'You are not subscribed to this API.' THEN 'not_subscribed_at_call'
+  ELSE 'unclassified_403' END AS saved_reason
+FROM external_platform.provider_calls p
+LEFT JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id = p.id
+WHERE p.usage_request_id = :'rid'::uuid AND p.provider_key = 'rapidapi'
+  AND p.operation IN ('native.r.threads_search_recent', 'native.r.threads_scraper_search_posts')
+  AND p.outcome = 'rejected' AND p.http_status = 403;
+ROLLBACK;
+SQL
+```
+
+`unclassified_403` 表示未匹配此消息；`archive_missing` 或零行表示缺少对应证据。均不能证明订阅有效或无效。可用诊断中心显示的**上游 requestId** 核对 RapidAPI 记录。确认权限后，用「新建相同查询」再发送一次验证，可能再次计费。
 
 **管理端切换或暂停：** 「策略搜索 → 管理」，五个接口都可单独设置固定供应商、优先与保底、暂停新采购。也可调接口：
 

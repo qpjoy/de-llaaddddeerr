@@ -185,7 +185,8 @@ test('every field the Threads comment parsers emit is documented', async () => {
 test('routing defaults to RapidAPI first on all five interfaces, and each can be switched or paused', async () => {
   const store = new StrategySearchRoutingStore()
   for (const id of ['search', 'crawl', 'user-info', 'post-comments', 'comment-replies']) {
-    assert.deepEqual([...strategyRouteProviders(id, 'threads')].sort(), ['rapidapi', 'tikhub'], id)
+    assert.deepEqual([...strategyRouteProviders(id, 'threads')].sort(),
+      id === 'search' ? ['rapidapi', 'rapidapi-threads-scraper', 'tikhub'] : ['rapidapi', 'tikhub'], id)
     const route = await store.get(id, 'threads')
     assert.deepEqual([route.mode, route.primaryProvider, route.fallbackProvider], ['priority', 'rapidapi', 'tikhub'], id)
   }

@@ -1381,6 +1381,46 @@ test('Xiaohongshu larger standard pages preserve provider session and buffer the
   assert.equal(new Set([...first.body.data.items, ...second.body.data.items, ...third.body.data.items].map(item => item.externalId)).size, 60)
 })
 
+test('Xiaohongshu large search pages reuse fresh details past the live lookup limit', async () => {
+  const ids = Array.from({ length: 22 }, (_, index) => (index + 1).toString(16).padStart(24, '0'))
+  const preview = '文'.repeat(60)
+  const full = preview + '，这是笔记的后半段。'
+  const title = '搜索卡片标题'.repeat(12)
+  const h = await harness({ platform: 'xiaohongshu', payload: call => {
+    if (call.params.note_id) return { id: call.params.note_id, title: '笔记', desc: full }
+    const page = Number(call.params.page)
+    const warming = call.params.keyword === '预热'
+    const source = xhsPage(warming ? [ids[20]] : ids.slice((page - 1) * 20, page * 20), page, !warming && page === 1)
+    for (const { note } of source.data.items) {
+      note.desc = preview
+      if (note.id === ids[20]) note.title = title
+    }
+    return source
+  } })
+  const { TIKHUB_XIAOHONGSHU_ENDPOINT_KEY } = await import('../../server/contracts/tikhub-xiaohongshu.mjs')
+  await h.controls.updatePolicy('tikhub', 'social.posts.resolve', { expectedRevision: 0, desiredState: 'active', reason: 'Offline detail',
+    priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 100000,
+      monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: 12 } } },
+  { runtime: { config: h.config, credentialConfigured: true } })
+  const warmed = await h.invokeData({ platform: 'xiaohongshu', query: '预热', pageSize: 1 }, 'xhs-warm-detail')
+  assert.equal(warmed.body.data.items[0].text, full)
+
+  const body = { platform: 'xiaohongshu', query: '城市', pageSize: 100 }
+  const result = await h.invokeData(body)
+  const items = result.body.data.items
+  assert.deepEqual(items.map(item => item.externalId), ids)
+  assert.equal(items[20].text, full)
+  assert.equal(items[20].title, title)
+  assert.equal(items[21].text, preview)
+  assert.equal(result.body.data.status, 'partial')
+  const calls = h.calls.length
+  assert.equal(h.calls.filter(call => call.params.note_id === ids[20]).length, 1)
+  assert.ok(!h.calls.some(call => call.params.note_id === ids[21]))
+  assert.equal(result.body.data.meta.providerCalls, calls - warmed.body.data.meta.providerCalls)
+  assert.deepEqual((await h.invokeData(body)).body, result.body)
+  assert.equal(h.calls.length, calls)
+})
+
 test('Xiaohongshu standard20 always uses existing gateway, whose pause never falls back to Night-All', async () => {
   const h = await harness({ platform: 'xiaohongshu', payload: xhsPage([]) })
   h.service.externalSocialSearchEnabled = false

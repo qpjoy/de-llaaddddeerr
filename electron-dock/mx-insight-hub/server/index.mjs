@@ -44,6 +44,7 @@ import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest, threadsAccountRecipe } from './contracts/hub-social-compat.mjs'
 import { threadsSearchRecipe } from './contracts/threads-search.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../shared/threads-search-routing.mjs'
 import { threadsSearchCursorProvider } from './external-platforms/threads-search-workflow.mjs'
 import { socialAccountCursorProvider, threadsAccountReceiptProvider } from './external-platforms/social-account-delivery.mjs'
 import { normalizePostCommentsRequest, POST_COMMENTS_RECIPES, POST_COMMENT_PROVIDER_RECIPES, POST_COMMENTS_PATH,
@@ -526,9 +527,11 @@ export async function createRuntime(config = loadConfig()) {
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   // Threads alone is routed on every interface; each supplier keeps one gateway.
   const threadsGateways = { rapidapi: nativeSearchGateway('threads', 'rapidapi'), tikhub: nativeSearchGateway('threads', 'tikhub') }
+  for (const gateway of Object.values(threadsGateways)) gateway.strategySearchRoutingStore = strategySearchRoutingStore
   const threadsRouter = options => createCommentRouter({ gateways: { threads: threadsGateways }, policyStore: strategySearchRoutingStore,
     platformFor: () => 'threads', ...options })
   const threadsSearch = threadsRouter({ interfaceId: 'search', recipeFor: threadsSearchRecipe,
+    gateways: { threads: { ...threadsGateways, [THREADS_SCRAPER_ROUTE]: threadsGateways.rapidapi } },
     cursorProvider: (input, options) => threadsSearchCursorProvider(input, options),
     bodyFor: input => input.normalized, invoke: (gateway, context, input) => gateway.searchThreads(context, input) })
   const threadsAccount = Object.fromEntries(['crawl', 'user-info'].map(operation => [operation, threadsRouter({ interfaceId: operation,

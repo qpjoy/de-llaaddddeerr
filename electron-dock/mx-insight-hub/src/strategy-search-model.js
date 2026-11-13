@@ -1,3 +1,5 @@
+import { THREADS_SCRAPER_ROUTE } from '../shared/threads-search-routing.mjs'
+
 export const STRATEGY_SEARCH_PATH = '/data-products/strategy-search'
 export const STRATEGY_SEARCH_INTERFACES = [
   { id: 'search', label: '关键词搜索', description: '按关键词和目标平台获取内容，使用统一条目或兼容 raw 响应。',
@@ -47,7 +49,11 @@ export function commentRouteUpdate(row, draft) {
   return { mode: draft.mode, primaryProvider: draft.primaryProvider, fallbackProvider, expectedRevision: row.policy.revision, reason }
 }
 
-export const STRATEGY_PROVIDER_LABELS = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', 'night-all': 'Night-All', 'night-all-a': 'Night-All-A 自建' }
+export const STRATEGY_PROVIDER_LABELS = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', [THREADS_SCRAPER_ROUTE]: 'RapidAPI · Threads Scraper', 'night-all': 'Night-All', 'night-all-a': 'Night-All-A 自建' }
+export function strategySupplierLabel(provider, platform) {
+  if (platform === 'threads' && provider === 'rapidapi') return 'RapidAPI · Threads API（threads-api4）'
+  return STRATEGY_PROVIDER_LABELS[provider] || provider || '未提供'
+}
 export const INSTAGRAM_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新搜索' }
 export const TWITTER_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新采购' }
 export const STRATEGY_MIGRATION_LABELS = { hub_native: 'Hub 直连', conditional: '部分已迁移', night_all: '仍经 Night-All', local: '本地数据' }
@@ -132,7 +138,7 @@ export function strategyPolicyEditor(interfaceId, row) {
 // reviewed policy editors can expose writes; other inventory stays read-only.
 export function strategyPolicySummary(interfaceId, row) {
   const editor = strategyPolicyEditor(interfaceId, row)
-  const providerLabel = provider => STRATEGY_PROVIDER_LABELS[provider] || provider || '未提供'
+  const providerLabel = provider => strategySupplierLabel(provider, row?.platform)
   if (!row) return { title: '尚未选择目标平台', mode: '未提供', description: '选择业务接口和平台后查看策略。', providers: [], modes: [], editor: null }
   if (editor === 'comment-route') {
     const policy = row.policy, { providers, modes } = commentRouteOptions(row)

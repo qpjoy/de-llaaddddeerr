@@ -5,6 +5,7 @@ import { TikHubAdapter, TikHubUpstreamError } from '../../server/adapters/tikhub
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { AppError } from '../../server/core/errors.mjs'
+import { setApiProcessCount } from '../../server/core/process-share.mjs'
 import { createInternalTrafficPolicy } from '../../server/core/internal-traffic-policy.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
 import { isNightAllLegacyEnvelope } from '../../server/contracts/night-all-legacy.mjs'
@@ -251,6 +252,15 @@ class PlatformStoreMock {
     return structuredClone(snapshot)
   }
 
+  async freshDetailBodiesFor(_consumerId, fingerprints, now = new Date()) {
+    const bodies = new Map()
+    for (const fingerprint of fingerprints) {
+      const snapshot = this.snapshots.get(this.#snapshotKey('social.posts.resolve', fingerprint))
+      if (snapshot && new Date(snapshot.freshUntil) >= now) bodies.set(fingerprint, structuredClone(snapshot.responseBody))
+    }
+    return bodies
+  }
+
   async providerState() { return {} }
 
   async acquireDispatchLease() { return { kind: 'acquired' } }
@@ -462,6 +472,33 @@ test('search enrichment leaves foreground slots available and cleans its own cou
   releases.forEach(resolve => resolve()); await first
   assert.equal(state.gateway.active, 0)
   assert.equal(state.gateway.activeEnrichment, 0)
+})
+
+for (const [limit, processes, overrides] of [
+  ['public process foreground reserve', 4, { maxConcurrency: 16, maxConsumerConcurrency: 8 }],
+  ['single consumer slot', 1, { maxConcurrency: 16, maxConsumerConcurrency: 1 }],
+]) test(`one available detail slot completes all previews sequentially under the ${limit}`, async (t) => {
+  setApiProcessCount(processes)
+  t.after(() => setApiProcessCount(1))
+  const ids = [FIRST_NOTE_ID, SECOND_NOTE_ID, '675d277d000000000600e659']
+  const preview = '预'.repeat(60)
+  const full = `${preview}补全正文`
+  const adapter = adapterFor({
+    notes: ids.map(id => note(id, preview)),
+    detailById: new Map(ids.map(id => [id, detailResult(id, full)])),
+    beforeDetail: async () => {
+      assert.equal(state.gateway.activeEnrichment, 1)
+      await new Promise(resolve => setImmediate(resolve))
+    },
+  })
+  const state = fixture(adapter, overrides)
+  const response = await state.gateway.searchNotes(state.context, request({
+    body: { platform: 'xiaohongshu', query: '补全', pageSize: ids.length },
+  }))
+  assert.deepEqual(response.body.data.items.map(item => item.text), ids.map(() => full))
+  assert.deepEqual(adapter.calls.detail.map(call => call.id), ids)
+  assert.equal(response.body.data.status, 'ok')
+  assert.equal(state.gateway.active, 0)
 })
 
 test('a fresh search snapshot published while waiting avoids another provider purchase', async () => {
