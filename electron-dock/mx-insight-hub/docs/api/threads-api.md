@@ -209,6 +209,10 @@ TikHub `fetch_post_comments` 的实际返回可以是 `code: 200`、`data.edges[
 
 TikHub 此接口不支持来源分页。即使返回 `page_info.has_next_page: true`，也不会据此发送后续采集；已购页面可按 `count` 分批交付，余量读完后 `hasMore: false`、`nextCursor: null` 只表示本渠道无法继续，并不保证已取得帖子的全部评论。
 
+**退避重试（2026-11-15，本版本部署后生效）：** TikHub 渠道的帖子评论和评论回复，对已核对的 HTTP 400 / 业务码 400 且消息精确匹配供应商固定 `Request failed. Please retry…You won't be charged for this request.` 提示，最多在同一个 Hub 请求内再试两次（总共最多 3 次）。退避依次为 1–1.25 秒、2–2.5 秒，带随机抖动；每次仍使用相同目标和参数，重查授权、暂停、预算、限流和原请求截止时间。不需要新增传参，`fillPage: false` 同样适用，重试不构成翻页。
+
+每次尝试独立保存上游回执和采购估价；供应商“不收费”提示不会把 `billed: null` 改为 `false`。恢复成功只交付一次，`data.meta.providerCalls` / `upstreamCallCount` 统计实际调用数，`upstreamPages` 仍为一个来源页。取消、预算不足或剩余时间不足时不再派发，保留最后一次明确拒绝。超时、运输错误、HTTP 5xx 等结果未知的调用，以及普通参数拒绝、鉴权失败、429 和已成功但无法解析的响应，不适用本次重试策略。次数耗尽后仍返回已保存的失败；同一幂等键重放不会重新采集，历史失败也不会被自动重试。
+
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/post-comments" \
   -H "X-API-Key: $HUB_KEY" -H "Content-Type: application/json" \
@@ -309,6 +313,14 @@ Hub 返回 `contractVersion`、`endpoint`、`data`、`meta.capturedAt`、`reques
 | 评论回复 | Threads API 优先、TikHub 保底 | — | `/api/post/comments` | `fetch_post_comments` |
 
 Scraper 在管理端的路由值是 `rapidapi-threads-scraper`，Threads API 是 `rapidapi`，TikHub 是 `tikhub`。标注为默认的路由适用于新建配置和符合条件的升级。两个 RapidAPI 产品共用 Hub 中的 RapidAPI 凭据，但须分别订阅，操作、采购价和诊断记录也分别核对。Scraper 的搜索保留返回顺序，没有“最新优先”排序承诺。评论与回复在另两个渠道购买，Scraper 订阅不包含这些接口。
+
+**搜索使用 Scraper，评论是否必须改用 RapidAPI？** 不需要。搜索返回的是 Threads 帖子标识，Hub 按字符串传给所选评论渠道；评论使用 TikHub 或 Threads API 都不要求搜索也使用同一渠道。2026-11-14 重新核对的 [Scraper 官方目录](https://rapidapi.com/premium-apis-oanor/api/threads-scraper)仍只有九项操作，没有评论列表或评论回复接口。
+
+若主动改用 RapidAPI 评论渠道，应订阅 [Lundehund 的 Threads API](https://rapidapi.com/Lundehund/api/threads-api4/playground/apiendpoint_7a5a3ade-41de-4601-9fae-6595cd432c29)，并核对生产应用 Key 对 `GET /api/post/comments` 的访问权限。Hub 已实现此接口：帖子评论把帖子 ID 传为 `post_id`，评论回复把目标评论 ID 传为 `post_id`，续页使用可选的 `end_cursor`。两项共用 `native.r.threads_post_comments`，不需再购买或实现一个独立的“评论回复”原生接口；`Get User Replies` 是账号自己发表的回复列表，不是某条评论的回复列表。现有接入按官方公开样例与本地测试校准，仍需用开通后的实际响应验收。
+
+开通后，在「策略搜索 → 管理」分别将「帖子评论」「评论回复」的 Threads 渠道选为「RapidAPI · Threads API（threads-api4）」并保存；内容搜索可继续使用 Scraper。同时核对该原生操作的启用状态、采购价和预算。供应商订阅不会自动修改 Hub 中已经保存的两条策略。
+
+**TikHub 返回 HTTP 400、业务码 400：** 这是上游拒绝，与 HTTP 200 后的 `invalid_social_contract` 解析错误不同，不能仅据此推断应开通 RapidAPI。核对这次原请求的实际操作、保存参数及根层或 `detail` 中的上游消息；通用的请求失败提示仍不能确定是参数、目标可用性或供应商采集故障。400 本身也不能证明未计费，需核对实际账本。此前失败不会因换渠道或订阅而被重写。
 
 渠道选择要求（2026-11-14）：Scraper 若提供帖子评论和评论回复，完成官方参数、返回结构与分页校验并接入后，两项均默认使用 Scraper，原渠道保留供管理端切换。当前官方目录不含这两项，因此本次复核没有新增 Scraper 评论选项或修改现有评论策略；这也不代表之后会自动切换生产配置。
 

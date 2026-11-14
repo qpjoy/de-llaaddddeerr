@@ -2,6 +2,7 @@ import { assertFacebookAccountEnabled, assertCommentRouteEnabled } from './strat
 import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
 import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
@@ -18,6 +19,7 @@ import { YOUTUBE_COMMENTS_TRAVERSAL } from '../contracts/youtube-comments.mjs'
 import { POST_COMMENTS_TRAVERSAL } from '../contracts/post-comments.mjs'
 import { COMMENT_REPLIES_TRAVERSAL } from '../contracts/comment-replies.mjs'
 import { THREADS_SEARCH_TRAVERSAL } from '../contracts/threads-search.mjs'
+import { threadsCommentRetryDelay } from './threads-comment-retry.mjs'
 
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -117,6 +119,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
   // looked up as a username. It is this request's answer unless that second
   // lookup is actually dispatched.
   let idLookupFailure = null
+  let commentRetryFailure = null
   const enoughTime = () => Number.isFinite(deadlineAt) && clock() + (gateway.config.timeoutMs || 30000) + 5000 < deadlineAt
   const warn = (code, message) => { if (!warnings.some(row => row.code === code)) warnings.push({ code, message }) }
   const stop = reason => { stopped = true; warn('social_page_fill_stopped', `Account acquisition paused before another dispatch (${reason}); continue with nextCursor when present.`) }
@@ -132,6 +135,19 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
   const answerIdLookup = async () => {
     const { status, body, latencyMs, capturedAt } = idLookupFailure
     idLookupFailure = null
+    try {
+      await gateway.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: status, responseBody: body,
+        unitsActual: 0, upstreamLatencyMs: latencyMs, deliverySourceMode: 'live', capturedAt })
+    } catch { await markUnknown(); throw uncertain() }
+    settledFailure = true
+    throw new AppError(status, body.error.code, body.error.message, body.error.details)
+  }
+  // A refusal already has its own settled provider receipt. If the retry
+  // cannot start, commit that known result instead of inventing an unknown
+  // purchase or attempting to settle the same provider call twice.
+  const answerCommentRetry = async () => {
+    const { status, body, latencyMs, capturedAt } = commentRetryFailure
+    commentRetryFailure = null
     try {
       await gateway.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: status, responseBody: body,
         unitsActual: 0, upstreamLatencyMs: latencyMs, deliverySourceMode: 'live', capturedAt })
@@ -232,7 +248,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         }
         consume(projected, { ...page, callId: job.buffer.callId }, job, index, step, job.buffer.offset, job.buffer.hash)
       }
-      const tokens = new Set(job.dispatchedTokens); let noProgress = 0, resolves = 0
+      const tokens = new Set(job.dispatchedTokens); let noProgress = 0, resolves = 0, commentRetries = 0
       while (rowsByJob[index].length < (request.operation === 'user-info' ? 1 : request.pageSize) && !job.buffer && !job.done && !job.manualContinuation) {
         if (calls >= 50) { stop('dispatch_limit'); break }
         if (job.upstreamPages >= 15) { job.done = true; stop('upstream_page_limit'); break }
@@ -251,6 +267,13 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         }
         if (step.socialCompat.stage === 'resolve' && ++resolves > (traversal?.maxResolves ?? 3)) throw unavailable()
         try {
+          if (commentRetryFailure) {
+            // The previous iteration released its procurement hold and child
+            // lease. Keep only the parent deduplication lease while waiting.
+            if (entered) { leaveCapacity(entered); entered = false }
+            await sleep(commentRetryFailure.delayMs, undefined, { signal })
+            if (!enoughTime()) throw new AppError(503, 'social_search_deadline', 'Account acquisition deadline reached before dispatch')
+          }
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
           await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
@@ -301,11 +324,14 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           currentEvidence = null
           currentCall = await store.beginProviderCall({ ...delivery, operation: expected.operation,
             contractVersion: expected.contractVersion, endpointKey: expected.endpointKey, endpointVersion: expected.endpointVersion,
-            marketplace, callOrdinal: calls, callRole: calls ? 'enrichment' : 'primary',
+            marketplace, callOrdinal: calls, callRole: commentRetryFailure ? 'retry' : calls ? 'enrichment' : 'primary',
             dispatchFingerprint: delivery.fingerprint, costControl: cost.costMinor === 0 ? null : cost,
             costReservationId: costReservation.id, operationControl: control })
           // The username lookup now owns the outcome.
           idLookupFailure = null
+          // From this point a new purchase owns the outcome, including any
+          // transport or persistence uncertainty; never replay the old refusal.
+          commentRetryFailure = null
           calls++; job.started = true; tokens.add(token); job.dispatchedTokens.push(token)
           if (traversal ? traversal.countsAsPage(step) : step.socialCompat.stage !== 'resolve') job.upstreamPages++
           const callStart = performance.now()
@@ -380,6 +406,21 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
               }
             }
             const failureBody = { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId }
+            const retryDelayMs = threadsCommentRetryDelay({ provider, request, step, workflowKind, error, retries: commentRetries })
+            if (retryDelayMs !== null && !signal?.aborted
+              && clock() + retryDelayMs + (gateway.config.timeoutMs || 30000) + 5000 < deadlineAt) {
+              await store.finishProviderStep(currentEvidence)
+              currentCall = null
+              bytes += currentEvidence.restrictedResponseArchive?.bodySize ?? 0
+              commentRetryFailure = { status, body: failureBody, latencyMs: currentEvidence.latencyMs,
+                capturedAt: currentEvidence.responseArchive?.capturedAt ?? new Date().toISOString(), delayMs: retryDelayMs }
+              commentRetries++
+              // Retry this exact source page, not a continuation. Keep every
+              // paid call in calls/receipts but count the logical page once.
+              tokens.delete(token); job.dispatchedTokens.pop()
+              if (traversal.countsAsPage(step)) job.upstreamPages--
+              continue
+            }
             // Callers send bare digits for both IDs and handles. When the ID
             // lookup definitely finds no account, settle that call and try the
             // same digits once as a username; nothing else buys a second lookup.
@@ -418,6 +459,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             if (currentCall) await store.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(currentEvidence || {}) }).catch(() => {})
             await markUnknown(); throw uncertain()
           }
+          if (commentRetryFailure) await answerCommentRetry()
           // Whatever kept the username lookup from being dispatched, the ID
           // lookup's definite refusal is still the answer.
           if (idLookupFailure) await answerIdLookup()
@@ -430,6 +472,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           childLease = null
         }
       }
+      if (commentRetryFailure) await answerCommentRetry()
       if (idLookupFailure) await answerIdLookup()
       if (stopped) break
     }
