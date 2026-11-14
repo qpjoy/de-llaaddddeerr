@@ -40,6 +40,65 @@ test('Weibo identity and interaction field names remain visible without their va
   for (const value of ['9876543210123456', 'private-author', '7654321', '7654322']) assert.equal(output.includes(value), false)
 })
 
+test('Threads comment and reply structure exposes fixed field names while withholding all scalar values', () => {
+  const result = inspectPostCommentArchive(archive({ code: 200, data: { comments: [{ node: {
+    thread_items: [{ post: { pk: '4026682943628068564', post_id: '4026682943628068564',
+      caption: { text: 'private-thread-comment' }, user: { pk: 'private-user', full_name: 'private-name' },
+      text_post_app_info: { direct_reply_count: 7654321, is_reply: true, reply_to_author: { username: 'private-handle' } },
+      replied_to: { id: '4026682943628068563' }, root_post: { id: '4026682943628068563' },
+      taken_at: 1777777777, 'private-field': 'private-value' } }],
+  } }], page_info: { end_cursor: 'private-cursor', has_next_page: true } } }))
+  assert.equal(result.state, 'archive_verified')
+  assert.equal(result.hashVerified, true)
+  const base = '$.data.comments[].node.thread_items[].post'
+  for (const suffix of ['pk', 'post_id', 'caption.text', 'user.pk', 'user.full_name', 'replied_to.id', 'root_post.id']) {
+    assert.deepEqual(result.fields.find(row => row.path === `${base}.${suffix}`).types, { string: 1 })
+  }
+  assert.deepEqual(result.fields.find(row => row.path === `${base}.text_post_app_info.direct_reply_count`).types, { number: 1 })
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.page_info.end_cursor').continuation, { nonempty_string: 1 })
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.page_info.has_next_page').signals, { true: 1 })
+  assert.doesNotMatch(JSON.stringify(result), /private-|402668294362806856[34]|7654321|1777777777/u)
+  const corrupt = archive({ data: { comments: [] } })
+  corrupt.body_sha256 = '0'.repeat(64)
+  assert.deepEqual(inspectPostCommentArchive(corrupt), { state: 'archive_integrity_failed' })
+})
+
+test('Threads request inspection accepts only matching TikHub and legacy RapidAPI comment endpoints', async () => {
+  for (const definition of [
+    { provider_key: 'tikhub', marketplace: 'threads', endpoint_key: 'native.t.api_fe58186e16adc3bb', accepted: true },
+    { provider_key: 'rapidapi', marketplace: 'threads', endpoint_key: 'native.r.threads_post_comments', accepted: true },
+    { provider_key: 'justone', marketplace: 'threads', endpoint_key: 'native.t.api_fe58186e16adc3bb', accepted: false },
+    { provider_key: 'rapidapi', marketplace: 'twitter', endpoint_key: 'native.r.threads_post_comments', accepted: false },
+  ]) {
+    const queries = []
+    const client = { async query(sql, values) {
+      queries.push({ sql, values })
+      if (sql.includes(':usage')) return { rows: [{ platform: 'threads', status: 'committed', response_status: 502 }] }
+      if (sql.includes(':calls')) return { rows: [{ id: callId, ...definition, outcome: 'succeeded_unusable',
+        http_status: 200, business_code: 200, billed: true, error_code: 'invalid_social_contract' }] }
+      if (sql.includes(':archive')) {
+        assert.equal(definition.accepted, true)
+        assert.deepEqual(values, [requestId, callId, 4194304])
+        assert.match(sql, /c.usage_request_id=\$1::uuid AND c.id=\$2::uuid/u)
+        return { rows: [archive({ code: 200, data: { comments: [] } })] }
+      }
+      return { rows: [] }
+    }, release() {} }
+    const result = await inspectPostCommentContract({ connect: async () => client }, requestId)
+    assert.equal(result.revision, 'post-comment-contract-inspection.v3')
+    assert.equal(result.usage.platform, 'threads')
+    assert.equal(result.usage.httpStatus, 502)
+    assert.equal(result.calls[0].httpStatus, 200)
+    assert.equal(result.calls[0].businessCode, 200)
+    assert.equal(result.calls[0].errorCode, 'invalid_social_contract')
+    assert.equal(result.calls[0].archive.state, definition.accepted ? 'archive_verified' : 'unrecognized_comment_endpoint')
+    assert.equal(queries.filter(row => row.sql.includes(':archive')).length, definition.accepted ? 1 : 0)
+    assert.match(queries[0].sql, /READ ONLY/u)
+    assert.equal(queries.at(-1).sql, 'ROLLBACK')
+    assert.equal(result.supplierHttpCallsMade, 0)
+  }
+})
+
 test('all raw byte parsing requires matching size and SHA and remains bounded', () => {
   const row = archive({ data: { comments: [] } })
   for (const changed of [{ body_size: row.body_size + 1 }, { actual_body_size: row.body_size + 1 }, { body_sha256: '0'.repeat(64) }]) {
@@ -224,7 +283,7 @@ test('Twitter shape mode is restricted to the exact native endpoint while usage 
     return { rows: [] }
   }, release() {} }
   const result = await inspectPostCommentContract({ connect: async () => client }, requestId, { twitterPostId })
-  assert.equal(result.revision, 'post-comment-contract-inspection.v2')
+  assert.equal(result.revision, 'post-comment-contract-inspection.v3')
   assert.equal(result.usage.platform, 'social')
   assert.equal(result.calls.every(row => row.platform === 'twitter'), true)
   assert.equal(result.calls[0].archive.twitterShape.rootIdRelation, 'same')

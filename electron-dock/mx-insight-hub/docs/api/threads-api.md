@@ -192,6 +192,8 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/post-detail" \
 
 ## 六、帖子评论
 
+此业务目前使用 Threads API（threads-api4）或 TikHub，独立于内容搜索的渠道选择。2026-11-14 重新读取 [Threads Scraper 官方当前版本目录](https://rapidapi.com/premium-apis-oanor/api/threads-scraper/playground/apiendpoint_6da30740-4df1-44ab-8341-27877aa001cc)，完整目录仍为第八节的九项操作，没有帖子评论或评论回复接口。`posts/detail` 的互动计数不是评论列表，不能据此提供评论正文或分页。仅订阅 Scraper 不代表已开通这两个评论渠道。
+
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `platform` | string | 是 | `threads` |
@@ -202,6 +204,10 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/post-detail" \
 | `includeRaw` | boolean | 否 | true 时每条附带来源对象 `raw` |
 
 短码和数字 ID 是同一个值的两种写法，Hub 在本地换算。RapidAPI 的非空首页包含被查询的帖子，Hub 会核对其 ID 并从评论中剔除。若供应商返回了另一篇帖子的首页，整页按来源数据错误处理。TikHub 的评论列表可以省略原帖。
+
+TikHub `fetch_post_comments` 的实际返回可以是 `code: 200`、`data.edges[].node.thread_items[].post`，并非只有文档描述的 `comments` 数组。Hub 同时兼容两种格式；按 `node.id` 选择会话条目中的目标回复，过滤被查询的帖子及已识别的上级帖子，再映射正文、作者、发布时间、互动指标与媒体。该结构依据 2026-11-14 已保存响应的字段摘要确认，完整原响应与实际楼中楼数据的线上验收需分别核对。
+
+TikHub 此接口不支持来源分页。即使返回 `page_info.has_next_page: true`，也不会据此发送后续采集；已购页面可按 `count` 分批交付，余量读完后 `hasMore: false`、`nextCursor: null` 只表示本渠道无法继续，并不保证已取得帖子的全部评论。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/post-comments" \
@@ -235,6 +241,8 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/post-comments" \
 
 ## 七、评论回复
 
+渠道限制同帖子评论：目前没有已公布的 Scraper 评论回复契约。账号自己发表的回复、帖子的回复数量与某条评论的回复列表是不同数据，不能互相替代。
+
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `platform` | string | 是 | `threads` |
@@ -245,6 +253,8 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/post-comments" \
 | `cursor` | string | 否 | 上一页 `data.page.nextCursor` |
 
 Threads 的回复本身也是帖子，所以用同一个评论接口查询，查询对象和它的上级帖子已剔除。供应商回显直接父级或会话根时，Hub 会用它们核对归属；父级与目标不符或上下文矛盾的页面会被拒绝。返回结构同评论，另有 `type: "reply"`、`rootCommentId`（被查询的评论）、`parentCommentId`（同 `rootCommentId`）。
+
+TikHub 评论和回复共用同一解析器，均支持上述 `data.edges` 结构；查询回复时上游 `post_id` 使用被查询的 `commentId`，并保留 `contentId` 作为所属帖子的上下文。回复同样受 TikHub 单来源页限制。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/comment-replies" \
@@ -299,6 +309,8 @@ Hub 返回 `contractVersion`、`endpoint`、`data`、`meta.capturedAt`、`reques
 | 评论回复 | Threads API 优先、TikHub 保底 | — | `/api/post/comments` | `fetch_post_comments` |
 
 Scraper 在管理端的路由值是 `rapidapi-threads-scraper`，Threads API 是 `rapidapi`，TikHub 是 `tikhub`。标注为默认的路由适用于新建配置和符合条件的升级。两个 RapidAPI 产品共用 Hub 中的 RapidAPI 凭据，但须分别订阅，操作、采购价和诊断记录也分别核对。Scraper 的搜索保留返回顺序，没有“最新优先”排序承诺。评论与回复在另两个渠道购买，Scraper 订阅不包含这些接口。
+
+渠道选择要求（2026-11-14）：Scraper 若提供帖子评论和评论回复，完成官方参数、返回结构与分页校验并接入后，两项均默认使用 Scraper，原渠道保留供管理端切换。当前官方目录不含这两项，因此本次复核没有新增 Scraper 评论选项或修改现有评论策略；这也不代表之后会自动切换生产配置。
 
 1. 迁移 188 建立原有五条业务路由。迁移 189 登记 Scraper 搜索操作。迁移 190 补齐其余八项并登记单帖详情；只将仍为迁移 188 原始 revision 1 的搜索、账号内容和账号资料改为固定 Scraper。人工保存过的策略、暂停状态和采购价保留。新详情以固定 Scraper 建立。历史幂等重放读取原记录，已有游标沿原渠道继续。
 2. 在「上游供应商 → RapidAPI」核对应用凭据和对应原生操作的启用状态、采购价及预算。部署脚本可以填充缺省采购估价，供应商实扣和租户扣款分别在诊断中心列示。账单记录的数值以最小货币单位计，CNY 的 1 个最小单位是 ¥0.01。

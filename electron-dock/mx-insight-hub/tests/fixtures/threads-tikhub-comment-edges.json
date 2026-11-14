@@ -1,0 +1,36 @@
+{
+  "_source": {
+    "basis": "Synthetic fixture from the production structural summary supplied on 2026-11-14, not the original response body or a supplier-published example. The summary observed 13 data.edges entries and sampled the first three; this fixture retains three representative entries. All scalar values are synthetic. User display fields are auxiliary source-shaped values for projection tests; they are not asserted to have been present in the structural summary.",
+    "usageRequestId": "09a1566b-22e1-4aa9-b159-8649b91844a1",
+    "upstreamRequestId": "00d4d51c-2952-4677-ae82-3bc23addd739",
+    "operation": "native.t.api_fe58186e16adc3bb",
+    "path": "/api/v1/threads/web/fetch_post_comments",
+    "observedPagination": "page_info.has_next_page was true and page_info.end_cursor was null; the documented TikHub endpoint does not support supplier pagination."
+  },
+  "payload": {
+    "code": 200,
+    "data": {
+      "edges": [
+        { "node": { "id": "3390920896561588969", "thread_items": [{ "post": {
+          "pk": "3390920896561588969", "id": "3390920896561588969_101",
+          "user": { "pk": "101", "id": "101", "username": "fixture_root", "full_name": "Root author" },
+          "caption": { "text": "Synthetic root post, excluded from comments" }, "taken_at": 1700000000, "like_count": 9,
+          "text_post_app_info": { "direct_reply_count": 12, "repost_count": 2, "quote_count": 1, "reply_to_author": null }
+        } }] } },
+        { "node": { "id": "3390930071274677885", "thread_items": [{ "post": {
+          "pk": "3390930071274677885", "id": "3390930071274677885_102",
+          "user": { "pk": "102", "id": "102", "username": "fixture_commenter", "full_name": "Comment author", "profile_pic_url": "https://example.invalid/avatar.png" },
+          "caption": { "text": "合成评论第一行\n第二行" }, "taken_at": 1700000001, "like_count": 0,
+          "text_post_app_info": { "direct_reply_count": 1, "repost_count": 0, "quote_count": 2, "reply_to_author": { "username": "fixture_root", "id": "101" } }
+        } }] } },
+        { "node": { "id": "3390930071274677999", "thread_items": [{ "post": {
+          "pk": "3390930071274677999", "id": "3390930071274677999_103",
+          "user": { "pk": "103", "id": "103", "username": "fixture_second", "full_name": "Second author" },
+          "caption": { "text": "Second synthetic comment" }, "taken_at": 1700000002, "like_count": 3,
+          "text_post_app_info": { "direct_reply_count": 0, "repost_count": 1, "quote_count": 0, "reply_to_author": { "username": "fixture_root", "id": "101" } }
+        } }] } }
+      ],
+      "page_info": { "has_next_page": true, "end_cursor": null }
+    }
+  }
+}

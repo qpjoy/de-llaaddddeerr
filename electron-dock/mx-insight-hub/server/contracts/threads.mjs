@@ -4,10 +4,10 @@ import { threadsScraperPostUrlParts, threadsPostIdFromShortcode } from '../../sh
 //
 // RapidAPI's threads-api4 relays Threads' own GraphQL pages; its structure was
 // calibrated from the listing's public example responses on 2026-11-11, because
-// the key available at the time was not subscribed. TikHub's Threads endpoints
-// wrap the same post objects in their own envelope (threads / results /
-// comments), described by its official OpenAPI text. Neither was checked with a
-// live paid page: inspect the first production page after enabling a supplier.
+// the key available at the time was not subscribed. TikHub's other Threads
+// envelopes follow its OpenAPI text. Its comments endpoint also returns a
+// GraphQL data.edges connection, confirmed by a saved production response's
+// structural inspection on 2026-11-14 (see the Threads comments incident doc).
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const text = (...values) => values.find(value => typeof value === 'string' && value.trim())?.trim() || ''
 const numericId = value => typeof value === 'string' && /^\d{1,30}$/u.test(value) ? value
@@ -288,12 +288,17 @@ export function parseThreadsCommentPage(payload, targetId, { provider, currentCu
   assertSucceeded(payload)
   const rapid = provider === 'rapidapi'
   if (!rapid && (provider !== 'tikhub' || payload.code !== 200)) fail('comment_provider')
-  // The RapidAPI fixture uses root data.data.edges. TikHub documents a
-  // comments-only list; it need not echo the target post in the first row.
-  const field = rapid ? 'edges' : 'comments'
-  const connection = roots(payload).find(root => Array.isArray(root[field]))
+  // TikHub's saved production page uses data.edges, with the same native
+  // thread items as RapidAPI's data.data.edges. Keep its documented
+  // comments-only list compatible; TikHub need not echo the target first.
+  const candidates = roots(payload)
+  const connection = candidates.find(root => Array.isArray(root.edges))
+    ?? (!rapid ? candidates.find(root => Array.isArray(root.comments)) : null)
   if (!connection) fail('comment_collection')
-  const groups = connection[field].map(entry => ({ posts: threadPosts(entry), focus: rapid ? numericId(entry.node?.id) : null }))
+  const graph = Array.isArray(connection.edges)
+  const groups = connection[graph ? 'edges' : 'comments'].map(entry => ({
+    posts: threadPosts(entry), focus: graph ? numericId(entry.node?.id) : null,
+  }))
   if (rapid && !currentCursor && groups.length) {
     const { posts, focus } = groups[0]
     if ((focus && focus !== targetId) || !posts.some(post => postPk(post) === targetId)) fail('comment_target')

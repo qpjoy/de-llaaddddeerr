@@ -10,7 +10,7 @@ const MAX_CALLS = 3
 const MAX_NODES = 2048
 const MAX_DEPTH = 18
 const ARRAY_SAMPLE = 3
-const PLATFORMS = ['twitter', 'reddit', 'xiaohongshu', 'instagram', 'weibo', 'kuaishou', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook', 'youtube']
+const PLATFORMS = ['twitter', 'reddit', 'xiaohongshu', 'instagram', 'weibo', 'kuaishou', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook', 'youtube', 'threads']
 const TWITTER_ID = /^[0-9]{1,30}$/u
 const REDDIT_POST_ID = /^(?:t3_)?[a-z0-9]{1,17}$/u
 const REDDIT_NATIVE_PATH = '/api/v1/data/native/t.api_c7f50cf300d63960'
@@ -58,6 +58,8 @@ const ENDPOINTS = new Map([
   ['j.api_524acfcc9a583248', 'youtube'], ['j.api_7e174f644bd5536b', 'youtube'],
 ].map(([key, platform]) => [`native.${key}`, { provider: key.startsWith('t.') ? 'tikhub' : 'justone', platform }]))
 ENDPOINTS.set('xiaohongshu.app-v2.note-comments.v1', { provider: 'tikhub', platform: 'xiaohongshu' })
+ENDPOINTS.set('native.t.api_fe58186e16adc3bb', { provider: 'tikhub', platform: 'threads' })
+ENDPOINTS.set('native.r.threads_post_comments', { provider: 'rapidapi', platform: 'threads' })
 
 // Unknown keys use anonymous aliases, including when traversing their children.
 // Explicit Twitter shape inspection additionally lists schema-like keys directly
@@ -77,7 +79,7 @@ const KEYS = new Set(`code status status_code success message msg data result re
   like_count like_counts likeCount likes digg_count diggCount reply_count replyCount replies_count repliesCount child_comment_count total_number
   sub_comment_count subCommentCount favorite_count retweet_count quote_count reply_count bookmark_count score ups downs reactions reaction_count
   stats statistics metrics vote_count votes upvote_count upvotes like_num likes_count likedCount
-  has_more hasMore has_next hasNext more hasNextPage hasPreviousPage is_end isEnd is_last isLast
+  has_more hasMore has_next hasNext more hasNextPage hasPreviousPage has_next_page has_previous_page is_end isEnd is_last isLast
   cursor next_cursor nextCursor cursor_type cursorType max_id max_id_type since_id next_max_id min_id pcursor
   continuation_token continuationToken continuation next next_page nextPage next_url nextUrl next_offset offset page page_size pageSize
   page_info pageInfo paging pagination end_cursor endCursor start_cursor startCursor after before index pageArea
@@ -101,12 +103,14 @@ const KEYS = new Set(`code status status_code success message msg data result re
   child_comment_next_offset reply_comment_id reply_root_comment_id url_list face sign icon images image_list pictures
   authorVerified isRemoved isInitiallyCollapsed isArchived isLocked isScoreHidden
   thread threads tweets reply_tweets reply_to reply_to_status_id reply_to_tweet_id replying_to
+  thread_items post caption text_post_app_info replied_to root_post direct_reply_count reply_to_author is_reply
+  taken_at full_name profile_pic_url image_versions2 candidates video_versions carousel_media media_type repost_count
   in_reply_to_status_id in_reply_to_tweet_id in_reply_to_user_id inReplyToStatusId conversation
   quoted_tweet retweeted_tweet media entities extended_entities attachments urls photos videos`.split(/\s+/u).filter(Boolean))
 const CONTINUATIONS = new Set(`cursor next_cursor nextCursor max_id since_id next_max_id pcursor continuation_token continuationToken
   continuation next next_page nextPage next_url nextUrl next_offset end_cursor endCursor after before token nextPageToken pageToken
   pagination_token pagination_reply prev_cursor prevCursor child_comment_next_offset`.split(/\s+/u))
-const SIGNALS = new Set(`has_more hasMore has_next hasNext more hasNextPage hasPreviousPage is_end isEnd is_last isLast is_empty isEmpty`.split(/\s+/u))
+const SIGNALS = new Set(`has_more hasMore has_next hasNext more hasNextPage hasPreviousPage has_next_page has_previous_page is_end isEnd is_last isLast is_empty isEmpty`.split(/\s+/u))
 const choice = (value, choices) => value == null ? null : choices.includes(value) ? value : 'other'
 const status = value => Number.isInteger(value) && value >= 100 && value <= 599 ? value : null
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -488,7 +492,7 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
         httpStatus: status(row.http_status), businessCode: [0, 200, 201, 302, 400, 401, 402, 403, 404, 429, 500, 601].includes(row.business_code) ? row.business_code : null,
         billed: typeof row.billed === 'boolean' ? row.billed : null,
         errorCode: choice(row.error_code, ['upstream_balance_exhausted', 'upstream_rate_limited', 'invalid_upstream_contract', 'upstream_rejected',
-          'upstream_timeout', 'invalid_upstream_content_type', 'external_platform_response_unusable']), archive })
+          'upstream_timeout', 'invalid_upstream_content_type', 'external_platform_response_unusable', 'invalid_social_contract']), archive })
     }
     if (prepareTwitterConversation) {
       const call = calls[0]
@@ -519,7 +523,7 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
     if (weiboProjectionValidator) return { revision: 'weibo-comment-projection-verification.v1', requestId,
       verified: calls[0].archive.projection?.verified === true, archive: calls[0].archive,
       supplierHttpCallsMade: 0, databaseWritesMade: 0 }
-    return { revision: 'post-comment-contract-inspection.v2', requestId,
+    return { revision: 'post-comment-contract-inspection.v3', requestId,
       usage: { platform: choice(usages[0].platform, [...PLATFORMS, 'social', 'ecommerce']), status: choice(usages[0].status, ['reserved', 'committed', 'released', 'unknown']), httpStatus: status(usages[0].response_status) },
       calls, callsTruncated: rows.length > MAX_CALLS, callLimit: MAX_CALLS, nativeCallEvidencePresent: rows.length > 0,
       supplierHttpCallsMade: 0,
