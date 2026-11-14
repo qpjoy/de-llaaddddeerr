@@ -180,7 +180,7 @@ export function isFacebookPhotoPage(value) {
 }
 
 export function createStrategySearchCell(platform) {
-  let state = { form: { platform, query: '', pageSize: 20, accountField: 'username', account: platform === 'threads' ? 'threads' : '' }, attempts: new Map(), consoleAttempts: new Map(), result: null, busy: false, error: null, checking: false }
+  let state = { form: { platform, query: '', pageSize: 20, accountField: 'username', account: platform === 'threads' ? 'threads' : '' }, attempts: new Map(), attemptHistory: new Map(), consoleAttempts: new Map(), result: null, busy: false, error: null, checking: false }
   const listeners = new Set()
   return { subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener) }, getSnapshot: () => state,
     update: patch => { state = { ...state, ...patch }; for (const listener of listeners) listener() } }
@@ -207,13 +207,41 @@ export const strategyFailureRequestId = error => [error?.details?.requestId, err
 export function recordStrategyAttempt(cell, event) {
   if (!event.idempotencyKey) return
   const state = cell.getSnapshot(), scope = strategyRequestFingerprint(event.input)
-  const operation = state.attempts.get(scope)?.idempotencyKey === event.idempotencyKey
-    ? state.attempts.get(scope) : { idempotencyKey: event.idempotencyKey, body: event.input.body, input: event.input }
+  const archived = state.attemptHistory.get(event.idempotencyKey)
+  const operation = archived || (state.attempts.get(scope)?.idempotencyKey === event.idempotencyKey
+    ? state.attempts.get(scope) : { idempotencyKey: event.idempotencyKey, body: event.input.body, input: event.input })
   operation.state = event.state === 'failed' ? uncertainStrategySearch(event.error) ? 'uncertain' : 'received' : event.state
   operation.requestId = (event.state === 'failed' ? strategyFailureRequestId(event.error) : event.requestId) || operation.requestId
   if (event.state === 'failed') operation.error = event.error
+  // A late debugger callback belongs to its archived key, never the new draft.
+  if (archived) { cell.update({}); return }
   state.attempts.set(scope, operation)
   cell.update({ busy: event.state === 'sending', ...(event.state === 'sending' ? { outcomeNote: null } : {}) })
+}
+
+export function strategyEndedUnknownMatches(attempt, recorded) {
+  return attempt?.state === 'uncertain' && attempt.input?.method === 'POST'
+    && attempt.input.path === STRATEGY_DATA_SEARCH_PATH && attempt.input.body?.platform === 'threads'
+    && !attempt.input.body.cursor && !attempt.body?.cursor
+    && attempt.body?.platform === 'threads' && typeof attempt.requestId === 'string' && Boolean(attempt.requestId.trim())
+    && recorded?.id === attempt.requestId && recorded.platform === 'threads' && recorded.capability == null
+    && !recorded.searchProtocol && recorded.status === 'unknown' && typeof recorded.completedAt === 'string'
+    && Number.isFinite(Date.parse(recorded.completedAt))
+}
+
+export function prepareStrategyNewQuery(cell, attempt) {
+  const state = cell.getSnapshot(), scope = attempt?.input && strategyRequestFingerprint(attempt.input)
+  if (state.busy || state.checking || !scope || state.attempts.get(scope) !== attempt
+    || state.form.platform !== attempt.body.platform
+    || !(attempt.state === 'received' || strategyEndedUnknownMatches(attempt, attempt.checkedOutcome))) return false
+  // Retain the original identity and evidence. Only a later explicit submit
+  // creates a new key and enters the normal server admission and billing path.
+  state.attemptHistory.set(attempt.idempotencyKey, attempt)
+  state.attempts.delete(scope)
+  cell.update({ error: null, outcomeNote: attempt.state === 'uncertain'
+    ? '已准备新查询，尚未发送。原请求结果和费用仍未知；再次点击搜索会按当前规则计量，并检查当前权限、余额和并发限制。'
+    : null })
+  return true
 }
 
 export function strategyOutcomeMatches(attempt, recorded) {

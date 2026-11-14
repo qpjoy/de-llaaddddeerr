@@ -580,7 +580,7 @@ curl -sS -X POST "$HUB_URL/api/v1/night-all/search/raw" \
 | 403 | `test_key_not_supported` | 测试 Key 不能实时采集 | 用正式 Key |
 | 409 | `idempotency_conflict` | 同一键用于不同请求体或路径 | 新请求换新键 |
 | 409 | `request_in_progress` | 同键请求还在执行 | 稍后用原键重试，或查状态 |
-| 409 | `request_outcome_unknown` | 同键前次结果未知 | 查状态，不要换键重发 |
+| 409 | `request_outcome_unknown` | 同键前次结果未知 | 先查状态，不自动换键重发；人工新建规则见下文 |
 | 409 | `search_page_unavailable` | 保存的页面已丢失 | 从第一页重查 |
 | 409 | `external_platform_response_unusable` | 相同请求上游已接受但解析失败，不再自动重试 | 带 requestId 找开发 |
 | 429 | `consumer_quota_exceeded`、`api_key_quota_exceeded` | 用户或 Key 配额用尽 | 等配额恢复 |
@@ -670,6 +670,11 @@ curl -sS "$HUB_URL/api/v1/acquisitions/<requestId>" \
 | `committed` | 已完成（可能是错误响应，看 `errorCode`） | 同键同请求体可重放；用 acquisitions 取原响应 |
 | `released` | 没有交付，预留已释放 | 需要的话换新键重发 |
 | `unknown` | 结果未知，可能已调用上游 | 不要自动重发；确需重采时换新键（Twitter 内容搜索另带 `X-MX-Insight-Retry-Of: <原 requestId>`） |
+
+Threads 标准内容搜索首页（不带 cursor）的产品展示提供显式准备入口：先按原幂等键只读核对；匹配原请求 ID、Threads 平台且
+`status=unknown`、`completedAt` 有效时，显示“准备新查询（再次发送会计量）”。点击准备只恢复输入并保留
+原请求证据，之后点击搜索才发送新请求。旧 unknown、原幂等键和账务保留；新请求仍可能被当前并发、限流、
+权限或余额检查拒绝。核对失败、未找到或 reserved 不开放准备入口，分页请求、账号和帖子详情不适用。
 
 管理端可查上游调用、供应商与失败证据（requestId 或上游请求 ID 都可以）：
 

@@ -3,6 +3,7 @@ import { AppError } from '../core/errors.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { analyzeRequestDiagnostic } from '../operations/request-diagnostic-analysis.mjs'
 import { FAILURE_EVIDENCE_WINDOW_MS } from '../external-platforms/availability-errors.mjs'
+import { projectTransportFailure } from '../core/transport-failure-evidence.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const LIMIT = 20
@@ -156,6 +157,9 @@ export async function lookupRequestDiagnostics(pool, input) {
           p.billed, p.cost_minor::text, p.cost_kind, p.currency, p.latency_ms,
           p.started_at, p.completed_at, a.id IS NOT NULL AS has_archive,
           a.content_type, a.body_size,
+          CASE WHEN p.provider_key = 'rapidapi' AND octet_length((a.raw_payload #> '{response,transportFailure}')::text) <= 4096
+            THEN a.raw_payload #> '{response,transportFailure}' END AS transport_failure,
+          COALESCE(p.provider_key = 'rapidapi' AND octet_length((a.raw_payload #> '{response,transportFailure}')::text) > 4096, false) AS transport_failure_too_large,
           r.id IS NOT NULL AS has_restricted_archive,
           CASE WHEN p.provider_key = 'qixin' AND p.outcome = 'rejected'
             AND r.parsed_payload->>'message' IN ('未授权调用该接口', '未添加IP白名单')
@@ -185,6 +189,8 @@ export async function lookupRequestDiagnostics(pool, input) {
         messageEvidence: reviewedMessage(p) ? 'reviewed_archive_message'
           : p.has_restricted_archive ? 'restricted_message_not_exposed' : 'not_recorded',
         hasArchive: p.has_archive, hasRestrictedArchive: p.has_restricted_archive,
+        transportFailure: p.provider_key === 'rapidapi' ? projectTransportFailure(p.transport_failure) : null,
+        transportFailureTooLarge: p.provider_key === 'rapidapi' && p.transport_failure_too_large === true,
         bodySize: p.body_size, billed: p.billed, costMinor: p.cost_minor,
         costKind: text(p.cost_kind), currency: text(p.currency), latencyMs: p.latency_ms,
         startedAt: p.started_at, completedAt: p.completed_at,

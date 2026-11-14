@@ -3,7 +3,7 @@ import test from 'node:test'
 import { build } from 'esbuild'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createStrategySearchCell, recordStrategyAttempt } from '../../src/strategy-search-experience-model.js'
+import { createStrategySearchCell, recordStrategyAttempt, strategyRequestFingerprint } from '../../src/strategy-search-experience-model.js'
 
 const require = createRequire(import.meta.url)
 const environment = { identity: 'original-key', key: 'synthetic-key', access: { platforms: ['kuaishou', 'zhihu', 'bilibili'], capabilities: [] } }
@@ -60,6 +60,130 @@ async function fixture() {
   const query = value => nodes(render()).find(node => node.type === 'input' && node.props.placeholder?.includes('搜索关键词')).props.onChange({ target: { value } })
   return { session, sent, lookups, render, submit, select, query }
 }
+
+async function threadsRecoveryFixture(t) {
+  const { StrategySearchExperience } = await view, previous = { ...environment }
+  t.after(() => { delete environment.hooks; delete environment.hookIndex; Object.assign(environment, previous) })
+  Object.assign(environment, { identity: 'threads-key', hooks: [], access: { platforms: ['threads', 'bilibili'], capabilities: ['social.content.crawl', 'social.profile.get', 'social.posts.resolve'] } })
+  const cell = createStrategySearchCell('threads'), session = new Map([['threads-key', cell]]), sent = [], lookups = []
+  cell.update({ form: { ...cell.getSnapshot().form, query: '原始关键词' } })
+  environment.send = async (_key, input, idem) => { sent.push({ input, idem }); throw unknown() }
+  const receipt = { id: 'ledger-original', platform: 'threads', status: 'unknown', completedAt: '2026-11-14T01:00:00.000Z' }
+  environment.lookup = async (_key, idem) => { lookups.push(idem); return { payload: { data: receipt } } }
+  const render = (operation = 'search') => { environment.hookIndex = 0; return StrategySearchExperience({ strategySession: session, operation }) }
+  const submit = async () => { nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush() }
+  const check = () => button(render(), '只读核对原请求状态').props.onClick()
+  const prepare = () => button(render(), '准备新查询（再次发送会计量）')
+  return { cell, session, sent, lookups, receipt, render, submit, check, prepare }
+}
+
+test('Threads unknown prepares a separate query only after a matching read-only receipt and a second explicit submit', async t => {
+  const h = await threadsRecoveryFixture(t)
+  await h.submit()
+  const original = [...h.cell.getSnapshot().attempts.values()][0], originalKey = original.idempotencyKey
+  assert.equal(h.prepare(), undefined)
+  await h.check()
+  assert.equal(searchButton(h.render()).props.disabled, true, 'checking never unlocks or purchases by itself')
+  assert.deepEqual(h.lookups, [originalKey])
+  const prepare = h.prepare().props.onClick
+  prepare(); prepare()
+  assert.equal(h.sent.length, 1, 'preparing and duplicate clicks never send')
+  assert.equal(h.cell.getSnapshot().attemptHistory.get(originalKey), original)
+  assert.equal(original.state, 'uncertain')
+  assert.equal(original.error.code, 'request_outcome_unknown')
+  assert.match(label(h.render()), /原请求结果和费用仍未知/u)
+  assert.match(label(h.render()), /已保留的原请求/u)
+  assert.match(label(h.render()), new RegExp(originalKey))
+  assert.equal(searchButton(h.render()).props.disabled, false)
+  await h.submit()
+  assert.equal(h.sent.length, 2)
+  assert.notEqual(h.sent[1].idem, originalKey)
+  assert.deepEqual(h.sent[1].input, h.sent[0].input)
+  const active = [...h.cell.getSnapshot().attempts.values()][0]
+  prepare()
+  assert.equal([...h.cell.getSnapshot().attempts.values()][0], active, 'the old prepare cannot remove the new unknown')
+  assert.equal(searchButton(h.render()).props.disabled, true)
+})
+
+test('Threads recovery stays locked on missing, mismatched, unfinished and failed lookups and does not extend to accounts or detail', async t => {
+  const h = await threadsRecoveryFixture(t)
+  await h.submit()
+  for (const result of [undefined, { ...h.receipt, id: 'other' }, { ...h.receipt, platform: 'twitter' },
+    { ...h.receipt, capability: 'social.profile.get' }, { ...h.receipt, completedAt: null },
+    { ...h.receipt, completedAt: 'bad' }, { ...h.receipt, status: 'reserved' }]) {
+    environment.lookup = async () => ({ payload: { data: result } })
+    await h.check()
+    assert.equal(h.prepare(), undefined)
+    assert.equal(searchButton(h.render()).props.disabled, true)
+  }
+  environment.lookup = async () => ({ payload: { data: h.receipt } })
+  await h.check()
+  assert.ok(h.prepare())
+  for (const operation of ['crawl', 'user-info', 'post-detail']) {
+    assert.equal(button(h.render(operation), '准备新查询（再次发送会计量）'), undefined)
+    assert.equal(searchButton(h.render(operation)).props.disabled, true)
+  }
+  for (const failure of [Object.assign(new Error('missing'), { code: 'request_not_found' }), new Error('network')]) {
+    environment.lookup = async () => { throw failure }
+    await h.check()
+    assert.equal(h.prepare(), undefined, 'a failed new check clears earlier authorization to prepare')
+    assert.equal(searchButton(h.render()).props.disabled, true)
+  }
+  assert.equal(h.sent.length, 1)
+})
+
+test('archived debugger callbacks retain their original key without relocking or overwriting a new Threads attempt', async t => {
+  const h = await threadsRecoveryFixture(t), input = { method: 'POST', path: '/api/v1/data/search', body: { platform: 'threads', query: '原始关键词', pageSize: 20, type: 'stable' } }
+  const event = { input, idempotencyKey: 'debugger-original', state: 'failed', error: unknown() }
+  const consoleAttempt = { idempotencyKey: event.idempotencyKey, state: 'uncertain' }
+  h.cell.getSnapshot().consoleAttempts.set('original-debugger-scope', consoleAttempt)
+  recordStrategyAttempt(h.cell, event)
+  await h.check()
+  h.prepare().props.onClick()
+  const original = h.cell.getSnapshot().attemptHistory.get(event.idempotencyKey)
+  assert.equal(h.cell.getSnapshot().consoleAttempts.get('original-debugger-scope'), consoleAttempt, 'debugger evidence is retained')
+  let finish
+  environment.send = (_key, request, idem) => { h.sent.push({ input: request, idem }); return new Promise(resolve => { finish = resolve }) }
+  await h.submit()
+  const scope = strategyRequestFingerprint(input), replacement = h.cell.getSnapshot().attempts.get(scope)
+  for (const state of ['sending', 'failed']) recordStrategyAttempt(h.cell, { ...event, state })
+  assert.equal(h.cell.getSnapshot().attempts.get(scope), replacement)
+  assert.equal(h.cell.getSnapshot().busy, true, 'old failure cannot clear the new in-flight state')
+  assert.equal(h.cell.getSnapshot().attemptHistory.get(event.idempotencyKey), original)
+  finish({ payload: { data: { platform: 'threads', items: [] } }, evidence: { requestId: 'new-receipt' } }); await flush()
+  recordStrategyAttempt(h.cell, event)
+  assert.equal(h.cell.getSnapshot().attempts.get(scope).requestId, 'new-receipt')
+  assert.equal(searchButton(h.render()).props.disabled, false)
+  assert.equal(h.sent.length, 1)
+})
+
+test('stale Threads prepare and lookup controls cannot act after platform, operation or caller identity changes', async t => {
+  const h = await threadsRecoveryFixture(t)
+  await h.submit(); await h.check()
+  const prepare = h.prepare().props.onClick, check = button(h.render(), '只读核对原请求状态').props.onClick
+  const original = [...h.cell.getSnapshot().attempts.values()][0]
+  button(h.render(), '哔哩哔哩').props.onClick()
+  prepare(); await check()
+  assert.equal(h.cell.getSnapshot().attemptHistory.size, 0)
+  assert.equal(h.lookups.length, 1)
+  button(h.render(), 'Threads').props.onClick()
+  h.render('user-info'); prepare(); await check()
+  assert.equal(h.cell.getSnapshot().attemptHistory.size, 0)
+  assert.equal(h.lookups.length, 1)
+  environment.identity = 'another-caller'; h.render(); prepare(); await check()
+  assert.equal(h.cell.getSnapshot().attemptHistory.size, 0)
+  assert.equal(h.lookups.length, 1)
+  assert.equal([...h.cell.getSnapshot().attempts.values()][0], original)
+  assert.equal(h.session.get('another-caller').getSnapshot().attempts.size, 0)
+  environment.identity = 'threads-key'; h.render()
+  let finish
+  environment.lookup = () => new Promise(resolve => { finish = resolve })
+  const pending = h.check()
+  const scope = strategyRequestFingerprint(original.input)
+  h.cell.getSnapshot().attempts.set(scope, { ...original, idempotencyKey: 'replacement' })
+  finish({ payload: { data: h.receipt } }); await pending
+  assert.equal(h.cell.getSnapshot().attempts.get(scope).checkedOutcome, null, 'an old async lookup cannot approve the replacement')
+})
 
 test('comment controls replace only an explicitly rejected request and preserve page, identity and replay keys', async t => {
   const { StrategyCommentsExperience } = await view

@@ -307,6 +307,8 @@ Scraper 在管理端的路由值是 `rapidapi-threads-scraper`，Threads API 是
 
 **已经开通但内容搜索返回 403：** 在诊断中心按 Hub 请求 ID 核对当次操作及归档。只有匹配固定的未订阅消息，才能确认 RapidAPI 当时是以未订阅为由拒绝。检查「上游供应商 → RapidAPI → API Key 管理」的来源和更新时间，再到该应用所属账号或团队核对对应产品和订阅生效时间。`native.r.threads_search_recent` 对应 [Lundehund 的 Threads API](https://rapidapi.com/Lundehund/api/threads-api4)，`native.r.threads_scraper_search_posts` 对应 Threads Scraper。如果订阅晚于原请求，重放已保存的失败不能验证新权限。
 
+**内容搜索显示“原请求结果待核实”：** 点击“只读核对原请求状态”。当记录匹配原请求 ID、Threads 平台且为带结束时间的 `unknown` 时，可点击“准备新查询（再次发送会计量）”，再明确点击搜索。准备不会发送请求，旧请求及可能已产生的费用保留；新请求使用新的幂等键并按当前规则计量，可能产生重复费用。仍在执行、查不到记录或核对失败时，不开放该入口。此流程只适用于 Threads 标准内容搜索首页（不带 `cursor`），不自动重试，也不改变分页、账号、详情接口的恢复规则。
+
 旧版诊断中心只显示“受限响应已保存”。可在有生产 kubectl 权限的服务器执行以下只读查询，把第一行替换为 Hub 请求 ID。它只返回固定分类，不输出正文或凭据，不发起采购，无需部署新版 Hub：
 
 ```bash

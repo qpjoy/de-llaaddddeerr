@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url'
 import { lookupRequestDiagnostics } from '../../server/acquisitions/diagnostics.mjs'
 import { UpstreamAmbiguousError } from '../../server/core/errors.mjs'
 import { nightAllFailureEvidence } from '../../server/data/night-all-failure-evidence.mjs'
+import { projectTransportFailure } from '../../server/core/transport-failure-evidence.mjs'
+import { projectTwitterTransportFailure } from '../../server/ops/diagnose-twitter-outcome.mjs'
 
 const id = 'a227f54a-0ac6-43f5-9d23-687fc369f2ae'
 function fixture({ platform = 'enterprise', status = 'released', responseStatus = 502, errorCode = 'enterprise_query_rejected', hasResponseBody = true, gateway = null, providers, connectors = [], matches = [{ id }], fail } = {}) {
@@ -123,6 +125,46 @@ test('arbitrary archive messages never cross the diagnostic boundary; unknown ou
   assert.doesNotMatch(JSON.stringify(run), /SECRET|private.test/)
 })
 
+test('Admin transport projection matches the standalone Twitter tool and bounds hostile historical metadata', () => {
+  for (const value of [null, undefined, [], 'private-code', {},
+    { phase: 'request', codes: ['ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT'], deadlineExceeded: false, elapsedMs: 4065, timeoutMs: 30000 },
+    { phase: 'body', codes: ['UND_ERR_BODY_TIMEOUT'], deadlineExceeded: true, elapsedMs: 30004, timeoutMs: 30000 },
+    { phase: 'private-phase', codes: ['ECONNRESET', 'private-code', 'ECONNRESET', ...Array(40).fill('private-code')],
+      deadlineExceeded: 'private-value', elapsedMs: -1, timeoutMs: Number.MAX_SAFE_INTEGER + 1,
+      message: 'private-message', stack: 'private-stack' },
+  ]) {
+    const projected = projectTransportFailure(value)
+    assert.deepEqual(projected, projectTwitterTransportFailure(value))
+    assert.doesNotMatch(JSON.stringify(projected), /private-/u)
+  }
+})
+
+test('saved RapidAPI transport evidence reaches Admin diagnostics while unknown outcome and billing remain unchanged', async () => {
+  const transport = { phase: 'request', codes: ['UND_ERR_CONNECT_TIMEOUT', 'private-code'],
+    deadlineExceeded: false, elapsedMs: 4065, timeoutMs: 30000, message: 'private-message', stack: 'private-stack' }
+  const f = fixture({ platform: 'threads', status: 'unknown', errorCode: 'external_platform_outcome_unknown',
+    responseStatus: 502, providers: [{ id: 'call', provider_key: 'rapidapi', outcome: 'unknown', billed: null,
+      http_status: null, has_archive: true, has_restricted_archive: false, transport_failure: transport }] })
+  const run = (await lookupRequestDiagnostics(f.pool, id)).runs[0]
+  const call = run.providerCalls[0]
+  assert.deepEqual(call.transportFailure, { phase: 'request', codes: ['UND_ERR_CONNECT_TIMEOUT'],
+    deadlineExceeded: false, elapsedMs: 4065, timeoutMs: 30000, unrecognizedCodes: true, codesTruncated: false })
+  assert.equal(run.status, 'unknown')
+  assert.equal(call.outcome, 'unknown')
+  assert.equal(call.billed, null)
+  assert.equal(call.httpStatus, null)
+  assert.equal(call.transportFailureTooLarge, false)
+  assert.equal(run.refusal, null)
+  assert.doesNotMatch(JSON.stringify(run), /private-|未派发|未发送|未调用供应商/u)
+  const old = (await lookupRequestDiagnostics(fixture().pool, id)).runs[0].providerCalls[0]
+  assert.equal(old.transportFailure, null)
+  assert.equal(old.transportFailureTooLarge, false)
+  const other = (await lookupRequestDiagnostics(fixture({ providers: [{ provider_key: 'justone',
+    transport_failure: transport, transport_failure_too_large: true }] }).pool, id)).runs[0].providerCalls[0]
+  assert.equal(other.transportFailure, null)
+  assert.equal(other.transportFailureTooLarge, false)
+})
+
 const threadsOperation = 'native.r.threads_search_recent'
 const subscriptionMessage = 'You are not subscribed to this API.'
 const threadsCall = { id: 'call', provider_key: 'rapidapi', operation: threadsOperation, endpoint_key: threadsOperation,
@@ -167,7 +209,7 @@ test('the provider SQL projection admits only the top-level Threads subscription
       operation text, endpoint_key text, outcome text, http_status int, business_code int, error_code text,
       upstream_request_id text, billed boolean, cost_minor int, cost_kind text, currency text, latency_ms int,
       started_at timestamptz, completed_at timestamptz);
-    CREATE TABLE external_platform.response_archives (id integer, provider_call_id integer, content_type text, body_size int);
+    CREATE TABLE external_platform.response_archives (id integer, provider_call_id integer, content_type text, body_size int, raw_payload jsonb);
     CREATE TABLE control.external_platform_restricted_raw_responses (id integer, provider_call_id integer, parsed_payload jsonb);`)
   const cases = [
     [{}, { message: subscriptionMessage, debug: 'private credentials' }],
@@ -192,6 +234,31 @@ test('the provider SQL projection admits only the top-level Threads subscription
   const { rows } = await db.query(sql, params)
   assert.deepEqual(rows.map(row => row.reviewed_message), cases.map((_, i) => i === 0 ? subscriptionMessage : null))
   assert.doesNotMatch(JSON.stringify(rows), /private credentials/u)
+  assert.ok(rows.every(row => row.transport_failure === null && row.transport_failure_too_large === false))
+
+  const transport = { phase: 'body', codes: ['UND_ERR_SOCKET'], deadlineExceeded: false, elapsedMs: 4065, timeoutMs: 30000 }
+  await db.query('INSERT INTO external_platform.response_archives (id, provider_call_id, raw_payload) VALUES (0, 0, $1)',
+    [JSON.stringify({ request: 'private credentials', response: { transportFailure: transport } })])
+  const withTransport = (await db.query(sql, params)).rows[0]
+  assert.deepEqual(withTransport.transport_failure, transport)
+  assert.equal(withTransport.transport_failure_too_large, false)
+  assert.doesNotMatch(JSON.stringify(withTransport), /private credentials/u)
+  await db.query('UPDATE external_platform.response_archives SET raw_payload=$1 WHERE id=0',
+    [JSON.stringify({ response: { transportFailure: { ...transport, message: 'private credentials'.repeat(300) } } })])
+  const oversized = (await db.query(sql, params)).rows[0]
+  assert.equal(oversized.transport_failure, null)
+  assert.equal(oversized.transport_failure_too_large, true)
+  const dto = (await lookupRequestDiagnostics(fixture({ providers: [oversized] }).pool, id)).runs[0].providerCalls[0]
+  assert.equal(dto.transportFailure, null)
+  assert.equal(dto.transportFailureTooLarge, true)
+  assert.doesNotMatch(JSON.stringify(dto), /private credentials/u)
+  await db.query("UPDATE external_platform.provider_calls SET provider_key='justone' WHERE id=0")
+  const other = (await db.query(sql, params)).rows[0]
+  assert.equal(other.transport_failure, null)
+  assert.equal(other.transport_failure_too_large, false)
+  await db.query('UPDATE external_platform.response_archives SET raw_payload=$1 WHERE id=0',
+    [JSON.stringify({ response: { transportFailure: transport } })])
+  assert.equal((await db.query(sql, params)).rows[0].transport_failure, null)
 })
 
 test('connector failures preserve correlation while committed fallback remains a submitted response', async () => {

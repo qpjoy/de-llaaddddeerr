@@ -238,4 +238,96 @@ test('public Threads routes deliver five original listing interfaces and replay 
     assert.deepEqual(calls.slice(before + 2), ['/api/v1/posts/search?query=bitcoin',
       '/api/v1/posts/search?query=bitcoin&cursor=opaque+%2B%2F%3D', '/api/search/recent?query=bitcoin'])
   })
+
+  await t.test('Chinese search preserves its query through a proxy and saves one unknown acquisition without failover', async () => {
+    await service.addTenantCredit(tenant.id, { amountMinor: 2, currency: 'CNY', reason: 'Offline transport verification' },
+      { idempotencyKey: 'threads-transport-credit', actor: 'fixture' })
+    await runtime.strategySearchRoutingStore.update('search', 'threads', {
+      mode: 'priority', primaryProvider: 'rapidapi-threads-scraper', fallbackProvider: 'rapidapi', expectedRevision: 4,
+      reason: 'Offline proxy transport verification',
+    })
+    const query = '张婧怡 #音乐 +测 /试=', requests = []
+    let allowDelivery = false
+    accountGateway.adapter = new RapidApiAdapter({ apiKey, fetchImpl: createRapidApiProxyFetch({
+      route: async () => ({ proxyUrls: ['http://fixture-a:7788', 'http://fixture-b:7788'], directFallback: false }),
+    }, {
+      makeAgent: () => ({ close: async () => {} }),
+      fetchImpl: async (input, options) => {
+        const target = new URL(input)
+        requests.push(target.href)
+        assert.equal(target.origin, 'https://threads-scraper.p.rapidapi.com')
+        assert.equal(options.method, 'GET')
+        assert.ok(options.signal instanceof AbortSignal)
+        if (target.pathname === '/') {
+          assert.equal(options.headers, undefined)
+          return new Response('', { status: 401 })
+        }
+        assert.equal(target.pathname, '/api/v1/posts/search')
+        assert.deepEqual([...target.searchParams], [['query', query]])
+        assert.equal(options.headers['x-rapidapi-host'], target.hostname)
+        assert.equal(options.headers['x-rapidapi-key'], apiKey)
+        if (allowDelivery) return Response.json({ status: 'ok', data: {
+          results: [samples.searchRecent.data.searchResults.edges[0]], cursor: null,
+        } })
+        throw new TypeError('fetch failed', { cause: Object.assign(new Error('synthetic connection failure'), { code: 'ECONNRESET' }) })
+      },
+    }) })
+    const response = await send('search', { query, pageSize: 20 }, 'fixture-threads-transport')
+    const failure = await response.json()
+    assert.equal(response.status, 502)
+    assert.equal(failure.error.code, 'upstream_outcome_unknown')
+    assert.equal(failure.error.message, 'Content-search acquisition failed; inspect its saved outcome')
+    assert.deepEqual(failure.error.details, { outcome: 'unknown', retryable: false, requestId: failure.requestId })
+    const saved = [...accountGateway.platformStore.calls.values()].filter(call => call.usageRequestId === failure.requestId)
+    assert.equal(saved.length, 1)
+    assert.deepEqual([saved[0].operation, saved[0].marketplace, saved[0].outcome, saved[0].httpStatus],
+      ['native.r.threads_scraper_search_posts', 'threads-scraper', 'unknown', null])
+    const evidence = accountGateway.platformStore.responseArchives.get(saved[0].id).rawPayload.response.transportFailure
+    assert.deepEqual([evidence.phase, evidence.codes, evidence.deadlineExceeded, evidence.timeoutMs],
+      ['request', ['ECONNRESET'], false, 30000])
+    assert.equal(requests.length, 2, 'one unauthenticated probe and one paid request')
+    const replay = await send('search', { query, pageSize: 20 }, 'fixture-threads-transport')
+    assert.equal(replay.status, 409)
+    const suppressed = await replay.json()
+    assert.equal(suppressed.error.code, 'request_outcome_unknown')
+    assert.equal(suppressed.error.details.requestId, failure.requestId)
+    assert.equal(requests.length, 2)
+
+    const lookup = await fetch(new URL('../requests/by-idempotency-key', base), {
+      headers: { authorization: `Bearer ${key.secret}`, 'idempotency-key': 'fixture-threads-transport' },
+    })
+    assert.equal(lookup.status, 200)
+    const recorded = (await lookup.json()).data
+    assert.equal(recorded.id, failure.requestId)
+    assert.equal(recorded.platform, 'threads')
+    assert.equal(recorded.status, 'unknown')
+    assert.ok(Number.isFinite(Date.parse(recorded.completedAt)))
+    assert.equal(requests.length, 2, 'status lookup reads the saved request')
+    const originalCall = structuredClone(saved[0])
+    const originalArchive = structuredClone(accountGateway.platformStore.responseArchives.get(saved[0].id))
+    const originalUsage = structuredClone(store.requests.get(failure.requestId))
+    const originalCharge = structuredClone(store.customerCharges.get(failure.requestId))
+    assert.equal(originalCall.billed, null)
+    assert.equal(originalCharge.status, 'unknown')
+
+    allowDelivery = true
+    const next = await send('search', { query, pageSize: 20 }, 'fixture-threads-new-intent')
+    const delivered = await next.json()
+    assert.equal(next.status, 200, JSON.stringify(delivered))
+    assert.notEqual(delivered.requestId, failure.requestId)
+    assert.equal(delivered.data.items.length, 1)
+    assert.equal(requests.length, 4, 'the new key makes one probe and one business call')
+    const newCalls = [...accountGateway.platformStore.calls.values()].filter(call => call.usageRequestId === delivered.requestId)
+    assert.equal(newCalls.length, 1)
+    assert.equal(newCalls[0].outcome, 'succeeded')
+    assert.notEqual(newCalls[0].id, originalCall.id)
+    const retained = await send('search', { query, pageSize: 20 }, 'fixture-threads-transport')
+    assert.equal(retained.status, 409)
+    assert.deepEqual(await retained.json(), suppressed)
+    assert.equal(requests.length, 4)
+    assert.deepEqual(accountGateway.platformStore.calls.get(originalCall.id), originalCall)
+    assert.deepEqual(accountGateway.platformStore.responseArchives.get(originalCall.id), originalArchive)
+    assert.deepEqual(store.requests.get(failure.requestId), originalUsage)
+    assert.deepEqual(store.customerCharges.get(failure.requestId), originalCharge)
+  })
 })

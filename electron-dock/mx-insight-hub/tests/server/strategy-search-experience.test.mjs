@@ -173,6 +173,40 @@ test('read-only resolution requires original request identity and the correct pe
   assert.equal(strategyOutcomeMatches({ body: { platform: 'tiktok' } }, { ...received, platform: 'instagram' }), false)
 })
 
+test('preparing an independent Threads search requires the exact ended unknown receipt and preserves the original key', async () => {
+  const { createStrategySearchCell, strategyRequestFingerprint, strategyEndedUnknownMatches, prepareStrategyNewQuery } = await import('../../src/strategy-search-experience-model.js')
+  const input = { method: 'POST', path: '/api/v1/data/search', body: { platform: 'threads', query: '关键词', pageSize: 20, type: 'stable' } }
+  const attempt = { input, body: input.body, state: 'uncertain', requestId: 'original', idempotencyKey: 'original-key' }
+  const recorded = { id: 'original', platform: 'threads', status: 'unknown', completedAt: '2026-11-14T01:00:00.000Z' }
+  assert.equal(strategyEndedUnknownMatches(attempt, recorded), true)
+  for (const patch of [null, { id: 'other' }, { platform: 'twitter' }, { capability: 'social.content.crawl' },
+    { status: 'reserved' }, { status: 'committed' }, { status: 'not_dispatched' }, { completedAt: null },
+    { completedAt: '' }, { completedAt: 'invalid' }, { completedAt: 0 }, { searchProtocol: { version: 2, state: 'unknown' } }]) {
+    assert.equal(strategyEndedUnknownMatches(attempt, patch === null ? null : { ...recorded, ...patch }), false)
+  }
+  for (const patch of [{ state: 'sending' }, { state: 'received' }, { requestId: null }, { requestId: '' },
+    { body: { platform: 'twitter' } }, { input: { ...input, method: 'GET' } },
+    { body: { ...input.body, cursor: 'original-page' } }, { input: { ...input, body: { ...input.body, cursor: 'original-page' } } },
+    ...['/api/v1/data/social/crawl', '/api/v1/data/social/user-info', '/api/v1/data/social/post-detail', '/api/v1/search/raw', '/api/v2/data/search'].map(path => ({ input: { ...input, path } }))]) {
+    assert.equal(strategyEndedUnknownMatches({ ...attempt, ...patch }, recorded), false)
+  }
+  const cell = createStrategySearchCell('threads'), scope = strategyRequestFingerprint(input)
+  cell.getSnapshot().attempts.set(scope, attempt)
+  assert.equal(prepareStrategyNewQuery(cell, attempt), false, 'a matching receipt must actually have been checked')
+  attempt.checkedOutcome = recorded
+  cell.update({ checking: true })
+  assert.equal(prepareStrategyNewQuery(cell, attempt), false)
+  cell.update({ checking: false, busy: true })
+  assert.equal(prepareStrategyNewQuery(cell, attempt), false)
+  cell.update({ busy: false })
+  assert.equal(prepareStrategyNewQuery(cell, attempt), true)
+  assert.equal(cell.getSnapshot().attempts.has(scope), false)
+  assert.equal(cell.getSnapshot().attemptHistory.get('original-key'), attempt)
+  assert.equal(attempt.state, 'uncertain')
+  assert.deepEqual(attempt.checkedOutcome, recorded)
+  assert.equal(prepareStrategyNewQuery(cell, attempt), false, 'a stale prepare cannot rotate a later attempt')
+})
+
 test('debugger attempt storage survives view remount and explicit new-request removal uses that same Map', async () => {
   const { createStrategySearchCell } = await import('../../src/strategy-search-experience-model.js')
   const session = new Map([['key', createStrategySearchCell('tiktok')]])

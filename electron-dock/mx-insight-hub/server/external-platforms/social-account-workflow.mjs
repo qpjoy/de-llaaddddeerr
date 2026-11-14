@@ -371,6 +371,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             const code = accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
             const commentSubject = { 'post-comments': 'post comments', 'comment-replies': 'comment replies' }[workflowKind]
             let message = accountFailure ? twitterAccountFailureMessage(evidence) : 'Account acquisition failed; inspect its saved outcome'
+            if (workflowKind === 'threads-search') message = 'Content-search acquisition failed; inspect its saved outcome'
             if (commentSubject) {
               message = commentFailureMessage(commentSubject, evidence.outcome)
               failureDetails.upstream = {

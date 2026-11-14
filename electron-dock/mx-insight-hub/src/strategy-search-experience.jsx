@@ -12,6 +12,7 @@ import { commentRoutePlatforms } from '../server/contracts/comment-routes.mjs'
 const COMMENT_PLATFORMS = new Set(commentRoutePlatforms('post-comments'))
 import { STRATEGY_SEARCH_PLATFORMS, strategySearchPlatforms, strategySearchBody, strategySearchForm,
   strategyPageInfo, uncertainStrategySearch, safeStrategyUrl, isFacebookPhotoPage, createStrategySearchCell, strategyRequestFingerprint, strategyOutcomeMatches, strategyUnresolvedAttempt, strategyFailureRequestId,
+  strategyEndedUnknownMatches, prepareStrategyNewQuery,
   strategyPostDetailPlatforms, strategyPostDetailBody, strategyAccountPlatforms, strategyOperationPath, strategyAccountBody, strategyAccountForm, strategyResultMatches, strategyAccountItem } from './strategy-search-experience-model.js'
 
 export function useStrategySearchState(strategySession) {
@@ -28,12 +29,18 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
   const accountOperation = operation === 'crawl' || operation === 'user-info'
   const detail = operation === 'post-detail'
   const path = strategyOperationPath(operation)
+  const view = useRef(null)
+  view.current = { cell, identity, key, path }
+  const currentView = () => view.current.cell === cell && view.current.identity === identity && view.current.key === key && view.current.path === path
   const platforms = detail ? strategyPostDetailPlatforms(access) : accountOperation ? strategyAccountPlatforms(access, operation) : strategySearchPlatforms(access)
   const { form, attempts, result, busy, checking } = state
   useEffect(() => {
     if (detail && form.platform !== 'threads') cell.update({ form: { ...cell.getSnapshot().form, platform: 'threads' }, error: null, outcomeNote: null })
   }, [detail, form.platform, cell])
   const unresolved = strategyUnresolvedAttempt(attempts, form.platform)
+  const canPrepareUnknown = operation === 'search' && strategyEndedUnknownMatches(unresolved, unresolved?.checkedOutcome)
+  const unknownHistory = [...state.attemptHistory.values()].filter(row => row.body?.platform === form.platform
+    && strategyEndedUnknownMatches(row, row.checkedOutcome))
   const error = state.error || unresolved?.error
   const change = patch => cell.update({ form: { ...form, ...patch }, error: null, outcomeNote: null })
   const twitterSearch = operation === 'search' && form.platform === 'twitter'
@@ -66,38 +73,53 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
   const canSend = Boolean(key && body && !busy && !checking && !unresolved)
   const currentPlatform = STRATEGY_SEARCH_PLATFORMS.find(row => row.platform === form.platform)
   async function search(requestBody) {
-    if (!canSend || !requestBody) return
+    const current = cell.getSnapshot()
+    if (!currentView() || !canSend || !requestBody || current.busy || current.checking
+      || strategyUnresolvedAttempt(current.attempts, requestBody.platform)) return
     const scope = strategyRequestFingerprint(inputFor(requestBody))
     const operation = attempts.get(scope) || { idempotencyKey: requestUuid(), body: requestBody, input: inputFor(requestBody) }
     if (['sending', 'uncertain'].includes(operation.state)) return
     operation.state = 'sending'; attempts.set(scope, operation)
+    const currentAttempt = () => cell.getSnapshot().attempts.get(scope) === operation
     cell.update({ busy: true, error: null, outcomeNote: null })
     try {
       const response = await publicDataApi.productRequest(key, inputFor(requestBody), operation.idempotencyKey)
       operation.state = 'received'; operation.requestId = response.evidence?.requestId
       const delivery = { ...response, identity, input: inputFor(requestBody) }
-      cell.update({ result: delivery }); onResult?.(delivery)
+      if (currentAttempt()) { cell.update({ result: delivery }); if (currentView()) onResult?.(delivery) }
     } catch (failure) {
       operation.state = uncertainStrategySearch(failure) ? 'uncertain' : 'received'
       operation.requestId = strategyFailureRequestId(failure) || operation.requestId
       operation.error = failure
-      if (cell.getSnapshot().form.platform === requestBody.platform) cell.update({ error: failure })
-    } finally { cell.update({ busy: false }) }
+      if (currentAttempt() && cell.getSnapshot().form.platform === requestBody.platform) cell.update({ error: failure })
+    } finally { if (currentAttempt()) cell.update({ busy: false }) }
   }
   async function checkOutcome() {
-    if (!key || !unresolved || busy || checking) return
+    const current = cell.getSnapshot()
+    if (!currentView() || !key || !unresolved || current.busy || current.checking
+      || strategyUnresolvedAttempt(current.attempts, current.form.platform) !== unresolved) return
+    const scope = strategyRequestFingerprint(unresolved.input)
+    const currentAttempt = () => cell.getSnapshot().attempts.get(scope) === unresolved && unresolved.state === 'uncertain'
+    unresolved.checkedOutcome = null
     cell.update({ checking: true, error: null })
     try {
       const response = await publicDataApi.requestByIdempotencyKey(key, unresolved.idempotencyKey)
       const recorded = response.payload?.data
-      // Lookup is owner-scoped and never redispatches. Unknown/not-found stays
-      // locked, even after the short replay window of a debugger request.
+      if (!currentAttempt()) return
+      // Lookup never redispatches or settles unknown. A separately prepared
+      // Threads search still needs an explicit submit and normal admission.
       if (strategyOutcomeMatches(unresolved, recorded)) {
         unresolved.state = 'received'; unresolved.requestId = recorded.id; unresolved.error = null
         if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ outcomeNote: recorded.status === 'committed' ? '已确认原请求已提交。可显式重放原查询，或新建另一次查询。' : '已确认原预留已释放。再次查询需显式发送，并按当前规则计量。' })
-      } else if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ outcomeNote: '原请求仍未确认结束。请保留原请求标识，稍后只读核对使用记录。' })
-    } catch (failure) { if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ error: failure }) }
+      } else if (strategyEndedUnknownMatches(unresolved, recorded)) {
+        unresolved.checkedOutcome = { ...recorded }
+        if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ outcomeNote: '原请求已记录为 unknown 且有结束时间；结果和费用仍未知。可以准备新查询，发送时仍会检查当前权限、余额和并发限制。' })
+      } else if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ outcomeNote: '原请求状态尚不足以准备新查询。请保留原请求标识，稍后只读核对使用记录。' })
+    } catch (failure) { if (currentAttempt() && cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ error: failure }) }
     finally { cell.update({ checking: false }) }
+  }
+  function prepare(attempt) {
+    if (currentView()) prepareStrategyNewQuery(cell, attempt)
   }
   return <div className="mih-strategy-experience">
     <section className="qp-panel mih-panel mih-strategy-composer" aria-label="策略搜索产品展示">
@@ -154,10 +176,13 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
         <p className="mih-strategy-search-note">仅点击查询或下一页时调用，按当前账户价格计量。切换业务接口、平台与标签不会查询。{detail ? null : accountOperation ? '批量账号、活动类型与平台参数可在接口调试中提交。' : <>跨平台同时检索请使用<a href="#/data-products/search">聚合搜索 ↗</a>。</>}</p>
         {form.platform.startsWith('wechat_') ? <p className="mih-strategy-search-note">微信返回原生一页，不保证 20 条；使用原生 items、continue_flag 与 cursor，完整业务字段保持不变。</p> : null}
         {form[formField] && validation ? <p role="status">{validation}</p> : null}
-        {attempt && !unresolved ? <div className="mih-strategy-repeat"><span>{accountOperation || detail ? '相同参数沿用原请求标识；按接口规则回放已有结果。' : '本页使用 stable 保留首次响应；相同参数沿用原请求标识。'}</span><button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={busy || checking} onClick={() => { attempts.delete(fingerprint); cell.update({ error: null }) }}>新建相同查询（再次发送会计量）</button></div> : null}
+        {attempt && !unresolved ? <div className="mih-strategy-repeat"><span>{accountOperation || detail ? '相同参数沿用原请求标识；按接口规则回放已有结果。' : '本页使用 stable 保留首次响应；相同参数沿用原请求标识。'}</span><button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={busy || checking} onClick={() => prepare(attempt)}>新建相同查询（再次发送会计量）</button></div> : null}
       </form>
-      {unresolved ? <div className="mih-strategy-unresolved" role="alert"><strong>原请求结果待核实</strong><p>此平台的原请求保持锁定。超时不代表取消；请先只读核对，避免重复采集和计费。可选择其他平台，切换不会发送请求。</p><p>幂等键 <code>{unresolved.idempotencyKey}</code></p>{unresolved.requestId ? <p>Hub 请求 ID <code>{unresolved.requestId}</code></p> : null}<button className="qp-button qp-button--outline" type="button" disabled={!key || busy || checking} onClick={checkOutcome}>{checking ? '核对中…' : '只读核对原请求状态'}</button>{unresolved.requestId ? <a href={`#/usage?requestId=${encodeURIComponent(unresolved.requestId)}`}>查看使用记录 ↗</a> : null}</div> : null}
+      {unresolved ? <div className="mih-strategy-unresolved" role="alert"><strong>原请求结果待核实</strong><p>此平台的原请求保持锁定。超时不代表取消；请先只读核对，避免重复采集和计费。可选择其他平台，切换不会发送请求。</p><p>幂等键 <code>{unresolved.idempotencyKey}</code></p>{unresolved.requestId ? <p>Hub 请求 ID <code>{unresolved.requestId}</code></p> : null}<button className="qp-button qp-button--outline" type="button" disabled={!key || busy || checking} onClick={checkOutcome}>{checking ? '核对中…' : '只读核对原请求状态'}</button>{unresolved.requestId ? <a href={`#/usage?requestId=${encodeURIComponent(unresolved.requestId)}`}>查看使用记录 ↗</a> : null}
+        {canPrepareUnknown ? <div><p>原请求已记录为 unknown，结束时间：{formatDate(unresolved.checkedOutcome.completedAt)}。原结果和费用仍未知，记录会保留；准备不会发送，再次点击搜索会计量。</p><button className="qp-button qp-button--outline" type="button" disabled={!key || busy || checking} onClick={() => prepare(unresolved)}>准备新查询（再次发送会计量）</button></div> : null}
+      </div> : null}
       {state.outcomeNote ? <p role="status">{state.outcomeNote}</p> : null}
+      {unknownHistory.length ? <details><summary>已保留的原请求（结果和费用仍未知）</summary>{unknownHistory.map(row => <div key={row.idempotencyKey}><p>Hub 请求 ID <a href={`#/usage?requestId=${encodeURIComponent(row.requestId)}`}>{row.requestId}</a> · unknown</p><p>幂等键 <code>{row.idempotencyKey}</code> · 已记录结束时间 {formatDate(row.checkedOutcome.completedAt)}</p></div>)}</details> : null}
       {error ? <ErrorState error={unresolved?.requestId && error === unresolved.error ? { ...error, message: error.message, requestId: unresolved.requestId } : error} /> : null}
     </section>
     {result?.identity === identity ? <>

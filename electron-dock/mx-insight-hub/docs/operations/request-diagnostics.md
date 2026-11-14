@@ -30,6 +30,21 @@ Launcher 用户（包括 Launcher 平台管理员）和 Public listener 均不�
 保留失败与成功回退的区别。`billed=null` 显示未知；`estimated` 不是实际采购扣款；
 `shadow` 客户结算不表示钱包实际扣款。无记录不证明请求没有执行。
 
+### RapidAPI 传输失败证据
+
+诊断 API、页面及导出 JSON 读取已保存的 `response.transportFailure`，只投影固定阶段、
+技术错误码白名单、实际耗时、适配器总超时设置和该总超时是否触发。归档字段最多读取 4096 字节；
+未知错误码不会原样返回，不展示异常 message、stack、地址或凭据。旧归档没有该字段时不补推原因。
+
+- `request`：尚未取得 HTTP Response，可能发生于路由读取、连接、请求发送或等待响应头；不证明未派发。
+- `body`：已取得 HTTP Response，但读取正文时失败。
+- `deadlineExceeded=true`：适配器总超时已触发；`false` 只表示该计时器未触发，底层连接仍可能超时。
+- `ENOTFOUND` / `EAI_AGAIN` 指向名称解析；`ECONNRESET` / `UND_ERR_SOCKET` 表示连接问题；
+  TLS 或 SQLSTATE 码按记录展示，不能据此判断唯一根因或供应商是否计费。
+
+查看这些字段不会重试采购或改变原请求状态。Threads 示例和无需部署镜像的只读命令见
+[Threads 搜索未知结果排查](threads-search-unknown-2026-11-14.md)。
+
 ## TikHub 限流提醒（2026-10-22）
 
 当次供应商账本明确为 `provider=tikhub`，且记录 HTTP 429 或

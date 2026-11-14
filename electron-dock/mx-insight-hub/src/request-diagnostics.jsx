@@ -42,7 +42,7 @@ function exportDiagnostics(data) {
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
-function Call({ call, provider }) {
+export function RequestDiagnosticCall({ call, provider }) {
   return <article className="mih-diagnostic-call">
     <h4>{provider ? call.provider : '连接器'} · {shown(call.operation)}</h4>
     <p><strong>{stateName(call.outcome)}</strong>{call.message ? ` · ${call.message}` : ''}</p>
@@ -56,6 +56,26 @@ function Call({ call, provider }) {
         ['采购金额（最小货币单位）', call.costMinor == null ? null : `${call.costMinor} ${call.currency || ''} · ${call.costKind || 'unknown'}`],
         ['归档证据', call.hasRestrictedArchive ? '已保存受限响应' : call.hasArchive ? '已保存响应元数据' : '未记录']] : []),
     ]}/>
+    {provider && call.transportFailure ? <section aria-label="传输失败证据">
+      <h5>传输失败证据</h5>
+      <Facts entries={[
+        ['记录阶段', call.transportFailure.phase === 'request' ? '请求阶段（尚未取得 HTTP 响应）'
+          : call.transportFailure.phase === 'body' ? '读取响应体' : null],
+        ['技术错误码', call.transportFailure.codes?.join(' · ')],
+        ['适配器总超时是否触发', call.transportFailure.deadlineExceeded == null ? null : call.transportFailure.deadlineExceeded ? '是' : '否'],
+        ['适配器配置超时', call.transportFailure.timeoutMs == null ? null : `${call.transportFailure.timeoutMs} ms`],
+        ['记录的传输耗时', call.transportFailure.elapsedMs == null ? null : `${call.transportFailure.elapsedMs} ms`],
+      ]}/>
+      {call.transportFailure.deadlineExceeded === false ? <p className="mih-diagnostic-note">未触发总超时仍可能有底层连接超时。</p> : null}
+      <p className="mih-diagnostic-note">{call.transportFailure.phase === 'request'
+        ? '请求阶段包含选路、连接、发送及等待响应头。按技术错误码核对原调用的出口或连接记录；此阶段仍需核对上游是否执行及最终费用。'
+        : call.transportFailure.phase === 'body'
+          ? '已取得 HTTP 响应，读取正文时失败。按原调用时间核对响应传输与读取记录，最终结果和费用以原请求证据为准。'
+          : '保存的阶段未能识别，请结合原调用记录核对。'}</p>
+      {call.transportFailure.unrecognizedCodes || call.transportFailure.codesTruncated
+        ? <p className="mih-diagnostic-note">部分技术错误码未通过展示规则或超过展示上限。</p> : null}
+    </section> : null}
+    {provider && call.transportFailureTooLarge ? <p className="mih-diagnostic-note">传输失败元数据超过展示上限，请按原调用 ID 核对归档。</p> : null}
     {provider && !call.message ? <p className="mih-diagnostic-note">{call.messageEvidence === 'restricted_message_not_exposed' ? '受限响应已保存；该消息尚未通过安全展示规则，界面仅展示业务码，不返回原始正文。' : '没有可展示的上游消息，不能据此推断具体根因。'}</p> : null}
     {!provider && call.failureEvidence ? <section aria-label="Night-All 错误链">
       <h4>Night-All 错误链</h4>
@@ -188,8 +208,8 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
           </> : null}
           <h4>当次上游调用</h4>
           {!run.providerCalls.length && !run.connectorCalls.length ? <p>{run.refusal ? '本请求被熔断保护拒绝，没有派发到供应商。' : '未找到当次调用记录。缓存交付、调度前拒绝或证据缺失都可能造成此情况。'}</p> : null}
-          {run.providerCalls.map(call => <Call key={call.id} call={call} provider/>)}
-          {run.connectorCalls.map(call => <Call key={call.id} call={call}/>)}
+          {run.providerCalls.map(call => <RequestDiagnosticCall key={call.id} call={call} provider/>)}
+          {run.connectorCalls.map(call => <RequestDiagnosticCall key={call.id} call={call}/>)}
           {run.callsTruncated ? <p>调用记录过多，每类仅显示前 50 条，以上不是完整调用链。</p> : null}
         </article>)}
       </> : !busy && !current.error ? <div className="mih-diagnostic-empty">输入请求 ID 后查询。失败、处理中和已交付的请求均可查看。</div> : null}
