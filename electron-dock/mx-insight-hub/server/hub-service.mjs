@@ -194,6 +194,7 @@ import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
 import { canRouteRawSearch } from './contracts/raw-search.mjs'
 import { canRouteDataSearch } from './contracts/hub-data-search.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
+import { threadsPostDetailRecipe, THREADS_POST_DETAIL_VERSION, THREADS_POST_DETAIL_CAPABILITY } from './contracts/threads-post-detail.mjs'
 import { threadsSearchRecipe } from './contracts/threads-search.mjs'
 import { normalizeTwitterSearchParameters } from './contracts/twitter-search-parameters.mjs'
 import { FILL_PAGE_FIELD, fillPageOption, takeFillPage } from './contracts/single-page-delivery.mjs'
@@ -1711,21 +1712,29 @@ export class HubService {
       const row = payload.data.platforms.find(row => row.platform === 'twitter')
       if (row) row.search = { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
     }
+    const capabilityGrants = await this.#effectiveCapabilityGrants(context)
     if (canonicalGrants.includes('threads')) {
-      let ready = false
-      try {
-        if (!isTestApiKey(context.apiKey) && this.externalDataSearch && this.externalNativeCapabilities) {
-          const route = await this.strategySearchRoutingStore.get('search', 'threads')
-          if (route && route.mode !== 'paused') {
-            const providers = route.mode === 'priority' ? [route.primaryProvider, route.fallbackProvider] : [route.primaryProvider]
-            const operationKeys = providers.map(provider => `native.${threadsSearchRecipe('threads', provider).key}`)
-            const states = await this.externalNativeCapabilities({ consumerId: context.consumer.id, operationKeys })
-            ready = operationKeys.some(key => states[key] === true)
-          }
+      const routeReady = async (interfaceId, recipeFor) => {
+        if (isTestApiKey(context.apiKey) || !this.externalNativeCapabilities) return false
+        try {
+          const route = await this.strategySearchRoutingStore.get(interfaceId, 'threads')
+          if (!route || route.mode === 'paused') return false
+          const providers = route.mode === 'priority' ? [route.primaryProvider, route.fallbackProvider] : [route.primaryProvider]
+          const operationKeys = providers.map(provider => `native.${recipeFor('threads', provider).key}`)
+          const states = await this.externalNativeCapabilities({ consumerId: context.consumer.id, operationKeys })
+          return operationKeys.some(key => states[key] === true)
+        } catch {
+          this.logger?.warn?.(`[threads] ${interfaceId} capability state is unavailable`)
+          return false
         }
-      } catch { this.logger?.warn?.('[threads] Search capability state is unavailable') }
-      payload.data.platforms.push({ platform: 'threads', source: 'hub', servingMode: 'live_only', ready,
-        search: { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' } })
+      }
+      const ready = !!this.externalDataSearch && await routeReady('search', threadsSearchRecipe)
+      const row = { platform: 'threads', source: 'hub', servingMode: 'live_only', ready,
+        search: { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' } }
+      if (capabilityGrants.includes(THREADS_POST_DETAIL_CAPABILITY)) row.postDetail = {
+        ready: await routeReady('post-detail', threadsPostDetailRecipe), source: 'hub', servingMode: 'live_only', contractVersion: THREADS_POST_DETAIL_VERSION,
+      }
+      payload.data.platforms.push(row)
     }
     // Twitter resolves its selected supplier above. A metadata failure for an
     // unrelated TikHub platform must not overwrite an available Rapid route.
@@ -1966,7 +1975,6 @@ export class HubService {
         }
       }
     }
-    const capabilityGrants = await this.#effectiveCapabilityGrants(context)
     // File datasets appear only for snapshot Keys holding both the platform
     // and the search capability (personal data is never inherited).
     const fileDatasetAccess = new Map()
@@ -2089,6 +2097,8 @@ export class HubService {
                   ? diagnosticsReady
                   : capability === 'social.posts.hot_search'
                     ? !isTestApiKey(context.apiKey) && providerOperationReady(hotNotesCapability, capability)
+                  : capability === THREADS_POST_DETAIL_CAPABILITY && payload.data.platforms.some(row => row.platform === 'threads' && row.postDetail?.ready)
+                    ? true
                   : XIAOHONGSHU_ACQUISITION_CAPABILITIES.has(capability)
                     ? !isTestApiKey(context.apiKey) && (
                         capability === XIAOHONGSHU_APP_V2_COMPAT_CAPABILITY

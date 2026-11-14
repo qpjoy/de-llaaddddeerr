@@ -4,8 +4,9 @@ import { NATIVE_FORWARDING_ENDPOINTS, normalizeNativeForwardingRequest } from '.
 import { normalizeTwitterResponse, validateTwitterUsername, HUB_SOCIAL_VERSION, TWITTER_REPLIES_ENDPOINT_KEY } from './hub-social.mjs'
 import { facebookRow } from './facebook-search.mjs'
 import { normalizeNightAllSocialItem } from './night-all-social-fields.mjs'
-import { parseThreadsAccountPage, parseThreadsProfiles } from './threads.mjs'
+import { parseThreadsAccountPage, parseThreadsProfiles, parseThreadsScraperProfile, parseThreadsScraperAccountPage } from './threads.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../../shared/social-account-contract.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 export { HUB_SOCIAL_COMPAT_PLATFORMS } from '../../shared/social-account-contract.mjs'
 
 export const HUB_SOCIAL_COMPAT_VERSION = 'mx-insight-hub.social-account-compat.v1'
@@ -91,10 +92,13 @@ const RECIPES = {
     comments: recipe('/api/v1/reddit/app/fetch_user_comments', 'username', 'after', 'cursor', { limit: 'page_size' }),
   },
 }
-// Threads alone has two reviewed account suppliers; routing picks one per
-// request. RapidAPI needs the numeric ID, so usernames resolve through its
-// profile search; TikHub's user pages have no working continuation.
+// threads-api4 needs numeric IDs; the other RapidAPI listing accepts handles
+// directly. TikHub's user pages have no working continuation.
 const THREADS_RECIPES = {
+  [THREADS_SCRAPER_ROUTE]: {
+    profile: recipe('/api/v1/users/detail', 'username', null, 'none'),
+    posts: recipe('/api/v1/users/posts', 'username', 'cursor'),
+  },
   rapidapi: {
     lookup: recipe('/api/search/profiles', 'query', null, 'none'),
     profile: recipe('/api/user/info', 'id', null, 'none'),
@@ -112,17 +116,20 @@ const THREADS_RECIPES = {
 }
 RECIPES.threads = THREADS_RECIPES.rapidapi
 const recipesFor = (platform, provider) => platform === 'threads' ? THREADS_RECIPES[provider] || THREADS_RECIPES.rapidapi : RECIPES[platform]
+const scraperSupportsJob = job => job.identity.kind === 'username' && ['profile', 'posts'].includes(job.activityType)
 export function threadsAccountRecipe(platform, provider, request) {
   const recipes = platform === 'threads' && THREADS_RECIPES[provider]
   if (!recipes) return null
+  const scraper = provider === THREADS_SCRAPER_ROUTE
+  if (scraper && !request.jobs.every(scraperSupportsJob)) return { provider: 'rapidapi', operationKeys: [], available: false }
   const operationKeys = new Set()
   for (const job of request.jobs) {
-    const first = buildHubSocialCompatDispatch({ ...job, provider }, { pageSize: request.pageSize })
+    const first = buildHubSocialCompatDispatch({ ...job, provider: scraper ? 'rapidapi' : provider, routeProvider: provider }, { pageSize: request.pageSize })
     operationKeys.add(first.operation)
     // A successful handle lookup supplies a numeric ID for the final step.
     if (first.socialCompat.stage === 'resolve') operationKeys.add(recipes[job.activityType].endpoint.operation)
   }
-  return { provider, operationKeys: [...operationKeys], available: true }
+  return { provider: scraper ? 'rapidapi' : provider, operationKeys: [...operationKeys], available: true }
 }
 export const HUB_SOCIAL_COMPAT_ACTIVITIES = Object.freeze(Object.fromEntries(Object.entries(RECIPES).map(([platform, rows]) => [platform, Object.freeze(Object.keys(rows).filter(key => !['profile', 'lookup'].includes(key)))])))
 
@@ -238,9 +245,13 @@ export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize =
   const jobs = [...identities.values()].flatMap(identity => [...new Set(activities)].map(activityType => {
     const provider = platform === 'threads' ? routedProvider === 'tikhub' ? 'tikhub' : 'rapidapi'
       : platform === 'twitter' ? 'rapidapi' : platform === 'facebook' ? 'justone' : 'tikhub'
-    const job = { platform, provider, operation, activityType, identity, params }
+    const scraper = platform === 'threads' && routedProvider === THREADS_SCRAPER_ROUTE
+    const job = { platform, provider, ...(scraper ? { routeProvider: THREADS_SCRAPER_ROUTE } : {}), operation, activityType, identity, params }
+    if (scraper && !scraperSupportsJob(job)) throw new AppError(400, 'threads_account_input_unsupported',
+      identity.kind !== 'username' ? 'This Threads source requires a username or profile URL' : 'This Threads source only supports the posts activity',
+      { platform, upstreamDispatched: false })
     // Validate all public parameters before any profile lookup can be charged.
-    const rows = recipesFor(platform, provider)
+    const rows = recipesFor(platform, job.routeProvider ?? provider)
     const recipes = [rows[activityType], rows.profile, rows.lookup].filter(value => object(value))
     const permitted = new Set(recipes.flatMap(row => row.endpoint.parameters.map(value => value.name)))
     if (Object.keys(params).some(key => !permitted.has(key))) fail('unsupported_fields', 'Unsupported account parameter')
@@ -264,11 +275,12 @@ function identityParams(row, identity, platform) {
   return { [name]: value }
 }
 export function buildHubSocialCompatDispatch(job, { page = 1, nextParams = null, resolvedIdentity = null, pageSize = 20 } = {}) {
-  const config = recipesFor(job.platform, job.provider)
+  const config = recipesFor(job.platform, job.routeProvider ?? job.provider)
   if (!config) fail('social_platform_not_implemented', 'Unsupported account platform')
   const identity = accountValue(job, resolvedIdentity)
   // A Threads page names its author, so a numeric ID needs no paid profile call.
-  const needProfile = job.operation === 'crawl' && !resolvedIdentity?.profileReady && !(job.platform === 'threads' && identity.kind === 'id')
+  const needProfile = job.operation === 'crawl' && !resolvedIdentity?.profileReady
+    && !(job.platform === 'threads' && (identity.kind === 'id' || job.routeProvider === THREADS_SCRAPER_ROUTE))
   let stage = needProfile ? 'resolve' : 'data', kind = needProfile || job.operation === 'user-info' ? 'profile' : job.activityType
   if (kind === 'profile' && !resolvedIdentity?.lookupComplete && config.lookup && (
     job.platform === 'youtube' && identity.kind !== 'id' || job.platform === 'xiaohongshu' && identity.kind === 'username' || job.platform === 'douyin' && identity.kind === 'username' || job.platform === 'threads' && identity.kind === 'username')) { kind = 'lookup'; stage = 'resolve' }
@@ -541,7 +553,13 @@ export function projectHubSocialCompatResponse(payload, request, { capturedAt = 
       ...(stage === 'resolve' ? { resolvedIdentity: { kind: 'id', value: account?.user_id || request.userId, username: account?.user_name || request.username, lookupComplete: true, profileReady: true } } : {}) }
   }
   if (kind === 'lookup' || kind === 'profile') {
-    let candidates = profileObjects(payload)
+    const providerPage = { hasMore: false, nextParams: null, nextPage: page + 1 }
+    let candidates
+    if (job.routeProvider === THREADS_SCRAPER_ROUTE) {
+      const user = parseThreadsScraperProfile(payload, { username: job.identity.value })
+      if (user === null) return { acquiredItems: [], profiles: [], providerPage }
+      candidates = [user]
+    } else candidates = profileObjects(payload)
     if (kind === 'lookup' && job.platform === 'xiaohongshu') {
       candidates = roots(payload).flatMap(value => Array.isArray(value?.users) ? value.users : [])
       const exact = candidates.filter(value => [value.red_id, value.username, value.user_name].some(candidate => typeof candidate === 'string' && candidate.replace(/^@+/, '').toLowerCase() === job.identity.value.toLowerCase()))
@@ -563,11 +581,13 @@ export function projectHubSocialCompatResponse(payload, request, { capturedAt = 
       : job.platform === 'linkedin' || job.platform === 'reddit' ? desired.value : profile.user_id
     const resolvedIdentity = { kind: ['linkedin'].includes(job.platform) ? 'url' : job.platform === 'reddit' ? 'username' : 'id', value,
       username: profile.user_name, lookupComplete: true, profileReady: kind === 'profile' }
-    return { acquiredItems: [], profiles: [modernProfile(profile)], providerPage: { hasMore: false, nextParams: null, nextPage: page + 1 }, ...(stage === 'resolve' ? { resolvedIdentity } : {}) }
+    return { acquiredItems: [], profiles: [modernProfile(profile)], providerPage, ...(stage === 'resolve' ? { resolvedIdentity } : {}) }
   }
   if (job.platform === 'threads') {
-    const parsed = parseThreadsAccountPage(payload, { activityType: job.activityType, ownerId: (context.resolvedIdentity || job.identity).value,
-      provider: job.provider, currentCursor: request.upstreamQuery.end_cursor ?? null, capturedAt })
+    const parsed = job.routeProvider === THREADS_SCRAPER_ROUTE
+      ? parseThreadsScraperAccountPage(payload, { username: job.identity.value, currentCursor: request.upstreamQuery.cursor ?? null, capturedAt })
+      : parseThreadsAccountPage(payload, { activityType: job.activityType, ownerId: (context.resolvedIdentity || job.identity).value,
+          provider: job.provider, currentCursor: request.upstreamQuery.end_cursor ?? null, capturedAt })
     const owner = parsed.owner ? profileRow(parsed.owner, 'threads', capturedAt) : null
     return { acquiredItems: parsed.rows.map(row => modernContent(row, 'threads', job.activityType)),
       profiles: owner ? [modernProfile(owner)] : [], providerPage: { ...parsed.providerPage, nextPage: page + 1 } }

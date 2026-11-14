@@ -139,12 +139,12 @@ test('Threads diagnostics reports the reviewed RapidAPI subscription rejection o
   assert.equal(run.providerCalls[0].messageEvidence, 'reviewed_archive_message')
   assert.match(run.guidance, /明确返回“未订阅此 API”/u)
   assert.match(run.guidance, /生产 RapidAPI Key.*threads-api4/u)
-  const scraper = await diagnose({ operation: 'native.r.threads_scraper_search_posts' })
+  const scraper = await diagnose({ operation: 'native.r.threads_scraper_post_detail' })
   assert.equal(scraper.providerCalls[0].message, subscriptionMessage)
   assert.match(scraper.guidance, /生产 RapidAPI Key.*Threads Scraper/u)
   assert.doesNotMatch(scraper.guidance, /threads-api4/u)
   for (const patch of [
-    { provider_key: 'tikhub' }, { operation: 'native.r.threads_search_profiles' },
+    { provider_key: 'tikhub' }, { operation: 'native.r.other_unreviewed_api' },
     { outcome: 'unknown' }, { http_status: 401 }, { reviewed_message: null },
     { reviewed_message: subscriptionMessage + ' private credentials' },
   ]) {
@@ -174,7 +174,7 @@ test('the provider SQL projection admits only the top-level Threads subscription
     [{}, { message: subscriptionMessage + ' private credentials' }],
     [{}, { error: { message: subscriptionMessage } }],
     [{ provider_key: 'tikhub' }, { message: subscriptionMessage }],
-    [{ operation: 'native.r.threads_search_profiles' }, { message: subscriptionMessage }],
+    [{ operation: 'native.r.other_unreviewed_api' }, { message: subscriptionMessage }],
     [{ http_status: 401 }, { message: subscriptionMessage }],
     [{ outcome: 'unknown' }, { message: subscriptionMessage }],
   ]

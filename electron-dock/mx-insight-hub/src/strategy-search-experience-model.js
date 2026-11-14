@@ -1,7 +1,9 @@
+import { threadsDetailCode, threadsScraperPostUrlParts } from '../shared/threads-post-identity.mjs'
 import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../shared/social-account-contract.mjs'
 
 export const STRATEGY_DATA_SEARCH_PATH = '/api/v1/data/search'
 export const STRATEGY_ACCOUNT_PATHS = { crawl: '/api/v1/data/social/crawl', 'user-info': '/api/v1/data/social/user-info' }
+export const STRATEGY_POST_DETAIL_PATH = '/api/v1/data/social/post-detail'
 export const STRATEGY_SEARCH_PLATFORMS = [
   ['douyin', '抖音', '抖'], ['bilibili', '哔哩哔哩', 'B'], ['kuaishou', '快手', '快'], ['zhihu', '知乎', '知'],
   ['telegram', 'Telegram', 'TG'], ['twitter', 'Twitter / X', '𝕏'], ['reddit', 'Reddit', 'R'],
@@ -10,7 +12,21 @@ export const STRATEGY_SEARCH_PLATFORMS = [
   ['wechat_search', '微信搜一搜', '搜'], ['wechat_mp', '微信公众号', '公'],
 ].map(([platform, label, mark]) => ({ platform, label, mark }))
 
-export const strategyOperationPath = operation => STRATEGY_ACCOUNT_PATHS[operation] || STRATEGY_DATA_SEARCH_PATH
+export const strategyOperationPath = operation => operation === 'post-detail' ? STRATEGY_POST_DETAIL_PATH : STRATEGY_ACCOUNT_PATHS[operation] || STRATEGY_DATA_SEARCH_PATH
+
+export function strategyPostDetailPlatforms(access) {
+  return STRATEGY_SEARCH_PLATFORMS.filter(row => row.platform === 'threads'
+    && (!access || access.platforms?.includes('threads') && access.capabilities?.includes('social.posts.resolve')))
+}
+
+export function strategyPostDetailBody(form, platforms) {
+  if (form.platform !== 'threads' || !platforms.some(row => row.platform === 'threads')) throw new Error('当前 Key 需要 Threads 平台和帖子详情授权。')
+  const target = String(form.postTarget || '').trim()
+  if (!target || target.includes('\0') || target.length > 2048) throw new Error('请输入 Threads 帖子 ID、短码或链接。')
+  if (threadsScraperPostUrlParts(target)) return { platform: 'threads', url: target }
+  if (threadsDetailCode(target)) return { platform: 'threads', contentId: target }
+  throw new Error('请输入有效的 Threads 帖子 ID、短码或 HTTPS 帖子链接。')
+}
 
 export function strategyAccountPlatforms(access, operation) {
   const supported = operation === 'crawl' ? HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS : HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS
@@ -25,6 +41,19 @@ export function strategyAccountBody(operation, form, platforms, cursor) {
   if (!platforms.some(row => row.platform === form.platform)) throw new Error('请选择当前 Key 已授权的目标平台。')
   let field = form.accountField || 'username', account = String(form.account || '').trim()
   if (!['username', 'userId', 'user_id', 'uid', 'url', 'profileUrl', 'profile_url'].includes(field) || !account || account.length > 500 || account.includes('\0')) throw new Error('请输入 1–500 字的有效账号标识。')
+  if (form.platform === 'threads') {
+    if (field === 'username' && !/^@?[A-Za-z0-9._]{1,64}$/.test(account)) throw new Error('请输入 Threads 用户名（例如 @threads）；主页链接请选择 url。')
+    if (['userId', 'user_id', 'uid'].includes(field) && !/^\d{1,30}$/.test(account)) throw new Error('Threads 的账号 ID 应为数字，用户名请选择 username。')
+    if (['url', 'profileUrl', 'profile_url'].includes(field)) {
+      let url
+      let path
+      try { url = new URL(account); path = decodeURIComponent(url.pathname) } catch { /* Invalid account link. */ }
+      if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port
+        || !/(^|\.)threads\.(?:com|net)$/.test(url.hostname) || !/^\/@[A-Za-z0-9._]{1,64}\/?$/.test(path)) {
+        throw new Error('请输入完整的 Threads 账号主页链接，例如 https://www.threads.com/@threads。')
+      }
+    }
+  }
   if (form.platform === 'twitter' && form.twitterAccountField !== 'original') {
     const mode = form.twitterAccountField || 'auto'
     // Hub tries bare digits as an ID and then as a username; digits too long
@@ -151,7 +180,7 @@ export function isFacebookPhotoPage(value) {
 }
 
 export function createStrategySearchCell(platform) {
-  let state = { form: { platform, query: '', pageSize: 20, accountField: 'username', account: '' }, attempts: new Map(), consoleAttempts: new Map(), result: null, busy: false, error: null, checking: false }
+  let state = { form: { platform, query: '', pageSize: 20, accountField: 'username', account: platform === 'threads' ? 'threads' : '' }, attempts: new Map(), consoleAttempts: new Map(), result: null, busy: false, error: null, checking: false }
   const listeners = new Set()
   return { subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener) }, getSnapshot: () => state,
     update: patch => { state = { ...state, ...patch }; for (const listener of listeners) listener() } }

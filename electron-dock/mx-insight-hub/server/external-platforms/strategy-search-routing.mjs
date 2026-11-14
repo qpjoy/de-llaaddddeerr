@@ -1,6 +1,6 @@
 import { AppError } from '../core/errors.mjs'
 import { COMMENT_INTERFACES, commentProviders, commentRoutePlatforms, defaultCommentRoute } from '../contracts/comment-routes.mjs'
-import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
+import { THREADS_BUSINESS_ROUTES, THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 
 export const STRATEGY_SEARCH_PROVIDERS = Object.freeze(['justone', 'tikhub', 'rapidapi', THREADS_SCRAPER_ROUTE])
 export const STRATEGY_SEARCH_MODES = Object.freeze(['fixed', 'priority', 'paused'])
@@ -8,21 +8,18 @@ const PROVIDERS_BY_PLATFORM = Object.freeze({
   instagram: Object.freeze(['justone', 'tikhub']),
   twitter: Object.freeze(['rapidapi', 'tikhub']),
   facebook: Object.freeze(['justone']),
-  threads: Object.freeze(['rapidapi', 'tikhub']),
 })
-// Threads is the one platform whose account interfaces are also routed.
-const THREADS_ROUTED_INTERFACES = Object.freeze(['search', 'crawl', 'user-info'])
-const THREADS_SEARCH_PROVIDERS = Object.freeze(['rapidapi', THREADS_SCRAPER_ROUTE, 'tikhub'])
-const defaultThreadsRow = interfaceId => ({ interface_key: interfaceId, platform: 'threads', mode: 'priority', primary_provider: 'rapidapi',
-  fallback_provider: 'tikhub', revision: 1, reason: 'default_route', updated_at: null })
+const THREADS_ROUTED_INTERFACES = Object.keys(THREADS_BUSINESS_ROUTES)
+const defaultThreadsRow = interfaceId => ({ interface_key: interfaceId, platform: 'threads', primary_provider: THREADS_SCRAPER_ROUTE,
+  mode: 'fixed', fallback_provider: null,
+  revision: 1, reason: 'default_route', updated_at: null })
 
 // Registered suppliers for one business interface on one platform. Comment
 // interfaces read the reviewed comment catalog; a pending supplier is still
 // registered (selectable once calibrated) but requests fail before dispatch.
 export function strategyRouteProviders(interfaceId, platform) {
   if (COMMENT_INTERFACES.includes(interfaceId)) return Object.keys(commentProviders(interfaceId, platform) || {})
-  if (platform === 'threads' && interfaceId === 'search') return THREADS_SEARCH_PROVIDERS
-  if (platform === 'threads') return THREADS_ROUTED_INTERFACES.includes(interfaceId) ? PROVIDERS_BY_PLATFORM.threads : []
+  if (platform === 'threads') return Object.hasOwn(THREADS_BUSINESS_ROUTES, interfaceId) ? THREADS_BUSINESS_ROUTES[interfaceId] : []
   if (platform === 'facebook') return ['crawl', 'user-info'].includes(interfaceId) ? PROVIDERS_BY_PLATFORM.facebook : []
   return interfaceId === 'search' ? PROVIDERS_BY_PLATFORM[platform] || [] : []
 }

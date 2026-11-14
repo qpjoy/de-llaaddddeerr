@@ -11,8 +11,9 @@ import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
-import { hubSocialPaths, hubSocialGuide, hubSocialAccountPlatforms } from './contracts/hub-social-docs.mjs'
+import { hubSocialPaths, hubSocialGuide, hubSocialAccountPlatforms, hubSocialAccountExample, threadsAccountInputDescription } from './contracts/hub-social-docs.mjs'
 import { youtubeCommentsPaths, youtubeCommentsGuide } from './contracts/youtube-comments-docs.mjs'
+import { THREADS_POST_DETAIL_PATH, THREADS_POST_DETAIL_VERSION, THREADS_POST_DETAIL_CAPABILITY } from './contracts/threads-post-detail.mjs'
 import { postCommentsPaths, postCommentsAliasPaths, postCommentsGuide, postCommentsPlatforms, commentRepliesPaths, commentRepliesPlatforms } from './contracts/post-comments-docs.mjs'
 import { productForDocs } from '../shared/product-workbenches.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
@@ -1327,6 +1328,24 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...hubSocialPaths,
     ...youtubeCommentsPaths,
     ...postCommentsPaths,
+    [THREADS_POST_DETAIL_PATH.slice('/api/v1'.length)]: { post: {
+      tags: ['社媒与内容数据'], operationId: 'threadsPostDetail', summary: '读取一条公开 Threads 帖子',
+      'x-mx-platform-options': ['threads'], 'x-mx-required-platform': 'threads', 'x-mx-required-capabilities': [THREADS_POST_DETAIL_CAPABILITY],
+      'x-mx-meter-key': THREADS_POST_DETAIL_CAPABILITY, 'x-mx-doc-path': '/docs/social-content',
+      description: '输入帖子数字 ID 字符串、短码或 Threads 帖子链接。一次获取一条帖子。返回字段沿用内容搜索的 SearchItem，缺失的互动计数为 null。同键重放已保存的结果。供应商可在管理页单独设置。',
+      parameters: [idempotencyParameter],
+      requestBody: { required: true, content: { 'application/json': {
+        schema: { type: 'object', additionalProperties: false, required: ['platform'], oneOf: [{ required: ['contentId'] }, { required: ['url'] }],
+          properties: { platform: { type: 'string', const: 'threads' }, contentId: { type: 'string', description: '帖子数字 ID 或短码' },
+            url: { type: 'string', format: 'uri', description: 'threads.com 或 threads.net 下的 HTTPS /@用户名/post/短码 链接' } } },
+        example: { platform: 'threads', contentId: 'DHJ6-NSogXR' },
+      } } },
+      responses: { ...publicErrors, 200: { description: '单条帖子，包含作者、正文、时间、互动计数和来源提供的媒体。',
+        content: { 'application/json': { schema: { type: 'object', required: ['requestId', 'data'], properties: {
+          requestId: { type: 'string', format: 'uuid' }, data: { type: 'object', required: ['platform', 'item'],
+            properties: { platform: { type: 'string', const: 'threads' }, item: { $ref: '#/components/schemas/SearchItem' } } },
+        } } } } } },
+    } },
     ...commentRepliesPaths,
     ...postCommentsAliasPaths,
     ...webSearchPaths,
@@ -5165,7 +5184,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                       },
                     },
                     input: { type: 'string', enum: ['official_note_url'] },
-                    postDetail: {
+                    postDetail: { oneOf: [{
                       type: 'object',
                       additionalProperties: false,
                       required: ['ready', 'source', 'servingMode', 'contractVersion', 'input', 'deliveryModes'],
@@ -5180,7 +5199,11 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                           items: { type: 'string', enum: [...XIAOHONGSHU_POST_DELIVERY_MODES] },
                         },
                       },
-                    },
+                    }, {
+                      type: 'object', additionalProperties: false, required: ['ready', 'source', 'servingMode', 'contractVersion'],
+                      properties: { ready: { type: 'boolean' }, source: { const: 'hub' }, servingMode: { const: 'live_only' },
+                        contractVersion: { const: THREADS_POST_DETAIL_VERSION } },
+                    }] },
                     search: {
                       type: 'object',
                       additionalProperties: false,
@@ -5556,7 +5579,7 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
       properties: { raw_info: { type: 'string' }, raw_data: { type: 'string' }, page: { type: 'object', additionalProperties: true }, meta: { type: 'object', additionalProperties: true } } },
   } } } }
   for (const path of ['/data/search', '/data/social/search', '/data/social/crawl', '/data/social/user-info', '/search/{operation}', '/search/raw',
-    '/data/social/post-comments', '/data/social/comment-replies', '/data/youtube/comments', '/data/youtube/channel-comments', '/data/xiaohongshu/notes/comments']) {
+    '/data/social/post-detail', '/data/social/post-comments', '/data/social/comment-replies', '/data/youtube/comments', '/data/youtube/channel-comments', '/data/xiaohongshu/notes/comments']) {
     const json = jsonOf(responseOf(path))
     if (json?.schema) json.schema = describeResponseFields(PUBLIC_OPENAPI_DOCUMENT, JSON.parse(JSON.stringify(json.schema)))
   }
@@ -6778,7 +6801,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
   if (path === '/data/search') return threadsSearchVisible(scopes) || wechatSearchVisible(scopes)
-  if (path === '/data/services/pricing') return postCommentsPlatforms(scopes).length > 0 || scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','youtube','web_search','xiaohongshu'].includes(value)))
+  if (path === '/data/services/pricing') return scopes.some(scope => scope.platforms.includes('threads') && scope.capabilities.includes(THREADS_POST_DETAIL_CAPABILITY)) || postCommentsPlatforms(scopes).length > 0 || scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','youtube','web_search','xiaohongshu'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
   let platform = operation?.['x-mx-required-platform']
@@ -6803,7 +6826,7 @@ const TENANT_PRODUCT_PATHS = {
   'web-search':Object.keys(webSearchPaths),
   [WECHAT_SELF_HOSTED.docs]: Object.keys(wechatSelfHostedPaths),
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
-  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths), ...Object.keys(postCommentsPaths), ...Object.keys(commentRepliesPaths)],
+  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', '/data/social/post-detail', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths), ...Object.keys(postCommentsPaths), ...Object.keys(commentRepliesPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
@@ -6873,7 +6896,8 @@ export function tenantOpenApiDocument(scopes) {
     const platforms = hubSocialAccountPlatforms(operation, scopes)
     entry['x-mx-platform-options'] = platforms
     entry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
-    entry.requestBody.content['application/json'].example.platform = platforms[0]
+    entry.requestBody.content['application/json'].example = hubSocialAccountExample(operation, platforms[0])
+    if (platforms.includes('threads')) entry.description += ' ' + threadsAccountInputDescription(operation)
   }
   const commentEntry = document.paths['/data/social/post-comments']?.post
   if (commentEntry) {
@@ -6910,13 +6934,18 @@ export function tenantOpenApiDocument(scopes) {
   return document
 }
 
+function threadsDetailGuide(scopes = null) {
+  if (!tenantDocumentPathAllowed('/data/social/post-detail', scopes)) return ''
+  return '<section><h2>Threads 帖子详情</h2><p><code>POST /api/v1/data/social/post-detail</code> 接受 <code>{"platform":"threads","contentId":"C8O-JbtAKrp"}</code>，也可将 contentId 替换为 url 并传入完整帖子链接。使用 Live Key 和 Idempotency-Key。响应的 <code>data.item</code> 提供正文、作者、发布时间、互动数和可用媒体。</p></section>'
+}
+
 function tenantDocBody(route, scopes) {
   if (route.key === 'strategy-search') return strategySearchGuide(scopes)
   if (route.key === 'web-search') return webSearchGuide
   if (route.key === WECHAT_SELF_HOSTED.docs) return wechatSelfHostedGuide
   if (route.nativeKey) return nativeEndpointGuide(route.key)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
-  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + youtubeCommentsGuide(path=>tenantDocumentPathAllowed(path,scopes)) + postCommentsGuide(scopes) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
+  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + youtubeCommentsGuide(path=>tenantDocumentPathAllowed(path,scopes)) + postCommentsGuide(scopes) + threadsDetailGuide(scopes) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk-subscription') return ipRiskProductGuide
@@ -6989,7 +7018,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key === 'ip-risk-v2') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskV2Guide}</main>`)
   if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
   if (route.key === WECHAT_SELF_HOSTED.docs) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${wechatSelfHostedGuide}</main>`)
-  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${postCommentsGuide()}${nativeServiceGuide(route.key)}</main>`)
+  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${postCommentsGuide()}${threadsDetailGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'strategy-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${strategySearchGuide()}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)
   if (tenant) {

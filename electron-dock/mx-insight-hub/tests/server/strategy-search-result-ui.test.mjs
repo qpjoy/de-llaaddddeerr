@@ -29,6 +29,20 @@ test('search cards preserve complete acquired body and distinguish missing metri
   assert.doesNotMatch(html, /href="javascript:|<script>/u)
 })
 
+test('Threads detail renders the one standard item, including zero metrics and its original post link', async () => {
+  const { StrategySearchResult } = await view
+  const url = 'https://www.threads.com/@sample/post/C8O-JbtAKrp'
+  const html = renderToStaticMarkup(createElement(StrategySearchResult, { operation: 'post-detail',
+    payload: { data: { platform: 'threads', item: { externalId: '3390920896561588969', url,
+      text: '来自详情的正文', author: { name: '示例账号' }, metrics: { likes: 0 } } } } }))
+  assert.match(html, /帖子详情/)
+  assert.match(html, /来自详情的正文/)
+  assert.match(html, /点赞 <b>0<\/b>/)
+  assert.match(html, /示例账号/)
+  assert.ok(html.includes(url))
+  assert.doesNotMatch(html, /本页无内容|本页 1 条/)
+})
+
 test('WeChat category navigation never becomes a content count or guessed unified items', async () => {
   const { StrategySearchResult } = await view
   const html = renderToStaticMarkup(createElement(StrategySearchResult, { payload: {

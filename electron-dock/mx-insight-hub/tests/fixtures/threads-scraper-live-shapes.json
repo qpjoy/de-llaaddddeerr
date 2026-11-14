@@ -1,0 +1,84 @@
+{
+  "_source": {
+    "observedAt": "2026-11-13T08:32:58.782Z",
+    "listing": "https://rapidapi.com/premium-apis-oanor/api/threads-scraper",
+    "basis": "Three authorized HTTP 200 supplier requests. These shapes use only names and types observed in the redacted summaries. Every sample value is synthetic; arrays shortened. Other optional fields were not captured.",
+    "paths": [
+      "/api/v1/users/detail",
+      "/api/v1/users/posts",
+      "/api/v1/posts/detail"
+    ]
+  },
+  "profile": {
+    "status": "ok",
+    "data": {
+      "user": {
+        "pk": "42",
+        "id": "42",
+        "username": "sample.account",
+        "profile_pic_url": "https://example.invalid/photo.jpg",
+        "biography": "Example account",
+        "follower_count": 0,
+        "full_name": "Sample",
+        "is_verified": false
+      }
+    }
+  },
+  "feed": {
+    "status": "ok",
+    "data": {
+      "posts": [
+        {
+          "node": {
+            "thread_items": [
+              {
+                "post": {
+                  "pk": "3390920896561588969",
+                  "id": "3390920896561588969_42",
+                  "code": "C8O-JbtAKrp",
+                  "user": {
+                    "pk": "42",
+                    "id": "42",
+                    "username": "sample.account",
+                    "profile_pic_url": "https://example.invalid/photo.jpg",
+                    "full_name": "Sample",
+                    "is_verified": false
+                  },
+                  "caption": {
+                    "text": "synthetic example",
+                    "pk": "62"
+                  },
+                  "taken_at": 1700000000,
+                  "like_count": 0,
+                  "media_type": 19,
+                  "carousel_media": null,
+                  "video_versions": null,
+                  "image_versions2": {},
+                  "text_post_app_info": {
+                    "id": "78"
+                  }
+                }
+              }
+            ],
+            "id": "99"
+          },
+          "cursor": "edge-cursor"
+        }
+      ],
+      "cursor": "page-cursor"
+    }
+  },
+  "detail": {
+    "status": "ok",
+    "data": {
+      "post": {
+        "id": "3390920896561588969",
+        "code": "C8O-JbtAKrp",
+        "username": "sample.account",
+        "text": "synthetic example",
+        "taken_at": 1700000000,
+        "like_count": 0
+      }
+    }
+  }
+}

@@ -1,11 +1,28 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { strategySearchPlatforms, strategySearchBody, strategySearchForm, strategyPageInfo, uncertainStrategySearch, safeStrategyUrl } from '../../src/strategy-search-experience-model.js'
-import { strategyAccountPlatforms, strategyAccountBody, strategyAccountForm, strategyOperationPath, strategyResultMatches } from '../../src/strategy-search-experience-model.js'
+import { strategyAccountPlatforms, strategyAccountBody, strategyAccountForm, strategyOperationPath, strategyResultMatches,
+  strategyPostDetailPlatforms, strategyPostDetailBody } from '../../src/strategy-search-experience-model.js'
 import { strategyCommentFailure } from '../../src/strategy-comments-model.js'
 
 const access = { platforms: ['tiktok', 'social', 'xiaohongshu', 'telegram'], capabilities: ['native.wechat.search.search'] }
 const platforms = strategySearchPlatforms(access)
+
+test('Threads post detail uses its own grant and path and preserves the entered identifier kind', () => {
+  const scope = { platforms: ['threads'], capabilities: ['social.posts.resolve'] }
+  const detail = strategyPostDetailPlatforms(scope)
+  assert.deepEqual(detail.map(row => row.platform), ['threads'])
+  assert.deepEqual(strategyPostDetailPlatforms({ ...scope, capabilities: [] }), [])
+  assert.deepEqual(strategyPostDetailPlatforms({ ...scope, platforms: [] }), [])
+  assert.equal(strategyOperationPath('post-detail'), '/api/v1/data/social/post-detail')
+  const body = postTarget => strategyPostDetailBody({ platform: 'threads', postTarget }, detail)
+  assert.deepEqual(body('3423248872904765000'), { platform: 'threads', contentId: '3423248872904765000' })
+  assert.deepEqual(body('C-BaaaaaaaA'), { platform: 'threads', contentId: 'C-BaaaaaaaA' })
+  const url = 'https://www.threads.com/@sample/post/C-BaaaaaaaA'
+  assert.deepEqual(body(url), { platform: 'threads', url })
+  for (const invalid of ['http://www.threads.com/@sample/post/C-BaaaaaaaA', 'https://example.com/@sample/post/C-BaaaaaaaA',
+    'https://www.threads.com/@sample/post/x', 'abc', '0', '18446744073709551616']) assert.throws(() => body(invalid))
+})
 
 test('comment failure display preserves the saved receipt and links only the matching admin view to durable usage', () => {
   const id = '10000000-0000-4000-8000-000000000001'
@@ -231,4 +248,15 @@ test('Twitter auto and manual fields resolve long IDs and numeric handles withou
     assert.deepEqual(strategyAccountBody('user-info', { platform: 'twitter', ...strategyAccountForm(body) }, platforms), body,
       'restoring a receipt must not rewrite its field or numeric handle and cause a new purchase')
   }
+})
+test('Threads accounts accept a public username or profile link and default to posts', () => {
+  const platforms = [{ platform: 'threads' }]
+  const form = { platform: 'threads', account: '@threads', pageSize: 20 }
+  assert.deepEqual(strategyAccountBody('crawl', form, platforms), { platform: 'threads', username: '@threads', pageSize: 20 })
+  const url = 'https://www.threads.com/@threads'
+  assert.deepEqual(strategyAccountBody('user-info', { ...form, accountField: 'url', account: url }, platforms),
+    { platform: 'threads', url })
+  assert.throws(() => strategyAccountBody('crawl', { ...form, account: url }, platforms), /请选择 url/)
+  assert.throws(() => strategyAccountBody('user-info', { ...form, accountField: 'url', account: url + '/post/abcde' }, platforms), /主页链接/)
+  assert.throws(() => strategyAccountBody('user-info', { ...form, accountField: 'userId' }, platforms), /账号 ID/)
 })

@@ -26,6 +26,7 @@ import { strategySearchDataStatisticsResponse } from './data/strategy-search-dat
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
+import { THREADS_POST_DETAIL_PATH } from './contracts/threads-post-detail.mjs'
 import { POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
 import { COMMENT_REPLIES_PATH } from './contracts/comment-replies.mjs'
 import { takeFillPage } from './contracts/single-page-delivery.mjs'
@@ -834,6 +835,7 @@ export function createApp({
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
   threadsNativeGateway = null,
+  threadsPostDetail = null,
   youtubeCommentsGateway = null,
   commentRepliesGateway = null,
   tikHubGateway = null,
@@ -6305,6 +6307,19 @@ export function createApp({
         if (request.method === 'GET') { sendJson(response,200,{data:await webSearchService.capabilities(context)},{'cache-control':'private, no-store'}); return }
         const result = await withAdmissionSignal(response, async signal => webSearchService.search(context,{signal,body:await readJson(request,64*1024),idempotencyKey:request.headers['idempotency-key'],baiduCompatible:pathname.endsWith('/compatible/baidu')}))
         sendJson(response,result.status,result.body,{'idempotent-replay':String(result.replay),'x-mx-insight-request-id':result.requestId,'x-mx-insight-source-mode':result.sourceMode})
+        return
+      }
+      if (request.method === 'POST' && pathname === THREADS_POST_DETAIL_PATH) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'Threads post detail')
+        if (!threadsPostDetail) throw new AppError(503, 'external_platform_unavailable', 'Threads post detail is unavailable')
+        const body = await readJson(request, 64 * 1024)
+        const result = await withAdmissionSignal(response, signal => threadsPostDetail(context, {
+          signal, body, idempotencyKey: request.headers['idempotency-key'],
+        }))
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId, 'x-mx-insight-source-mode': result.sourceMode,
+        })
         return
       }
       if (request.method === 'POST' && pathname === POST_COMMENTS_PATH) {

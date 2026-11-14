@@ -26,7 +26,7 @@ test('strategy catalog separates supported operation sets and exposes the implem
   const editable = catalog.interfaces.flatMap(group => group.platforms.filter(row => row.editable).map(row => `${group.id}:${row.platform}`))
   // Comment interfaces are Hub-native and editable for each registered platform.
   const commentEditable = ['post-comments', 'comment-replies'].flatMap(id => commentRoutePlatforms(id).map(platform => `${id}:${platform}`))
-  assert.deepEqual(editable.sort(), ['crawl:facebook', 'crawl:threads', 'search:facebook', 'search:instagram', 'search:threads', 'search:twitter', 'user-info:facebook', 'user-info:threads', ...commentEditable].sort())
+  assert.deepEqual(editable.sort(), ['crawl:facebook', 'crawl:threads', 'search:facebook', 'search:instagram', 'search:threads', 'search:twitter', 'post-detail:threads', 'user-info:facebook', 'user-info:threads', ...commentEditable].sort())
   for (const row of catalog.interfaces.flatMap(group => group.platforms)) {
     assert(row.label && row.routeSummary)
     if (!row.editable) assert(row.readOnlyReason)

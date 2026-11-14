@@ -48,7 +48,7 @@ test('Twitter strategies support fixed, reversed priority and pause without acce
   assert.equal((await store.get('search', 'instagram')).revision, 1)
 })
 
-test('the second RapidAPI listing is independently selectable only for Threads content search', async () => {
+test('Threads Scraper is independently selectable only for its supported business interfaces', async () => {
   const store = new StrategySearchRoutingStore()
   const fixed = await store.update('search', 'threads', change({ primaryProvider: THREADS_SCRAPER_ROUTE }))
   assert.equal(fixed.primaryProvider, THREADS_SCRAPER_ROUTE)
@@ -57,7 +57,11 @@ test('the second RapidAPI listing is independently selectable only for Threads c
   assert.equal(priority.fallbackProvider, THREADS_SCRAPER_ROUTE)
   const paused = await store.update('search', 'threads', change({ mode: 'paused', primaryProvider: THREADS_SCRAPER_ROUTE, expectedRevision: priority.revision }))
   assert.equal(paused.mode, 'paused')
-  for (const [interfaceId, platform] of [['search','twitter'], ['crawl','threads'], ['user-info','threads'], ['post-comments','threads'], ['comment-replies','threads']]) {
+  for (const interfaceId of ['crawl','user-info','post-detail']) {
+    assert.equal((await store.update(interfaceId, 'threads', change({ primaryProvider: THREADS_SCRAPER_ROUTE }))).primaryProvider, THREADS_SCRAPER_ROUTE)
+  }
+  await assert.rejects(store.update('post-detail', 'threads', change({ primaryProvider: 'tikhub', expectedRevision: 2 })), { code: 'invalid_strategy_search_route' })
+  for (const [interfaceId, platform] of [['search','twitter'], ['post-comments','threads'], ['comment-replies','threads']]) {
     await assert.rejects(store.update(interfaceId, platform, change({ primaryProvider: THREADS_SCRAPER_ROUTE })), { code: 'invalid_strategy_search_route' })
   }
 })
@@ -229,7 +233,7 @@ test('Facebook migration preserves other routes, enforces business scope and aud
   assert.equal(audit.rows[2].policy.mode, 'paused')
 })
 
-test('Threads migrations preserve reviewed routes and register the Scraper operation only for search', {
+test('Threads migrations preserve reviewed routes and register separately priced Scraper operations', {
   skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE,
 }, async t => {
   const { PGlite } = await import(pathToFileURL(process.env.MX_INSIGHT_TEST_PGLITE_MODULE).href)
@@ -311,5 +315,33 @@ test('Threads migrations preserve reviewed routes and register the Scraper opera
   assert.deepEqual((await operations()).rows, migrated)
   assert.deepEqual(await store.get('search', 'threads'), selected)
   assert.deepEqual(await store.get('crawl', 'threads'), paused)
+  assert.deepEqual((await legacyRoutes()).rows, previous)
+
+  const expanded = await migration('190_threads_scraper_account_detail')
+  await db.exec(expanded)
+  const detail = await store.get('post-detail', 'threads')
+  assert.deepEqual([detail.mode, detail.primaryProvider, detail.fallbackProvider], ['fixed', THREADS_SCRAPER_ROUTE, null])
+  assert.deepEqual(await store.get('search', 'threads'), selected)
+  assert.deepEqual(await store.get('crawl', 'threads'), paused)
+  const profile = await store.get('user-info', 'threads')
+  assert.deepEqual([profile.mode, profile.primaryProvider, profile.fallbackProvider, profile.revision], ['fixed', THREADS_SCRAPER_ROUTE, null, 2])
+  for (const op of ['crawl','user-info','post-detail']) {
+    const policy = await store.get(op, 'threads')
+    await store.update(op, 'threads', change({ primaryProvider: THREADS_SCRAPER_ROUTE, expectedRevision: policy.revision }))
+  }
+  await assert.rejects(db.query("UPDATE control.strategy_search_routes SET primary_provider='tikhub' WHERE interface_key='post-detail' AND platform='threads'"))
+  await assert.rejects(db.query("UPDATE control.strategy_search_routes SET primary_provider='rapidapi-threads-scraper' WHERE interface_key='post-comments' AND platform='threads'"))
+  const endpoints = (await operations()).rows
+  assert.equal(endpoints.filter(row => row.actor === 'migration-190').length, 8)
+  for (const operation of endpoints.filter(row => row.actor === 'migration-190')) {
+    assert.deepEqual([operation.provider_key, operation.endpoint_keys, operation.desired_state, operation.revision],
+      ['rapidapi', [operation.operation_key], 'disabled', 1])
+  }
+  const current = (await routeRows()).rows, audit = (await routeEvents()).rows
+  await db.exec(expanded)
+  assert.deepEqual((await operations()).rows, endpoints)
+  assert.deepEqual((await routeRows()).rows, current)
+  assert.deepEqual((await routeEvents()).rows, audit)
+  assert.deepEqual(await store.get('search', 'threads'), selected)
   assert.deepEqual((await legacyRoutes()).rows, previous)
 })

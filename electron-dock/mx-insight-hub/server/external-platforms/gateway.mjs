@@ -1,3 +1,6 @@
+import { normalizeThreadsPostDetail, projectThreadsPostDetail, threadsPostDetailRecipe, THREADS_POST_DETAIL_CAPABILITY, THREADS_POST_DETAIL_PATH, THREADS_POST_DETAIL_VERSION } from '../contracts/threads-post-detail.mjs'
+import { assertCommentRouteEnabled } from './strategy-search-routing.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, isLcySupplierPriority, effectiveBusinessPageLimit } from '../core/internal-traffic-policy.mjs'
@@ -9,7 +12,7 @@ import { gatewayWebSearchRequest } from '../web-search/contract.mjs'
 import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
-import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
+import { RapidApiUpstreamError, assertThreadsScraperBusinessSuccess } from '../adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hub-social.mjs'
 import { normalizeHubSocialCompatRequest } from '../contracts/hub-social-compat.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
@@ -805,6 +808,51 @@ export class ExternalPlatformGateway {
       replayReleasedFailures: true, skipIngest: true,
       normalize: () => normalizeXhsDiscoveryRequest('hot_notes', body, { decodeCursor: codec.decode }),
       dispatch: ({ credential }) => this.adapter.hotXiaohongshuNotes(body, { ...credential, decodeCursor: codec.decode, encodeCursor: codec.encode }),
+    })
+  }
+
+  async threadsPostDetail(context, input) {
+    const identity = normalizeThreadsPostDetail(input.body)
+    const provider = input.routing.provider
+    const recipe = threadsPostDetailRecipe('threads', provider)
+    if (!this.operationControlStore || !recipe || this.providerKey !== 'rapidapi') {
+      throw new AppError(503, 'external_platform_contract_unverified', 'The configured Threads detail operation is unavailable')
+    }
+    const params = provider === THREADS_SCRAPER_ROUTE ? { code: identity.code } : { post_id: identity.postId }
+    const endpoint = nativeForwardingEndpoint(recipe.key)
+    const checkRoute = () => assertCommentRouteEnabled(this.strategySearchRoutingStore, { platform: 'threads', routeInterface: 'post-detail' })
+    return this.#deliver(context, { ...input, path: THREADS_POST_DETAIL_PATH }, {
+      operation: endpoint.operation, authorizationPlatform: 'threads', capability: THREADS_POST_DETAIL_CAPABILITY,
+      capabilityMessage: 'Threads post detail is not granted', meterKey: THREADS_POST_DETAIL_CAPABILITY,
+      nativeForwarding: true, dataSearch: true, skipIngest: true, replayReleasedFailures: true, billingUnknown: true,
+      normalize: () => ({ ...endpoint, endpointContractVersion: THREADS_POST_DETAIL_VERSION, endpointVersion: endpoint.schemaVersion,
+        marketplace: endpoint.marketplace ?? endpoint.platform, deliveryMode: 'live_only', fingerprintBody: identity.fingerprintBody }),
+      resolveLiveRoute: async ({ normalized }) => {
+        await checkRoute()
+        if (provider !== THREADS_SCRAPER_ROUTE && !identity.postId) throw new AppError(400, 'invalid_threads_post',
+          'The selected listing requires a shortcode that encodes a numeric post ID')
+        normalizeNativeForwardingRequest(recipe.key, { params })
+        return normalized
+      },
+      admit: async () => { await checkRoute() },
+      dispatch: ({ credential }) => this.adapter.forwardNative(recipe.key, { params }, credential),
+      finalize: ({ result }) => {
+        const { data, meta } = result.publicBody
+        if (provider === THREADS_SCRAPER_ROUTE) assertThreadsScraperBusinessSuccess(data, result)
+        try {
+          const item = projectThreadsPostDetail(data, identity, provider, meta.capturedAt)
+          result.publicBody = { data: { platform: 'threads', item }, meta }
+          result.items = [item]
+          return result
+        } catch {
+          const state = 'succeeded_unusable'
+          throw new RapidApiUpstreamError({ outcome: state, billed: null, httpStatus: result.responseArchive?.httpStatus ?? 200,
+            errorCode: 'social_upstream_response_unusable', businessCode: null, circuitCategory: 'contract' }, {
+            responseArchive: { ...result.responseArchive, contractState: state }, upstreamEvidence: result.upstreamEvidence,
+            restrictedResponseArchive: result.restrictedResponseArchive && { ...result.restrictedResponseArchive, state },
+          })
+        }
+      },
     })
   }
 

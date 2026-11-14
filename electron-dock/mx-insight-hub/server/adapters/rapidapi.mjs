@@ -76,6 +76,21 @@ export class RapidApiUpstreamError extends Error {
   }
 }
 
+// The native product forwards the original envelope. Standardized business
+// products classify an explicit supplier refusal before projecting its data.
+export function assertThreadsScraperBusinessSuccess(payload, result) {
+  if (payload?.status !== 'error') return
+  const { responseArchive, restrictedResponseArchive, upstreamEvidence } = result
+  throw new RapidApiUpstreamError({
+    outcome: 'rejected', billed: null, httpStatus: responseArchive.httpStatus,
+    businessCode: null, errorCode: 'social_upstream_rejected', affectsCircuit: false,
+  }, {
+    responseArchive: { ...responseArchive, contractState: 'rejected' },
+    restrictedResponseArchive: { ...restrictedResponseArchive, state: 'rejected' },
+    upstreamEvidence,
+  })
+}
+
 async function readBody(response, controller) {
   if (Number(response.headers.get('content-length')) > MAX_BYTES) { controller.abort(); throw new Error('response_too_large') }
   const reader = response.body?.getReader()

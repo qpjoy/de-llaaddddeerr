@@ -2,9 +2,9 @@
 
 更新于 2026-11-13
 
-Hub 已实现 Threads 的五类策略搜索接口。调用方使用现有业务路径，并传入 `platform: "threads"`。持有平台授权的 Key 可通过 `GET /api/v1/data/capabilities` 查看 `threads.search.ready`，租户 OpenAPI 和策略搜索指南也会显示相应入口。就绪值来自 Hub 配置与操作控制，供应商订阅需另行验证。
+策略搜索支持按关键词找帖子、按账号取发帖或资料、按标识取单帖，以及读取评论和回复。策略接口统一使用 `platform: "threads"`。持有该平台授权的 Key 可通过 `GET /api/v1/data/capabilities` 查询平台条目的 `search.ready`。同时拥有 `social.posts.resolve` 授权的 Key 还可读取 `postDetail.ready`。它表示当前 Hub 的搜索路由及操作就绪情况。供应商订阅和上游实时响应要按实际调用核对。
 
-> **生产验收待完成。** 11 月 12 日的样例 Key 在 `threads-api4` 上收到明确的未订阅 403；11 月 13 日生产查询也在该渠道收到 403，具体拒绝原因需核对该次归档。新增 Threads Scraper 使用独立操作，已做本地 Hub HTTP 交付、切换和重放测试，尚未用生产 Key 验证该产品。
+2026-11-13 在 Threads Scraper 实测了三个上游接口。查询 `@threads` 的账号资料成功，账号帖子首页的 24 条会话记录展开为 30 条该作者的帖子，响应含下一页游标。使用该页一个实际短码也成功取得了同一篇帖子的详情。其余六个 Scraper 接口已按公布的参数和本地测试校验，本次未发起真实调用。真实上游验收与整套 Hub 在目标环境部署后的端到端验收是两个步骤。
 
 ## 一、接口总览
 
@@ -14,12 +14,13 @@ Hub 已实现 Threads 的五类策略搜索接口。调用方使用现有业务�
 | 内容搜索（固定时间窗） | `POST /api/v2/data/search` | `threads` | `data.pageInfo.nextCursor` |
 | 账号内容 | `POST /api/v1/data/social/crawl` | `threads` + `social.content.crawl` | `data.pageInfo.nextCursor` |
 | 账号资料 | `POST /api/v1/data/social/user-info` | `threads` + `social.profile.get` | 无 |
+| 帖子详情 | `POST /api/v1/data/social/post-detail` | `threads` + `social.posts.resolve` | 单条 `data.item`，无分页 |
 | 帖子评论 | `POST /api/v1/data/social/post-comments` | `threads` + `social.comments.list` | `data.page.nextCursor` |
 | 评论回复 | `POST /api/v1/data/social/comment-replies` | `threads` + `social.comments.list` | `data.page.nextCursor` |
 
 通用请求头：`X-API-Key`、`Content-Type: application/json`、`Idempotency-Key`（8–128 位安全字符，同键重放不重复采购）。
 
-**每个查询目标和活动每次最多取一个来源内容页。** 账号按用户名查询可能另需一次身份解析。可继续读取已购余量或上游提供了有效后续游标时，使用 Hub 返回的 `nextCursor`。RapidAPI 未明确说明是否还有下一页、声明有下一页却缺少可用游标，或重复游标时，读完已购余量后返回 `hasMore: null` 和 `nextCursor: null`，并附分页警告。达到 Hub 的 15 页上限同样会停止续页。明确结束时返回 `hasMore: false`。TikHub 的 Threads 接口仅提供单页。
+每个查询目标和活动每次最多取一个来源内容页。Threads Scraper 按用户名直接读取帖子，旧 Threads API 按用户名查帖子可能另需一次身份解析。可继续读取已购余量或上游提供了有效后续游标时，使用 Hub 返回的 `nextCursor`。供应商未明确说明是否还有下一页、声明有下一页却缺少可用游标，或出现重复游标时，读完已购余量后返回 `hasMore: null` 和 `nextCursor: null`，并附分页警告。达到 Hub 的 15 页上限同样会停止续页。明确结束时返回 `hasMore: false`。TikHub 的 Threads 接口仅提供单页。
 
 ## 二、内容搜索
 
@@ -106,13 +107,13 @@ curl -sS -X POST "$HUB_URL/api/v1/data/search" \
 | `count` | integer | 否 | 1–500，默认 20（别名 `pageSize`、`page_size`、`limit`） |
 | `cursor` | string | 否 | 上一页 `data.pageInfo.nextCursor` |
 
-单个数字 ID 查询一种活动只需一次上游调用，传用户名时还需解析账号。Hub 按请求中所有账号的标识类型和所有活动检查所需操作，例如只查数字 ID 的回复只需回复操作。用户名按精确匹配解析。`replies` 只返回该账号自己发的回复。
+默认 Threads Scraper 接受用户名或公开主页链接，每个账号按用户名读取 `posts`。Hub 展开作者在同一会话中的多条帖子，核对作者并按帖子 ID 去重。请求含数字账号 ID、`replies` 或 `reposts` 时，管理员可配置支持这些条件的 Threads API 或 TikHub。固定 Scraper 时返回 400 `threads_account_input_unsupported`；配置优先与保底时按整批输入检查是否可在派发前改用保底。旧 Threads API 查单个数字 ID 的一种活动通常只需一次上游调用，用户名可能增加一次精确账号解析。`replies` 返回该账号自己发表的回复。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
   -H "X-API-Key: $HUB_KEY" -H "Content-Type: application/json" \
   -H "Idempotency-Key: threads-crawl-$(date +%s)" \
-  -d '{"platform":"threads","userId":"63625256886","activityTypes":["posts"],"count":20}'
+  -d '{"platform":"threads","username":"threads","activityTypes":["posts"],"count":20}'
 ```
 
 返回 `data.items`（每项结构同其他平台账号内容）、`data.raw_info`、`data.raw_data`（JSON 字符串）、`data.page`、`data.pageInfo`。每项主要字段：
@@ -144,7 +145,9 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
 
 ## 四、账号资料
 
-字段同账号内容的账号字段，不需要 `activityTypes`。
+字段同账号内容的账号字段。默认 Threads Scraper 接受用户名或主页链接。按数字 ID 查询须使用 Threads API 或 TikHub。
+
+Threads Scraper 返回 `status: "ok"` 且 `data.user` 为 `null` 表示未找到该账号。单账号查询成功返回空的 `data.items`，批量查询中该账号的 `results[].items` 为空，其他账号的资料照常返回。供应商返回 `status: "error"` 时，业务接口将此次调用记录为上游拒绝。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \
@@ -172,9 +175,22 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \
 }
 ```
 
-`following`、`posts` 供应商不提供，恒为 null。
+供应商缺少的指标返回 null，例如该样本中的 `following`、`posts`。保留供应商给出的真实零值。
 
-## 五、帖子评论
+## 五、帖子详情
+
+`POST /api/v1/data/social/post-detail` 接受一个 `contentId` 或一个 `url`。`contentId` 可以是字符串形式的数字帖子 ID 或 5–32 位短码。`url` 可以是 `threads.com` 或 `threads.net` 的 HTTPS 帖子链接。参数歧义、非 Threads 链接和多余字段返回 400 `invalid_threads_post`。
+
+```bash
+curl -sS -X POST "$HUB_URL/api/v1/data/social/post-detail" \
+  -H "X-API-Key: $HUB_KEY" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"platform":"threads","contentId":"C8O-JbtAKrp"}'
+```
+
+成功响应读取 `data.platform`、`data.item` 和 `requestId`。`data.item` 使用第二节搜索结果的字段，包含帖子 ID、文本、链接、作者、发布时间、指标与媒体。此接口不接受 `cursor` 或 `pageSize`。Scraper 的详情位于 `data.post`，Hub 核对返回的帖子标识后才交付。旧版 Threads API 的详情路径已登记，其详情响应结构仍待该渠道的真实样本验证。
+
+## 六、帖子评论
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -217,7 +233,7 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/post-comments" \
 }
 ```
 
-## 六、评论回复
+## 七、评论回复
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -237,36 +253,57 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/comment-replies" \
   -d '{"platform":"threads","replyRef":{"platform":"threads","commentId":"3390930071274677885","contentId":"3390920896561588969"},"count":20}'
 ```
 
-## 七、启用与校验（内部，对外分享时删去）
+## 八、Threads Scraper 原生接口
 
-**供应商对应：**
+九项操作均通过同一组 Hub 原生路径调用。将下表的完整后缀分别接在 Hub 路径 `POST /api/v1/data/native/r.threads_scraper_` 和权限名 `native.r.threads_scraper_` 后。同一个 Hub Live Key 需要 `social` 平台授权以及对应的**单项原生权限**。业务接口使用第一节列出的独立业务授权。供应商主机为 `threads-scraper.p.rapidapi.com`，下表路径均为 HTTPS GET。[供应商接口目录](https://rapidapi.com/premium-apis-oanor/api/threads-scraper)
 
-| 接口 | RapidAPI（`threads-api4`） | TikHub（保底） | 校准 |
+| 原生操作后缀 | 上游路径 | Hub 请求体的 `params` 示例 | 用途与边界 |
 | --- | --- | --- | --- |
-| 内容搜索 | `/api/search/recent` | `/api/v1/threads/web/search_posts` | RapidAPI 官方样例 / TikHub 文档 |
-| 账号内容 posts | `/api/user/posts` | `/api/v1/threads/web/fetch_user_posts` | 同上 |
-| 账号内容 replies | `/api/user/replies` | `/api/v1/threads/web/fetch_user_replies` | 同上 |
-| 账号内容 reposts | `/api/user/reposts` | `/api/v1/threads/web/fetch_user_reposts` | 同上 |
-| 账号资料 | `/api/user/info`（`id`） | `fetch_user_info` / `fetch_user_info_by_id` | 同上 |
-| 用户名解析 | `/api/search/profiles` 精确匹配 | `fetch_user_info` | 同上 |
-| 帖子评论、评论回复 | `/api/post/comments` | `/api/v1/threads/web/fetch_post_comments` | 同上 |
+| `search_posts` | `/api/v1/posts/search` | `{"query":"张婧怡"}` | 关键词找帖子，`results`、可选续页 `cursor`。保持供应商顺序 |
+| `user_detail` | `/api/v1/users/detail` | `{"username":"threads"}` | 精确用户名的账号资料。真实样本见 `user` 对象 |
+| `user_detail_with_biolink` | `/api/v1/users/detail-with-biolink` | `{"username":"threads"}` | 带简介链接的账号资料。返回的可选字段依账号而异 |
+| `search_users` | `/api/v1/users/search` | `{"query":"threads","count":10}` | 搜公开账号。正整数 `count` 可省略，上游默认 10，受 Key 页大小限制 |
+| `user_posts` | `/api/v1/users/posts` | `{"username":"threads"}` | 账号帖子，`posts`、可选续页 `cursor`。一条会话记录可能含多个帖子 |
+| `post_detail` | `/api/v1/posts/detail` | `{"code":"C8O-JbtAKrp"}` | 按短码或 HTTPS 帖子 `url` 查单帖，数据在 `post` 内 |
+| `resolve_post` | `/api/v1/explore/resolve` | `{"reference":"C8O-JbtAKrp"}` | 按短码或完整帖子链接转换标识；成功转换不能证明帖子存在 |
+| `post_media` | `/api/v1/explore/post-media` | `{"url":"https://www.threads.com/@example/post/C8O-JbtAKrp"}` | 按短码或 HTTPS 帖子 `url` 获取媒体版本。媒体链接可能过期 |
+| `profiles_batch` | `/api/v1/explore/profiles` | `{"usernames":"threads,instagram"}` | 1–3 个不含 @ 的用户名，用逗号分隔。按条检查结果与错误 |
 
-帖子详情、相关帖子、链接转 ID、热门搜索等其余 RapidAPI 接口可通过 `POST /api/v1/data/native/r.threads_*` 原样调用。
+原生用户名使用字母、数字、点和下划线，长度 1–64，不带 @。详情和媒体至少提供一个 `url` 或 `code`；两者均传时供应商优先使用 URL。帖子链接使用 `https://www.threads.com/@用户名/post/短码` 或对应的 `threads.net` 链接。
 
-**使用已开通的 Threads Scraper 做关键词搜索：**
+```bash
+curl -sS -X POST "$HUB_URL/api/v1/data/native/r.threads_scraper_user_posts" \
+  -H "X-API-Key: $HUB_KEY" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" -d '{"params":{"username":"threads"}}'
+```
 
-1. 发布包含迁移 189 的 Hub。迁移登记独立操作 `native.r.threads_scraper_search_posts`，保留现有路由和价格。两个 RapidAPI 渠道使用同一供应商凭据、分别订阅。确认生产 Key 所属应用可访问 [Threads Scraper](https://rapidapi.com/premium-apis-oanor/api/threads-scraper/playground/List%20User%20Posts)。
-2. 在「上游供应商 → RapidAPI」核对新操作的启用状态、采购价和预算。报价按操作分别维护；部署时填入的默认估价不是供应商账单。比价时按操作区分 Scraper 和原来的 `native.r.threads_search_recent`，不要把客户扣款或预估采购价当作供应商实扣。
-3. 在「策略搜索 → 管理 → 内容搜索 → Threads」选择固定供应商 **RapidAPI · Threads Scraper**，填变更原因并保存。需切回时选择 **RapidAPI · Threads API（threads-api4）**；也可保留 TikHub 或配置优先、保底。改动只影响新内容搜索，账号和评论仍使用各自的策略。旧请求保留原收据，已有游标沿原渠道继续。
-4. 使用「新建相同查询」进行一次明确的新查询验证；它可能计费。供关键词搜索使用的是该产品的 [Search Posts](https://rapidapi.com/premium-apis-oanor/api/threads-scraper/playground/apiendpoint_b999a4ee-9518-4668-9b6c-0057d2c433c3)：`GET /api/v1/posts/search?query=…`，其 `data.cursor` 由 Hub 封装成 `nextCursor`。同一产品的 List User Posts 是按用户名取发帖列表。
+Hub 返回 `contractVersion`、`endpoint`、`data`、`meta.capturedAt`、`requestId`。`data` 保留供应商 JSON，所以先判断 `data.status`。HTTP 200 也可能带有 `data.status: "error"`。仅当 `data.status === "ok"` 时读取 `data.data`。以下空列表用于说明结构。
 
-**原有五类接口上线顺序：**
+```json
+{"contractVersion":"mx-insight-hub.native-forwarding.v1","endpoint":"r.threads_scraper_user_posts","data":{"status":"ok","data":{"posts":[],"cursor":null}},"meta":{"projection":"native","pagination":"explicit_parameters"},"requestId":"…"}
+```
 
-1. 在 RapidAPI 控制台切换到生产 Key 对应的账号或团队，在订阅列表核对 `threads-api4`。也可在该服务的 Endpoints 页面选用生产应用，对 `/api/search/recent` 发起一次最小查询。HTTP 200 且响应含可解析的搜索结果可验证该 Key 的搜索访问权。HTTP 403 且明确提示未订阅，可确认该 Key 缺少该服务的访问权。[RapidAPI 官方测试说明](https://docs.rapidapi.com/docs/connecting-to-an-api)
-2. 准备包含迁移 188 的 Hub 发布。迁移写入五个路由、十一项默认禁用的 RapidAPI 操作；现有部署脚本中的默认定价步骤可随即启用这些操作。开放租户流量前核对实际采购价、预算、路由模式和目标租户的授权。
-3. 通过部署后的 Hub 做五类业务验收，含账号 ID 与用户名、三种账号活动、两级评论归属，以及带有效游标的后续页。TikHub 作为保底时也需以实际凭据校验。完成后再按已验收的接口开放流量。
+只有帖子搜索和账号帖子这两项原生操作接受显式 `params.cursor`。传入上页外层 `data.data.cursor`，保留原查询条件并为新页指定新的幂等键。会话内部的 `edge.cursor`、策略接口的 `nextCursor` 均不能代用。其余七项无游标；`search_users.count` 只限制返回数量。
 
-未订阅就部署时，默认的 RapidAPI 优先路由会把请求发给 RapidAPI 并得到 403，返回 502 `external_platform_rejected`，**不会**自动转 TikHub（保底只在派发前生效）。这种情况请先把策略改为固定 TikHub 或暂停。
+通过 `GET /api/v1/data/services/pricing?path=/api/v1/data/native/r.threads_scraper_user_posts` 可用当前 Key 查看该操作的 Hub 官方价与账户执行价；查询价格不发起采购。九项操作各有启停、采购价、预算和授权。空列表或供应商在 HTTP 200 中返回业务错误时，按实际账单和原请求收据核对。HTTP 400 检查参数，403 检查 Hub Key 的平台及单项授权，402 检查余额，429 检查限额；502/503 查看请求 ID、实际操作和上游证据。
+
+## 九、渠道、升级与故障诊断（管理端）
+
+| 业务接口 | 默认路由 | Threads Scraper | Threads API（threads-api4） | TikHub |
+| --- | --- | --- | --- | --- |
+| 内容搜索 | 固定 Scraper | `posts/search` | `/api/search/recent` | `search_posts` |
+| 账号内容 | 固定 Scraper | `users/posts`，用户名，仅 posts | `/api/user/{posts,replies,reposts}` | `fetch_user_{posts,replies,reposts}` |
+| 账号资料 | 固定 Scraper | `users/detail`，用户名 | `/api/user/info`，按 ID，用户名先精确解析 | `fetch_user_info` / `fetch_user_info_by_id` |
+| 帖子详情 | 固定 Scraper | `posts/detail` | `/api/post/detail` | — |
+| 帖子评论 | Threads API 优先、TikHub 保底 | — | `/api/post/comments` | `fetch_post_comments` |
+| 评论回复 | Threads API 优先、TikHub 保底 | — | `/api/post/comments` | `fetch_post_comments` |
+
+Scraper 在管理端的路由值是 `rapidapi-threads-scraper`，Threads API 是 `rapidapi`，TikHub 是 `tikhub`。标注为默认的路由适用于新建配置和符合条件的升级。两个 RapidAPI 产品共用 Hub 中的 RapidAPI 凭据，但须分别订阅，操作、采购价和诊断记录也分别核对。Scraper 的搜索保留返回顺序，没有“最新优先”排序承诺。评论与回复在另两个渠道购买，Scraper 订阅不包含这些接口。
+
+1. 迁移 188 建立原有五条业务路由。迁移 189 登记 Scraper 搜索操作。迁移 190 补齐其余八项并登记单帖详情；只将仍为迁移 188 原始 revision 1 的搜索、账号内容和账号资料改为固定 Scraper。人工保存过的策略、暂停状态和采购价保留。新详情以固定 Scraper 建立。历史幂等重放读取原记录，已有游标沿原渠道继续。
+2. 在「上游供应商 → RapidAPI」核对应用凭据和对应原生操作的启用状态、采购价及预算。部署脚本可以填充缺省采购估价，供应商实扣和租户扣款分别在诊断中心列示。账单记录的数值以最小货币单位计，CNY 的 1 个最小单位是 ¥0.01。
+3. 在「策略搜索 → 管理」按接口选择「固定供应商」「优先与保底」或「暂停新采购」。优先模式在第一笔采购派发前检查渠道可用性；已派发后出现 403、超时或不可用响应，不会再向第二渠道重复采购。
+4. 改订阅、凭据或路由后，如需验证当前权限，使用新的幂等键或页面的「新建相同查询」明确发起一次新请求，可能计费。原请求 ID 仍可查看此前响应。
 
 **已经开通但内容搜索返回 403：** 在诊断中心按 Hub 请求 ID 核对当次操作及归档。只有匹配固定的未订阅消息，才能确认 RapidAPI 当时是以未订阅为由拒绝。检查「上游供应商 → RapidAPI → API Key 管理」的来源和更新时间，再到该应用所属账号或团队核对对应产品和订阅生效时间。`native.r.threads_search_recent` 对应 [Lundehund 的 Threads API](https://rapidapi.com/Lundehund/api/threads-api4)，`native.r.threads_scraper_search_posts` 对应 Threads Scraper。如果订阅晚于原请求，重放已保存的失败不能验证新权限。
 
@@ -293,7 +330,7 @@ SQL
 
 `unclassified_403` 表示未匹配此消息；`archive_missing` 或零行表示缺少对应证据。均不能证明订阅有效或无效。可用诊断中心显示的**上游 requestId** 核对 RapidAPI 记录。确认权限后，用「新建相同查询」再发送一次验证，可能再次计费。
 
-**管理端切换或暂停：** 「策略搜索 → 管理」，五个接口都可单独设置固定供应商、优先与保底、暂停新采购。也可调接口：
+**管理端切换或暂停：** 「策略搜索 → 管理」，六个接口都可单独设置固定供应商、优先与保底、暂停新采购。也可调接口：
 
 ```bash
 curl -sS -X PUT "$HUB_ADMIN_URL/internal/v1/admin/strategy-search/search/threads" \
@@ -301,10 +338,4 @@ curl -sS -X PUT "$HUB_ADMIN_URL/internal/v1/admin/strategy-search/search/threads
   -d '{"mode":"paused","primaryProvider":"rapidapi","fallbackProvider":null,"expectedRevision":1,"reason":"暂停 Threads 搜索"}'
 ```
 
-`{interface}` 为 search、crawl、user-info、post-comments、comment-replies。暂停时已完成响应的重放仍可读。新采购返回 HTTP 503，搜索及账号接口的错误码为 `threads_acquisition_paused`，两类评论接口为 `comment_acquisition_paused`。
-
-**首页核对清单：**
-
-- 内容搜索、账号内容、评论各发一次，`data.items` 的 `text`、`author`、`publishedAt` 有值。
-- 账号内容或评论拿到 `nextCursor` 后续一页，确认内容不同。若重复，说明 `end_cursor` 无效，翻页需要关闭。
-- 确认 RapidAPI 的响应结构仍与 `tests/fixtures/threads-rapidapi-samples.json` 一致；TikHub 响应首次使用时同样核对。
+`{interface}` 为 search、crawl、user-info、post-detail、post-comments、comment-replies。先读取管理目录中该路由的 revision，再作为 expectedRevision 提交。暂停时已完成响应的重放仍可读。新采购返回 HTTP 503，搜索、账号及帖子详情接口的错误码为 `threads_acquisition_paused`，两类评论接口为 `comment_acquisition_paused`。

@@ -182,14 +182,17 @@ test('every field the Threads comment parsers emit is documented', async () => {
   assert.deepEqual([...new Set(rows.flatMap(row => Object.keys(row)))].filter(name => !documented.has(name)), [])
 })
 
-test('routing defaults to RapidAPI first on all five interfaces, and each can be switched or paused', async () => {
+test('Scraper is the default on the four supported interfaces and comments retain the original listing', async () => {
   const store = new StrategySearchRoutingStore()
   for (const id of ['search', 'crawl', 'user-info', 'post-comments', 'comment-replies']) {
     assert.deepEqual([...strategyRouteProviders(id, 'threads')].sort(),
-      id === 'search' ? ['rapidapi', 'rapidapi-threads-scraper', 'tikhub'] : ['rapidapi', 'tikhub'], id)
+      ['search','crawl','user-info'].includes(id) ? ['rapidapi', 'rapidapi-threads-scraper', 'tikhub'] : ['rapidapi', 'tikhub'], id)
     const route = await store.get(id, 'threads')
-    assert.deepEqual([route.mode, route.primaryProvider, route.fallbackProvider], ['priority', 'rapidapi', 'tikhub'], id)
+    assert.deepEqual([route.mode, route.primaryProvider, route.fallbackProvider], ['search','crawl','user-info'].includes(id)
+      ? ['fixed', 'rapidapi-threads-scraper', null] : ['priority', 'rapidapi', 'tikhub'], id)
   }
+  const detail = await store.get('post-detail', 'threads')
+  assert.deepEqual([detail.mode, detail.primaryProvider, detail.fallbackProvider], ['fixed', 'rapidapi-threads-scraper', null])
   assert.deepEqual(defaultCommentRoute('post-comments', 'threads'), { mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub' })
   const switched = await store.update('search', 'threads', { mode: 'fixed', primaryProvider: 'tikhub', fallbackProvider: null, expectedRevision: 1, reason: 'switch' })
   assert.equal(switched.primaryProvider, 'tikhub')
@@ -203,9 +206,10 @@ test('the admin catalog and product tiles expose Threads on every interface', as
   const store = new StrategySearchRoutingStore()
   const commentPolicies = (await store.list()).filter(row => ['post-comments', 'comment-replies'].includes(row.interface) || row.platform === 'threads')
   const catalog = strategySearchCatalog({ commentPolicies })
-  for (const id of ['search', 'crawl', 'user-info', 'post-comments', 'comment-replies']) {
+  for (const id of ['search', 'crawl', 'user-info', 'post-detail', 'post-comments', 'comment-replies']) {
     const row = catalog.interfaces.find(group => group.id === id).platforms.find(item => item.platform === 'threads')
     assert(row, id)
+    if (['crawl', 'post-detail', 'user-info'].includes(id)) assert.equal(row.providerVerification['rapidapi-threads-scraper'], 'verified')
     assert.equal(strategyPolicyEditor(id, row), 'comment-route', id)
     assert.equal(strategyPolicySummary(id, row).editor, 'comment-route')
     assert.equal(commentRouteUpdate(row, { mode: 'paused', primaryProvider: 'rapidapi', reason: 'pause' }).mode, 'paused')
@@ -260,6 +264,8 @@ async function searchHarness(payload) {
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'threads', providerCircuit: 'marketplace' })
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'rapidapi',
     apiKeyPepper: PEPPER, reservationLeaseMs: 150000, operationControlStore: controls, logger: { warn() {} } })
+  await gateway.strategySearchRoutingStore.update('search', 'threads', { mode: 'fixed', primaryProvider: 'rapidapi',
+    fallbackProvider: null, expectedRevision: 1, reason: 'Exercise the original Threads API page contract' })
   const route = createCommentRouter({ interfaceId: 'search', gateways: { threads: { rapidapi: gateway } }, policyStore: gateway.strategySearchRoutingStore,
     recipeFor: threadsSearchRecipe, platformFor: () => 'threads', cursorProvider: threadsSearchCursorProvider, bodyFor: input => input.normalized,
     invoke: (selected, current, input) => selected.searchThreads(current, input) })
@@ -290,7 +296,7 @@ test('search runs through Hub delivery: one purchase, replay, signed cursor, the
   assert.deepEqual(h.calls[1].params, { query: 'bitcoin', end_cursor: 'next-page' })
   assert.equal(second.body.data.pageInfo.hasMore, false)
   await assert.rejects(h.search({ ...body, query: 'other', cursor }, 'threads-search-foreign'), { code: 'invalid_cursor' })
-  await h.gateway.strategySearchRoutingStore.update('search', 'threads', { mode: 'paused', primaryProvider: 'rapidapi', fallbackProvider: null, expectedRevision: 1, reason: 'pause' })
+  await h.gateway.strategySearchRoutingStore.update('search', 'threads', { mode: 'paused', primaryProvider: 'rapidapi', fallbackProvider: null, expectedRevision: 2, reason: 'pause' })
   await assert.rejects(h.search({ ...body, query: 'paused' }, 'threads-search-paused'), { code: 'threads_acquisition_paused' })
   assert.equal(h.calls.length, 2, 'a paused route buys nothing')
 })

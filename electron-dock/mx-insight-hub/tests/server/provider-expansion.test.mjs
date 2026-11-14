@@ -103,7 +103,7 @@ test('account price snapshot preserves decimals and incompleteness; it never syn
 
 test('catalog distinguishes declared coverage, fixed contracts, runtime state and Admin price evidence',()=>{
   const catalog=officialProviderCatalog([])
-  assert.equal(catalog.rows.length,1343);assert.ok(catalog.rows.every(row=>row.effectiveState==='not_checked'))
+  assert.equal(catalog.rows.filter(row=>row.provider === 'tikhub' || row.provider === 'justone').length,1343);assert.ok(catalog.rows.every(row=>row.effectiveState==='not_checked'))
   assert.deepEqual(providerCatalogKeys('lemon8'),['source-platform-lemon8'])
   assert.ok(catalog.rows.some(row=>row.procurementReference?.unitPrice==='0.001' && row.procurementReference.actualChargeVerified===false))
   assert.ok(catalog.rows.some(row=>row.implementation==='documented_only'&&row.hubPath===null))

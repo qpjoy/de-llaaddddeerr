@@ -32,7 +32,7 @@ function replyPage() {
   return page
 }
 
-test('public Threads routes deliver all five interfaces and replay each purchase from its ledger', async t => {
+test('public Threads routes deliver five original listing interfaces and replay each purchase from its ledger', async t => {
   const fetchLocal = globalThis.fetch
   t.mock.method(globalThis, 'fetch', (url, options) => {
     assert.equal(new URL(url).hostname, '127.0.0.1', 'Only the local Hub listener may use the network')
@@ -45,6 +45,10 @@ test('public Threads routes deliver all five interfaces and replay each purchase
   }))
   const { store, service } = runtime
   t.after(async () => { runtime.agent.close(); await store.close() })
+  for (const operation of ['search', 'crawl', 'user-info']) {
+    await runtime.strategySearchRoutingStore.update(operation, 'threads', { mode: 'priority', primaryProvider: 'rapidapi',
+      fallbackProvider: 'tikhub', expectedRevision: 1, reason: 'Exercise the original Threads API fixtures and readiness' })
+  }
   const fixtures = {
     '/api/search/recent': samples.searchRecent, '/api/user/posts': samples.userPosts, '/api/user/info': samples.userInfo,
     '/api/v1/posts/search': null, // Generated below so page two can assert cursor ownership.
@@ -59,6 +63,7 @@ test('public Threads routes deliver all five interfaces and replay each purchase
       assert.equal(options.headers['x-rapidapi-host'], url.hostname)
       if (url.searchParams.get('query') === 'rejected') return Response.json({ message: 'You are not subscribed to this API.' },
         { status: 403, headers: { 'x-rapidapi-proxy-response': 'true' } })
+      if (url.searchParams.get('query') === 'declined') return Response.json({ status: 'error', data: { results: [] } })
       const cursor = url.searchParams.get('cursor')
       assert.ok(cursor === null || cursor === 'opaque +/=', 'Scraper cursor must round-trip unchanged')
       return Response.json({ status: 'ok', data: { results: [samples.searchRecent.data.searchResults.edges[cursor ? 1 : 0]],
@@ -175,7 +180,7 @@ test('public Threads routes deliver all five interfaces and replay each purchase
     const before = calls.length
     for (const [index, mode] of ['fixed', 'paused'].entries()) {
       await runtime.strategySearchRoutingStore.update('crawl', 'threads', {
-        mode, primaryProvider: 'tikhub', fallbackProvider: null, expectedRevision: index + 1, reason: 'Offline replay regression',
+        mode, primaryProvider: 'tikhub', fallbackProvider: null, expectedRevision: index + 2, reason: 'Offline replay regression',
       })
       const replay = await send('social/crawl', accountInput)
       assert.equal(replay.status, 200)
@@ -193,7 +198,7 @@ test('public Threads routes deliver all five interfaces and replay each purchase
     const scraper = 'rapidapi-threads-scraper'
     const query = { query: 'bitcoin', pageSize: 20 }
     const before = calls.length
-    await select(scraper, 1, 'rapidapi')
+    await select(scraper, 2, 'rapidapi')
     const old = await send('search', query)
     assert.equal(old.headers.get('idempotent-replay'), 'true')
     assert.deepEqual(await old.json(), search)
@@ -201,6 +206,15 @@ test('public Threads routes deliver all five interfaces and replay each purchase
     const refused = await send('search', { query: 'rejected' }, 'fixture-threads-refusal')
     assert.equal(refused.status, 502, JSON.stringify(await refused.json()))
     assert.deepEqual(calls.slice(before), ['/api/v1/posts/search?query=rejected'], 'no second purchase after a 403')
+    const failed = await send('search', { query: 'declined' }, 'fixture-threads-inner-error')
+    const failure = await failed.json()
+    assert.equal(failed.status, 502, JSON.stringify(failure))
+    assert.equal(failure.error.code, 'external_platform_rejected')
+    const decline = [...accountGateway.platformStore.calls.values()].find(call => call.usageRequestId === failure.requestId)
+    assert.deepEqual([decline.outcome, decline.httpStatus, decline.errorCode], ['rejected', 200, 'social_upstream_rejected'])
+    const replayFailure = await send('search', { query: 'declined' }, 'fixture-threads-inner-error')
+    assert.deepEqual(await replayFailure.json(), failure)
+    assert.deepEqual(calls.slice(before + 1), ['/api/v1/posts/search?query=declined'])
     const read = async (body, key) => {
       const response = await send('search', body, key), result = await response.json()
       assert.equal(response.status, 200, JSON.stringify(result))
@@ -215,13 +229,13 @@ test('public Threads routes deliver all five interfaces and replay each purchase
     assert.equal(own(first.requestId).archiveObjects[0].marketplace, 'threads-scraper')
     const ingested = accountGateway.platformStore.ingestJobs.find(job => job.payload.providerCallId === own(first.requestId).id)
     assert.deepEqual([ingested.payload.providerKey, ingested.payload.platform], ['rapidapi', 'threads'])
-    await select('rapidapi', 2)
+    await select('rapidapi', 3)
     assert.match(first.data.pageInfo.nextCursor, /^mxds1\./u)
     const next = await read({ ...query, cursor: first.data.pageInfo.nextCursor }, 'fixture-scraper-next')
     assert.equal(next.data.items[0].text, 'fragment text')
     assert.equal(next.data.pageInfo.hasMore, false)
     await read(query, 'fixture-legacy-again')
-    assert.deepEqual(calls.slice(before + 1), ['/api/v1/posts/search?query=bitcoin',
+    assert.deepEqual(calls.slice(before + 2), ['/api/v1/posts/search?query=bitcoin',
       '/api/v1/posts/search?query=bitcoin&cursor=opaque+%2B%2F%3D', '/api/search/recent?query=bitcoin'])
   })
 })

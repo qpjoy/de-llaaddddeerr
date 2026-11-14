@@ -1,5 +1,6 @@
 import official from './provider-official-contracts.json' with { type: 'json' }
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
+import { THREADS_SCRAPER_RAPIDAPI_ENDPOINTS } from '../contracts/threads-rapidapi-endpoints.mjs'
 import { PROVIDER_CATALOG_ADDITIONS } from './provider-catalog-additions.mjs'
 import tikPrices from './tikhub-official-prices.json' with { type: 'json' }
 import wechat from './wechat-contracts.json' with { type: 'json' }
@@ -21,9 +22,9 @@ export function officialProviderCatalog(operations = []) {
   const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [`${row.provider}:${row.method}:${row.path}`,row]))
   const policies = new Map(operations.map(row => [`${row.provider}:${row.operation}`,row.current]))
   const wechatByPath = new Map(wechat.endpoints.map(row => [row.path, row]))
-  const rows = official.endpoints.map(original => {
+  const rows = [...official.endpoints, ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS].map(original => {
     const row = original.provider === 'tikhub' && wechatByPath.has(original.path) ? { ...original, ...wechatByPath.get(original.path) } : original
-    const endpoint = native.get(`${row.provider}:${row.method}:${row.path}`)
+    const endpoint = row.marketplace === 'threads-scraper' ? row : native.get(`${row.provider}:${row.method}:${row.path}`)
     const policy = endpoint && policies.get(`${row.provider}:${endpoint.operation}`)
     return { provider:row.provider, platform:row.platform, label:row.platformLabel || row.platform,
       summary:row.summary, method:row.method, sourcePath:row.path, sourceUrl:row.sourceUrl,
@@ -38,8 +39,9 @@ export function officialProviderCatalog(operations = []) {
       runtimeStatus:'not_checked' }
   })
   return { version:official.version, observedAt:official.observedAt, rows,
-    summary:['tikhub','justone'].map(provider => { const items=rows.filter(row=>row.provider===provider); return {
-      provider, documented:items.length, platforms:new Set(items.map(row=>row.platform)).size,
+    summary:['tikhub','justone','rapidapi'].map(provider => { const items=rows.filter(row=>row.provider===provider); return {
+      provider, label: provider === 'rapidapi' ? 'RapidAPI · Threads Scraper' : provider === 'tikhub' ? 'TikHub' : 'JustOne',
+      observedAt: provider === 'rapidapi' ? '2026-11-13' : official.observedAt, documented:items.length, platforms:new Set(items.map(row=>row.platform)).size,
       implemented:items.filter(row=>row.hubPath).length, active:items.filter(row=>row.effectiveState==='active').length,
       canary:items.filter(row=>row.effectiveState==='canary').length,
       unmappedPlatforms:[...new Set(items.filter(row=>!row.catalogKeys.length).map(row=>row.platform))],

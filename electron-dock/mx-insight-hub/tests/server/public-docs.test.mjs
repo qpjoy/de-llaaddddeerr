@@ -1906,6 +1906,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/social/search',
       '/data/social/crawl',
       '/data/social/post-comments',
+      '/data/social/post-detail',
       '/data/social/comment-replies',
       '/data/social/user-info',
       '/data/youtube/comments',

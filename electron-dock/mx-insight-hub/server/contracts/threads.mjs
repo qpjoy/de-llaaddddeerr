@@ -1,3 +1,5 @@
+import { threadsScraperPostUrlParts, threadsPostIdFromShortcode } from '../../shared/threads-post-identity.mjs'
+
 // Threads supplier pages projected onto Hub's existing row shapes.
 //
 // RapidAPI's threads-api4 relays Threads' own GraphQL pages; its structure was
@@ -14,8 +16,6 @@ const count = value => typeof value === 'number' && Number.isSafeInteger(value) 
 const fail = reason => { throw new Error(`invalid_threads_response:${reason}`) }
 
 export const THREADS_WEB_ORIGIN = 'https://www.threads.com'
-const SHORTCODE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
-
 // Post URLs carry a shortcode that encodes the numeric ID the suppliers need,
 // so resolving a link costs no paid lookup.
 export function threadsPostId(value) {
@@ -23,10 +23,7 @@ export function threadsPostId(value) {
   const input = String(value).trim()
   const numeric = /^(\d{1,30})(?:_\d{1,30})?$/u.exec(input)
   if (numeric) return numeric[1]
-  if (!/^[A-Za-z0-9_-]{1,16}$/u.test(input)) return null
-  let id = 0n
-  for (const char of input) id = id * 64n + BigInt(SHORTCODE_ALPHABET.indexOf(char))
-  return id > 0n && id <= 18446744073709551615n ? String(id) : null
+  return threadsPostIdFromShortcode(input)
 }
 
 function roots(payload) {
@@ -148,34 +145,119 @@ export function parseThreadsSearchPage(payload, { provider, currentCursor = null
   return { rows, providerPage: threadsContinuation(pageInfo, provider, currentCursor) }
 }
 
-// Threads Scraper returns source edges directly under data.results. Edge cursors
-// belong to the source graph; only the outer data.cursor continues this listing.
-export function parseThreadsScraperSearchPage(payload, { currentCursor = null, capturedAt }) {
+// The Scraper listing documents the ok/error envelope, feed/search source
+// edges, canonical detail link and nullable counters. The inner objects are
+// projected using the Threads source shapes; fixtures note their provenance.
+function scraperData(payload) {
   assertSucceeded(payload)
   if (payload.status !== 'ok') fail('scraper_status')
-  const data = payload.data
-  if (!object(data) || !Array.isArray(data.results)) fail('scraper_results')
+  if (!object(payload.data)) fail('scraper_data')
+  return payload.data
+}
+
+function scraperThreadItems(edge) {
+  const node = edge?.node
+  if (!object(node)) fail('scraper_edge')
+  const items = (node.thread ?? node).thread_items
+  if (!Array.isArray(items) || !items.length) fail('scraper_post')
+  return items
+}
+
+// Edge cursors belong to the graph. Only the outer data.cursor continues
+// the RapidAPI page, and a malformed or missing cursor cannot prove exhaustion.
+function scraperPage(data, key, currentCursor) {
+  const cursor = data.cursor
+  const page = { hasMore: null, nextParams: null, nextPage: null }
+  if (!data[key].length || cursor === null) return { ...page, hasMore: false }
+  if (typeof cursor !== 'string' || !cursor.trim() || cursor.length > 8192 || cursor.includes('\0')) return page
+  if (cursor === currentCursor) return { ...page, stopReason: 'repeated_cursor' }
+  return { ...page, hasMore: true, nextParams: { cursor } }
+}
+
+export function parseThreadsScraperSearchPage(payload, { currentCursor = null, capturedAt }) {
+  const data = scraperData(payload)
+  if (!Array.isArray(data.results)) fail('scraper_results')
   const rowsById = new Map()
   for (const edge of data.results) {
-    const node = edge?.node
-    if (!object(node)) fail('scraper_edge')
-    // Source thread edges in the existing Threads examples wrap the thread
-    // or use it directly as the node. An envelope or node ID is not a post ID.
-    const items = (node.thread ?? node).thread_items
-    const post = Array.isArray(items) ? items[0]?.post : null
+    const post = scraperThreadItems(edge)[0]?.post
     if (!object(post)) fail('scraper_post')
     const row = threadsPostRow(post, capturedAt, null)
     if (!rowsById.has(row.content_id)) rowsById.set(row.content_id, row)
   }
-  const rows = [...rowsById.values()]
-  const cursor = data.cursor
-  let providerPage = { hasMore: null, nextParams: null, nextPage: null }
-  if (!rows.length || cursor === null) providerPage.hasMore = false
-  else if (typeof cursor === 'string' && cursor.trim() && cursor.length <= 8192 && !cursor.includes('\0')) {
-    if (cursor === currentCursor) providerPage.stopReason = 'repeated_cursor'
-    else providerPage = { hasMore: true, nextParams: { cursor }, nextPage: null }
+  return { rows: [...rowsById.values()], providerPage: scraperPage(data, 'results', currentCursor) }
+}
+
+const validHandle = value => typeof value === 'string' && /^[A-Za-z0-9._]{1,64}$/u.test(value)
+const sameHandle = (actual, expected) => validHandle(actual) && typeof expected === 'string' && actual.toLowerCase() === expected.toLowerCase()
+
+function scraperUserId(user) {
+  let id = null
+  for (const value of [user.pk, user.id]) {
+    if (value == null) continue
+    const parsed = numericId(value)
+    if (!parsed || (id && id !== parsed)) fail('scraper_user_id')
+    id = parsed
   }
-  return { rows, providerPage }
+  return id
+}
+
+export function parseThreadsScraperProfile(payload, { username }) {
+  const user = scraperData(payload).user
+  if (user === null) return null
+  if (!object(user) || !sameHandle(user.username, username)) fail('scraper_profile_identity')
+  scraperUserId(user)
+  return user
+}
+
+export function parseThreadsScraperAccountPage(payload, { username, currentCursor = null, capturedAt }) {
+  const data = scraperData(payload)
+  if (!Array.isArray(data.posts)) fail('scraper_posts')
+  const rowsById = new Map()
+  let owner = null, ownerId = null
+  for (const edge of data.posts) {
+    let matched = false
+    for (const item of scraperThreadItems(edge)) {
+      const post = item?.post
+      if (!object(post) || !object(post.user) || !validHandle(post.user.username)) fail('scraper_post_author')
+      if (!sameHandle(post.user.username, username)) continue
+      matched = true
+      const id = scraperUserId(post.user)
+      if (ownerId && id && ownerId !== id) fail('scraper_post_author')
+      if (!owner || (!ownerId && id)) owner = post.user
+      ownerId ??= id
+      const row = threadsPostRow(post, capturedAt, null)
+      if (!rowsById.has(row.content_id)) rowsById.set(row.content_id, row)
+    }
+    if (!matched) fail('scraper_post_author')
+  }
+  return { rows: [...rowsById.values()], owner, providerPage: scraperPage(data, 'posts', currentCursor) }
+}
+
+export function parseThreadsScraperPostDetail(payload, { code, capturedAt }) {
+  const post = scraperData(payload).post
+  if (!object(post) || typeof code !== 'string' || !/^[A-Za-z0-9_-]{5,32}$/u.test(code)) fail('scraper_detail')
+  const sourceUrl = post.url ?? post.permalink
+  const parts = sourceUrl == null ? null : threadsScraperPostUrlParts(sourceUrl)
+  if (sourceUrl != null && (!parts || parts.code !== code)) fail('scraper_detail_url')
+  if (post.code != null && post.code !== code) fail('scraper_detail_code')
+  const expectedId = threadsPostIdFromShortcode(code)
+  const ids = [post.pk, post.id, post.post_id].filter(value => value != null).map(value =>
+    numericId(typeof value === 'string' && /^\d+_\d+$/u.test(value) ? value.split('_')[0] : value))
+  if (ids.some(id => !id || id !== ids[0]) || (ids.length && expectedId && ids[0] !== expectedId)) fail('scraper_detail_id')
+  if (!parts && post.code !== code && !(expectedId && ids[0] === expectedId)) fail('scraper_detail_identity')
+  const id = ids[0] ?? expectedId
+  if (!id) fail('scraper_detail_id')
+  const user = object(post.user) ? post.user : {}
+  const author = user.username ?? post.username ?? parts?.username
+  if ((author != null && !validHandle(author)) || (parts && !sameHandle(parts.username, author))) fail('scraper_detail_author')
+  const info = object(post.text_post_app_info) ? post.text_post_app_info : {}
+  const row = threadsPostRow({ ...post, pk: id, code, user: { ...user, username: author },
+    taken_at: post.taken_at ?? post.timestamp, text_post_app_info: { ...info, direct_reply_count: info.direct_reply_count ?? post.reply_count,
+      repost_count: info.repost_count ?? post.repost_count, quote_count: info.quote_count ?? post.quote_count } }, capturedAt, null)
+  if (!row.published_at && typeof post.timestamp === 'string' && /^\d{4}-\d{2}-\d{2}T/u.test(post.timestamp) && Number.isFinite(Date.parse(post.timestamp))) {
+    row.created_at = row.published_at = new Date(post.timestamp).toISOString()
+  }
+  return row
 }
 
 // The replies timeline pairs each reply with the post it answers. A self-thread

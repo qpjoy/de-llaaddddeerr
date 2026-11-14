@@ -1,8 +1,8 @@
 # 策略搜索使用手册
 
-更新：2026-11-11
+更新于 2026-11-13
 
-策略搜索提供监测策略要用的数据接口：内容搜索、账号内容、账号资料、帖子评论、评论回复，以及旧客户端的兼容入口。调用方只传业务字段，不传供应商；走哪个供应商由管理端配置（见第九节）。
+策略搜索提供监测策略要用的数据接口：内容搜索、账号内容、账号资料、单帖详情、帖子评论、评论回复，以及旧客户端的兼容入口。调用方只传业务字段，不传供应商；走哪个供应商由管理端配置（见第九节）。
 
 ## 一、接口总览
 
@@ -13,6 +13,7 @@
 | 社交内容搜索（Twitter） | `POST /api/v1/data/social/search` | twitter + `social.content.search` | 只支持 Twitter，每次一页。返回 `data.items` 与 `raw_info`、`raw_data` 字符串 |
 | 账号内容 | `POST /api/v1/data/social/crawl` | 目标平台 + `social.content.crawl` | 按已知账号取内容。返回 `data.items` 数组、`raw_info`、`raw_data` 字符串、`data.pageInfo` |
 | 账号资料 | `POST /api/v1/data/social/user-info` | 目标平台 + `social.profile.get` | 按已知账号取资料（不是按关键词搜账号） |
+| 帖子详情（Threads） | `POST /api/v1/data/social/post-detail` | `threads` + `social.posts.resolve` | 按帖子 ID、短码或完整链接获取一篇帖子。返回 `data.item`，无分页 |
 | 帖子评论 | `POST /api/v1/data/social/post-comments` | 目标平台 + `social.comments.list` | 按帖子 ID 取一级评论，每条带 `replyRef`；分页在 `data.page` |
 | 评论回复 | `POST /api/v1/data/social/comment-replies` | 目标平台 + `social.comments.list` | 按评论 ID 取楼中楼回复；分页在 `data.page` |
 | 兼容业务接口 | `POST /api/v1/search/{operation}`、`POST /api/v1/night-all/search/{operation}` | 目标平台；小红书另需对应能力 | operation 为 raw、crawl、user-info、post-detail、post-comments。`data.raw_info`、`data.raw_data` 是 JSON 字符串，分页在 `data.page` |
@@ -39,7 +40,7 @@
 | wechat_search、wechat_mp | ✓（专用结构） | — | — | — | — |
 | telegram | ✓（Hub 已收录数据） | — | — | — | — |
 
-「✓」表示接口已实现，某个 Key 能不能调用以它的授权为准。
+「✓」表示接口已实现，能否调用取决于当前 Key 的授权。另有 Threads 专用标准单帖详情，见第四节第 3 小节。
 
 ## 二、调用方式
 
@@ -64,7 +65,7 @@ export HUB_KEY="<Hub API Key>"
 - 首页不传 `cursor`；下一页把返回的 `nextCursor` 原样放进顶层 `cursor`，其他字段不变，换新的 Idempotency-Key。
 - 游标 24 小时有效，最多 15 页，绑定 Key 和查询条件，不同接口之间不能互换。
 - 页大小是上限，不保证条数。只在 `nextCursor` 非空时继续翻页；`hasMore=null` 表示不确定，不要自动循环。
-- 默认会连续调用上游直到凑满页大小。请求体加 `"fillPage": false` 后，每次请求最多取一页上游结果就返回，见第三节第 4 小节。
+- 支持补页的平台默认会连续调用上游直到凑满页大小。Threads 每个目标和活动每次最多读取一个来源内容页。请求体加 `"fillPage": false` 后，每次请求最多取一页上游结果就返回，见第三节第 4 小节。
 - 指标未提供为 `null`，真实为 0 才是 `0`。
 - 超时或 5xx 不代表没扣费、没调用上游。先查请求状态（第八节），不要直接换新键重发。
 
@@ -107,6 +108,8 @@ params：
 | kuaishou | `sort_type`、`publish_time`、`duration` | |
 | zhihu | `show_all_topics`、`search_source`、`sort` | |
 | reddit、youtube、tiktok、threads | 不支持 | 传 params（包括空对象）返回 400 |
+
+Threads 默认走 Threads Scraper，帖子保留供应商顺序，无按发布时间排序保证。续页只传 Hub 返回的 `data.pageInfo.nextCursor`。
 
 cURL：
 
@@ -260,7 +263,7 @@ activityTypes：
 | 平台 | 可选值 |
 | --- | --- |
 | twitter | `posts`、`replies`（该账号自己发的回复） |
-| threads | `posts`、`replies`（该账号自己发的回复）、`reposts` |
+| threads | 默认 Threads Scraper 仅支持 `posts`，使用用户名或公开主页。Threads API 和 TikHub 另外支持数字账号 ID、`replies`（账号自己发的回复）和 `reposts` |
 | instagram | `posts`、`reels`、`stories`、`tagged_posts`、`highlights`、`followers`、`following` |
 | tiktok | `posts`、`likes`、`reposts` |
 | reddit | `posts`、`comments` |
@@ -315,7 +318,7 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
 
 ### 2. 账号资料 `POST /api/v1/data/social/user-info`
 
-字段同账号内容，没有 `activityTypes`。
+字段同账号内容，没有 `activityTypes`。Threads 默认按用户名或公开主页查询资料；按数字账号 ID 查询时，管理员可配置 Threads API 或 TikHub。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \
@@ -342,6 +345,19 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \
 | `collected_at` | 采集时间 |
 
 要点：Twitter 账号不存在返回 `404 social_account_not_found`；被封、注销、受保护返回 `422 social_account_unavailable`，原因看 `error.details.reason`。都不是空结果，不要重试。
+
+### 3. 单帖详情 `POST /api/v1/data/social/post-detail`
+
+同一个 Live Key 需具备 `threads` 平台和 `social.posts.resolve` 权限。请求包含 `platform: "threads"`，并提供一个帖子标识。可以传字符串形式的数字 ID 或短码 `contentId`，也可以传 `https://www.threads.com/@用户名/post/短码` 形式的 `url`。
+
+```bash
+curl -sS -X POST "$HUB_URL/api/v1/data/social/post-detail" \
+  -H "Authorization: Bearer $HUB_KEY" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"platform":"threads","contentId":"C8O-JbtAKrp"}'
+```
+
+成功响应包含 `requestId`、`data.platform` 及单个 `data.item`。该条目沿用标准搜索内容字段，包括 `externalId`、`text`、`author`、`publishedAt`、`metrics` 和 `media`，没有 `items` 列表或分页参数。旧 `/search/post-detail` 的平台范围见第六节。
 
 ## 五、评论
 
@@ -605,6 +621,9 @@ curl -sS -X POST "$HUB_URL/api/v1/night-all/search/raw" \
 | 503 | `content_search_deadline`、`twitter_fill_deadline` | 内容搜索 | 截止时间内未完成 | 稍后用原键重试 |
 | 503 | `content_search_unavailable`、`search_cursor_unavailable` | 内容搜索 | 暂不可用 | 稍后用原键原游标重试 |
 | 503 | `platform_operation_unavailable`、`compatibility_store_unavailable`、`compatibility_capabilities_unavailable` | 兼容 | 兼容链路暂不可用 | 稍后重试 |
+| 400 | `invalid_threads_post` | Threads 帖子详情 | 帖子标识不合法、字段超出合同或同时传入 ID 与链接 | 传一个有效的帖子 ID、短码或链接 |
+| 400 | `threads_account_input_unsupported` | Threads 账号内容、资料 | 固定的渠道不支持输入条件，未派发 | 用用户名或主页查资料或发帖，或配置支持条件的供应商 |
+| 503 | `threads_acquisition_paused` | Threads 搜索、账号、帖子详情 | 管理端暂停了该业务的新采购 | 查对应接口的路由 |
 | 400 | `invalid_social_request` | 账号 | 账号参数不合法，看 `details.field`、`details.reason` | 改参数 |
 | 400 | `invalid_user_profile_url` | 账号、兼容 | 小红书主页链接不是官方域名 | 用官方主页链接 |
 | 404 | `social_account_not_found`、`user_not_found` | 账号、兼容 | 账号不存在 | 核对账号 |
@@ -690,9 +709,17 @@ curl -sS "$HUB_ADMIN_URL/internal/v1/admin/strategy-search" \
   -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN"
 ```
 
-Threads 的五个接口都可切换或暂停，默认 RapidAPI 的 Threads API 优先、TikHub 保底。内容搜索还可单独选用 RapidAPI 的 Threads Scraper；两项订阅和采购价独立，管理端操作见 [Threads 接口手册](threads-api.md)。
+Threads 的六个接口可分别切换或暂停，选择和默认值如下。
 
-修改一个组合（`{interface}` 为 search、crawl、user-info、post-comments、comment-replies）：
+| Threads 接口 | 新默认 | 其他可选渠道 |
+| --- | --- | --- |
+| `search`、`crawl`、`user-info` | 固定 Threads Scraper（`rapidapi-threads-scraper`） | Threads API（`rapidapi`）、TikHub（`tikhub`） |
+| `post-detail` | 固定 Threads Scraper | Threads API |
+| `post-comments`、`comment-replies` | Threads API 优先、TikHub 保底 | 可在这两项之间修改 |
+
+迁移 190 将迁移 188 留下的原始 revision 1 搜索、账号内容和资料策略升级为固定 Scraper，并以此默认值新建单帖详情。管理员保存过的策略、暂停、采购价、原收据和已有游标保留。两个 RapidAPI 产品按订阅和操作分别核对，单项原生透传另需 `social` 平台及相应操作授权。九项操作、示例、计价与故障诊断见 [Threads 接口手册](threads-api.md)。
+
+修改一个组合（`{interface}` 为 search、crawl、user-info、post-detail、post-comments、comment-replies）：
 
 ```bash
 curl -sS -X PUT "$HUB_ADMIN_URL/internal/v1/admin/strategy-search/post-comments/douyin" \
@@ -722,7 +749,7 @@ curl -sS "$HUB_ADMIN_URL/internal/v1/admin/strategy-search/usage?days=7" \
   -H "x-mx-insight-admin-token: $HUB_ADMIN_TOKEN"
 ```
 
-可切换的组合与默认路由（没保存过配置时的路由，线上以 GET 为准）：
+除上方 Threads 路由表外，其他可切换组合的初始配置如下。线上以 GET 的结果为准。
 
 | 接口 | 平台 | 可选供应商 | 默认 |
 | --- | --- | --- | --- |

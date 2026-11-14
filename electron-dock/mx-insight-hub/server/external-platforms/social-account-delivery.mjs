@@ -6,6 +6,7 @@ import { requestFingerprint } from '../core/crypto.mjs'
 import { assertCommentRouteEnabled } from './strategy-search-routing.mjs'
 import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
 import { withSinglePage } from '../contracts/single-page-delivery.mjs'
+import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 
 export const SOCIAL_COMPAT_VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -16,6 +17,7 @@ export function normalizeSocialAccountDelivery(operation, body, { context, maxPa
     if (body?.[key] != null && (typeof body[key] !== 'string' || body[key].trim() !== context.consumer.businessId)) throw new AppError(400, 'business_id_mismatch', 'businessId must match the authenticated consumer')
   }
   const normalized = normalizeHubSocialCompatRequest(operation, body, { maxPageSize, businessId: context.consumer.businessId, provider })
+  const routeProvider = normalized.jobs[0].routeProvider
   const totalLimit = normalized.jobs.length * (operation === 'user-info' ? 1 : normalized.pageSize)
   const allowedWork = Math.min(maxPageSize, 1000)
   if (totalLimit > allowedWork) {
@@ -32,6 +34,7 @@ export function normalizeSocialAccountDelivery(operation, body, { context, maxPa
       const state = codec.decode(normalized.cursor)
       if (state.version !== SOCIAL_COMPAT_VERSION || state.operation !== operation || state.scopeHash !== scopeHash
         || state.provider != null && state.provider !== normalized.jobs[0].provider
+        || state.routeProvider !== routeProvider
         || state.platform !== normalized.platform || !uuid(state.previousDeliveryId)
         || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
         || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now()) throw new Error('cursor')
@@ -41,10 +44,11 @@ export function normalizeSocialAccountDelivery(operation, body, { context, maxPa
   } else if (normalized.page > 1) throw new AppError(400, 'invalid_cursor', 'Continue with the previous response nextCursor, or restart at page 1')
   // Validate every initial provider request before reserving or dispatching.
   for (const job of normalized.jobs) buildHubSocialCompatDispatch(job, { pageSize: normalized.pageSize })
-  return { ...normalized, totalLimit, scopeHash, page, expiresAt, previousDeliveryId,
+  return { ...normalized, ...(routeProvider ? { routeProvider } : {}), totalLimit, scopeHash, page, expiresAt, previousDeliveryId,
     deliveryMode: 'live_only', fingerprintBody: { ...normalized.fingerprintBody, cursor: normalized.cursor || null },
     encodeNext: deliveryId => codec.encode({ version: SOCIAL_COMPAT_VERSION, operation, platform: normalized.platform,
       ...(normalized.platform === 'threads' ? { provider: normalized.jobs[0].provider } : {}),
+      ...(routeProvider ? { routeProvider } : {}),
       scopeHash, page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }
 }
 
@@ -76,7 +80,8 @@ export function socialAccountDeliveryBody(request, { rowsByJob, state, calls, wa
 
 export function socialAccountPlan({ gateway, context, input, dependencies }) {
   const { operation, body, path } = input
-  const first = normalizeHubSocialCompatRequest(operation, body, { maxPageSize: 1000, businessId: context.consumer.businessId, provider: gateway.providerKey })
+  const provider = input.routing?.provider ?? gateway.providerKey
+  const first = normalizeHubSocialCompatRequest(operation, body, { maxPageSize: 1000, businessId: context.consumer.businessId, provider })
   if (path !== `/api/v1/data/social/${operation}` || first.jobs.some(job => job.provider !== gateway.providerKey)) throw new AppError(400, 'social_platform_not_implemented', 'This social route does not support the selected platform')
   if (!gateway.operationControlStore) throw new AppError(503, 'external_platform_contract_unverified', 'Account data requires reviewed operation controls')
   const capability = operation === 'crawl' ? 'social.content.crawl' : 'social.profile.get'
@@ -87,12 +92,12 @@ export function socialAccountPlan({ gateway, context, input, dependencies }) {
     normalize: ({ policy }) => {
       const threads = first.platform === 'threads'
       // No live Threads page has proven end_cursor yet: one source page per request.
-      request = withSinglePage(normalizeSocialAccountDelivery(operation, body, { context, maxPageSize: policy.maxPageSize, codec, provider: gateway.providerKey }), input.singlePage || threads)
+      request = withSinglePage(normalizeSocialAccountDelivery(operation, body, { context, maxPageSize: policy.maxPageSize, codec, provider }), input.singlePage || threads)
       return (request = threads ? { ...request, routeInterface: operation } : request)
     },
     assemble: async ({ delivery, deadlineAt, signal }) => {
       if (request.platform === 'threads' && !request.cursor) {
-        const { operationKeys } = threadsAccountRecipe('threads', gateway.providerKey, request)
+        const { operationKeys } = threadsAccountRecipe('threads', provider, request)
         // Each dispatch already enforces its own controls. For a batch or
         // handle lookup, check later steps before buying the first one.
         if (operationKeys.length > 1) {
@@ -116,11 +121,16 @@ export async function threadsAccountReceiptProvider(store, context, input, norma
   const saved = await store.getUsageRequestByIdempotencyKey(context.consumer.id, input.idempotencyKey)
   if (!saved || saved.platform !== 'threads' || saved.apiKeyId !== context.apiKey.id
     || saved.tenantId !== context.tenant.id || saved.acquisitionRequest?.path !== input.path) return null
-  for (const provider of ['rapidapi', 'tikhub']) {
-    const request = provider === 'rapidapi' ? normalized : normalizeHubSocialCompatRequest(input.operation, input.body,
-      { businessId: context.consumer.businessId, provider })
-    const { fingerprintBody } = withSinglePage(request, true)
-    if (requestFingerprint({ method: 'POST', path: input.path, body: fingerprintBody }) === saved.fingerprint) return provider
+  for (const provider of ['rapidapi', 'tikhub', THREADS_SCRAPER_ROUTE]) {
+    try {
+      const request = provider === 'rapidapi' ? normalized : normalizeHubSocialCompatRequest(input.operation, input.body,
+        { businessId: context.consumer.businessId, provider })
+      const { fingerprintBody } = withSinglePage(request, true)
+      if (requestFingerprint({ method: 'POST', path: input.path, body: fingerprintBody }) === saved.fingerprint) return provider
+    } catch (error) {
+      // A listing that cannot express this input cannot own its receipt.
+      if (!(error instanceof AppError) || error.status !== 400) throw error
+    }
   }
   return null // The gateway enforces authorization and rejects a conflicting fingerprint.
 }
@@ -131,6 +141,7 @@ export const socialAccountCursorProvider = operation => (body, { gateway, contex
   if (typeof cursor !== 'string' || !cursor.startsWith('mxds1.')) return null
   try {
     const state = createDataSearchCursorCodec(gateway.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}:social:${operation}`).decode(cursor)
-    return typeof state.provider === 'string' ? state.provider : null
+    const routeProvider = state.routeProvider ?? state.provider
+    return typeof routeProvider === 'string' ? routeProvider : null
   } catch { return null }
 }

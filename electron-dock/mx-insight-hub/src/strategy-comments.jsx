@@ -9,9 +9,8 @@ import { safeStrategyUrl } from './strategy-search-experience-model.js'
 import { STRATEGY_COMMENT_PATHS, strategyCommentPlatforms, strategyCommentBody, strategyCommentPage, strategyCommentRows,
   commentIdHint, replyNeedsContent, strategyCommentFailure } from './strategy-comments-model.js'
 import { commentRoutePlatforms } from '../server/contracts/comment-routes.mjs'
+import { STRATEGY_OPERATION_OPTIONS } from './strategy-search-model.js'
 
-const OPERATIONS = [{ value: 'search', label: '内容搜索' }, { value: 'crawl', label: '账号内容' }, { value: 'user-info', label: '账号资料' },
-  { value: 'post-comments', label: '帖子评论' }, { value: 'comment-replies', label: '评论回复' }]
 const REPLY_PLATFORMS = new Set(commentRoutePlatforms('comment-replies'))
 const statusText = { continuable: '可继续读取下一页', exhausted: '已到最后一页', unknown: '是否还有更多无法确认（不要自动循环）', limit_reached: '已达到 15 页上限' }
 
@@ -69,7 +68,7 @@ export function StrategyCommentsExperience({ operation, onOperationChange, prefi
       <header><div><p className="qp-kicker">评论数据</p><h2>{replies ? '查看一条评论下的回复' : '按帖子查看评论'}</h2>
         <p>{replies ? '传入评论 ID；抖音、小红书、快手、B站、Instagram、Reddit 还需要所属帖子 ID。从帖子评论点「查看回复」会自动带上。' : '每次查询一个平台的一篇帖子，返回一级评论；每条评论都可以继续查看回复。'}</p></div>
         <code>POST {path}</code></header>
-      {onOperationChange ? <DropdownField label="业务接口" value={operation} onChange={onOperationChange} options={OPERATIONS} /> : null}
+      {onOperationChange ? <DropdownField label="业务接口" value={operation} onChange={onOperationChange} options={STRATEGY_OPERATION_OPTIONS} /> : null}
       <form onSubmit={event => { event.preventDefault(); void send(body) }}>
         <fieldset>
           <legend>目标平台 <span>{!key ? '请选择调用身份（可预览支持平台）' : access ? `当前 Key 可见 ${platforms.length} 个` : '支持平台 · 发送时验证权限'}</span></legend>

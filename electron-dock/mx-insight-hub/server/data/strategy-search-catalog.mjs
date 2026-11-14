@@ -3,7 +3,7 @@ import { WECHAT_LEGACY_SEARCH_PLATFORMS } from '../contracts/wechat-search-alias
 import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../../shared/social-account-contract.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
 import { COMMENT_PROVIDER_CATALOG, commentRoutePlatforms } from '../contracts/comment-routes.mjs'
-import { THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
+import { THREADS_BUSINESS_ROUTES, THREADS_SCRAPER_ROUTE } from '../../shared/threads-search-routing.mjs'
 
 const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
@@ -23,17 +23,16 @@ function historicalPlatform(platform, operation) {
 }
 
 // Threads is routed on every interface, with the same editor as the comments.
-const THREADS_VERIFICATION = Object.freeze({ rapidapi: 'sample', tikhub: 'derived' })
 function threadsPlatform(interfaceId, summary, policies) {
   const policy = policies.find(row => row.interface === interfaceId && row.platform === 'threads') || null
-  const verification = interfaceId === 'search'
-    ? { rapidapi: 'sample', [THREADS_SCRAPER_ROUTE]: 'derived', tikhub: 'derived' }
-    : { ...THREADS_VERIFICATION }
+  const providers = THREADS_BUSINESS_ROUTES[interfaceId]
+  const verification = Object.fromEntries(providers.map(key => [key, 'derived']))
+  if (interfaceId !== 'post-detail') verification.rapidapi = 'sample'
+  if (['crawl', 'user-info', 'post-detail'].includes(interfaceId)) verification[THREADS_SCRAPER_ROUTE] = 'verified'
   return { platform: 'threads', label: LABELS.threads, editable: true, migrationStatus: 'hub_native',
-    providers: Object.keys(verification), providerVerification: verification,
+    providers: [...providers], providerVerification: verification,
     allowedModes: ['fixed', 'priority', 'paused'], policy: policy == null ? null : structuredClone(policy), routeSummary: summary }
 }
-const THREADS_ROUTE_NOTE = '优先与保底只在新请求派发前、优先供应商凭据、操作开关或价格未就绪时切换；游标固定原供应商。RapidAPI 响应结构按其官方公开样例校准，TikHub 按其官方文档描述，首个生产页需核对。每次请求只取一个来源页，继续用 nextCursor。'
 
 function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPolicy }) {
   const row = historicalPlatform(platform, 'raw')
@@ -89,7 +88,9 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPoli
 }
 
 function accountPlatform(platform, operation, accountPolicy = null, policies = []) {
-  if (platform === 'threads') return threadsPlatform(operation, `POST /api/v1/data/social/${operation} 由 Hub 直连供应商，返回字段与其他平台账号接口一致。${THREADS_ROUTE_NOTE}`, policies)
+  if (platform === 'threads') return threadsPlatform(operation, operation === 'crawl'
+    ? 'Threads Scraper 按用户名查账号发帖。按数字用户 ID、回复或转发查询时，请使用支持对应条件的 Threads API 或 TikHub。续页沿用原供应商。'
+    : 'Threads Scraper 按用户名查账号资料。按数字用户 ID 查询时，请使用支持该条件的 Threads API 或 TikHub。', policies)
   const row = historicalPlatform(platform, operation)
   const legacy = NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation].includes(platform)
   return {
@@ -151,14 +152,14 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
       },
       {
         id: 'post-detail', label: '帖子详情',
-        paths: ['/api/v1/search/post-detail', '/api/v1/night-all/search/post-detail'],
-        description: '按帖子 ID、contentId 或 URL 获取单篇完整正文、发布时间、作者和媒体。小红书已由 /api/v1/data/post 提供 Hub-native 合同；此兼容入口服务其他平台的历史请求，供应商与凭据由 Hub/Night-All 管理。',
+        paths: ['/api/v1/data/social/post-detail', '/api/v1/search/post-detail', '/api/v1/night-all/search/post-detail'],
+        description: '按帖子标识或 URL 获取单篇正文、发布时间、作者和媒体。Threads 使用 data/social/post-detail，小红书使用 data/post。其余兼容入口保留原有平台范围。',
         platforms: NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS.map(platform => ({
           ...historicalPlatform(platform, 'post-detail'),
           routeSummary: platform === 'xiaohongshu'
             ? '小红书详情使用 Hub /api/v1/data/post；此旧入口保留历史兼容，不改变现有登录、联网或已签发结果。'
             : 'Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。',
-        })),
+        })).concat(threadsPlatform('post-detail', 'Threads 的帖子详情可选 Threads API 或 Threads Scraper，按各自的 RapidAPI 订阅和操作价格执行。', commentPolicies)),
       },
       {
         id: 'post-comments', label: '帖子评论',

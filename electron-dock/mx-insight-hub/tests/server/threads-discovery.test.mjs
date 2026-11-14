@@ -41,16 +41,16 @@ test('Threads management saves from the browser client and public discovery foll
   }
   const threads = data => data.platforms.find(row => row.platform === 'threads')
   const original = await discovery(key)
-  assert.deepEqual(threads(original), { platform: 'threads', source: 'hub', servingMode: 'live_only', ready: true,
-    search: { source: 'hub', servingMode: 'live_only', ready: true, contractVersion: 'night-all.data-search.v1' } })
+  assert.deepEqual(threads(original), { platform: 'threads', source: 'hub', servingMode: 'live_only', ready: false,
+    search: { source: 'hub', servingMode: 'live_only', ready: false, contractVersion: 'night-all.data-search.v1' } })
   assert.equal(original.legacySearch, null)
   assert.equal(threads(await discovery(other)), undefined)
   assert.equal(threads(await discovery(testKey)).ready, false)
-  assert.deepEqual(checks, [{ consumerId: consumer.id, operationKeys: [rapid, tik] }])
+  assert.deepEqual(checks, [{ consumerId: consumer.id, operationKeys: ['native.r.threads_scraper_search_posts'] }])
   const policy = (mode, expectedRevision, primaryProvider = 'rapidapi') => ({
     mode, primaryProvider, fallbackProvider: null, expectedRevision, reason: 'Offline route verification',
   })
-  for (const op of ['search', 'crawl', 'user-info', 'post-comments', 'comment-replies']) {
+  for (const op of ['search', 'crawl', 'user-info', 'post-detail', 'post-comments', 'comment-replies']) {
     const update = await adminApi.updateCommentRoute(adminToken, op, 'threads', policy('paused', 1))
     assert.equal(update.mode, 'paused', op)
     assert.equal(update.revision, 2, op)
@@ -67,7 +67,11 @@ test('Threads management saves from the browser client and public discovery foll
   assert.equal(threads(await discovery(key)).ready, false, 'the new listing has its own readiness')
   assert.deepEqual(checks.at(-1).operationKeys, ['native.r.threads_scraper_search_posts'])
   assert.throws(() => adminApi.updateCommentRoute(adminToken, 'crawl', 'twitter', policy('paused', 1)))
-  assert.throws(() => adminApi.updateCommentRoute(adminToken, 'post-detail', 'threads', policy('paused', 1)))
+  for (const op of ['crawl','user-info','post-detail']) {
+    const updated = await adminApi.updateCommentRoute(adminToken, op, 'threads', policy('fixed', 2, 'rapidapi-threads-scraper'))
+    assert.equal(updated.primaryProvider, 'rapidapi-threads-scraper')
+  }
+  assert.throws(() => adminApi.updateCommentRoute(adminToken, 'post-detail', 'twitter', policy('paused', 1)))
 })
 
 test('Threads tenant documentation describes only authorized standard and WeChat v1 contracts', () => {

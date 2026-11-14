@@ -2,7 +2,7 @@ import snapshot from '../data/night-all-provider-inventory.json' with { type: 'j
 import official from '../data/provider-official-contracts.json' with { type: 'json' }
 import wechat from '../data/wechat-contracts.json' with { type: 'json' }
 import { AppError } from '../core/errors.mjs'
-import { THREADS_RAPIDAPI_ENDPOINTS, THREADS_SCRAPER_SEARCH_ENDPOINT } from './threads-rapidapi-endpoints.mjs'
+import { THREADS_RAPIDAPI_ENDPOINTS, THREADS_SCRAPER_RAPIDAPI_ENDPOINTS, validThreadsScraperPostInput } from './threads-rapidapi-endpoints.mjs'
 
 export const NATIVE_FORWARDING_VERSION = 'mx-insight-hub.native-forwarding.v1'
 const PRIVATE_PARAMS = new Set(['cookie', 'token', 'api_key', 'authorization', 'password', 'proxy'])
@@ -98,7 +98,7 @@ export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
   ...tikHubCommerce,
   ...wechat.endpoints.map(row => Object.freeze({ ...row, operation: `native.${row.key}`, endpointKey: `native.${row.key}` })),
   ...THREADS_RAPIDAPI_ENDPOINTS,
-  THREADS_SCRAPER_SEARCH_ENDPOINT,
+  ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS,
   ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))
     .map(row => Object.freeze({ ...row, id: row.key, operation: `native.${row.key}`, endpointKey: `native.${row.key}`,
       hubPath: `/api/v1/data/native/${row.key}`, schemaVersion: official.version,
@@ -167,6 +167,9 @@ export function normalizeNativeForwardingRequest(key, body, { maxPageSize = 100 
       throw new AppError(400, 'invalid_page_size', `${p.name} must be between 1 and ${maxPageSize}`)
     }
     query[p.name] = value
+  }
+  if (endpoint.marketplace === 'threads-scraper' && !validThreadsScraperPostInput(key, query)) {
+    throw new AppError(400, 'invalid_parameter', 'Provide a canonical HTTPS Threads post URL or a valid shortcode')
   }
   if (key === 'wechat.channels.video-detail' && !['object_id', 'export_id', 'share_url'].some(name => query[name])) {
     throw new AppError(400, 'missing_parameter', 'Provide object_id, export_id or share_url')

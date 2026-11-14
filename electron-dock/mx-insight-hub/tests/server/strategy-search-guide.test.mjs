@@ -197,3 +197,16 @@ test('account profile docs are independently authorized and leave old compatibil
   assert.match(identifiers.params.description, /screen_name\/screenName/)
   assert.equal(document.paths['/data/social/crawl'], undefined)
 })
+test('Threads account examples use a handle and only posts, and describe the fixed Scraper input limits', () => {
+  for (const [operation, capability] of [['crawl', 'social.content.crawl'], ['user-info', 'social.profile.get']]) {
+    const scopes = [{ platforms: ['threads'], capabilities: [capability] }]
+    const html = strategySearchGuide(scopes)
+    assert.match(html, /固定使用 Threads Scraper.*纯数字账号 ID/u)
+    const entry = tenantOpenApiDocument(scopes).paths[`/data/social/${operation}`].post
+    assert.deepEqual(entry.requestBody.content['application/json'].example, {
+      platform: 'threads', username: 'threads', ...(operation === 'crawl' ? { pageSize: 20, activityTypes: ['posts'] } : {}),
+    })
+    assert.match(entry.description, /固定使用 Threads Scraper/u)
+    if (operation === 'crawl') assert.match(entry.description, /仅支持 posts/u)
+  }
+})

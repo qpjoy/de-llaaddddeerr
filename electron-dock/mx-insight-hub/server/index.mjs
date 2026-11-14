@@ -43,6 +43,7 @@ import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest, threadsAccountRecipe } from './contracts/hub-social-compat.mjs'
+import { normalizeThreadsPostDetail, threadsPostDetailRecipe } from './contracts/threads-post-detail.mjs'
 import { threadsSearchRecipe } from './contracts/threads-search.mjs'
 import { THREADS_SCRAPER_ROUTE } from '../shared/threads-search-routing.mjs'
 import { threadsSearchCursorProvider } from './external-platforms/threads-search-workflow.mjs'
@@ -527,19 +528,25 @@ export async function createRuntime(config = loadConfig()) {
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   // Threads alone is routed on every interface; each supplier keeps one gateway.
   const threadsGateways = { rapidapi: nativeSearchGateway('threads', 'rapidapi'), tikhub: nativeSearchGateway('threads', 'tikhub') }
+  // Native endpoints reserve under the social grant; standardized Threads
+  // workflows reserve in the threads domain. The ledger checks that scope.
+  const threadsNativeGateway = nativeSearchGateway('social', 'rapidapi')
   for (const gateway of Object.values(threadsGateways)) gateway.strategySearchRoutingStore = strategySearchRoutingStore
-  const threadsRouter = options => createCommentRouter({ gateways: { threads: threadsGateways }, policyStore: strategySearchRoutingStore,
+  const threadsListingGateways = { ...threadsGateways, [THREADS_SCRAPER_ROUTE]: threadsGateways.rapidapi }
+  const threadsRouter = options => createCommentRouter({ gateways: { threads: threadsListingGateways }, policyStore: strategySearchRoutingStore,
     platformFor: () => 'threads', ...options })
   const threadsSearch = threadsRouter({ interfaceId: 'search', recipeFor: threadsSearchRecipe,
-    gateways: { threads: { ...threadsGateways, [THREADS_SCRAPER_ROUTE]: threadsGateways.rapidapi } },
     cursorProvider: (input, options) => threadsSearchCursorProvider(input, options),
     bodyFor: input => input.normalized, invoke: (gateway, context, input) => gateway.searchThreads(context, input) })
+  const threadsPostDetail = threadsRouter({ interfaceId: 'post-detail', recipeFor: threadsPostDetailRecipe, cursorProvider: () => null,
+    platformFor: body => { normalizeThreadsPostDetail(body); return 'threads' },
+    invoke: (gateway, context, input) => gateway.threadsPostDetail(context, input) })
   const threadsAccount = Object.fromEntries(['crawl', 'user-info'].map(operation => [operation, threadsRouter({ interfaceId: operation,
     recipeFor: threadsAccountRecipe, bodyFor: input => input.normalized, cursorProvider: socialAccountCursorProvider(operation),
     invoke: (gateway, context, input) => gateway.socialAccountData(context, input) })]))
   async function routeThreadsAccount(context, input, normalized) {
     const provider = await threadsAccountReceiptProvider(store, context, input, normalized)
-    if (provider) return threadsGateways[provider].socialAccountData(context, input)
+    if (provider) return threadsListingGateways[provider].socialAccountData(context, { ...input, routing: { provider, interface: input.operation, reason: 'receipt' } })
     return threadsAccount[input.operation](context, { ...input, normalized })
   }
   socialAccountDataGateways.facebook.strategySearchRoutingStore = strategySearchRoutingStore
@@ -674,7 +681,7 @@ export async function createRuntime(config = loadConfig()) {
       const results = await Promise.allSettled([
         [socialAccountGateway, externalPlatformCredentialStore, 'justone'],
         [socialAccountTikHubGateway, tikHubCredentialStore, 'tikhub'],
-        [hubSocialGateway, rapidApiCredentialStore, 'rapidapi'],
+        [threadsNativeGateway, rapidApiCredentialStore, 'rapidapi'],
       ].map(async ([gateway, credentials, provider]) => {
         // The Admin listener reads credential metadata only; it never needs
         // decrypted acquisition credentials to render an operation status.
@@ -871,7 +878,8 @@ export async function createRuntime(config = loadConfig()) {
     enterpriseGateway,
     socialAccountGateway,
     socialAccountTikHubGateway,
-    threadsNativeGateway: threadsGateways.rapidapi,
+    threadsNativeGateway,
+    threadsPostDetail,
     // Comments reserve usage in the YouTube domain, not account search's social domain.
     youtubeCommentsGateway: socialAccountDataGateways.youtube,
     commentRepliesGateway: { commentReplies },
@@ -898,7 +906,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways, socialAccountDataGateways, threadsGateways, postCommentsGateways, postCommentProviderGateways, commentReplyGateways,
+    nativeSearchGateways, socialAccountDataGateways, threadsGateways, threadsNativeGateway, postCommentsGateways, postCommentProviderGateways, commentReplyGateways,
     socialDataGateway, strategySearchRoutingStore,
   }
 }

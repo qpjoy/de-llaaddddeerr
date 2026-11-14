@@ -4,7 +4,7 @@ import { THREADS_SCRAPER_ROUTE } from '../shared/threads-search-routing.mjs'
 import { ProductApiConsole } from './product-workbench.jsx'
 import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
 import { StrategySearchExperience, useStrategySearchState } from './strategy-search-experience.jsx'
-import { ArrowRight, MagnifyingGlass, User, Users, ChatCircleText, ChatsCircle } from '@phosphor-icons/react'
+import { ArrowRight, MagnifyingGlass, Article, User, Users, ChatCircleText, ChatsCircle } from '@phosphor-icons/react'
 import { adminApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, PageHeading, useRemoteData } from './components.jsx'
 import { StrategyDataStatistics } from './strategy-data-statistics.jsx'
@@ -17,7 +17,7 @@ import { isCommentOperation } from './strategy-comments-model.js'
 import { recordStrategyAttempt } from './strategy-search-experience-model.js'
 import './strategy-search.css'
 
-const icons = { search: MagnifyingGlass, crawl: Users, 'user-info': User, 'post-comments': ChatCircleText, 'comment-replies': ChatsCircle }
+const icons = { search: MagnifyingGlass, crawl: Users, 'user-info': User, 'post-detail': Article, 'post-comments': ChatCircleText, 'comment-replies': ChatsCircle }
 const migration = value => STRATEGY_MIGRATION_LABELS[value] || value || '状态未提供'
 
 export function StrategySearchPage({ token, session, query, setQuery, onUnauthorized, notify, strategySession }) {
@@ -32,7 +32,7 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
   const selected = STRATEGY_SEARCH_INTERFACES.find(row => row.id === query.get('interface')) || STRATEGY_SEARCH_INTERFACES[0]
   const changeTab = view => { if (view === 'management') setManagementVisited(true); setQuery({ view }) }
   return <div className="mih-page mih-strategy-search">
-    <PageHeading title="策略搜索" description="从关键词、账号内容与资料、帖子评论与回复接口接入 Hub，按目标平台查看内容与接入方式。">
+    <PageHeading title="策略搜索" description="按目标平台查询内容、账号资料、帖子详情、评论与回复。">
       <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/strategy-search')}>接口文档 ↗</a>
     </PageHeading>
     <ProductViewTabs label="策略搜索" value={tab} onChange={changeTab} session={session} />

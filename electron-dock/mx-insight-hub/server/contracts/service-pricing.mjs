@@ -1,6 +1,7 @@
 import { nativeForwardingByPath } from './native-forwarding.mjs'
 import { hubSocialByPath } from './hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from './youtube-comments.mjs'
+import { THREADS_POST_DETAIL_PATH, THREADS_POST_DETAIL_CAPABILITY } from './threads-post-detail.mjs'
 import { POST_COMMENTS_PATH, POST_COMMENTS_RECIPES, POST_COMMENTS_CAPABILITY } from './post-comments.mjs'
 import { COMMENT_REPLIES_PATH, COMMENT_REPLY_RECIPES } from './comment-replies.mjs'
 import { QIXIN_CATALOG } from './enterprise.mjs'
@@ -9,6 +10,7 @@ import { XIAOHONGSHU_ANALYTICS_METERS } from '../../shared/product-catalog.mjs'
 import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
 const enterprises = new Set(QIXIN_CATALOG.apis.map(api => api.api_id))
 export function servicePriceDefinition(path) {
+  if (path === THREADS_POST_DETAIL_PATH) return { platform: 'threads', capabilities: [THREADS_POST_DETAIL_CAPABILITY], meterKey: THREADS_POST_DETAIL_CAPABILITY }
   if ([POST_COMMENTS_PATH, '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'].includes(path)) return {
     platforms: Object.keys(POST_COMMENTS_RECIPES), capabilities: [POST_COMMENTS_CAPABILITY], meterKey: POST_COMMENTS_CAPABILITY,
   }

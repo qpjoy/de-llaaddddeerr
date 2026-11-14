@@ -17,6 +17,11 @@ export const STRATEGY_SEARCH_INTERFACES = [
     input: 'Hub 接口接受 platform 与 username / userId / user_id / uid；各平台的 ID 与用户名不可互换，批量别名见详细文档。',
     output: '交付账号资料 items、raw_info JSON 字符串及请求关联信息，缺失字段与真实零值分别保留。',
     boundary: 'Hub 接口需要当前平台及 social.profile.get 授权。资料查询与内容采集独立管理，旧转发入口继续保留。' },
+  { id: 'post-detail', label: '帖子详情', description: '按帖子标识或原文链接获取一篇 Threads 帖子。',
+    paths: ['/api/v1/data/social/post-detail'],
+    input: 'platform 为 threads，contentId 接受数字帖子 ID 或短码，也可通过 url 传入帖子链接。',
+    output: 'data.item 包含正文、作者、媒体、发布时间和已提供的互动指标。',
+    boundary: '需要 threads 平台及 social.posts.resolve 授权。此接口每次查询一篇帖子。' },
   { id: 'post-comments', label: '帖子评论', description: '按 contentId（帖子 ID）或帖子链接获取一级评论，每条评论附带可直接用于查回复的 replyRef。',
     paths: ['/api/v1/data/social/post-comments', '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'],
     input: 'platform 与 contentId（或 postId、平台专用 ID、规范帖子 URL），可选 count（1–100，默认 20）与 cursor。',
@@ -28,6 +33,7 @@ export const STRATEGY_SEARCH_INTERFACES = [
     output: '交付 items（回复），每条含 rootCommentId（被查询的评论）、parentCommentId（直接回复对象，未知为 null）及分页状态。',
     boundary: '与帖子评论共用 social.comments.list 授权与计费。尚未校准的平台在派发前返回 external_platform_contract_unverified，不计费。' },
 ]
+export const STRATEGY_OPERATION_OPTIONS = STRATEGY_SEARCH_INTERFACES.map(({ id, label }) => ({ value: id, label }))
 export const STRATEGY_COMMENT_INTERFACES = ['post-comments', 'comment-replies']
 export const COMMENT_VERIFICATION_LABELS = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '沿用同平台已校准结构', pending: '待校准 · 暂不派发' }
 export const COMMENT_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新采购' }

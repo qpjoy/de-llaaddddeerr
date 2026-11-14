@@ -7,7 +7,7 @@ import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
-import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
+import { assertThreadsScraperBusinessSuccess, RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { twitterAccountFailureMessage, twitterLookupFoundNoAccount } from '../contracts/twitter-account-failure.mjs'
 import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '../contracts/hub-social-compat.mjs'
@@ -239,7 +239,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         if (bytes + (provider === 'rapidapi' ? 4194304 : 8388608) > 12582912) { stop('archive_byte_limit'); break }
         if (!enoughTime()) { stop('deadline'); break }
         const step = buildStep(index, job), expected = descriptor(step)
-        const listingMarketplace = workflowKind === 'threads-search' && request.routeProvider ? step.marketplace : undefined
+        const listingMarketplace = request.platform === 'threads' && request.routeProvider ? step.marketplace : undefined
         const marketplace = listingMarketplace ?? request.platform
         const callDelivery = { ...delivery, operation: expected.operation, ...(listingMarketplace ? { marketplace } : {}) }
         const token = hash({ endpoint: step.endpointKey, cursor: job.providerCursor, identity: job.resolvedIdentity })
@@ -319,6 +319,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
               : await gateway.adapter.forwardNative(step.key, { params: step.upstreamQuery }, { credential: credential.credential })
             const receipt = result.restrictedResponseArchive
             const payload = receipt?.bodyBytes ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(receipt.bodyBytes).replace(/^\uFEFF/u, '')) : null
+            if (provider === 'rapidapi' && step.marketplace === 'threads-scraper') assertThreadsScraperBusinessSuccess(payload, result)
             try { ({ projected, records } = projectPage(publicPayload(payload, credential.credential), step, request.operation, receipt?.capturedAt, traversal)) }
             catch {
               const evidence = { outcome: 'succeeded_unusable', billed, httpStatus: 200, businessCode, errorCode: 'invalid_social_contract', affectsCircuit: false }

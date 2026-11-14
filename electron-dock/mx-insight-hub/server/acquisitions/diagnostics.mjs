@@ -1,3 +1,4 @@
+import { THREADS_RAPIDAPI_ENDPOINTS, THREADS_SCRAPER_RAPIDAPI_ENDPOINTS } from '../contracts/threads-rapidapi-endpoints.mjs'
 import { AppError } from '../core/errors.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { analyzeRequestDiagnostic } from '../operations/request-diagnostic-analysis.mjs'
@@ -8,15 +9,15 @@ const LIMIT = 20
 const CALL_LIMIT = 50
 const QIXIN_MESSAGES = new Set(['未授权调用该接口', '未添加IP白名单'])
 const THREADS_LISTINGS = new Map([
-  ['native.r.threads_search_recent', 'Lundehund 的 threads-api4'],
-  ['native.r.threads_scraper_search_posts', 'Threads Scraper（threads-scraper）'],
+  ...THREADS_RAPIDAPI_ENDPOINTS.map(row => [row.operation, 'Lundehund 的 threads-api4']),
+  ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS.map(row => [row.operation, 'Threads Scraper（threads-scraper）']),
 ])
 const NOT_SUBSCRIBED = 'You are not subscribed to this API.'
-const threadsSearch403 = p => p.provider_key === 'rapidapi' && THREADS_LISTINGS.has(p.operation)
+const threadsListing403 = p => p.provider_key === 'rapidapi' && THREADS_LISTINGS.has(p.operation)
   && p.outcome === 'rejected' && p.http_status === 403
 function reviewedMessage(p) {
   if (!p.has_restricted_archive) return null
-  if (threadsSearch403(p) && p.reviewed_message === NOT_SUBSCRIBED) return NOT_SUBSCRIBED
+  if (threadsListing403(p) && p.reviewed_message === NOT_SUBSCRIBED) return NOT_SUBSCRIBED
   if (p.provider_key === 'qixin' && p.outcome === 'rejected' && QIXIN_MESSAGES.has(p.reviewed_message)) return p.reviewed_message
   return null
 }
@@ -61,7 +62,7 @@ function advice(request, providers, connectors, gateway, refusal = null) {
   if (qixin?.business_code === 105) return '启信宝拒绝接口授权。核对当次 AppKey 所属应用的接口开通与授权有效期；不能据此判断未开通、过期或应用不匹配。'
   if (qixin?.business_code === 104) return '启信宝返回白名单拒绝。核对该应用访问供应商时的实际出口 IP。'
   if (request.status === 'unknown' || providers.some(p => p.outcome === 'unknown')) return '存在未知调用结果。保留原请求身份，先核对上游记录与结算，不自动重发。'
-  const threads = providers.find(p => reviewedMessage(p) === NOT_SUBSCRIBED) || providers.find(threadsSearch403)
+  const threads = providers.find(p => reviewedMessage(p) === NOT_SUBSCRIBED) || providers.find(threadsListing403)
   if (threads) {
     const reason = reviewedMessage(threads) === NOT_SUBSCRIBED
       ? 'RapidAPI 当时明确返回“未订阅此 API”。' : 'RapidAPI 返回 HTTP 403，已存证据未确认具体拒绝原因。'
