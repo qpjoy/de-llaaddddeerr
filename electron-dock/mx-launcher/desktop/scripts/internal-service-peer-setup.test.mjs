@@ -230,6 +230,7 @@ function workerInternalBaseUrlForSite() { return 'http://127.0.0.1:18090'; }
 function renderSameHostNote() { return ''; }
 function renderOverseaTerminal() { return ''; }
 ${functionSource(rendererSource, 'isOverseaDeliveryUnverified')}
+${functionSource(rendererSource, 'renderOverseaRecovery')}
 ${functionSource(rendererSource, 'renderOverseaSiteDetail')}
 return renderOverseaSiteDetail;
 `

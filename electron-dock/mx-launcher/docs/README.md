@@ -18,6 +18,8 @@
 
 ## 架构与历史专题
 
+- [63 · Oversea 服务检查与恢复](63-oversea-service-recovery.md)：SSH 已通后通过现有 Internal API 安装 Docker/Hysteria2，以及 Launcher 的显式节点恢复入口；区分 Elastic IP 换机、原机换 IP 和健康节点，保留原站点账号并保护 Domestic/SSO。
+
 - [62 · Oversea 换机同 IP 的 SSH 恢复](62-oversea-ssh-server-replacement.md)：`mx-oversea-us01` 的无重启 known_hosts 修复、按需补公钥授权，以及 Launcher 现有 Refresh Host Key / Bootstrap Key 流程；不改变正常新机 Bootstrap。
 
 - [60 · Launcher 间歇慢与 504 排查](60-launcher-504-triage-2026-10-27.md)：10 月 27 日日志确认公网 Nginx 到 Internal :80 建连超时，23:34 容器探针恢复，底层原因待查；含只读采集、恢复分支及后台数据库异常退出 API 的独立本地修复。

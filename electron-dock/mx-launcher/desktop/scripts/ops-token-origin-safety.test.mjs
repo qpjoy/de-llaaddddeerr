@@ -188,6 +188,7 @@ for (const [method, path] of [
   ['POST', '/internal/v1/admin/actions/execute'],
   ['POST', '/internal/v1/admin/oversea/mx-oversea-hk01/shadow-setup'],
   ['POST', '/internal/v1/admin/oversea/mx-oversea-hk01/ensure'],
+  ['POST', '/internal/v1/admin/oversea/mx-oversea-hk01/recover'],
   ['POST', '/internal/v1/admin/oversea/mx-oversea-hk01/terminal'],
   ['DELETE', '/internal/v1/user-center/users/usr_test'],
   ['GET', '/internal/v1/sdk/service-accounts'],
@@ -207,7 +208,8 @@ for (const [method, path] of [
   ['GET', '/internal/v1/sdk/oauth/feishu/config'],
   ['GET', '/internal/v1/launcher-network/products'],
   ['POST', '/internal/v1/launcher-network/enrollments'],
-  ['GET', '/internal/v1/admin/dashboard']
+  ['GET', '/internal/v1/admin/dashboard'],
+  ['GET', '/internal/v1/admin/oversea/mx-oversea-hk01/recover']
 ]) {
   assert.equal(
     security.isOpsProtectedInternalRequest(`https://internal.example${path}`, method),
@@ -215,6 +217,17 @@ for (const [method, path] of [
     `${method} ${path} must not receive the ops token`
   );
 }
+
+assert.equal(
+  security.opsTokenForRequest(new URL('https://internal.example/internal/v1/admin/oversea/mx-oversea-us01/recover'), 'POST'),
+  'session-secret',
+  'recovery receives the bound Internal ops token'
+);
+assert.equal(
+  security.opsTokenForRequest(new URL('https://attacker.example/internal/v1/admin/oversea/mx-oversea-us01/recover'), 'POST'),
+  '',
+  'recovery never sends the ops token to another origin'
+);
 
 serverInput.value = 'https://other-internal.example';
 security.setSecrets({ 'mx-oversea-jp01': { url: 'secret' } });

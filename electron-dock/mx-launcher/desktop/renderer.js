@@ -171,6 +171,9 @@ const state = {
   overseaShowArchived: false,
   overseaEnsureBusy: false,
   overseaEnsureFeedback: null,
+  overseaRecoveryBusy: false,
+  overseaRecovery: null,
+  overseaArchiveBusy: false,
   overseaDefaultSiteBusy: false,
   overseaDefaultSiteFeedback: null,
   overseaRollout: null,
@@ -2351,6 +2354,7 @@ async function runOverseaShadowSetupFromSshProfile() {
 // 归档不删除任何证据：站点记录、plan 和 worker report 都保留，只是把 access
 // account 置为 paused —— 用户订阅只收 active 账号，节点因此自动消失。
 async function setSelectedOverseaArchived(archived) {
+  if (state.overseaRecoveryBusy || state.overseaArchiveBusy) return;
   const site = selectedOverseaSite();
   if (!site) return;
   const affected = Number(site.activeAccounts || 0);
@@ -2358,6 +2362,8 @@ async function setSelectedOverseaArchived(archived) {
     ? `Archive ${site.siteId}?\n\nIt will be removed from every user's subscription on their next refresh${affected ? ` (${affected} active access account${affected > 1 ? 's' : ''} will be paused)` : ''}.\n\nEvidence is preserved and you can unarchive it later.`
     : `Unarchive ${site.siteId}?\n\nIts access accounts become active again and the node reappears in entitled users' subscriptions.`;
   if (!window.confirm(warning)) return;
+  state.overseaArchiveBusy = true;
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
   try {
     const payload = await fetchJson(
       `/internal/v1/admin/oversea/${encodeURIComponent(site.siteId)}/${archived ? 'archive' : 'unarchive'}`,
@@ -2375,12 +2381,14 @@ async function setSelectedOverseaArchived(archived) {
   } catch (error) {
     state.overseaOverviewError = error.message;
     state.overseaEnsureFeedback = { tone: 'error', message: `Archive failed: ${error.message}` };
+  } finally {
+    state.overseaArchiveBusy = false;
   }
   renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
 }
 
 async function ensureSelectedOversea() {
-  if (state.overseaEnsureBusy) return;
+  if (state.overseaEnsureBusy || state.overseaRecoveryBusy) return;
   const overviewSite = selectedOverseaSite();
   const siteId = overviewSite?.siteId || state.selectedSiteId || blankToNull(sshProfileSiteId.value);
   if (!siteId) {
@@ -2435,6 +2443,73 @@ async function ensureSelectedOversea() {
     renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
   } finally {
     state.overseaEnsureBusy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  }
+}
+
+async function recoverSelectedOversea(executeRecovery = false) {
+  if (state.overseaRecoveryBusy || state.overseaEnsureBusy || state.overseaTerminalBusy || state.overseaArchiveBusy) return;
+  const site = selectedOverseaSite();
+  const host = site?.sshProfile?.host || site?.host;
+  if (!site?.sshProfile?.profileId || !host || site.archived || site.status === 'archived' || site.status === 'draft') return;
+  if (executeRecovery && !window.confirm(
+    `检查并恢复 ${site.siteId}（${host}）？\n\n将先检查已保存目标 IP；健康节点不做变更，仅在需要时恢复或重载此节点的 Oversea 服务。其他站点、Domestic / Internal WG 和用户登录不受此操作影响。`
+  )) return;
+  const pending = {
+    siteId: site.siteId,
+    host,
+    requestId: `desktop-oversea-recover-${Date.now()}`,
+    result: null,
+    feedback: { kind: 'info', message: `${executeRecovery ? '正在检查并恢复' : '正在只读检查'} ${site.siteId} / ${host}` }
+  };
+  state.overseaRecovery = pending;
+  state.overseaRecoveryBusy = true;
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson(`/internal/v1/admin/oversea/${encodeURIComponent(site.siteId)}/recover`, {
+      method: 'POST',
+      body: {
+        expectedHost: host,
+        executeRecovery: executeRecovery === true,
+        confirmRecovery: executeRecovery === true,
+        requestedBy: 'desktop-admin',
+        requestId: pending.requestId
+      }
+    });
+    if (state.overseaRecovery !== pending || state.selectedSiteId !== site.siteId) return;
+    const current = selectedOverseaSite();
+    if ((current?.sshProfile?.host || current?.host) !== host) {
+      pending.feedback = { kind: 'error', message: '已保存目标 IP 已改变，请刷新 Profile 后重新检查。' };
+      return;
+    }
+    const recovery = payload.recovery;
+    const earlyBlocked = recovery?.status === 'blocked' && recovery.changed !== true && recovery.host == null;
+    if (!recovery || recovery.siteId !== site.siteId || (!earlyBlocked && recovery.host !== host)) {
+      pending.feedback = { kind: 'error', message: '恢复结果与请求目标不匹配，请刷新后重新检查。' };
+      return;
+    }
+    pending.result = recovery;
+    pending.feedback = {
+      kind: recovery.status === 'healthy' || recovery.status === 'recovered' ? 'success' : recovery.status === 'ready' ? 'info' : 'error',
+      message: recovery.status === 'healthy' ? '目标节点本机健康检查通过，未做变更。'
+        : recovery.status === 'recovered' ? '服务恢复及本机检查已通过，请刷新订阅并验证联网。'
+          : recovery.status === 'ready' ? '只读检查完成，可执行检查并恢复。'
+            : `恢复${recovery.status === 'blocked' ? '受阻' : '失败'}，请查看下方检查结果。`
+    };
+    state.overseaOverview = payload.oversea || state.overseaOverview;
+    state.overseaOverviewError = null;
+  } catch (error) {
+    if (state.overseaRecovery === pending && state.selectedSiteId === site.siteId) {
+      const uncertainExecution = executeRecovery && /timeout|timed out|504|network|invalid JSON|超时|网络/i.test(error.message);
+      pending.feedback = {
+        kind: 'error',
+        message: uncertainExecution
+          ? `${error.message}。请求可能仍在服务器执行，未自动重试。请先查看该站点历史报告，再决定是否重试（${pending.requestId}）。`
+          : error.message
+      };
+    }
+  } finally {
+    state.overseaRecoveryBusy = false;
     renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
   }
 }
@@ -2513,7 +2588,7 @@ function parseLooseJson(value) {
 }
 
 async function runSelectedOverseaTerminal() {
-  if (state.overseaTerminalBusy) return;
+  if (state.overseaTerminalBusy || state.overseaRecoveryBusy) return;
   const site = selectedOverseaSite();
   const command = (state.overseaTerminalCommand || overseaTerminalTemplates.inspect).trim();
   if (!site || !command) {
@@ -4744,7 +4819,7 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
       || /^\/internal\/v1\/site-slots\/[^/]+\/access-accounts$/.test(path)
       || /^\/internal\/v1\/config-center\/site-slot-ssh-profiles(?:\/bootstrap|\/[^/]+\/readiness-probe)?$/.test(path)
       || path === '/internal/v1/admin/actions/execute'
-      || /^\/internal\/v1\/admin\/oversea\/[^/]+\/(?:shadow-setup|archive|unarchive|ensure|terminal)$/.test(path)
+      || /^\/internal\/v1\/admin\/oversea\/[^/]+\/(?:shadow-setup|archive|unarchive|ensure|recover|terminal)$/.test(path)
       || /^\/internal\/v1\/app-center\/apps(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+\/gate)?$/.test(path)
       || path === '/internal/v1/release-artifacts'
@@ -7059,6 +7134,7 @@ function renderOverseaWorkbench(pipelines) {
     button.addEventListener('click', () => {
       state.selectedSiteId = button.dataset.overseaSite || null;
       state.overseaEnsureFeedback = null;
+      state.overseaRecovery = null;
       state.overseaTerminalCommand = '';
       state.overseaTerminalResult = null;
       renderDeploymentWorkbench(pipelines);
@@ -7148,6 +7224,10 @@ function renderOverseaWorkbench(pipelines) {
       void ensureSelectedOversea();
     });
   }
+  const recoverButton = siteWorkbench.querySelector('[data-oversea-recover]');
+  if (recoverButton) recoverButton.addEventListener('click', () => void recoverSelectedOversea(true));
+  const recoveryCheckButton = siteWorkbench.querySelector('[data-oversea-recovery-check]');
+  if (recoveryCheckButton) recoveryCheckButton.addEventListener('click', () => void recoverSelectedOversea(false));
   const refreshButton = siteWorkbench.querySelector('[data-oversea-refresh]');
   if (refreshButton) {
     refreshButton.addEventListener('click', () => {
@@ -7207,7 +7287,7 @@ function renderOverseaSiteDetail(site) {
   const status = site.status || 'planned';
   const installed = status === 'installed';
   const archived = site.archived || status === 'archived';
-  const installDisabled = state.overseaEnsureBusy || archived || status === 'blocked' || status === 'draft' || status === 'needs-ssh-profile' || !site.sshProfile?.profileId;
+  const installDisabled = state.overseaEnsureBusy || state.overseaRecoveryBusy || archived || status === 'blocked' || status === 'draft' || status === 'needs-ssh-profile' || !site.sshProfile?.profileId;
   const installLabel = state.overseaEnsureBusy
     ? 'Running'
     : archived
@@ -7236,13 +7316,14 @@ function renderOverseaSiteDetail(site) {
       <div class="oversea-actions">
         ${hostPeer ? '<button class="secondary-button" type="button" data-oversea-reuse-host-ssh>Reuse Host SSH</button>' : ''}
         <button class="secondary-button" type="button" data-oversea-edit-profile>Edit Profile</button>
-        <button class="secondary-button" type="button" data-oversea-archive="${site.archived ? 'unarchive' : 'archive'}" title="${site.archived ? 'Restore this Oversea node and re-activate its access accounts' : 'Retire this Oversea node: pauses its access accounts so it drops out of every user subscription. Evidence is preserved and it can be restored.'}">${site.archived ? 'Unarchive' : 'Archive'}</button>
+        <button class="secondary-button" type="button" data-oversea-archive="${site.archived ? 'unarchive' : 'archive'}" ${state.overseaRecoveryBusy || state.overseaArchiveBusy ? 'disabled' : ''} title="${site.archived ? 'Restore this Oversea node and re-activate its access accounts' : 'Retire this Oversea node: pauses its access accounts so it drops out of every user subscription. Evidence is preserved and it can be restored.'}">${site.archived ? 'Unarchive' : 'Archive'}</button>
         <button class="primary-button" type="button" data-oversea-ensure ${installDisabled ? 'disabled' : ''}>
           ${escapeHtml(installLabel)}
         </button>
         <button class="secondary-button" type="button" data-oversea-refresh>Refresh</button>
       </div>
     </div>
+    ${renderOverseaRecovery(site)}
     <div class="oversea-service-grid">
       ${services.map((service) => `
         <article data-status="${escapeHtml(normalizeStageStatus(service.status))}">
@@ -7317,6 +7398,35 @@ function renderSameHostNote(site, hostPeer) {
   `;
 }
 
+function renderOverseaRecovery(site) {
+  const host = site.sshProfile?.host || site.host;
+  const busy = state.overseaRecoveryBusy || state.overseaEnsureBusy || state.overseaTerminalBusy || state.overseaArchiveBusy;
+  const disabled = busy || !site.sshProfile?.profileId || !host || site.archived || site.status === 'archived' || site.status === 'draft';
+  const recovery = state.overseaRecovery?.siteId === site.siteId && state.overseaRecovery?.host === host ? state.overseaRecovery : null;
+  const result = recovery?.result;
+  const details = result ? [
+    `status: ${result.status} / changed: ${result.changed === true ? 'yes' : 'no'}`,
+    ...(result.reportId ? [`report: ${result.reportId}`] : []),
+    ...asArray(result.steps).map((step) => `${step.stepId}: ${step.status}${step.message ? ` / ${step.message}` : ''}`),
+    ...asArray(result.blockedReasons),
+    ...asArray(result.warnings).map((warning) => `warning: ${warning}`),
+    ...asArray(result.nextActions).map((action) => `next: ${action}`)
+  ].join('\n') : '';
+  return `
+    <section class="oversea-boundary-note" aria-label="Oversea 节点恢复">
+      <strong>节点检查与恢复</strong>
+      <p>已保存目标：${escapeHtml(site.siteId)} / ${escapeHtml(host || 'Host not configured')}。更换 IP 请先通过 Edit Profile 保存。服务恢复需要 SSH 已能连接；同 IP 换机出现 SSH 错误时，继续使用原有 Refresh Host Key / Bootstrap Key。此操作不会自动接受新主机指纹。</p>
+      <div class="oversea-actions">
+        <button class="secondary-button" type="button" data-oversea-recovery-check ${disabled ? 'disabled' : ''}>只读检查</button>
+        <button class="secondary-button" type="button" data-oversea-recover ${disabled ? 'disabled' : ''}>${state.overseaRecoveryBusy ? '检查中' : '检查并恢复'}</button>
+      </div>
+      ${recovery?.feedback ? `<p class="profile-feedback" data-kind="${escapeHtml(recovery.feedback.kind)}">${escapeHtml(recovery.feedback.message)}</p>` : ''}
+      ${details ? `<pre class="terminal-screen">${escapeHtml(details)}</pre>` : ''}
+      ${result?.status === 'blocked' || result?.status === 'failed' ? '<p>若 SSH 主机指纹变化，请使用 SSH Access 的 Refresh Host Key；若认证失败，请用 Bootstrap Key 重新安装已有公钥，Rotate 保持不勾选。目标 IP 不匹配时，刷新 Profile 后重试。</p>' : ''}
+    </section>
+  `;
+}
+
 function renderOverseaTerminal(site) {
   const command = state.overseaTerminalCommand || overseaTerminalTemplates.inspect;
   const terminal = state.overseaTerminalResult;
@@ -7347,7 +7457,7 @@ function renderOverseaTerminal(site) {
       </div>
       <textarea class="terminal-input" data-oversea-terminal-input spellcheck="false">${escapeHtml(command)}</textarea>
       <div class="terminal-actions">
-        <button class="primary-button" type="button" data-oversea-terminal-run ${state.overseaTerminalBusy ? 'disabled' : ''}>
+        <button class="primary-button" type="button" data-oversea-terminal-run ${state.overseaTerminalBusy || state.overseaRecoveryBusy ? 'disabled' : ''}>
           ${state.overseaTerminalBusy ? 'Running' : 'Run Command'}
         </button>
       </div>

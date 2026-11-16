@@ -48,6 +48,7 @@
     "test:oversea-site-archive": "node --test --import tsx src/modules/launcher-network/oversea-site-archive.test.ts",
     "test:oversea-subscription-link": "node --test --import tsx src/modules/user-center/oversea-subscription-link.test.ts",
     "test:system-subscriptions": "node --test --import tsx src/modules/user-center/system-subscriptions.test.ts src/modules/user-center/system-subscriptions-aggregate.test.ts src/modules/admin/admin-site-slot-credential-visibility.test.ts src/modules/config-center/site-slot-ssh-profile-auth.test.ts src/modules/site-slots/remote-ssh-profile-binding.test.ts",
+    "test:oversea-recovery": "node --test --import tsx src/modules/admin/oversea-recovery*.test.ts src/modules/admin/admin-site-slot-credential-visibility.test.ts src/modules/site-slots/remote-ssh-profile-binding.test.ts src/store/oversea-artifact-transport.test.ts ../scripts/k8s-oversea-recover.test.mjs",
     "test:user-oversea-entitlement": "node --test --import tsx src/modules/user-center/user-oversea-entitlement-assignment.test.ts",
     "test:api-docs": "node --test --import tsx src/modules/api-docs/api-docs.contract.test.ts"
   },

@@ -22,6 +22,12 @@ SSH 实现整理；本次没有连接生产集群，不能将本地测试视为�
 container `internal-api`。`/app/artifacts/ssh` 挂载独立 PVC `mx-launcher-internal-ssh`，
 本地 PV 对应 `/var/lib/mx-launcher/k8s/internal-ssh`。现场若使用不同 namespace/路径，先核对再执行。
 
+已经验证 `SSH_OK` 时，新机已接受原公钥，无需再次复制。同一 K8s 节点上保留 PVC 和宿主机目录，
+Pod/容器重建后可继续使用原私钥；当前底层是 hostPath，调度到其他节点、宿主机更换、底层磁盘
+丢失或删除上述目录属于不同情况，需要迁移或恢复 SSH 数据备份。
+后续 Docker/Hysteria2 安装、Elastic IP 换机与原机换 IP 的服务恢复见
+[63 · Oversea 服务检查与恢复](63-oversea-service-recovery.md)。
+
 ## 可选脚本：只更新 known_hosts 后验证
 
 先从**新服务器的云控制台/已核验的管理会话**取得主机指纹：

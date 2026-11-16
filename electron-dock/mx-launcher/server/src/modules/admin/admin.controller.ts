@@ -22,6 +22,8 @@ import { buildSiteSlotRemoteSshGate, buildSiteSlotRemoteSshReadOnlyProbe, buildS
 import { runAwxApiLaunch } from './awx-api-launch.js';
 import { runAwxCredentialSync } from './awx-credential-sync.js';
 import { runAwxObjectSync } from './awx-object-sync.js';
+import { probeOverseaRecovery } from './oversea-recovery.js';
+import type { OverseaRecoveryLive } from './oversea-recovery.js';
 import {
   internalServicePeerObservationClearsWarning,
   internalServicePeerObservationInput
@@ -34,6 +36,7 @@ import {
 import {
   MX_DEFAULT_APP_DNS_ZONE,
   MX_H2I_PRODUCT_ID,
+  defaultSiteSlotAccessAccountNames,
   isSystemSubscriptionAccessAccount,
   SYSTEM_SUBSCRIPTION_CLIENT_BANDWIDTH,
   normalizeOverseaBandwidth,
@@ -89,9 +92,11 @@ import type {
 const execFileAsync = promisify(execFile);
 const INTERNAL_SERVICE_PEER_ID = 'mx-internal-service-peer';
 const INTERNAL_SERVICE_PEER_INTERFACE = 'mx-internal-svc';
+interface OverseaRecoveryContext { lock: symbol; profileSnapshot: string; accountSnapshot: string; onWorkerStart: () => void }
 
 @Controller('internal/v1/admin')
 export class AdminController {
+  private readonly overseaOperations = new Map<string, symbol>();
   constructor(@Inject(PLATFORM_STORE) private readonly store: PlatformStore) {}
 
   @Get('dashboard')
@@ -467,6 +472,7 @@ export class AdminController {
     assertPrincipalScope(actionPolicy, 'site-slot.manage');
     const body = asRecord(rawBody);
     const siteId = sanitizeSiteId(rawSiteId, 'oversea-main');
+    if (this.overseaOperations.has(siteId)) throw new BadRequestException('An Oversea operation is already running for this site.');
     const result = await this.store.archiveLauncherNetworkMihomoSite({
       siteId,
       archived,
@@ -494,6 +500,7 @@ export class AdminController {
     assertPrincipalScope(actionPolicy, 'site-slot.execute');
     const body = asRecord(rawBody);
     const siteId = sanitizeSiteId(rawSiteId, 'oversea-main');
+    if (this.overseaOperations.has(siteId)) throw new BadRequestException('An Oversea operation is already running for this site.');
     const requestedBy = stringValue(body.requestedBy) ?? actionPolicy.principal.principalId;
     const requestId = stringValue(body.requestId) ?? `admin-oversea-shadow-setup-${Date.now()}`;
     const workerInternalBaseUrl = workerInternalBaseUrlFromBody(body);
@@ -632,8 +639,8 @@ export class AdminController {
     }, opsToken);
   }
 
-  @Post('oversea/:siteId/ensure')
-  async ensureOverseaSite(
+  @Post('oversea/:siteId/recover')
+  async recoverOverseaSite(
     @Headers('authorization') authorization: string | undefined,
     @Param('siteId') rawSiteId: string,
     @Body() rawBody: unknown,
@@ -646,6 +653,200 @@ export class AdminController {
     assertPrincipalScope(actionPolicy, 'site-slot.execute');
     const body = asRecord(rawBody);
     const siteId = sanitizeSiteId(rawSiteId, 'oversea-main');
+    const recovery: {
+      siteId: string; host: string | null;
+      status: 'ready' | 'healthy' | 'recovered' | 'blocked' | 'failed'; changed: boolean;
+      steps: Array<{ stepId: string; status: string; message?: string }>;
+      blockedReasons: string[]; nextActions: string[]; warnings: string[];
+      live?: OverseaRecoveryLive; planId?: string; jobId?: string; reportId?: string;
+    } = { siteId, host: null, status: 'blocked', changed: false, steps: [], blockedReasons: [], nextActions: [], warnings: [] };
+    const connectivityBoundary = 'Checks cover SSH, local containers, TLS/account material and UDP bindings. Public UDP, protected subscription delivery and actual client connectivity still require validation.';
+    const blocked = (reason: string, action: string) => {
+      recovery.status = 'blocked';
+      recovery.blockedReasons = [reason];
+      recovery.nextActions = [action];
+      return { recovery };
+    };
+    if (this.overseaOperations.has(siteId)) return blocked('An Oversea operation is already running for this site.', 'wait-for-current-operation');
+    const lock = Symbol(siteId);
+    this.overseaOperations.set(siteId, lock);
+    try {
+      const registeredSite = await this.store.getLauncherNetworkMihomoSite(siteId);
+      if (!registeredSite?.publicHost) return blocked('Recovery requires an existing registered site with a published host.', 'use-install-for-new-site');
+      if (registeredSite.status === 'archived') return blocked('This site is archived; recovery cannot reactivate it.', 'unarchive-site');
+      const profiles = await this.store.listSiteSlotSshProfiles();
+      const profile = latestByUpdatedAt(profiles.filter((item) => item.siteId === siteId && item.kind === 'oversea' && item.status === 'active'));
+      if (!profile) return blocked('An active Oversea SSH profile is required.', 'open-ssh-access');
+      recovery.host = profile.host;
+      if (profiles.some((item) => item.kind === 'oversea' && item.status === 'active' && item.siteId !== siteId
+        && item.host?.toLowerCase() === profile.host?.toLowerCase())) {
+        return blocked('Another active Oversea site uses this host; its shared containers cannot be safely recovered as a single site.', 'review-shared-oversea-host');
+      }
+      const expectedHost = stringValue(body.expectedHost);
+      if (!expectedHost || expectedHost.toLowerCase() !== profile.host?.toLowerCase()) {
+        return blocked('expectedHost must match the currently saved SSH host. Save the intended IP in Edit Profile and check again.', 'reload-saved-profile');
+      }
+      if (!remoteExecutionEnvEnabledByDefault('SITE_SLOT_WORKER_REMOTE_SSH')) {
+        return blocked('Remote SSH execution is disabled on Internal.', 'review-remote-ssh-env-gate');
+      }
+      const executeRecovery = booleanValue(body.executeRecovery) === true;
+      if (executeRecovery && booleanValue(body.confirmRecovery) !== true) {
+        return blocked('confirmRecovery=true is required for server recovery.', 'confirm-recovery');
+      }
+      const accounts = await this.store.listSiteSlotAccessAccounts(siteId);
+      const missingAccounts = defaultSiteSlotAccessAccountNames(siteId).filter((username) => !accounts.some((account) => (
+        account.username === username && account.status === 'active' && account.authToken
+      )));
+      if (missingAccounts.length) return blocked('Existing active default/system account material is incomplete; recovery will not issue or reactivate accounts.', 'review-existing-access-accounts');
+      const profileSnapshot = JSON.stringify(profile);
+      const accountSnapshot = recoveryAccountSnapshot(accounts);
+      const snapshotMatches = async () => {
+        const currentProfiles = await this.store.listSiteSlotSshProfiles();
+        const currentProfile = latestByUpdatedAt(currentProfiles.filter((item) => item.siteId === siteId && item.kind === 'oversea' && item.status === 'active'));
+        const currentSite = await this.store.getLauncherNetworkMihomoSite(siteId);
+        const currentAccounts = await this.store.listSiteSlotAccessAccounts(siteId);
+        return Boolean(currentSite && currentSite.status !== 'archived'
+          && currentSite.publicHost === registeredSite.publicHost && currentSite.serverPorts === registeredSite.serverPorts
+          && currentProfile && JSON.stringify(currentProfile) === profileSnapshot
+          && recoveryAccountSnapshot(currentAccounts) === accountSnapshot
+          && !currentProfiles.some((item) => item.kind === 'oversea' && item.status === 'active' && item.siteId !== siteId
+            && item.host?.toLowerCase() === profile.host?.toLowerCase()));
+      };
+      const live = await this.probeOverseaRecovery(profile, accounts);
+      recovery.live = live;
+      recovery.steps = ['ssh', 'docker', 'compose', 'stack', 'hysteria', 'outlet', 'health', 'tlsMatchesRuntime', 'accountsMatch', 'portsMatch'].map((stepId) => ({
+        stepId, status: live[stepId as keyof OverseaRecoveryLive] === true ? 'passed' : 'failed', message: 'Initial read-only inspection'
+      }));
+      if (!await snapshotMatches()) return blocked('The saved target, publication or account material changed during inspection; check again.', 'reload-saved-profile');
+      if (!live.ssh) {
+        const action = live.category === 'host-key' ? 'refresh-host-key'
+          : live.category === 'auth' ? 'bootstrap-existing-key'
+          : live.category === 'ssh-config-target' ? 'fix-saved-ssh-config-hostname' : 'review-ssh-access';
+        return blocked(`Read-only SSH check failed (${live.category ?? 'connection'}); no recovery was started.`, action);
+      }
+      if (live.dockerInstalled && !live.compose) {
+        return blocked('Docker is already installed but Compose is missing. Install the matching Compose plugin before recovery to avoid upgrading the existing Docker engine.', 'install-matching-compose-plugin');
+      }
+      const metadataMatches = registeredSite.publicHost.toLowerCase() === expectedHost.toLowerCase()
+        && registeredSite.tlsFingerprint?.toUpperCase() === live.tlsFingerprint
+        && registeredSite.serverPorts === (profile.serverPorts || '51288');
+      if (live.healthy && metadataMatches) {
+        recovery.status = 'healthy';
+        recovery.nextActions = ['no-recovery-needed'];
+        recovery.warnings.push(connectivityBoundary);
+        return { recovery };
+      }
+      if (!executeRecovery) {
+        recovery.status = 'ready';
+        recovery.nextActions = ['recover-oversea'];
+        return { recovery };
+      }
+      if (!await snapshotMatches()) {
+        return blocked('The SSH profile changed during inspection; check the saved target again.', 'reload-saved-profile');
+      }
+      const requestedBy = stringValue(body.requestedBy) ?? actionPolicy.principal.principalId;
+      const requestId = stringValue(body.requestId) ?? `admin-oversea-recover-${Date.now()}`;
+      let workerStarted = false;
+      const restorePublishedMetadata = async () => {
+        if (!workerStarted) return;
+        try {
+          const current = await this.store.getLauncherNetworkMihomoSite(siteId);
+          if (current && (current.publicHost !== registeredSite.publicHost || current.serverPorts !== registeredSite.serverPorts)) {
+            recovery.warnings.push('Published host or ports changed concurrently; those external edits were retained and TLS metadata was not rolled back.');
+            return;
+          }
+          if (current && registeredSite.tlsFingerprint && current.tlsFingerprint !== registeredSite.tlsFingerprint) {
+            await this.store.upsertLauncherNetworkMihomoSite({
+              siteId, tlsFingerprint: registeredSite.tlsFingerprint,
+              requestedBy, requestId: `${requestId}:restore-publication`
+            });
+          }
+          if (!registeredSite.tlsFingerprint && current?.tlsFingerprint) {
+            recovery.warnings.push('No prior TLS fingerprint was available to restore; the worker may have recorded a new certificate fingerprint. The original published host was retained.');
+          }
+        } catch {
+          recovery.warnings.push('Published metadata restoration failed; inspect this site before retrying.');
+        }
+      };
+      try {
+        if (!live.healthy) {
+          recovery.changed = true;
+          const result = await this.ensureOverseaSite(authorization, siteId, {
+            executeRemote: true, confirmInstall: true, force: true, requestedBy, requestId
+          }, rawToken, rawUserId, opsToken, { lock, profileSnapshot, accountSnapshot, onWorkerStart: () => { workerStarted = true; } });
+          const ensure = result.ensure as Record<string, unknown>;
+          if (ensure.status === 'blocked' && ['recovery-target-changed', 'recovery-account-material-changed', 'site-archived', 'recovery-site-missing'].includes(String(ensure.reason))) {
+            recovery.changed = false;
+            return blocked('The target or account state changed before deployment; check the saved site again.', 'reload-saved-profile');
+          }
+          for (const field of ['planId', 'jobId', 'reportId'] as const) {
+            const value = stringValue(ensure[field]);
+            if (value) recovery[field] = value;
+          }
+          recovery.steps.push({ stepId: 'install-sync', status: ['installed', 'passed'].includes(String(ensure.status)) ? 'passed' : 'failed' });
+          recovery.live = await this.probeOverseaRecovery(profile, await this.store.listSiteSlotAccessAccounts(siteId));
+          recovery.steps.push({ stepId: 'final-live-check', status: recovery.live.healthy ? 'passed' : 'failed' });
+          if (!['installed', 'passed'].includes(String(ensure.status)) || !recovery.live.healthy) {
+            recovery.status = 'failed';
+            recovery.blockedReasons = ['Recovery did not pass both Install/Sync and the final live check. The previously published host is retained.'];
+            recovery.nextActions = ['review-worker-evidence', 'check-oversea-again'];
+            await restorePublishedMetadata();
+            return { recovery };
+          }
+        }
+        if (!await snapshotMatches()) {
+          throw new Error('SSH profile changed during recovery');
+        }
+        await this.store.upsertLauncherNetworkMihomoSite({
+          siteId, publicHost: profile.host, serverPorts: profile.serverPorts || '51288',
+          tlsFingerprint: recovery.live.tlsFingerprint, requestedBy, requestId: `${requestId}:publish-verified-host`
+        });
+        recovery.changed = true;
+        recovery.status = 'recovered';
+        recovery.steps.push({ stepId: 'publish-verified-host', status: 'passed' });
+        recovery.nextActions = ['refresh-client-subscription'];
+        recovery.warnings.push(connectivityBoundary);
+        return { recovery };
+      } catch {
+        recovery.status = 'failed';
+        recovery.blockedReasons = ['Recovery could not complete; review worker evidence before retrying.'];
+        recovery.nextActions = ['review-worker-evidence', 'check-oversea-again'];
+        await restorePublishedMetadata();
+        return { recovery };
+      }
+    } finally {
+      if (this.overseaOperations.get(siteId) === lock) this.overseaOperations.delete(siteId);
+    }
+  }
+
+  private probeOverseaRecovery(profile: SiteSlotSshProfile, accounts: SiteSlotAccessAccount[]) {
+    return probeOverseaRecovery(profile, accounts);
+  }
+
+  @Post('oversea/:siteId/ensure')
+  async ensureOverseaSite(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('siteId') rawSiteId: string,
+    @Body() rawBody: unknown,
+    @Query('token') rawToken?: string,
+    @Query('userId') rawUserId?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string,
+    recoveryContext?: OverseaRecoveryContext
+  ) {
+    assertInternalOpsToken(opsToken);
+    const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
+    assertPrincipalScope(actionPolicy, 'site-slot.execute');
+    const body = asRecord(rawBody);
+    const siteId = sanitizeSiteId(rawSiteId, 'oversea-main');
+    const activeLock = this.overseaOperations.get(siteId);
+    if (activeLock && activeLock !== recoveryContext?.lock) {
+      const ensure = ensureBlocked(siteId, 'operation-in-progress', ['An Oversea operation is already running for this site.'], []);
+      return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    }
+    const ownLock = !activeLock;
+    const lock = activeLock ?? Symbol(siteId);
+    if (ownLock) this.overseaOperations.set(siteId, lock);
+    try {
     const requestedBy = stringValue(body.requestedBy) ?? actionPolicy.principal.principalId;
     const requestId = stringValue(body.requestId) ?? `admin-oversea-ensure-${Date.now()}`;
     const requestWorkerInternalBaseUrl = stringValue(body.workerInternalBaseUrl) ?? stringValue(body.internalBaseUrl);
@@ -662,6 +863,10 @@ export class AdminController {
     // Install/Sync implicitly reactivate paused accounts or mutate the remote;
     // restoration must be an explicit Unarchive action first.
     const registeredSite = await this.store.getLauncherNetworkMihomoSite(siteId);
+    if (recoveryContext && !registeredSite) {
+      const ensure = ensureBlocked(siteId, 'recovery-site-missing', ['The registered Oversea site disappeared after inspection.'], ensureSteps);
+      return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    }
     if (registeredSite?.status === 'archived') {
       const ensure = {
         ...ensureBlocked(siteId, 'site-archived', [
@@ -676,6 +881,12 @@ export class AdminController {
     const profile = latestByUpdatedAt(profiles.filter((item) => item.kind === 'oversea' && item.siteId === siteId && item.status === 'active'));
     if (!profile) {
       const ensure = ensureBlocked(siteId, 'missing-ssh-profile', ['Create or bootstrap an Internal-managed SSH profile for this Oversea site.'], ensureSteps);
+      return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    }
+    if (recoveryContext && (JSON.stringify(profile) !== recoveryContext.profileSnapshot
+      || profiles.some((item) => item.kind === 'oversea' && item.status === 'active' && item.siteId !== siteId
+        && item.host?.toLowerCase() === profile.host?.toLowerCase()))) {
+      const ensure = ensureBlocked(siteId, 'recovery-target-changed', ['The saved SSH profile changed after the recovery probe.'], ensureSteps);
       return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
     }
     ensureSteps.push(overseaEnsureStep('ssh-profile', 'passed', profile.profileId, {
@@ -701,7 +912,7 @@ export class AdminController {
       ? requestOverseaCallbackBaseUrl
       : normalizeOverseaCallbackBaseUrl(profile.overseaCallbackBaseUrl);
 
-    const access = await this.store.issueSiteSlotAccessAccounts({
+    const access = recoveryContext && registeredSite ? { site: registeredSite } : await this.store.issueSiteSlotAccessAccounts({
       siteId,
       service: 'hysteria2',
       issueDefaults: true,
@@ -710,7 +921,16 @@ export class AdminController {
       requestedBy,
       requestId
     });
-    const planAccessAccounts = siteSlotPlanAccessAccountMaterial(await this.store.listSiteSlotAccessAccounts(siteId));
+    const currentAccountRows = await this.store.listSiteSlotAccessAccounts(siteId);
+    const planAccessAccounts = siteSlotPlanAccessAccountMaterial(currentAccountRows);
+    if (recoveryContext && recoveryAccountSnapshot(currentAccountRows) !== recoveryContext.accountSnapshot) {
+      const ensure = ensureBlocked(siteId, 'recovery-account-material-changed', ['Active account material changed after inspection.'], ensureSteps);
+      return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    }
+    if (recoveryContext && defaultSiteSlotAccessAccountNames(siteId).some((username) => !planAccessAccounts.some((account) => account.username === username))) {
+      const ensure = ensureBlocked(siteId, 'recovery-account-material-changed', ['Active default/system account material changed after inspection.'], ensureSteps);
+      return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    }
     ensureSteps.push(overseaEnsureStep('internal-mihomo', 'passed', access.site.siteId, {
       subscriptionBaseUrl: access.site.subscriptionBaseUrl,
       accounts: planAccessAccounts.length
@@ -736,7 +956,9 @@ export class AdminController {
       }
     }
 
-    let plan = await this.findReusableOverseaPlan(siteId, profile.profileId, serverPorts, exportPort, workerInternalBaseUrl, overseaCallbackBaseUrl);
+    // Recovery always snapshots the current account material; historical plans
+    // may contain revoked or rotated credentials even when usernames match.
+    let plan = recoveryContext ? null : await this.findReusableOverseaPlan(siteId, profile, serverPorts, exportPort, workerInternalBaseUrl, overseaCallbackBaseUrl);
     if (!plan || JSON.stringify(normalizeOverseaBandwidth(plan.runtime.oversea?.bandwidth)) !== JSON.stringify(normalizeOverseaBandwidth(profile.bandwidth))
       || !reusableOverseaPlanIncludesAccounts(plan, planAccessAccounts)) {
       plan = await this.store.createSiteSlotPlan({
@@ -859,6 +1081,7 @@ export class AdminController {
       return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
     }
 
+    recoveryContext?.onWorkerStart();
     const workerRun = await this.runRemoteSshWorker(job.jobId, profile.profileId, workerInternalBaseUrl, requestedBy, requestId);
     const latestReport = latestByCreatedAt(await this.store.listSiteSlotWorkerReports(job.jobId));
     const status = latestReport?.status ?? (workerRun.exitCode === 0 ? 'passed' : 'failed');
@@ -886,6 +1109,9 @@ export class AdminController {
       generatedAt: new Date().toISOString()
     };
     return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    } finally {
+      if (ownLock && this.overseaOperations.get(siteId) === lock) this.overseaOperations.delete(siteId);
+    }
   }
 
   @Post('oversea/:siteId/terminal')
@@ -909,6 +1135,7 @@ export class AdminController {
     const profiles = await this.store.listSiteSlotSshProfiles();
     const profile = latestByUpdatedAt(profiles.filter((item) => item.kind === 'oversea' && item.siteId === siteId && item.status === 'active'));
     const gateFailures = [
+      ...(this.overseaOperations.has(siteId) ? ['An Oversea operation is already running for this site.'] : []),
       ...(!profile ? ['active Oversea SSH profile is required'] : []),
       ...(remoteExecutionEnvEnabledByDefault('SITE_SLOT_WORKER_REMOTE_SSH') ? [] : ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before remote terminal execution']),
       ...(booleanValue(body.confirmRemoteExecution) === true ? [] : ['confirmRemoteExecution=true is required']),
@@ -1004,7 +1231,7 @@ export class AdminController {
 
   private async findReusableOverseaPlan(
     siteId: string,
-    profileId: string,
+    profile: SiteSlotSshProfile,
     serverPorts: string | null,
     exportPort: number | null,
     workerInternalBaseUrl: string | null,
@@ -1014,7 +1241,10 @@ export class AdminController {
     return latestByCreatedAt(plans.filter((plan) => (
       plan.kind === 'oversea'
       && plan.siteId === siteId
-      && plan.ssh.profileId === profileId
+      && plan.ssh.profileId === profile.profileId
+      && plan.host?.trim().toLowerCase() === profile.host?.trim().toLowerCase()
+      && plan.ssh.user === profile.sshUser
+      && plan.ssh.port === profile.sshPort
       && plan.status !== 'blocked'
       && reusableOverseaPlanContract(plan)
       && reusableOverseaPlanMatchesRuntime(plan, serverPorts, exportPort, workerInternalBaseUrl, overseaCallbackBaseUrl)
@@ -2960,6 +3190,12 @@ function siteSlotPlanAccessAccountMaterial(accounts: SiteSlotAccessAccount[]): S
         downRate: bandwidth
       };
     });
+}
+
+function recoveryAccountSnapshot(accounts: SiteSlotAccessAccount[]): string {
+  return JSON.stringify(accounts.filter((account) => account.status === 'active')
+    .map((account) => [account.username, account.authToken])
+    .sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function domesticBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {

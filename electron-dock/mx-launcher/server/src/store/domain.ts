@@ -7494,7 +7494,8 @@ function siteSlotDeploymentPhases(
   const scpRecursive = (source: string, dest: string) => `scp -r -P ${sshPort} ${source} ${sshUser}@${target}:${dest}`;
   const rsyncOverSsh = (source: string, dest: string, deleteStale = false) => {
     const flags = deleteStale ? '-az --delete' : '-az';
-    return `if command -v rsync >/dev/null 2>&1; then rsync ${flags} -e 'ssh -p ${sshPort}' ${source} ${sshUser}@${target}:${dest}; else ${source.endsWith('/') ? scpRecursive(source, dest) : scp(source, dest)}; fi`;
+    const remoteRsyncCheck = kind === 'oversea' ? ` && ${ssh('command -v rsync >/dev/null 2>&1')}` : '';
+    return `if command -v rsync >/dev/null 2>&1${remoteRsyncCheck}; then rsync ${flags} -e 'ssh -p ${sshPort}' ${source} ${sshUser}@${target}:${dest}; else ${source.endsWith('/') ? scpRecursive(source, dest) : scp(source, dest)}; fi`;
   };
   const switchCurrentSymlink = (releaseDir: string, currentDir: string) => {
     const legacyCurrentDir = `${currentDir}.legacy-${releaseRevision}`;
