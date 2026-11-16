@@ -25,7 +25,9 @@ async function invalidateBetterSqlite3RebuildMarker() {
 
 module.exports = {
   appId: 'dev.qpjoy.mx-h2i',
-  productName: 'MX-H2I',
+  productName: 'MinCave',
+  // package.json.productName and the executable/app ID stay compatible with
+  // installed MX-H2I clients (userData, safeStorage, upgrades and ownership).
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   beforeBuild: invalidateBetterSqlite3RebuildMarker,
   asar: true,
@@ -101,6 +103,7 @@ module.exports = {
     requestedExecutionLevel: 'asInvoker'
   },
   nsis: {
+    shortcutName: 'MinCave',
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true

@@ -15,26 +15,40 @@ const { join, resolve } = require('node:path');
 
 const originalExecFile = childProcess.execFile;
 const originalSpawnSync = childProcess.spawnSync;
+const nativeSystemRoot = process.env.SystemRoot;
 
-function mappedPowerShellCommand(command, args) {
+function mappedWindowsCommand(command, args) {
   const expected = process.env.MX_TEST_WIREGUARD_POWERSHELL;
-  if (!expected || resolve(String(command)) !== resolve(expected)) return null;
+  if (!expected) return null;
+  const expectedServiceCommand = join(process.env.SystemRoot, 'System32', 'sc.exe');
+  if (![expected, expectedServiceCommand].some((stub) => resolve(String(command)) === resolve(stub))) return null;
   return {
     command: process.execPath,
     args: [String(command), ...(args || [])]
   };
 }
 
+function nodeStubOptions(options) {
+  const env = { ...(options?.env || process.env) };
+  // Windows environment keys are case-insensitive. Do not pass the fixture's
+  // fake SystemRoot into native Node/OpenSSL initialization.
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'systemroot') delete env[key];
+  }
+  if (nativeSystemRoot !== undefined) env.SystemRoot = nativeSystemRoot;
+  return { ...options, env };
+}
+
 childProcess.execFile = function(command, args, options, callback) {
-  const mapped = mappedPowerShellCommand(command, args);
+  const mapped = mappedWindowsCommand(command, args);
   return mapped
-    ? originalExecFile(mapped.command, mapped.args, options, callback)
+    ? originalExecFile(mapped.command, mapped.args, nodeStubOptions(options), callback)
     : originalExecFile(command, args, options, callback);
 };
 childProcess.spawnSync = function(command, args, options) {
-  const mapped = mappedPowerShellCommand(command, args);
+  const mapped = mappedWindowsCommand(command, args);
   return mapped
-    ? originalSpawnSync(mapped.command, mapped.args, options)
+    ? originalSpawnSync(mapped.command, mapped.args, nodeStubOptions(options))
     : originalSpawnSync(command, args, options);
 };
 syncBuiltinESMExports();
@@ -341,6 +355,7 @@ async function verifyAsyncLiveProbe() {
   const system32Dir = join(root, 'System32');
   const scCommand = join(system32Dir, 'sc.exe');
   const probeScriptCapture = join(root, 'nrpt-probe-command.ps1');
+  const probeEnvironmentCapture = join(root, 'nrpt-probe-environment.json');
 
   // The Windows tunnel status is read with two separate probes now: sc.exe (or
   // Get-Service as a fallback) for the service state, and a PowerShell script
@@ -398,7 +413,9 @@ async function verifyAsyncLiveProbe() {
   });
   writeFileSync(
     powerShell,
-    `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(probeScriptCapture)}, process.argv.at(-1));\nsetTimeout(() => process.stdout.write(${JSON.stringify(snapshot)}), 120);\n`
+    `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(probeScriptCapture)}, process.argv.at(-1));\n`
+    + `require('node:fs').writeFileSync(${JSON.stringify(probeEnvironmentCapture)}, JSON.stringify({ SystemRoot: process.env.SystemRoot }));\n`
+    + `setTimeout(() => process.stdout.write(${JSON.stringify(snapshot)}), 120);\n`
   );
   chmodSync(powerShell, 0o755);
   process.env.SystemRoot = root;
@@ -415,6 +432,11 @@ async function verifyAsyncLiveProbe() {
     const live = await pending;
     assert.equal(live.ready, true, JSON.stringify(live));
     assert.equal(live.state, 'ready');
+    assert.deepEqual(
+      JSON.parse(readFileSync(probeEnvironmentCapture, 'utf8')),
+      JSON.parse(JSON.stringify({ SystemRoot: nativeSystemRoot })),
+      'native stub processes must inherit the host SystemRoot, never the fixture directory'
+    );
     const probeScript = readFileSync(probeScriptCapture, 'utf8');
     assert.match(probeScript, /Global\\QPJoy\.MXLauncher\.NRPT\.v1/);
     assert.match(

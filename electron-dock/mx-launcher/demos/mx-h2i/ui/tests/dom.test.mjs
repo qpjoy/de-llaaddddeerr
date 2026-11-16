@@ -16,6 +16,18 @@ const bundle = (
 ).replaceAll('import.meta.url', '"http://mincave.test/assets/app.js"');
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
 
+async function waitFor(assertion) {
+  const deadline = performance.now() + 3000;
+  while (true) {
+    try {
+      return assertion();
+    } catch (error) {
+      if (!(error instanceof assert.AssertionError) || performance.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
 async function mount(initial, withBridge = true, methods = {}) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
@@ -580,25 +592,29 @@ test('updates retain their dialog during download and use the native restart act
     releaseNotes: '更新说明',
     deliveryMode: 'prompt-download-restart',
   };
-  const h = await mount(state);
+  // The initial IPC response and React's modal effects need not finish in 40 ms.
+  const h = await mount(state, true, {
+    getState: () => new Promise((resolve) => setTimeout(() => resolve(structuredClone(state)), 80)),
+  });
   try {
-    await tick();
-    assert.equal(h.document.querySelector('dialog')?.open, true);
+    await waitFor(() => assert.equal(h.document.querySelector('dialog')?.open, true));
     await h.click('下载更新');
-    assert.equal(h.document.querySelector('dialog')?.open, true);
-    assert.equal(
-      h.document.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow'),
-      '12.5',
-    );
+    await waitFor(() => {
+      assert.equal(h.document.querySelector('dialog')?.open, true);
+      assert.equal(
+        h.document.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow'),
+        '12.5',
+      );
+    });
     assert.ok(!h.document.body.textContent.includes('取消下载'));
     h.emit({
       update: { ...state.update, status: 'staged', restartPrompt: true, restartRequired: true },
     });
-    await tick();
+    await waitFor(() => assert.equal(h.button('重新启动').disabled, false));
     await h.click('重新启动');
-    assert.ok(h.calls.includes('restartApp'));
+    await waitFor(() => assert.ok(h.calls.includes('restartApp')));
     await h.click('关闭弹窗');
-    assert.equal(h.document.querySelector('dialog'), null);
+    await waitFor(() => assert.equal(h.document.querySelector('dialog'), null));
     assert.deepEqual(h.errors, []);
   } finally {
     h.dom.window.close();
