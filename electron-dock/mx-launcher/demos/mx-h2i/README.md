@@ -116,6 +116,21 @@ npm first.
 
 ## Package
 
+构建机的 Node.js 至少为 **22.18.0**（UI 测试直接加载 TypeScript）；22.16.0 会报 `ERR_UNKNOWN_FILE_EXTENSION: .ts`。升级后重新打开终端，使用 `node --version` 确认版本。`build:ui`、`check` 和打包链在 UI 构建前会检查这一要求；这不改变客户端内置的 Electron/Node.js 版本。
+
+Windows x64 完整安装包在 Windows PowerShell 中、从仓库根目录执行：
+
+```powershell
+node --version
+cd electron-dock\mx-launcher
+pnpm install
+cd demos\mx-h2i
+npm --prefix ui ci
+pnpm make:win
+```
+
+安装包和 ZIP 输出到 `demos/mx-h2i/out/electron-builder/`（相对 `mx-launcher`）。
+
 ```sh
 pnpm --filter @qpjoy/mx-h2i-demo build
 pnpm --filter @qpjoy/mx-h2i-demo package

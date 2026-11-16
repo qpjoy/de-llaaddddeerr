@@ -2,6 +2,9 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { cleanElectronNodeEnv } from './node-env.mjs';
+import { assertUiNodeVersion } from './ui-node-version.mjs';
+
+assertUiNodeVersion();
 
 const uiRoot = fileURLToPath(new URL('../ui/', import.meta.url));
 const commands = [
