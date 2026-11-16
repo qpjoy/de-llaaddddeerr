@@ -643,7 +643,7 @@ html[data-platform='win32'] .mincave-topbar {
 .mincave-apps-grid {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 12px;
   max-width: 820px;
   margin: 0 auto;
