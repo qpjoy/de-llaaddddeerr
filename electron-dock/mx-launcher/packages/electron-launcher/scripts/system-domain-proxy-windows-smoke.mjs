@@ -19,6 +19,7 @@ import { delimiter, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
+const nativeSystemRoot = process.env.SystemRoot;
 const testDir = mkdtempSync(join(tmpdir(), 'mx-system-domain-proxy-windows-'));
 const binDir = join(testDir, 'bin');
 const windowsDir = join(testDir, 'windows');
@@ -176,6 +177,12 @@ assert.equal(
   'Sysnative must win for a 32-bit process on 64-bit Windows'
 );
 rmSync(join(windowsDir, 'Sysnative'), { recursive: true, force: true });
+
+// Scope the fake root to path-resolution assertions. Native Node children need
+// the host SystemRoot during OpenSSL startup; command mocks still intercept
+// reg.exe and powershell.exe before either can touch the actual machine.
+if (nativeSystemRoot === undefined) delete process.env.SystemRoot;
+else process.env.SystemRoot = nativeSystemRoot;
 
 const oldClash = windowsProxyState('http://clash.invalid/old.pac', '127.0.0.1:7890', '<local>;old.test');
 const newClash = windowsProxyState('http://clash.invalid/new.pac', '127.0.0.1:7891', '<local>;new.test');
