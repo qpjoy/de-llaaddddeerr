@@ -116,6 +116,10 @@ npm first.
 
 ## Package
 
+完整安装包、macOS 应用包与 ASAR 制品的显示名称统一为 **MinCave**，Windows 安装界面和快捷方式也使用 MinCave。以当前版本为例，Windows 输出 `MinCave-2.1.20-win-x64.exe` 和 `.zip`，打包命令及输出目录保持不变。
+
+`package.json` 中的内部 `productName: MX-H2I`、应用 ID、Windows 可执行文件名和网络服务标识继续保留，用于兼容旧安装、Electron 用户数据目录、safeStorage 登录凭据及网络 ownership；只通过打包配置设置对外的 MinCave 名称，不迁移或清空现有数据。旧安装包不会自动重命名，需要重新生成完整包；本次不修改版本号或发布制品。
+
 构建机的 Node.js 至少为 **22.18.0**（UI 测试直接加载 TypeScript）；22.16.0 会报 `ERR_UNKNOWN_FILE_EXTENSION: .ts`。升级后重新打开终端，使用 `node --version` 确认版本。`build:ui`、`check` 和打包链在 UI 构建前会检查这一要求；这不改变客户端内置的 Electron/Node.js 版本。
 
 Windows x64 完整安装包在 Windows PowerShell 中、从仓库根目录执行：
