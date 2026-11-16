@@ -884,26 +884,59 @@ html[data-platform='win32'] .mincave-topbar {
   justify-content: flex-end;
   margin-top: 10px;
 }
+.mincave-modal.mincave-update-modal {
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  max-height: 85vh;
+  padding: 0;
+  border: 1px solid #e3e3f0;
+  border-radius: 21px;
+  box-shadow: 0 22px 80px #15234a26;
+  font-family: Inter, var(--font);
+  font-weight: 400;
+  line-height: normal;
+  -webkit-font-smoothing: antialiased;
+}
+.mincave-update-modal::backdrop {
+  background: #28345650;
+  backdrop-filter: blur(5px);
+}
+.mincave-update-modal > .mincave-modal-title {
+  gap: 15px;
+  margin: 0;
+  padding: 22px 25px 18px;
+  border-bottom: 1px solid #f0eef7;
+}
+.mincave-update-modal > .mincave-modal-title h2 {
+  font-size: 18px;
+  font-weight: 620;
+  letter-spacing: -0.35px;
+}
+.mincave-update-modal .mincave-icon-button {
+  padding: 5px;
+  border-radius: 9px;
+}
+.mincave-update-modal > .mincave-update { padding: 25px; }
 .mincave-update {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 23px;
 }
 .mincave-version-row {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   flex-wrap: wrap;
   gap: 15px;
   font-size: 12px;
 }
 .mincave-version-row strong {
-  margin-left: 7px;
   font-size: 16px;
 }
 .mincave-update-steps {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 .mincave-update-steps > span {
   display: flex;
@@ -914,10 +947,12 @@ html[data-platform='win32'] .mincave-topbar {
 .mincave-update-steps i {
   font-style: normal;
   border-radius: 50%;
-  border: 1px solid #e3e1ef;
+  border: 1px solid #dfe1ec;
   background: #f7f7fc;
-  width: 24px;
-  height: 24px;
+  width: 23px;
+  height: 23px;
+  flex-shrink: 0;
+  font-size: 11px;
   display: grid;
   place-items: center;
 }
@@ -931,31 +966,67 @@ html[data-platform='win32'] .mincave-topbar {
   margin: 0;
   line-height: 1.7;
 }
-.mincave-release-notes {
-  padding: 14px 16px;
-  background: #f8f7ff;
-  border-radius: 10px;
-  font-size: 12px;
-  line-height: 1.8;
+.mincave-update .mincave-legacy.mincave-release-notes {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.9;
+  white-space: normal;
+  max-height: none;
+  overflow: visible;
   overflow-wrap: anywhere;
 }
+.mincave-update .mincave-release-notes :is(ul, ol) { margin: 0; padding-left: 18px; }
+.mincave-update .mincave-release-notes :is(h1, h2, h3, h4) { color: #111; }
 .mincave-update-actions {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
   flex-wrap: wrap;
 }
+.mincave-update-actions .mincave-button {
+  min-width: 100px;
+  min-height: 39px;
+  padding: 10px 17px;
+  border-color: #dedff0;
+  font-size: 13px;
+  font-weight: 500;
+}
+.mincave-update-actions .mincave-button.primary { border-color: transparent; box-shadow: 0 3px 9px #7561fc17; }
+.mincave-update-actions .mincave-button.primary:hover:not(:disabled) {
+  background: var(--gradient);
+  border-color: transparent;
+  box-shadow: 0 4px 13px #7561fc30;
+}
+.mincave-update-actions .mincave-button.primary:disabled {
+  background: #ece8fa;
+  color: #111;
+  border-color: #e0daef;
+  opacity: 1;
+  box-shadow: 0 3px 9px #7561fc17;
+}
+.mincave-update-ready { display: flex; flex-direction: column; gap: 11px; }
+.mincave-update-ready > strong { font-size: 17px; }
+.mincave-update-ready code { font-size: 12px; overflow-wrap: anywhere; }
 .mincave-update-error {
   color: #a5283d;
   font-size: 12px;
   overflow-wrap: anywhere;
 }
 .mincave-download {
-  font-size: 11px;
+  font-size: 12px;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 12px;
+  padding: 8px 0;
 }
+.mincave-download-label { display: flex; justify-content: space-between; gap: 15px; }
+.mincave-download-label strong { font-size: 12px; font-weight: 500; }
+.mincave-download-label > span { font-variant-numeric: tabular-nums; }
 .mincave-progress {
   background: #ecebf5;
   border-radius: 8px;

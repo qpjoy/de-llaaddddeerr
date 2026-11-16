@@ -45,7 +45,6 @@ export function formatTransfer(bytes: number | undefined): string {
 }
 
 export function updateStage(status: string | undefined): number {
-  if (['staged', 'ready-to-install', 'installer-opened'].includes(status || '')) return 2;
-  if (status === 'downloading') return 1;
+  if (['staged', 'ready-to-install', 'installer-opened', 'applied'].includes(status || '')) return 1;
   return 0;
 }
