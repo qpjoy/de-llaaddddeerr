@@ -2648,27 +2648,27 @@ function listenForFeishuCallback(flow) {
 
 function handleFeishuCallbackRequest(flow, request, response) {
   if (request.method !== 'GET') {
-    writeFeishuCallbackResponse(response, 405, '请求方式不受支持', '请返回 MX-H2I 重新发起飞书登录。');
+    writeFeishuCallbackResponse(response, 405, '请求方式不受支持', '请返回 MinCave 重新发起飞书登录。');
     return;
   }
   let callback;
   try {
     callback = new URL(request.url || '/', flow.redirectUri);
   } catch {
-    writeFeishuCallbackResponse(response, 400, '回调地址无效', '请返回 MX-H2I 重新发起飞书登录。');
+    writeFeishuCallbackResponse(response, 400, '回调地址无效', '请返回 MinCave 重新发起飞书登录。');
     return;
   }
   const expectedCallback = new URL(flow.redirectUri);
   if (callback.origin !== expectedCallback.origin || callback.pathname !== FEISHU_CALLBACK_PATH) {
-    writeFeishuCallbackResponse(response, 404, '不是 MX-H2I 飞书回调', '此本地地址仅用于飞书登录。');
+    writeFeishuCallbackResponse(response, 404, '不是 MinCave 飞书回调', '此本地地址仅用于飞书登录。');
     return;
   }
   if (pendingFeishuLogin !== flow) {
-    writeFeishuCallbackResponse(response, 410, '登录请求已结束', '可以关闭此页面并返回 MX-H2I。');
+    writeFeishuCallbackResponse(response, 410, '登录请求已结束', '可以关闭此页面并返回 MinCave。');
     return;
   }
   if (flow.callbackAccepted) {
-    writeFeishuCallbackResponse(response, 410, '登录回调已处理', '可以关闭此页面并返回 MX-H2I。');
+    writeFeishuCallbackResponse(response, 410, '登录回调已处理', '可以关闭此页面并返回 MinCave。');
     return;
   }
   const returnedState = nullableString(callback.searchParams.get('state'));
@@ -2691,12 +2691,12 @@ function handleFeishuCallbackRequest(flow, request, response) {
   }
   const code = feishuAuthorizationCodeFromRawUrl(request.url);
   if (!code) {
-    writeFeishuCallbackResponse(response, 400, '飞书没有返回授权码', '请返回 MX-H2I 重新发起登录。');
+    writeFeishuCallbackResponse(response, 400, '飞书没有返回授权码', '请返回 MinCave 重新发起登录。');
     void rejectFeishuCallback(flow, 'missing-code');
     return;
   }
   flow.stage = 'exchanging-token';
-  writeFeishuCallbackResponse(response, 200, '飞书授权已完成', 'MX-H2I 正在验证身份并准备员工网络，可以关闭此页面。');
+  writeFeishuCallbackResponse(response, 200, '飞书授权已完成', 'MinCave 正在验证身份并准备员工网络，可以关闭此页面。');
   broadcastState();
   void completeFeishuLogin(flow, code);
 }
@@ -2909,7 +2909,7 @@ function writeFeishuCallbackResponse(response, statusCode, title, message) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'" />
-  <title>MX-H2I 飞书登录</title>
+  <title>MinCave 飞书登录</title>
   <style>body{margin:0;background:#171922;color:#eef1f3;font:16px/1.6 system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}.card{max-width:520px;margin:24px;padding:32px;border:1px solid #334057;border-radius:16px;background:#222633}h1{margin:0 0 12px;font-size:24px}p{margin:0;color:#aeb6c4}</style>
 </head>
 <body><main class="card"><h1>${escapeHtmlText(title)}</h1><p>${escapeHtmlText(message)}</p></main></body>
