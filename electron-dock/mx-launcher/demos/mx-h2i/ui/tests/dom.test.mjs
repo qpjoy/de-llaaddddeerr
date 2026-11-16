@@ -529,7 +529,7 @@ test('notifications show real version updates and reopen the existing download f
     assert.equal(h.document.querySelector('dialog [data-action="applyUpdate"]'), null);
     await h.click('查看更新');
     assert.equal(h.document.querySelectorAll('dialog').length, 1);
-    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '版本更新');
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '发现新版本');
     assert.match(h.document.querySelector('dialog').textContent, /版本更新说明/);
     await h.click('下载更新');
     assert.ok(h.calls.includes('applyUpdate'));
@@ -598,6 +598,8 @@ test('updates retain their dialog during download and use the native restart act
   });
   try {
     await waitFor(() => assert.equal(h.document.querySelector('dialog')?.open, true));
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '发现新版本');
+    assert.equal(h.document.querySelector('dialog [data-action="checkUpdates"]'), null);
     await h.click('下载更新');
     await waitFor(() => {
       assert.equal(h.document.querySelector('dialog')?.open, true);
@@ -606,17 +608,70 @@ test('updates retain their dialog during download and use the native restart act
         '12.5',
       );
     });
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '正在下载更新');
     assert.ok(!h.document.body.textContent.includes('取消下载'));
     h.emit({
       update: { ...state.update, status: 'staged', restartPrompt: true, restartRequired: true },
     });
-    await waitFor(() => assert.equal(h.button('重新启动').disabled, false));
-    await h.click('重新启动');
+    await waitFor(() => assert.equal(h.button('安装并重新启动').disabled, false));
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '更新已下载');
+    assert.equal(h.document.querySelector('dialog [data-action="applyUpdate"]'), null);
+    await h.click('安装并重新启动');
     await waitFor(() => assert.ok(h.calls.includes('restartApp')));
     await h.click('关闭弹窗');
     await waitFor(() => assert.equal(h.document.querySelector('dialog'), null));
     assert.deepEqual(h.errors, []);
   } finally {
+    h.dom.window.close();
+  }
+});
+
+test('update dialog preserves download retry, installer recovery and release restrictions', async () => {
+  const state = runtimeFixture();
+  state.update = {
+    ...state.update,
+    status: 'download-failed',
+    latestVersion: '2.1.21',
+    artifactUrl: 'https://download.example.test/MinCave.exe',
+    reason: '网络中断',
+    stagedPath: 'C:\\Users\\private-account\\Downloads\\MinCave.exe',
+  };
+  let installerOpens = 0;
+  let restartFinish;
+  const h = await mount(state, true, {
+    applyUpdate: async () => { installerOpens++; return state; },
+    restartApp: () => new Promise((resolve) => { restartFinish = () => resolve(state); }),
+  });
+  try {
+    await h.click('通知');
+    await h.click('查看更新');
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '下载未完成');
+    assert.equal(h.document.querySelector('[role="alert"]').textContent, '网络中断');
+    await h.click('重试下载');
+    assert.equal(installerOpens, 1);
+    h.emit({ update: { ...state.update, status: 'ready-to-install', installerOpenError: '打开失败' } });
+    await tick();
+    assert.equal(h.document.querySelector('.mincave-update-ready code').textContent, 'MinCave.exe');
+    assert.ok(!h.document.querySelector('dialog').textContent.includes('private-account'));
+    assert.ok(h.button('打开文件夹'));
+    await h.click('安装更新');
+    assert.equal(installerOpens, 2);
+    h.emit({ update: { ...state.update, status: 'installer-opened', restartPrompt: true } });
+    await tick();
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '安装包已打开');
+    await h.click('重新启动');
+    assert.equal(h.document.querySelector('dialog').getAttribute('aria-label'), '准备重新启动');
+    assert.ok(h.button('重新启动中…').disabled);
+    restartFinish();
+    await tick();
+    h.emit({ update: { ...state.update, status: 'blocked', reason: '暂不可安装', restartPrompt: true } });
+    await tick();
+    assert.equal(h.document.querySelector('dialog [data-action="applyUpdate"]'), null);
+    assert.equal(h.document.querySelector('dialog [data-action="restartApp"]'), null);
+    assert.match(h.document.querySelector('[role="alert"]').textContent, /暂不可安装/);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    restartFinish?.();
     h.dom.window.close();
   }
 });

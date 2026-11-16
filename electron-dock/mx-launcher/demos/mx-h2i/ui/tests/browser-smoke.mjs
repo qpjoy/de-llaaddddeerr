@@ -128,14 +128,14 @@ try {
   const release = runtimeFixture();
   release.update = { ...release.update, status: 'update-available', latestVersion: '2.1.21', artifactUrl: 'https://download.example.test/app.asar', artifactKind: 'app-asar', releaseNotes: '更新说明', deliveryMode: 'prompt-download-restart', activation: 'restart-auto' };
   const updates = await createPage(release);
-  await updates.getByRole('dialog', { name: '版本更新' }).waitFor();
+  await updates.getByRole('dialog', { name: '发现新版本' }).waitFor();
   await updates.getByRole('button', { name: '下载更新', exact: true }).click();
   await updates.getByRole('progressbar', { name: '更新下载进度' }).waitFor();
   assert.equal(await updates.getByRole('dialog').count(), 1);
   assert.equal(await updates.getByRole('button', { name: '取消下载', exact: true }).count(), 0);
   await updates.screenshot({ path: path.join(output, 'update-downloading.png') });
   await updates.evaluate(() => window.__finishDownload());
-  await updates.getByRole('button', { name: '重新启动', exact: true }).waitFor();
+  await updates.getByRole('button', { name: '安装并重新启动', exact: true }).waitFor();
   await updates.screenshot({ path: path.join(output, 'update-ready.png') });
   await updates.keyboard.press('Escape');
   assert.equal(await updates.getByRole('dialog').count(), 0);

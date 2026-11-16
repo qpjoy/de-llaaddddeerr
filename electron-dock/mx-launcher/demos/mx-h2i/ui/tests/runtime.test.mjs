@@ -207,8 +207,9 @@ test('wide window defaults, work-area clamps and custom resized bounds remain st
 test('network and update labels preserve degraded and staged semantics', () => {
   assert.equal(connectionLabel('tunnel-only'), '网络需要修复');
   assert.equal(connectionLabel('connected', false, true), '恢复已暂停');
-  assert.equal(updateStage('installer-opened'), 2);
-  assert.equal(updateStage('downloading'), 1);
+  assert.equal(updateStage('installer-opened'), 1);
+  assert.equal(updateStage('staged'), 1);
+  assert.equal(updateStage('downloading'), 0);
   assert.equal(formatTransfer(undefined), '');
   assert.equal(formatTransfer(0), '0 B');
 });

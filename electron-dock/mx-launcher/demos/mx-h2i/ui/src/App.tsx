@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { view, type CatalogApp, type Snapshot, type UpdateState } from './bridge';
+import { view, type CatalogApp, type Snapshot } from './bridge';
 import Icon from './Icon';
 import Devices from './Devices';
 import LegacyPanel from './LegacyPanel';
-import { categoryLabel, connectionLabel, formatTransfer, updateStage } from './model';
+import { categoryLabel, connectionLabel } from './model';
 import snake from './assets/snake.svg';
 import { workplaceApps } from './workplaceApps';
 import Modal from './Modal';
 import AdminConsole from './AdminConsole';
 import { adminPages, type AdminPage } from './admin';
 import UpdateNotifications, { hasUpdateNotification } from './UpdateNotifications';
+import UpdateDialog, { UpdateDetails } from './UpdateDialog';
 
 type Page = 'home' | 'devices' | 'settings' | 'updates' | 'advanced' | 'apps';
 
@@ -321,86 +322,6 @@ function Catalog({ snapshot }: { snapshot: Snapshot }) {
         </div>
       )}
     </section>
-  );
-}
-
-function UpdateDetails({ update, busy }: { update: UpdateState; busy: boolean }) {
-  const stage = updateStage(update.status);
-  const progress = update.downloadProgress;
-  const percent =
-    typeof progress?.percent === 'number' && Number.isFinite(progress.percent)
-      ? Math.max(0, Math.min(100, progress.percent))
-      : null;
-  return (
-    <div className="mincave-update">
-      <div className="mincave-version-row">
-        <span>
-          当前版本 <strong>{update.currentVersion || '正在读取'}</strong>
-        </span>
-        {update.latestVersion && update.latestVersion !== update.currentVersion && (
-          <span>
-            新版本 <strong>{update.latestVersion}</strong>
-          </span>
-        )}
-      </div>
-      <div className="mincave-update-steps">
-        {['发现更新', '下载与校验', '准备安装'].map((label, i) => (
-          <span key={label} className={stage >= i ? 'active' : ''}>
-            <i>{i + 1}</i>
-            {label}
-          </span>
-        ))}
-      </div>
-      {update.notesHtml && (
-        <LegacyPanel
-          html={update.notesHtml}
-          className="release-notes-markdown mincave-release-notes"
-        />
-      )}
-      {update.status === 'downloading' && (
-        <div className="mincave-download">
-          <div
-            className={`mincave-progress ${percent === null ? 'indeterminate' : ''}`}
-            role="progressbar"
-            aria-label="更新下载进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={percent ?? undefined}
-          >
-            <span style={{ width: percent === null ? '25%' : `${percent}%` }} />
-          </div>
-          <span>
-            {percent === null ? '正在下载' : `${percent}%`}
-            {progress?.bytes !== undefined ? ` · ${formatTransfer(progress.bytes)}` : ''}
-            {progress?.totalBytes ? ` / ${formatTransfer(progress.totalBytes)}` : ''}
-          </span>
-        </div>
-      )}
-      <div className="mincave-update-actions">
-        <button
-          className="mincave-button"
-          data-action="checkUpdates"
-          disabled={busy || update.status === 'downloading'}
-        >
-          检查更新
-        </button>
-        {update.canApply && (
-          <button className="mincave-button primary" data-action="applyUpdate">
-            {update.actionLabel}
-          </button>
-        )}
-        {update.stagedPath && (
-          <button className="mincave-button" data-action="showDownloadedInstaller" disabled={busy}>
-            打开文件夹
-          </button>
-        )}
-        {(update.restartPrompt || (update.status === 'staged' && update.restartRequired)) && (
-          <button className="mincave-button primary" data-action="restartApp" disabled={busy}>
-            重新启动
-          </button>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -750,7 +671,7 @@ export default function App() {
                       <section className="mincave-panel">
                         <UpdateDetails
                           update={snapshot.update}
-                          busy={Boolean(snapshot.busyAction)}
+                          busyAction={snapshot.busyAction}
                         />
                       </section>
                       <LegacyPanel html={snapshot.update.historyHtml} trimHints />
@@ -787,26 +708,14 @@ export default function App() {
         </Modal>
       )}
       {updateOpen && (
-        <Modal
-          title="版本更新"
+        <UpdateDialog
+          update={snapshot.update}
+          busyAction={snapshot.busyAction}
           onClose={() => {
             setUpdateOpen(false);
             view.dismissRelease();
           }}
-        >
-          <UpdateDetails update={snapshot.update} busy={Boolean(snapshot.busyAction)} />
-          <div className="mincave-modal-footer">
-            <button
-              className="mincave-text-button"
-              onClick={() => {
-                setUpdateOpen(false);
-                view.dismissRelease();
-              }}
-            >
-              稍后
-            </button>
-          </div>
-        </Modal>
+        />
       )}
     </>
   );
