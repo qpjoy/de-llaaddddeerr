@@ -15,10 +15,11 @@ const platform = normalizePlatform(requiredArg('platform', args.platform ?? proc
 // the installed base. Match the macOS/Windows convenience scripts' defaults.
 const arch = normalizeArch(requiredArg('arch', args.arch ?? (platform === 'darwin' ? 'universal' : 'x64')));
 const packageJson = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8'));
+const { productName } = require('../electron-builder.config.cjs');
 const version = normalizeVersion(requiredArg('version', args.version ?? packageJson.version));
 const outputDir = path.resolve(projectDir, args.outputDir || 'out/release-asar');
 const stagingDir = path.join(outputDir, `.staging-${process.pid}-${platform}-${arch}`);
-const fileName = `MX-H2I-${version}-${platform}-${arch}-app.asar`;
+const fileName = `${productName}-${version}-${platform}-${arch}-app.asar`;
 const outputPath = path.join(outputDir, fileName);
 
 await mkdir(outputDir, { recursive: true });
