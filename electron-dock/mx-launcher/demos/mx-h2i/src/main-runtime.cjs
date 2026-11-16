@@ -3337,7 +3337,7 @@ function shouldPersistWindowBounds() {
   if (activeWindowDrag) return false;
   if (!runtime || !mainWindow || mainWindow.isDestroyed()) return false;
   if (mainWindow.isMinimized()) return false;
-  if (MINCAVE_UI_ENABLED && mainWindow.isMaximized()) return false;
+  if (MINCAVE_UI_ENABLED && (mainWindow.isMaximized() || mainWindow.isFullScreen())) return false;
   if (currentWindowMode === 'launcher' && (isTopHidden || isTopHideAnimating || isTopDocked || topDockHidePending || topAnimationTimer)) {
     return false;
   }
@@ -3549,6 +3549,23 @@ function hideToTopEdge(options = {}) {
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createMainWindow();
+    return;
+  }
+  if (MINCAVE_UI_ENABLED) {
+    // Dock activation must use the native normal size, not legacy launcher
+    // bounds or a stale top-edge drag snapshot. Minimized bounds may be transient.
+    const normalBounds = mainWindow.getNormalBounds();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    if (!mainWindow.isMaximized() && !mainWindow.isFullScreen()) {
+      applyWindowModeChrome(currentWindowMode);
+      const targetBounds = constrainWindowBounds(normalBounds, currentWindowMode);
+      if (!sameBounds(targetBounds, mainWindow.getBounds())) {
+        setWindowBoundsWithoutTracking(targetBounds);
+      }
+      rememberWindowBoundsForMode(currentWindowMode, targetBounds);
+    }
+    mainWindow.focus();
     return;
   }
   isTopHidden = false;

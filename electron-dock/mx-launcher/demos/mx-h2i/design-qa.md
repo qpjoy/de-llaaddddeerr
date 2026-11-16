@@ -197,3 +197,14 @@ MinCave 仅允许飞书登录的明悉科技成员，用户中心新增独立的
 用生产构建在隔离窗口注入 `platform: win32` 检查视觉，默认与聚焦局部证据分别为 `out/ui-qa/windows-controls/default-buttons.png`、`focused-buttons.png`；检查了颜色、圆角、边框、图标居中和可见性。此为 macOS 上的 Windows 模式 Chromium 渲染预览，未声称 Windows 实机或原生窗口操作验收。预览只使用隔离测试数据，按钮 IPC 在自动化中验证原调用；独立进程已退出，临时启动入口已还原。
 
 完整 demo `pnpm check` 及 53 项 UI／桥接测试通过，包含 Windows 三项窗口操作、macOS 登录页和工作台不出现重复控件、各平台主进程窗口配置。未修改网络、登录、更新或后端接口；本轮 macOS／Windows 窗口按钮调整的提交与推送状态以功能分支为准。
+
+
+### macOS 程序坞恢复窗口尺寸（2026-11-16）
+
+用户反馈最小化后从程序坞打开，宽版界面缩成接近方形；关闭后重新创建窗口正常。回归测试确认旧 `showMainWindow()` 使用 `bounds.launcher`／`lastVisibleBounds`，将旧窄窗口宽度 462 限制到 MinCave 最小宽度 760，结果把正常 1120×760 改成 760×760 并触发窄屏布局。修复后 MinCave 读取 Electron 原生 `getNormalBounds()`，先恢复最小化窗口，保留用户尺寸和位置；超出工作区才约束。最大化／全屏不强行重设或持久化特殊尺寸，旧窄版路径保留。
+
+验证：新增 5 项行为回归，覆盖重复最小化恢复、尚未持久化的手动调整、最大化／全屏、较小显示器约束及旧版路径。旧代码 4 项失败、旧版兼容项通过；修复后 5 项通过。完整 `pnpm check` 通过，共 60 项 UI／桥接测试。
+
+原生验收使用独立签名副本和私有测试数据目录，载入实际生产 UI、当前窗口函数与真实 BrowserWindow，注入旧窄版记录及测试员工数据；不加载真实登录／网络运行时。连续两次原生最小化及 activate/restore 后，四条恢复完成记录均为 1120×760，工作台和侧栏保持宽版布局。证据：`out/ui-qa/window-restore/before.png`、`after.png`、`native-observations.jsonl`。没有重启已安装客户端或改变账号／系统网络。
+
+修复涉及主进程，完整包或 ASAR 更新后需要重启客户端生效；Windows 原生恢复未实机验收。

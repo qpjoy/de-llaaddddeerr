@@ -444,3 +444,5 @@ MinCave 的 macOS 窗口采用 Electron `titleBarStyle: hiddenInset` 原生标�
 
 
 Windows 的 MinCave 页面窗口按钮也统一为 macOS 风格：左上红／黄／绿圆点，默认显示颜色，悬停或键盘聚焦显示关闭／最小化／缩放图标，按下时加深颜色。Windows 仍使用原有 `close`／`minimize`／`zoom` IPC，绿色按钮执行最大化或还原，不加载 macOS 原生 API。macOS 保持上文的系统原生控件；不重复绘制页面按钮。
+
+MinCave 从 macOS 程序坞、托盘或第二实例唤醒时使用原生正常窗口尺寸（`getNormalBounds()`），不再读取旧版 `bounds.launcher` 或顶部拖动快照。最小化恢复保留手动调整后的尺寸和位置，仅在超出当前显示器工作区时约束；最大化和全屏状态不重设或持久化特殊尺寸。此修复在主进程中，完整包或 ASAR 更新后需重启客户端生效。
