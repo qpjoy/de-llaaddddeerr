@@ -18,6 +18,8 @@
 
 ## 架构与历史专题
 
+- [62 · Oversea 换机同 IP 的 SSH 恢复](62-oversea-ssh-server-replacement.md)：`mx-oversea-us01` 的无重启 known_hosts 修复、按需补公钥授权，以及 Launcher 现有 Refresh Host Key / Bootstrap Key 流程；不改变正常新机 Bootstrap。
+
 - [60 · Launcher 间歇慢与 504 排查](60-launcher-504-triage-2026-10-27.md)：10 月 27 日日志确认公网 Nginx 到 Internal :80 建连超时，23:34 容器探针恢复，底层原因待查；含只读采集、恢复分支及后台数据库异常退出 API 的独立本地修复。
 
 本目录同时保存历史方案、当前实现基线和目标架构。涉及 MX-H2I 网络行为时，优先按以下

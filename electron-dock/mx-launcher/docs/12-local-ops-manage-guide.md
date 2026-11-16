@@ -361,6 +361,11 @@ Config Center。K8s Shadow 默认关闭真实密码注入，做真机 bootstrap 
 bash scripts/manage.sh ops k8s-shadow ssh-bootstrap enable
 ```
 
+更换服务器但 IP 不变时，需要更新的是 `known_hosts` 中的服务器公钥，而不是地址。
+现有 `Refresh Host Key` 可重新扫描；新机未授权原 Launcher 公钥时，再用 `Bootstrap Key`
+补授权并保持 Rotate 不勾选。若只需要原地修改本站 SSH 文件，见
+[无重启 K8s SSH 恢复步骤](62-oversea-ssh-server-replacement.md)，无需改 Launcher 功能或新服务器接入流程。
+
 完成 key 注入后，回到 Admin 执行 `Check Readiness`，再走 `Create Plan -> Preflight ->
 Confirm Apply -> Runner -> Worker Job -> Worker Run -> Evidence`。如果 key 失效或重装机器，
 重新输入 username/password 再点一次 `Bootstrap Key` 即可复写远端公钥。bootstrap 完成后
