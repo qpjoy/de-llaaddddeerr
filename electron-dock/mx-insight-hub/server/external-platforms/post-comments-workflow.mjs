@@ -46,8 +46,11 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
     previousDeliveryId, importedContinuation, legacyProviderCursor, deliveryMode: 'live_only',
     // TikHub pages without a trusted end flag buy one page per request. Zhihu
     // still relays Zhihu's own is_end, so it keeps filling count as before.
+    // Twitter AIO replies are uncalibrated: continuation is explicit, never
+    // an automatic second purchase to fill the requested count.
     // Threads: no live page has proven end_cursor yet, so never auto-buy one.
-    manualProviderPagination: ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform) && recipe.provider === 'tikhub' || request.platform === 'threads',
+    manualProviderPagination: ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform) && recipe.provider === 'tikhub'
+      || request.platform === 'twitter' && recipe.provider === 'rapidapi' || request.platform === 'threads',
     fingerprintBody: { ...identity, initialParams: request.initialParams ?? null, cursor: request.cursor ?? null },
     encodeNext: deliveryId => codec.encode({ version: POST_COMMENTS_VERSION, scopeHash, provider: recipe.provider,
       page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }
@@ -58,7 +61,11 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
 const REPLY_PLATFORMS = new Set(commentRoutePlatforms('comment-replies'))
 // Reddit names a comment's hidden replies by its tree cursor, carried here too.
 const withReplyRef = (platform, row) => REPLY_PLATFORMS.has(platform) && row.commentId
-  ? { ...row, replyRef: { platform, commentId: row.commentId, contentId: row.contentId ?? null, ...(row.replyCursor ? { cursor: row.replyCursor } : {}) } } : row
+  ? { ...row, replyRef: { platform, commentId: row.commentId,
+    // A Twitter post-comments target may itself be a reply. Keep the delivered
+    // target identity, but replies need the conversation's actual root post.
+    contentId: platform === 'twitter' ? row.conversationId ?? row.contentId ?? null : row.contentId ?? null,
+    ...(row.replyCursor ? { cursor: row.replyCursor } : {}) } } : row
 
 export function postCommentsDeliveryBody(request, { rowsByJob, state, calls, warnings, deliveryId }) {
   const job = state.jobs[0], items = rowsByJob[0].map(row => withReplyRef(request.platform, row))

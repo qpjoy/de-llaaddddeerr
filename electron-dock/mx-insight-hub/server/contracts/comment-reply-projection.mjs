@@ -1,5 +1,6 @@
 import { AppError } from '../core/errors.mjs'
 import { parseTikHubTwitterCommentPage } from './twitter-comment-page.mjs'
+import { parseRapidApiTwitterCommentPage } from './twitter-rapid-comment-page.mjs'
 import { parseTikHubWeiboCommentPage } from './weibo-comment-page.mjs'
 import { parseTikHubRedditCommentPage } from './reddit-comment-page.mjs'
 import { parseTikHubKuaishouReplyPage } from './kuaishou-comment-page.mjs'
@@ -62,6 +63,15 @@ function twitter(payload, request, continuation, capturedAt) {
   if (request.contentId && scalar(payload.data?.conversation_id) !== request.contentId) unusable()
   const rows = parsed.comments.map(({ raw, values }) => postCommentItem(itemRequest(request, contentId), values, raw, capturedAt))
   return finish(request, { rows, raws: parsed.comments.map(row => row.raw), providerPage: parsed.providerPage, capturedAt, provider: 'tikhub', contentId })
+}
+function twitterRapidApi(payload, request, continuation, capturedAt) {
+  let parsed
+  try { parsed = parseRapidApiTwitterCommentPage(payload, request.commentId, continuation) } catch { unusable() }
+  if (request.contentId && parsed.conversationId && request.contentId !== parsed.conversationId) unusable()
+  const contentId = request.contentId ?? parsed.conversationId
+  const rows = parsed.comments.map(({ raw, values }) => postCommentItem(itemRequest(request, contentId), values, raw, capturedAt))
+  return finish(request, { rows, raws: parsed.comments.map(row => row.raw), providerPage: parsed.providerPage,
+    capturedAt, provider: 'rapidapi', contentId })
 }
 function weibo(payload, request, continuation, capturedAt) {
   let parsed
@@ -195,6 +205,7 @@ export function projectCommentReplyPage(payload, step, { capturedAt }) {
     throw new AppError(503, 'external_platform_contract_unverified', 'This platform reply response requires calibration')
   }
   if (request.platform === 'threads') return threads(payload, request, continuation, capturedAt, step.provider)
+  if (request.platform === 'twitter' && step.provider === 'rapidapi') return twitterRapidApi(payload, request, continuation, capturedAt)
   if (!object(payload) || step.provider !== 'tikhub' || payload.code !== 200) unusable()
   if (request.platform === 'twitter') return twitter(payload, request, continuation, capturedAt)
   if (request.platform === 'weibo') return weibo(payload, request, continuation, capturedAt)

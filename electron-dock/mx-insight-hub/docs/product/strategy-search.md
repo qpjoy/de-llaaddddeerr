@@ -188,3 +188,11 @@ MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-p
 `nightAllRequests` 仅计存在关联 `serving.connector_calls` 证据的业务请求；同一请求有多条旧连接器证据仍只计一次。这是进入旧适配器的已记录请求证据，不是供应商付费派发次数，也不是完整迁移率。部分历史 `/data/search` 分支没有写此连接器记录；没有关联证据不能反推它由 Hub 原生执行。停用 Night-All 或特定旧 URL 前仍需结合足够时间的访问日志、客户端迁移情况和对应调用证据确认。
 
 新增只读 `/internal/v1/admin/strategy-search/data-statistics?days=7` 将每日新增 canonical 对象、内容更新、版本和观察与接口调用数分开。该看板仅覆盖有入库链路的子集，Twitter 专用社交接口和微信原生转发当前不自动入 canonical；内存模式明确不可用。完整调用链、Night-All 自存限制、指标去重与退役条件见 [策略接口、持久化与每日入库统计](strategy-search-data-flow.md)。
+
+## Twitter 评论与回复默认 RapidAPI（2026-11-17）
+
+帖子评论与评论回复现在都提供 RapidAPI，并以 RapidAPI 优先、TikHub 保底作为默认策略；复用现有 Twitter AIO 的 `/tweet/{tweetId}/replies` 和 RapidAPI 凭据。标准搜索、账号内容和账号资料沿用既有 RapidAPI 路由。管理页继续支持固定、优先与保底、暂停；帖子评论也保留 JustOne 选项。
+
+迁移 191 仅更新未修改的 migration-181 默认配置，保留人工已保存策略及审计、历史结果和原供应商游标。RapidAPI 每次最多采购一页，不为填满 `count` 自动补买；仅在首次派发前未就绪时走 TikHub，派发后不自动换供应商重购。回复结构依据供应商公开合同适配，标记为 `derived`，首个正常生产业务页仍待核对。
+
+本轮本地验证完成、尚未部署。新增操作的就绪与发布流程、采购估算价格及只读验收见 [Twitter RapidAPI 评论接入记录](../operations/twitter-rapid-comments-2026-11-17.md)。

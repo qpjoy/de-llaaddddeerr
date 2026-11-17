@@ -5,6 +5,7 @@ import { canonicalJson } from '../ingest/normalizers.mjs'
 import { projectXhsResearch, XHS_RESEARCH_ENDPOINTS } from './xiaohongshu-research.mjs'
 import { projectYoutubeCommentsPage } from './youtube-comments.mjs'
 import { parseTikHubTwitterCommentPage } from './twitter-comment-page.mjs'
+import { parseRapidApiTwitterCommentPage } from './twitter-rapid-comment-page.mjs'
 import { parseTikHubRedditCommentPage } from './reddit-comment-page.mjs'
 import { parseTikHubKuaishouCommentPage } from './kuaishou-comment-page.mjs'
 import { parseTikHubWeiboCommentPage } from './weibo-comment-page.mjs'
@@ -106,6 +107,15 @@ function twitterTikHub(payload, step, capturedAt) {
   const rows = parsed.comments.map(({ raw, values }) => item(request, values, raw, capturedAt))
   return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
     records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, 'tikhub')) }
+}
+function twitterRapidApi(payload, step, capturedAt) {
+  const { request, continuation = null } = step.postComments
+  let parsed
+  try { parsed = parseRapidApiTwitterCommentPage(payload, request.postId, continuation) }
+  catch { unusable() }
+  const rows = parsed.comments.map(({ raw, values }) => item(request, values, raw, capturedAt))
+  return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
+    records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, 'rapidapi')) }
 }
 function redditTikHub(payload, step, capturedAt) {
   const { request, continuation = null } = step.postComments
@@ -378,6 +388,7 @@ export function projectPostCommentPage(payload, step, { capturedAt }) {
   // before any call. A supplier without a parser for this platform fails closed.
   const provider = step.provider
   if (request.platform === 'threads') return threadsComments(payload, step, capturedAt)
+  if (request.platform === 'twitter' && provider === 'rapidapi') return twitterRapidApi(payload, step, capturedAt)
   if (!JUSTONE_PLATFORMS.has(request.platform) && provider === 'justone' || !TIKHUB_PLATFORMS.has(request.platform) && provider === 'tikhub'
     || !['justone', 'tikhub'].includes(provider)) unusable()
   if (provider === 'justone') return justOne(payload, step, capturedAt)

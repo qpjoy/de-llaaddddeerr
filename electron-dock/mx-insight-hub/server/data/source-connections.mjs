@@ -117,7 +117,7 @@ export function implementedRoutes(sources = []) {
       : '现行历史帖子详情兼容入口；平台支持取自 Hub 固定合同，实时可用性待请求验证。',
     evidence: 'server/contracts/night-all-post-detail.mjs',
   }))
-  const verificationLabel = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '沿用同平台已校准结构，首个生产页待核对', pending: '待校准，暂不派发' }
+  const verificationLabel = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '按已知合同结构适配，首个生产页待核对', pending: '待校准，暂不派发' }
   for (const [platform, recipes] of Object.entries(POST_COMMENT_PROVIDER_RECIPES)) for (const recipe of Object.values(recipes)) rows.push(route(`hub-${platform}-post-comments-${recipe.provider}`, {
     platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: recipe.provider,
     product: '社交内容与账号', operation: POST_COMMENTS_CAPABILITY, path: POST_COMMENTS_PATH,

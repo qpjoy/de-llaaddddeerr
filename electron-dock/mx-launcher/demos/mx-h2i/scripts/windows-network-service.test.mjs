@@ -37,14 +37,25 @@ test('Windows installation ACL policy accepts safe secondary-drive paths and rej
   // Execute the exact installer functions against a deterministic in-memory
   // filesystem/ACL fixture. No real services, folders or permissions change.
   const scenario = `
-function Get-Item { param($LiteralPath, [switch]$Force) [pscustomobject]@{Attributes=0;PSIsContainer=$false} }
+$script:itemAttributes=[IO.FileAttributes]::Directory
+function Get-Item { param($LiteralPath, [switch]$Force) [pscustomobject]@{Attributes=$script:itemAttributes;PSIsContainer=$false} }
 function Get-Acl { param($LiteralPath)
   $sddl = if ($LiteralPath -eq 'D:\\Apps') { $script:parentAcl } else { 'O:BAG:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)' }
   $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetSecurityDescriptorSddlForm($sddl);return $acl
 }
-$script:parentAcl='O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)'
-Assert-InstallAcl 'D:\\Apps' $true
+foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)','O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)(A;OICIIO;FA;;;CO)')) {
+  $script:parentAcl=$sddl
+  Assert-InstallAcl 'D:\\Apps' $true
+}
 Assert-InstallTree 'D:\\Apps\\MinCave'
+$script:itemAttributes=[IO.FileAttributes]([int][IO.FileAttributes]::Directory -bor [int][IO.FileAttributes]::ReparsePoint)
+$rejected=$false
+try { Assert-InstallAcl 'D:\\Apps\\link' $false } catch {
+  if($_.Exception.Message -ne 'Links and junctions are not supported.'){throw}
+  $rejected=$true
+}
+if(-not $rejected){throw 'Reparse-point attributes accepted'}
+$script:itemAttributes=[IO.FileAttributes]::Directory
 foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x40;;;BU)','O:BAG:BAD:(A;;FA;;;BA)(A;;0x100;;;BU)','O:S-1-5-21-1-2-3-1000G:BAD:(A;;FA;;;BA)')) {
   $script:parentAcl=$sddl;$rejected=$false
   try { Assert-InstallAcl 'D:\\Apps' $true } catch { $rejected=$true }
@@ -59,7 +70,14 @@ foreach($value in @('\\\\server\\share\\MinCave','D:\\','D:\\Apps.\\MinCave','D:
   const source = script + '\n' + scenario;
   const env = { ...process.env };
   delete env.MINCAVE_INSTALL_DIRECTORY;
-  const result = execFileSync(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { env, windowsHide: true, timeout: 30000, encoding: 'utf8' });
+  let result;
+  try {
+    result = execFileSync(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { env, windowsHide: true, timeout: 30000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    // execFileSync's default message includes the entire encoded script.
+    // Preserve the actual failure without flooding the packaging log.
+    throw new Error(`Windows PowerShell installation ACL policy failed (exit ${error.status ?? error.code}):\n${String(error.stderr || error.stdout || '').slice(-6000)}`);
+  }
   assert.equal(result, 'directory-policy-ok');
 });
 

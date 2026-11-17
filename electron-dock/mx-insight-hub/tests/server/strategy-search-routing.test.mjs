@@ -345,3 +345,66 @@ test('Threads migrations preserve reviewed routes and register separately priced
   assert.deepEqual(await store.get('search', 'threads'), selected)
   assert.deepEqual((await legacyRoutes()).rows, previous)
 })
+
+test('Twitter comment migration changes only untouched defaults and preserves operator state on repeat', {
+  skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE,
+}, async t => {
+  const { PGlite } = await import(pathToFileURL(process.env.MX_INSIGHT_TEST_PGLITE_MODULE).href)
+  const migration = name => readFile(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8')
+  for (const reviewed of [false, true]) {
+    const db = new PGlite()
+    t.after(() => db.close())
+    await db.exec('CREATE SCHEMA control')
+    const schema = await migration('060_external_platform_operation_control')
+    await db.exec(schema.slice(schema.indexOf('CREATE TABLE IF NOT EXISTS control.external_platform_provider_price_books'),
+      schema.indexOf('CREATE OR REPLACE FUNCTION control.reject_external_platform_append_only_mutation')))
+    await db.exec("INSERT INTO control.external_platform_provider_price_books(provider_key,version,source,status) VALUES('rapidapi',0,'legacy_environment','inherited')")
+    for (const name of ['150_strategy_search_routes', '160_twitter_strategy_search', '170_facebook_account_business_pause',
+      '181_comment_strategy_routes', '188_threads_strategy_routes', '189_threads_scraper_search', '190_threads_scraper_account_detail']) {
+      await db.exec(await migration(name))
+    }
+    const query = (sql, values) => db.query(sql, values)
+    const store = new StrategySearchRoutingStore({ query, connect: async () => ({ query, release() {} }) })
+    if (reviewed) {
+      await store.update('post-comments', 'twitter', change({ primaryProvider: 'justone' }))
+      await store.update('comment-replies', 'twitter', change({ mode: 'paused' }))
+    }
+    const routes = async () => (await db.query('SELECT * FROM control.strategy_search_routes ORDER BY interface_key,platform')).rows
+    const events = async () => (await db.query('SELECT * FROM control.strategy_search_route_events ORDER BY id')).rows
+    const before = await routes(), priorEvents = await events()
+    const upgrade = await migration('191_twitter_rapidapi_comments')
+    await db.exec(upgrade)
+    const after = await routes(), audit = await events()
+    const isTwitterComment = row => row.platform === 'twitter' && ['post-comments','comment-replies'].includes(row.interface_key)
+    assert.deepEqual(after.filter(row => !isTwitterComment(row)), before.filter(row => !isTwitterComment(row)))
+    assert.deepEqual(audit.slice(0, priorEvents.length), priorEvents, 'historical audit snapshots stay immutable')
+    if (reviewed) {
+      assert.deepEqual(after, before, 'manual fixed and paused choices are not deployment defaults')
+      assert.deepEqual(audit, priorEvents)
+    } else {
+      assert.deepEqual(after.filter(isTwitterComment).map(row => [row.interface_key,row.mode,row.primary_provider,row.fallback_provider,row.revision]),
+        ['comment-replies','post-comments'].map(id => [id,'priority','rapidapi','tikhub',2]))
+      assert.deepEqual(audit.slice(priorEvents.length).map(row => [row.actor,row.revision,row.policy.primaryProvider]),
+        [['migration-191',2,'rapidapi'],['migration-191',2,'rapidapi']])
+      await assert.rejects(store.update('post-comments', 'twitter', change()), { code: 'strategy_search_route_revision_conflict' })
+    }
+    for (const interfaceId of ['post-comments','comment-replies']) {
+      await assert.rejects(db.query(`UPDATE control.strategy_search_routes SET primary_provider='rapidapi'
+        WHERE interface_key=$1 AND platform='douyin'`, [interfaceId]))
+    }
+    const operationKey = 'native.r.twitter_aio_tweet_replies'
+    const release = (await db.query('SELECT * FROM control.external_platform_operation_releases WHERE operation_key=$1', [operationKey])).rows[0]
+    assert.deepEqual([release.provider_key,release.endpoint_keys,release.price_book_version], ['rapidapi',[operationKey],0])
+    const policy = (await db.query('SELECT * FROM control.external_platform_operation_policies WHERE operation_key=$1', [operationKey])).rows[0]
+    assert.deepEqual([policy.desired_state,policy.revision,policy.updated_by], ['disabled',1,'migration-191'])
+    const operationAudit = (await db.query('SELECT * FROM control.external_platform_operation_policy_events WHERE operation_key=$1', [operationKey])).rows
+    assert.equal(operationAudit.length, 1)
+    await db.query("UPDATE control.external_platform_operation_policies SET desired_state='paused',revision=2 WHERE operation_key=$1", [operationKey])
+    await db.exec(upgrade)
+    assert.deepEqual(await routes(), after)
+    assert.deepEqual(await events(), audit)
+    const preserved = (await db.query('SELECT * FROM control.external_platform_operation_policies WHERE operation_key=$1', [operationKey])).rows[0]
+    assert.deepEqual([preserved.desired_state,preserved.revision], ['paused',2], 'rerun never re-enables a reviewed operation')
+    assert.deepEqual((await db.query('SELECT * FROM control.external_platform_operation_policy_events WHERE operation_key=$1', [operationKey])).rows, operationAudit)
+  }
+})

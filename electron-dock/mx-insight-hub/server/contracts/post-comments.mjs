@@ -31,6 +31,7 @@ const definitions = [
 // Alternative suppliers selectable through Strategy Search routing. JustOne
 // rows reuse the layouts calibrated from its official samples on 2026-11-02.
 const alternatives = [
+  ['twitter', 'rapidapi', '/tweet/{tweetId}/replies', 'tweetId', ['cursor'], []],
   ['twitter', 'justone', '/api/twitter/get-post-comments/v1', 'tweetId', ['cursor'], []],
   ['reddit', 'justone', '/api/reddit/get-post-comments/v1', 'postId', ['cursor'], []],
   ['kuaishou', 'justone', '/api/kuaishou/get-video-comment/v1', 'videoId', ['pcursor'], []],

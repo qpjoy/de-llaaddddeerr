@@ -1,0 +1,24 @@
+# Incident recovery only; not included by the normal deployment renderer.
+# Create only after confirming the original VIP/port is not owned by another Service.
+# Selects the existing Ready public identity Pod; does not change its template or secrets.
+# externalIPs is deprecated since Kubernetes 1.36. This retains the current ingress
+# address for recovery; migration of that ingress is a separate deployment change.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-identity-public-ingress
+  namespace: mx-internal-shadow
+spec:
+  type: ClusterIP
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+    - IPv4
+  externalIPs:
+    - 10.88.88.88
+  selector:
+    app: mx-identity-public
+  ports:
+    - name: http
+      protocol: TCP
+      port: 18444
+      targetPort: 18444

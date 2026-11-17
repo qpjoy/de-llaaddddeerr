@@ -126,20 +126,28 @@ export class RapidApiAdapter {
     const request = normalizeNativeForwardingRequest(key, body)
     const apiKey = credential === undefined ? await this.resolveCredential() : credential
     if (typeof apiKey !== 'string' || !apiKey) throw new Error('External credential is unavailable')
-    const url = new URL(endpoint.path, `https://${endpoint.host}`)
-    for (const [name, value] of Object.entries(request.upstreamQuery)) url.searchParams.set(name, String(value))
+    const pathParameters = endpoint.parameters.filter(parameter => parameter.in === 'path')
+    let path = endpoint.path
+    for (const parameter of pathParameters) {
+      path = path.replace(`{${parameter.name}}`, encodeURIComponent(String(request.upstreamQuery[parameter.name])))
+    }
+    const url = new URL(path, `https://${endpoint.host}`)
+    for (const [name, value] of Object.entries(request.upstreamQuery)) {
+      if (!pathParameters.some(parameter => parameter.name === name)) url.searchParams.set(name, String(value))
+    }
     const controller = new AbortController()
     let deadlineExceeded = false
     const timer = setTimeout(() => { deadlineExceeded = true; controller.abort() }, this.timeoutMs)
     const startedAt = performance.now(), capturedAt = new Date().toISOString(), scrub = createCredentialEchoRedactor(apiKey)
-    let response, bytes, raw, bodyText, failure = null, phase = 'request', parsed = false
+    let response, bytes, raw, bodyText, rateLimit, failure = null, phase = 'request', parsed = false
     const requestId = () => scrub(response?.headers.get('x-rapidapi-request-id') || response?.headers.get('x-request-id') || '') || null
     const persistence = state => ({
       upstreamEvidence: { requestId: requestId() },
       responseArchive: response || failure ? { contractState: state, httpStatus: response?.status ?? null, businessCode: null,
         contentType: response?.headers.get('content-type') ?? null, bodySize: bytes?.length ?? null,
         payloadSha256: bytes ? createHash('sha256').update(bytes).digest('hex') : null,
-        rawPayload: { response: { httpStatus: response?.status ?? null, requestId: requestId(), ...(failure ? { transportFailure: failure } : {}) } }, capturedAt } : null,
+        rawPayload: { response: { httpStatus: response?.status ?? null, requestId: requestId(),
+          ...(rateLimit ? { rateLimit } : {}), ...(failure ? { transportFailure: failure } : {}) } }, capturedAt } : null,
       restrictedResponseArchive: bytes ? { state, capturedAt, httpStatus: response.status, contentType: response.headers.get('content-type'),
         bodySize: bytes.length, bodySha256: createHash('sha256').update(bytes).digest('hex'), bodyBytes: bytes,
         bodyText: isPostgresSafeText(bodyText) ? bodyText : null, jsonParsed: parsed, parsedPayload: parsed && isPostgresSafeJsonValue(raw) ? raw : null } : null,
@@ -147,6 +155,7 @@ export class RapidApiAdapter {
     try {
       response = await this.fetch(url, { method: 'GET', redirect: 'error', signal: controller.signal,
         headers: { 'x-rapidapi-host': endpoint.host, 'x-rapidapi-key': apiKey, 'user-agent': HUB_USER_AGENT } })
+      if (endpoint.marketplace === 'twitter') rateLimit = twitterRateLimitObservation(response)
       phase = 'body'
       bytes = await readBody(response, controller)
       phase = 'decode'

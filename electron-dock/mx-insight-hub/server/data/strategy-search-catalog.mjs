@@ -105,7 +105,7 @@ function accountPlatform(platform, operation, accountPolicy = null, policies = [
   }
 }
 
-const VERIFICATION_LABELS = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '沿用同平台已校准结构（首个生产页待核对）', pending: '待校准，暂不派发' }
+const VERIFICATION_LABELS = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '按已知合同结构适配（首个生产页待核对）', pending: '待校准，暂不派发' }
 // Comment interfaces are Hub-native and editable for every platform with a
 // registered supplier. Pending suppliers stay visible so operators can see
 // what calibration would unlock, but requests to them fail before dispatch.

@@ -35,7 +35,7 @@ export const STRATEGY_SEARCH_INTERFACES = [
 ]
 export const STRATEGY_OPERATION_OPTIONS = STRATEGY_SEARCH_INTERFACES.map(({ id, label }) => ({ value: id, label }))
 export const STRATEGY_COMMENT_INTERFACES = ['post-comments', 'comment-replies']
-export const COMMENT_VERIFICATION_LABELS = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '沿用同平台已校准结构', pending: '待校准 · 暂不派发' }
+export const COMMENT_VERIFICATION_LABELS = { verified: '已用付费样本验证', sample: '按供应商官方样例校准', derived: '按已知合同结构适配，首个生产页待核对', pending: '待校准 · 暂不派发' }
 export const COMMENT_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新采购' }
 
 export function commentRouteOptions(row) {
