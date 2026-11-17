@@ -1,10 +1,44 @@
 # Twitter 评论与回复默认 RapidAPI
 
-日期：2026-11-17。最新状态：已保存的 TweetDetail 200 响应在只读复验中确认被时间线指令校验拒绝；本地已补齐 TimelineTerminateTimeline，待部署后再次检查同一归档。累计仍为 2 次供应商 HTTP 请求，thread-replies 未尝试；两个评论接口最后确认仍固定 TikHub、revision 3。兼容验收尚未通过。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+日期：2026-11-17。最新状态：用户确认 Public 部署成功，同一份 RapidAPI 真实首屏归档已通过 parser、projection、workflow 三层复验，均为 36 条且 JSON 安全。累计仍为 2 次供应商 HTTP 请求，thread-replies 未尝试；两个评论接口最后确认仍固定 TikHub、revision 3。回复、上游翻页和整体线上切换尚未验收。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
 
-## TimelineTerminateTimeline 适配修复（当前执行）
+## 真实首屏归档复验通过
 
-用户返回的固定归档 hashVerified=true、jsonSafe=true，保存错误码为 invalid_social_contract。结构摘要为 ClearCache、AddEntries、TerminateTimeline 各一条，1 个 focal 条目、39 个会话模块、1 个非空 Bottom 游标，40 个 Tweet 且无已知字段异常；parser 在原第 29 行的未支持指令分支失败。该解析器未接收 TerminateTimeline，足以导致整个响应成为 succeeded_unusable / Hub 502。结构摘要未给出结束方向，不能据非空游标推断为 Top，也不能据此确认后续所有字段已兼容。
+在 Public rollout 成功后，固定的 200,594 字节归档仍匹配 SHA-256 `34747817708f7dd6e4ab1b8dd9f4b92f20f2fd5c8f96165e347532d3a35fa2a6`。用户返回 parser.ok=true / commentCount=36 / continuationPresent=true；projection.ok=true / itemCount=36 / recordCount=36 / jsonSafe=true / recordFieldsJsonSafe=true；workflow.ok=true / itemCount=36 / recordCount=36，error=null，本次供应商请求数为零。
+
+这确认当前部署代码能处理该真实首屏并投影到 Hub 的现有合同；不把原 committed/502 历史回执改写为成功，也不宣称外部 HTTP 入口、真实回复或下一页已经通过。非空游标只说明存在续页参数，尚无上游续页成功证据。原三次授权仍剩一次，下一步仅用于受限回复验证，生产路由先保持原状。
+
+## 剩余一次回复验证（当前执行）
+
+新增 `verify-twitter-rapid-comments.mjs --resume-replies`，只使用原来尚未执行的 `THREAD_KEYS[1]`。普通无参、`--execute` 和 `--resume-thread` 不会绕过现有回执重买首屏。无参预览的 installedContract 已改为检查当前 TweetDetail 合同，避免新版本因仍比对旧 recipe 而误报未安装。
+
+新入口必须同时匹配原 404 失败和本次 200/invalid_social_contract 失败的固定 usage、call、owner、端点版本、长度和 SHA，现有两次调用数必须准确。它会用容器内已安装代码再次复验 36 条首屏记录，并选取同一帖子下有正回复数的评论构造 replyRef；没有候选则零调用停止，不另买首屏或改用其他候选来源。二次读取归档及实际 HTTP 发起前均复核证据，仍要求两条生产评论路由固定 TikHub。
+
+执行使用原 advisory lock、正常身份授权/采购控制/价格和账本；只允许一次 GET `/tweet/{replyId}`，不携带续页 cursor，本轮累计不超过三次。任何已有 thread-replies usage（包括无上游调用的预留或失败）都会使重跑只读。历史失败回执和原 TikHub 来源保留，工具不改全局路由。
+
+**仅同步更新后的验证脚本到服务器 Hub 目录即可，无需再次构建镜像。** 以下命令明确使用用户原已授权额度中剩余的一次上游请求：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - --resume-replies \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+成功验收需要 `supplierHttpCallsMade=1`、`supplierCallsAfter=3`、`firstArchiveRevalidated` 的三层计数为 36、thread-replies 为 saved_success/HTTP 200、publicContractValid=true、positiveRowsObserved=true，以及 sourceUnchanged/originalFailureUnchanged/threadFailureUnchanged 均为 true。空页只证明空响应契约，不算正样本兼容验收。失败、未知结果或零调用前置阻断应读取报告，不删除回执或换幂等键重试。
+
+即使回复正样本通过，upstreamContinuationVerified 和 coverageComplete 仍为 false：本轮没有购买真正的下一页，也没有从外部 HTTP 入口调用。不能据此宣称 Twitter 全部接口均已切换或完成全链路验证。下一步切换须按接口范围和已有验收证据处理。
+
+本次本地验证 48 项通过、零跳过：23 项 probe 测试、8 项归档诊断测试、17 项 Rapid 评论合同测试；包含真实网关的成功/空页/拒绝/未知结果、并发互斥、已有回复回执只读、证据漂移、防额外派发和 PGlite 查询。未从本机发起真实供应商请求。
+
+## 运行代码版本确认
+
+用户返回 Public Pod `mx-insight-hub-public-6f8dc97cd6-ctphw`，创建时间 `2026-11-17T11:24:48Z`，镜像标签 `mx-insight-hub:shadow`，imageID `sha256:9028c1c8db4d7bcd47bcef0b834121f31c3182e61bbaa52644331c69dec29328`。解析器 LF 归一化 SHA-256 为 `dfcf8d09142de5de2976c8e41f6987f4068906aecf76b79b62953e0599aa97da`，与本地 Git 的 a0d791dd 文件完全一致；Top / Bottom / TopAndBottom 接受测试均为 false。可确认的是解析器未更新，不能据此断言整个镜像对应哪个 commit，也不能归因于构建缓存。
+
+ca1d512e 修复版解析器的 LF 归一化 SHA-256 为 `bbb60c50042eb0d7922a551758a00868a71b51f85489d9b62cd5ae7ef80cb378`。应先核对服务器 Hub 目录内源码，再执行完整 deploy；部署成功后对实际 Public Pod 验证相同哈希，最后在同一 Pod 只读检查固定归档。任何前置检查或部署失败均停止后续流程。完整 deploy 会构建、导入镜像并更新 Public；apply、单独 restart 或 stdin 新诊断脚本都不能替代构建导入步骤。当前无需强制 no-cache 或更换标签。Public 为 Recreate 策略，更新时有重建窗口，部署失败不保证旧 Pod 仍在线。
+
+## TimelineTerminateTimeline 适配修复（已部署，归档复验通过）
+
+用户返回的固定归档 hashVerified=true、jsonSafe=true，保存错误码为 invalid_social_contract。结构摘要为 ClearCache、AddEntries、TerminateTimeline 各一条，1 个 focal 条目、39 个会话模块、1 个非空 Bottom 游标，40 个 Tweet 且无已知字段异常；parser 在原第 29 行的未支持指令分支失败。该解析器未接收 TerminateTimeline，足以导致整个响应成为 succeeded_unusable / Hub 502。后续诊断已确认结束方向 Top、无额外字段、无 __typename；当时解析器仍为旧版本，尚不能确认修复后的所有字段均已兼容。
 
 修复严格接收 X 官方定义的 Top、Bottom、TopAndBottom 三种方向及 type / __typename / direction 元数据；如有 __typename，必须与指令类型相符。Top 保留向下游标；Bottom / TopAndBottom 保留本页业务行并停止供应商向下续页，已购溢出仍通过 Hub 缓存分页交付。未知方向、未知指令和夹带业务字段仍拒绝，不静默遗漏评论。依据：[X 官方方向序列化实现](https://github.com/twitter/the-algorithm/blob/c54bec0d4e029fe34926ef3258a86ccacc0d0182/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/functional_component/marshaller/response/urt/TerminateTimelineInstructionMarshaller.scala)。底部结束优先于残留游标是按终止语义采取的保守处理，尚不是本份真实归档已验证的方向组合。
 
@@ -13,12 +47,15 @@
 这次修改了镜像内的解析器，**需要重建并滚动更新 Hub**，仅同步诊断脚本不会加载修复。同步代码后在服务器 Hub 目录执行：
 
 ```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
 MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
 
 kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
   node --input-type=module - \
   < server/ops/diagnose-twitter-rapid-comment-page.mjs
 ```
+
+用户确认服务器构建出网需要本地 7788。`MX_INSIGHT_BUILD_PROXY` 使用脚本现有的专用 host-network Buildx builder，使构建走此 HTTP 代理，并保留上述 Launcher 同步和数据采样关闭项；不修改全局 Docker daemon 代理或 MX-H2I 网络。服务器源码与容器内解析器哈希的前后检查仍须保留。
 
 第二步只读使用原 200,594 字节归档，供应商新增调用应为零。需要确认 parser、projection、workflow 三项均为 ok=true，并检查 terminateTimeline 方向与计数；若仍失败，使用受审代码行号继续定位，无需重新买首屏。旧 committed/502 回执不会被修改为成功，原幂等键仍回放原失败。总额度仍剩一次，本步骤不使用该额度、不切换生产路由。
 

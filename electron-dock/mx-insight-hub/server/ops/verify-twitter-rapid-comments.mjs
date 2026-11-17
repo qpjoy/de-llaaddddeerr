@@ -1,5 +1,6 @@
 // Installed Public runtime only. Preview and old --execute read existing receipts.
-// Only --resume-thread can spend the remaining two calls after the known failure;
+// --resume-thread covers the old failure; --resume-replies can spend only the
+// last call after revalidating the exact saved thread page with installed code.
 // normal Hub controls remain active and recovered TikHub routes are never changed.
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,6 +16,9 @@ export const THREAD_KEYS = Object.freeze(['first', 'replies'].map(stage => `ops-
 export const RESUME_SOURCE = Object.freeze({ requestId: 'e813c900-44b2-45e8-bf84-6eb8786b1a5e',
   callId: 'dc07998d-21c6-44cd-8f48-5f99f7e7918c', bodySize: 77,
   sha256: 'a8f881027fc841cd737652640dbc864c94af4fe55f612ace64236059ed25a9a2' })
+export const REPLY_SOURCE = Object.freeze({ requestId: 'e531d032-0bfa-463e-9e0f-ff10e2457a5d',
+  callId: '783683dc-0dde-45ac-9c9c-76753f9c8949', bodySize: 200594,
+  sha256: '34747817708f7dd6e4ab1b8dd9f4b92f20f2fd5c8f96165e347532d3a35fa2a6' })
 const ALL_KEYS = [...KEYS, ...THREAD_KEYS]
 const STAGES = [{ stage: 'first', kind: 'first', key: KEYS[0] }, { stage: 'next', kind: 'next', key: KEYS[1] },
   { stage: 'replies', kind: 'replies', key: KEYS[2] }, { stage: 'thread-first', kind: 'first', key: THREAD_KEYS[0] },
@@ -40,7 +44,8 @@ const SAFE_ERRORS = new Set(['needs_deploy', 'invalid_arguments', 'public_postgr
   'external_platform_rejected', 'external_platform_operation_blocked', 'external_platform_operation_disabled',
   'external_platform_operation_paused', 'external_platform_operation_canary', 'external_platform_rate_limited',
   'external_platform_busy', 'invalid_social_contract', 'invalid_upstream_contract', 'page_size_exceeded',
-  'platform_not_granted', 'capability_not_granted', 'comment_acquisition_paused', 'resume_source_unverified', 'recovered_routes_required'])
+  'platform_not_granted', 'capability_not_granted', 'comment_acquisition_paused', 'resume_source_unverified', 'recovered_routes_required',
+  'reply_source_unverified', 'first_archive_revalidation_failed', 'reply_candidate_unavailable'])
 const safeCode = error => SAFE_ERRORS.has(error?.code) ? error.code : 'verification_unavailable'
 const savedErrorCode = value => ({ code: SAFE_ERRORS.has(value) ? value : null, known: SAFE_ERRORS.has(value) })
 const savedFailurePhase = call => {
@@ -77,7 +82,7 @@ export function inspectRapidCommentError(payload, subjectId) {
 }
 
 async function archive(executor, callId, { optional = false } = {}) {
-  const { rows } = await executor.query(`SELECT /* twitter-rapid-check:archive */ body_size,body_sha256,
+  const { rows } = await executor.query(`SELECT /* twitter-rapid-check:archive */ body_size,body_sha256,captured_at,
     CASE WHEN body_size <= $2 AND octet_length(body_bytes) <= $2 THEN body_bytes END AS body_bytes
     FROM control.external_platform_restricted_raw_responses WHERE provider_call_id=$1`, [callId, MAX_BYTES])
   const row = rows[0], bytes = row?.body_bytes instanceof Uint8Array ? Buffer.from(row.body_bytes) : null
@@ -87,7 +92,8 @@ async function archive(executor, callId, { optional = false } = {}) {
   let payload
   try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/u, '')) }
   catch { requireValue(false, 'archive_unverified') }
-  return { payload, summary: { archiveState: 'verified', bodySize: bytes.length, sha256: row.body_sha256, hashVerified: true } }
+  return { payload, capturedAt: row.captured_at,
+    summary: { archiveState: 'verified', bodySize: bytes.length, sha256: row.body_sha256, hashVerified: true } }
 }
 
 async function sourceReceipt(executor) {
@@ -148,6 +154,7 @@ async function savedAttempts(executor, source) {
     && new Set(rows.map(row => row.idempotency_key)).size === rows.length, 'receipt_owner_mismatch')
   const { rows: calls } = await executor.query(`SELECT /* twitter-rapid-check:budget */ call.id,call.usage_request_id,
     call.tenant_id,call.consumer_id,call.api_key_id,call.provider_key,call.operation,call.endpoint_key,call.outcome,call.http_status,call.billed,call.error_code,
+    call.marketplace,call.contract_version,call.endpoint_version,call.completed_at,
     request.tenant_id AS request_tenant_id,request.api_key_id AS request_api_key_id
     FROM external_platform.provider_calls call JOIN public.usage_requests request ON request.id=call.usage_request_id
     WHERE request.consumer_id=$1 AND request.idempotency_key=ANY($2::text[]) LIMIT 4`, [source.consumer_id, ALL_KEYS])
@@ -281,6 +288,70 @@ export function assertThreadResumeEvidence(saved, stages) {
   requireValue(inspectThreadResumeEvidence(saved, stages).verified, 'resume_source_unverified')
 }
 
+// The internal checker can be supplied by offline tests with synthetic hashes;
+// the CLI always uses these exact production fingerprints, without an override.
+export function assertReplyResumeEvidence(saved, stages) {
+  const row = saved.rows.find(row => row.idempotency_key === THREAD_KEYS[0])
+  const call = saved.calls.find(call => call.usage_request_id === row?.id)
+  const evidence = stages.find(stage => stage.stage === 'thread-first')?.providerCalls?.[0]
+  const legacy = saved.calls.find(call => call.id === RESUME_SOURCE.callId)
+  requireValue(saved.rows.length === 2 && saved.calls.length === 2
+    && row?.id === REPLY_SOURCE.requestId && row.status === 'committed' && row.response_status === 502
+    && call?.id === REPLY_SOURCE.callId && call.operation === THREAD_OPERATION && call.endpoint_key === THREAD_OPERATION
+    && call.marketplace === 'twitter' && call.contract_version === 'mx-insight-hub.native-forwarding.v1'
+    && call.endpoint_version === 'twitter-aio.tweet-thread.2026-11-17'
+    && call.outcome === 'succeeded_unusable' && call.http_status === 200 && call.billed === null
+    && call.error_code === 'invalid_social_contract' && evidence?.callId === REPLY_SOURCE.callId
+    && evidence.hashVerified === true && evidence.bodySize === REPLY_SOURCE.bodySize && evidence.sha256 === REPLY_SOURCE.sha256
+    && legacy?.marketplace === 'twitter' && legacy.contract_version === 'mx-insight-hub.native-forwarding.v1'
+    && legacy.endpoint_version === 'twitter-aio.replies.2026-11-17',
+  'reply_source_unverified')
+}
+
+async function installedReplayModules(root = process.argv[1] === '-'
+  ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)) {
+  const [parser, projection, contract, safety, workflow] = await Promise.all([
+    import(new URL('contracts/twitter-rapid-comment-page.mjs', root)), import(new URL('contracts/post-comment-projection.mjs', root)),
+    import(new URL('contracts/post-comments.mjs', root)), import(new URL('core/postgres-json.mjs', root)),
+    import(new URL('external-platforms/social-account-workflow.mjs', root)),
+  ])
+  return { parse: parser.parseRapidApiTwitterCommentPage, project: projection.projectPostCommentPage,
+    normalize: contract.normalizePostCommentsRequest, dispatch: contract.buildPostCommentsDispatch,
+    isJsonSafe: safety.isPostgresSafeJsonValue, workflowProject: workflow.projectPage, traversal: contract.POST_COMMENTS_TRAVERSAL }
+}
+
+async function revalidateThreadFirst(executor, saved, source, stages, replyEvidenceCheck) {
+  const row = saved.rows.find(row => row.idempotency_key === THREAD_KEYS[0])
+  const call = saved.calls.find(call => call.usage_request_id === row?.id)
+  const raw = await archive(executor, call.id), modules = await installedReplayModules()
+  const currentStages = structuredClone(stages)
+  Object.assign(currentStages.find(stage => stage.stage === 'thread-first').providerCalls[0], raw.summary)
+  replyEvidenceCheck(saved, currentStages)
+  const request = modules.normalize(row.acquisition_request.body, { provider: 'rapidapi' }), step = modules.dispatch(request)
+  requireValue(request.postId === source.postId && !request.cursor && !Object.keys(request.initialParams || {}).length
+    && !request.includeRaw && step.operationKey === THREAD_OPERATION && step.endpointKey === THREAD_OPERATION
+    && step.endpointPath === '/tweet/{tweetId}', 'first_archive_revalidation_failed')
+  const capturedAt = new Date(raw.capturedAt ?? call.completed_at).toISOString()
+  const parsed = modules.parse(raw.payload, request.postId, step.postComments.continuation)
+  const projected = modules.project(raw.payload, step, { capturedAt })
+  const workflow = modules.workflowProject(raw.payload, step, 'comments', capturedAt, modules.traversal)
+  const recordsSafe = result => result.records.every(record => Object.entries(record).every(([key, value]) =>
+    modules.isJsonSafe(['eventTime', 'collectedAt', 'editedAt', 'deletedAt'].includes(key) && value instanceof Date ? value.toISOString() : value)))
+  requireValue(modules.isJsonSafe(raw.payload) && modules.isJsonSafe(projected.projected) && modules.isJsonSafe(workflow.projected)
+    && recordsSafe(projected) && recordsSafe(workflow) && parsed.comments.length === 36
+    && projected.projected.acquiredItems.length === 36 && projected.records.length === 36
+    && workflow.projected.acquiredItems.length === 36 && workflow.records.length === 36
+    && isDeepStrictEqual(projected.projected.acquiredItems, workflow.projected.acquiredItems), 'first_archive_revalidation_failed')
+  const candidate = workflow.projected.acquiredItems.find(item => integer(item.replyCount) && item.replyCount > 0
+    && item.postId === source.postId && id(item.commentId) && item.commentId !== source.postId
+    && item.platform === 'twitter' && (item.conversationId ?? item.contentId) === source.postId)
+  requireValue(candidate, 'reply_candidate_unavailable')
+  return { replyRef: { platform: 'twitter', commentId: candidate.commentId, contentId: source.postId },
+    summary: { hashVerified: true, commentCount: 36, itemCount: 36, recordCount: 36, jsonSafe: true,
+      recordFieldsJsonSafe: true, workflowOk: true, replyCandidateAvailable: true,
+      continuationPresent: Boolean(parsed.providerPage.nextParams), historicalReceiptStillFailed: true } }
+}
+
 async function readRoutes(executor) {
   return (await executor.query(`SELECT /* twitter-rapid-check:routes */ interface_key,mode,
     primary_provider,fallback_provider,revision FROM control.strategy_search_routes
@@ -293,9 +364,17 @@ const requireRecoveredRoutes = rows => requireValue(rows.length === 2 && rows.ev
 const originalAttemptDigest = (saved, stages) => sha(JSON.stringify([
   saved.rows.filter(row => KEYS.includes(row.idempotency_key)), saved.calls.filter(call => call.operation === OPERATION), stages.slice(0, 3),
 ]))
+const threadAttemptDigest = (saved, stages) => sha(JSON.stringify([
+  saved.rows.filter(row => row.idempotency_key === THREAD_KEYS[0]),
+  saved.calls.filter(call => call.usage_request_id === REPLY_SOURCE.requestId), stages.find(row => row.stage === 'thread-first'),
+]))
+const resumeIsReadOnly = (saved, resumeThread, resumeReplies) => resumeReplies
+  ? saved.rows.some(row => row.idempotency_key === THREAD_KEYS[1])
+  : !resumeThread || saved.rows.some(row => THREAD_KEYS.includes(row.idempotency_key))
 
 export async function previewRapidComments({ pool, installed = true, readiness = async () => ({ ready: false }),
-  resumeThread = false, resumeEvidenceCheck = assertThreadResumeEvidence }) {
+  resumeThread = false, resumeReplies = false, resumeEvidenceCheck = assertThreadResumeEvidence,
+  replyEvidenceCheck = assertReplyResumeEvidence }) {
   const report = { diagnosticRevision: REVISION, mode: 'preview', installedContract: installed,
     savedErrorInspectionVersion: 1, maxSupplierCalls: MAX_CALLS, supplierHttpCallsMade: 0 }
   const client = await pool.connect()
@@ -309,15 +388,20 @@ export async function previewRapidComments({ pool, installed = true, readiness =
     if (saved.rows.length || saved.calls.length) {
       report.mode = 'read_saved_only'; report.stages = await summarizeSaved(client, saved, source)
       report.resumeSourceInspection = inspectThreadResumeEvidence(saved, report.stages)
-      if (!resumeThread || saved.rows.some(row => THREAD_KEYS.includes(row.idempotency_key))) return report
+      if (resumeIsReadOnly(saved, resumeThread, resumeReplies)) return report
     }
-    if (resumeThread) {
+    if (resumeThread || resumeReplies) {
       resumeEvidenceCheck(saved, report.stages || []); requireRecoveredRoutes(routes)
-      report.mode = 'resume_thread_preview'; report.remainingSupplierCalls = MAX_CALLS - saved.calls.length
+      report.mode = resumeReplies ? 'resume_replies_preview' : 'resume_thread_preview'
+      report.remainingSupplierCalls = MAX_CALLS - saved.calls.length
       report.upstreamContinuationVerified = false
     }
     report.pageSize = await readOwner(client, source.source); report.ownerVerified = true
     requireValue(installed, 'needs_deploy')
+    if (resumeReplies) {
+      replyEvidenceCheck(saved, report.stages || [])
+      report.firstArchiveRevalidated = (await revalidateThreadFirst(client, saved, source, report.stages, replyEvidenceCheck)).summary
+    }
     report.readiness = await readiness(client, source.source)
     requireValue(report.readiness.ready === true, 'operation_not_ready')
     report.readyForExecute = true
@@ -326,13 +410,13 @@ export async function previewRapidComments({ pool, installed = true, readiness =
   return report
 }
 
-export async function runRapidCommentVerification({ runtime, AppError, resumeThread = false,
-  resumeEvidenceCheck = assertThreadResumeEvidence }) {
-  const operation = resumeThread ? THREAD_OPERATION : OPERATION
-  const stageSpecs = resumeThread ? STAGES.slice(3) : STAGES.slice(0, 3)
-  const report = { diagnosticRevision: REVISION, mode: resumeThread ? 'resume_thread' : 'execute', maxSupplierCalls: MAX_CALLS,
+export async function runRapidCommentVerification({ runtime, AppError, resumeThread = false, resumeReplies = false,
+  resumeEvidenceCheck = assertThreadResumeEvidence, replyEvidenceCheck = assertReplyResumeEvidence }) {
+  const threaded = resumeThread || resumeReplies, operation = threaded ? THREAD_OPERATION : OPERATION
+  const stageSpecs = resumeReplies ? STAGES.slice(4) : resumeThread ? STAGES.slice(3) : STAGES.slice(0, 3)
+  const report = { diagnosticRevision: REVISION, mode: resumeReplies ? 'resume_replies' : resumeThread ? 'resume_thread' : 'execute', maxSupplierCalls: MAX_CALLS,
     savedErrorInspectionVersion: 1, scope: 'installed_public_gateways_not_http_ingress', globalPolicyWrites: 0, stages: [] }
-  let lock, locked = false, source, currentStage = null, attempts = 0, originalFailureDigest
+  let lock, locked = false, source, currentStage = null, attempts = 0, originalFailureDigest, threadFailureDigest, revalidated
   const restores = []
   try {
     lock = await runtime.pool.connect()
@@ -343,13 +427,17 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
     if (before.rows.length || before.calls.length) {
       const summaries = await summarizeSaved(lock, before, source)
       report.resumeSourceInspection = inspectThreadResumeEvidence(before, summaries)
-      if (!resumeThread || before.rows.some(row => THREAD_KEYS.includes(row.idempotency_key))) {
+      if (resumeIsReadOnly(before, resumeThread, resumeReplies)) {
         report.mode = 'read_saved_only'; report.stages = summaries; return report
       }
       report.originalStages = summaries.slice(0, 3)
+      if (resumeReplies) {
+        replyEvidenceCheck(before, summaries)
+        threadFailureDigest = threadAttemptDigest(before, summaries)
+      }
     }
     const routes = await readRoutes(lock); report.routes = safeRoutes(routes)
-    if (resumeThread) {
+    if (threaded) {
       resumeEvidenceCheck(before, report.originalStages || []); requireRecoveredRoutes(routes)
       originalFailureDigest = originalAttemptDigest(before, report.originalStages)
       report.remainingSupplierCalls = MAX_CALLS - before.calls.length
@@ -357,6 +445,11 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
       report.continuationState = 'not_covered_original_budget_reserved_for_reply_contract'
     }
     const pageSize = await readOwner(lock, source.source); report.pageSize = pageSize
+    if (resumeReplies) {
+      revalidated = await revalidateThreadFirst(lock, before, source,
+        await summarizeSaved(lock, before, source), replyEvidenceCheck)
+      report.firstArchiveRevalidated = revalidated.summary
+    }
     const context = await runtime.store.findApiKeyById(source.source.api_key_id)
     requireValue(context?.tenant?.id === source.source.tenant_id && context?.consumer?.id === source.source.consumer_id
       && context?.apiKey?.id === source.source.api_key_id && context.apiKey.environment === 'live', 'original_owner_unavailable')
@@ -368,7 +461,7 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
     requireValue(ready[operation] === true, 'operation_not_ready')
     const controls = runtime.externalPlatformControlStore, authorize = controls.authorizeDispatch
     controls.authorizeDispatch = async function (provider, operation, options) {
-      requireValue(currentStage && provider === 'rapidapi' && operation === (resumeThread ? THREAD_OPERATION : OPERATION)
+      requireValue(currentStage && provider === 'rapidapi' && operation === (threaded ? THREAD_OPERATION : OPERATION)
         && options?.consumerId === source.source.consumer_id, 'unexpected_diagnostic_operation')
       if (currentStage.sent || (await savedAttempts(runtime.pool, source.source)).calls.length >= MAX_CALLS) {
         throw new AppError(409, 'external_platform_operation_blocked', 'Diagnostic call budget exhausted')
@@ -381,8 +474,14 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
       adapter.fetch = async function (url, options) {
         const target = new URL(url)
         requireValue(currentStage && target.origin === 'https://twitter-aio.p.rapidapi.com'
-          && target.pathname === `/tweet/${currentStage.subject}${resumeThread ? '' : '/replies'}` && options?.method === 'GET', 'unexpected_diagnostic_request')
-        if (resumeThread) requireRecoveredRoutes(await readRoutes(runtime.pool))
+          && target.pathname === `/tweet/${currentStage.subject}${threaded ? '' : '/replies'}` && options?.method === 'GET'
+          && (!resumeReplies || !target.searchParams.has('cursor')), 'unexpected_diagnostic_request')
+        if (threaded) requireRecoveredRoutes(await readRoutes(runtime.pool))
+        if (resumeReplies) {
+          const current = await savedAttempts(runtime.pool, source.source), summaries = await summarizeSaved(runtime.pool, current, source)
+          requireValue(originalAttemptDigest(current, summaries) === originalFailureDigest
+            && threadAttemptDigest(current, summaries) === threadFailureDigest, 'reply_source_unverified')
+        }
         requireValue(!currentStage.sent && attempts < MAX_CALLS
           && attempts < MAX_CALLS - before.calls.length
           && (await savedAttempts(runtime.pool, source.source)).calls.length <= MAX_CALLS, 'stage_already_dispatched')
@@ -401,8 +500,8 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
         body = { ...firstBody, cursor }
       }
       if (kind === 'replies') {
-        const candidate = first.body.data.items.find(row => row.replyCount > 0 && id(row.replyRef?.commentId))
-        const replyRef = candidate?.replyRef ?? source.fallbackReply
+        const candidate = first?.body.data.items.find(row => row.replyCount > 0 && id(row.replyRef?.commentId))
+        const replyRef = resumeReplies ? revalidated.replyRef : candidate?.replyRef ?? source.fallbackReply
         if (!replyRef) { report.stages.push({ stage, state: 'not_covered_no_reply_candidate' }); continue }
         body = { platform: 'twitter', replyRef, count: pageSize, includeRaw: false }
       }
@@ -417,7 +516,7 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
       if (kind === 'first') first = result
     }
     report.publicContractValid = report.stages.filter(row => row.state === 'saved_success').every(row => row.publicContractValid)
-    report.upstreamContinuationVerified = !resumeThread && report.stages.find(row => row.stage === 'next')?.upstreamContinuationVerified === true
+    report.upstreamContinuationVerified = !threaded && report.stages.find(row => row.stage === 'next')?.upstreamContinuationVerified === true
     report.positiveSamplesComplete = report.stages.every(row => row.state === 'saved_success' && row.positiveRowsObserved)
     report.coverageComplete = report.positiveSamplesComplete && report.upstreamContinuationVerified
   } catch (error) { report.errorCode = safeCode(error) }
@@ -434,6 +533,10 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
           report.originalFailureUnchanged = originalAttemptDigest(saved, report.savedStages) === originalFailureDigest
           if (!report.originalFailureUnchanged) report.errorCode ||= 'resume_source_unverified'
         }
+        if (threadFailureDigest) {
+          report.threadFailureUnchanged = threadAttemptDigest(saved, report.savedStages) === threadFailureDigest
+          if (!report.threadFailureUnchanged) report.errorCode ||= 'reply_source_unverified'
+        }
         report.sourceUnchanged = (await sourceReceipt(runtime.pool)).digest === source.digest
         if (!report.sourceUnchanged) report.errorCode ||= 'source_changed'
       } catch (error) { report.errorCode ||= safeCode(error) }
@@ -449,9 +552,10 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
 export async function main(args = process.argv.slice(2)) {
   let pool, runtime
   try {
-    requireValue(args.length === 0 || args.length === 1 && ['--execute', '--resume-thread'].includes(args[0]), 'invalid_arguments')
-    const resumeThread = args[0] === '--resume-thread', operation = resumeThread ? THREAD_OPERATION : OPERATION
-    const nativeKey = operation.slice(7)
+    requireValue(args.length === 0 || args.length === 1 && ['--execute', '--resume-thread', '--resume-replies'].includes(args[0]), 'invalid_arguments')
+    const resumeThread = args[0] === '--resume-thread', resumeReplies = args[0] === '--resume-replies'
+    const operation = resumeThread || resumeReplies ? THREAD_OPERATION : OPERATION
+    const contractOperation = args.length === 0 ? THREAD_OPERATION : operation, nativeKey = contractOperation.slice(7)
     const root = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)
     const { loadConfig } = await import(new URL('config.mjs', root)), config = loadConfig()
     requireValue(config.listenerMode === 'public' && config.storeDriver === 'postgres', 'public_postgres_container_required')
@@ -462,7 +566,7 @@ export async function main(args = process.argv.slice(2)) {
       const { nativeForwardingEndpoint } = await import(new URL('contracts/native-forwarding.mjs', root))
       const { postCommentRecipe } = await import(new URL('contracts/post-comments.mjs', root))
       const { commentReplyRecipe } = await import(new URL('contracts/comment-replies.mjs', root))
-      installed = nativeForwardingEndpoint(nativeKey)?.operation === operation
+      installed = nativeForwardingEndpoint(nativeKey)?.operation === contractOperation
         && postCommentRecipe('twitter', 'rapidapi')?.key === nativeKey && commentReplyRecipe('twitter', 'rapidapi')?.key === nativeKey
     } catch { /* Older images still support the source-only preview. */ }
     const readiness = async (executor, source) => {
@@ -481,12 +585,12 @@ export async function main(args = process.argv.slice(2)) {
         state: state?.effectiveState ?? 'not_registered', priceReady: state?.priceBook?.ready === true,
         blockers: (state?.blockers || []).map(row => row.code) }
     }
-    let report = await previewRapidComments({ pool, installed, readiness, resumeThread })
+    let report = await previewRapidComments({ pool, installed, readiness, resumeThread, resumeReplies })
     await pool.end(); pool = null
     if (args.length && report.readyForExecute && !report.errorCode && report.mode !== 'read_saved_only') {
       const { createRuntime } = await import(new URL('index.mjs', root)), { AppError } = await import(new URL('core/errors.mjs', root))
       runtime = await createRuntime(config)
-      report = await runRapidCommentVerification({ runtime, AppError, resumeThread })
+      report = await runRapidCommentVerification({ runtime, AppError, resumeThread, resumeReplies })
     }
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
     if (report.errorCode) process.exitCode = 1
