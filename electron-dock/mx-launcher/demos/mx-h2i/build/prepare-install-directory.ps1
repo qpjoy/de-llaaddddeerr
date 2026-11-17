@@ -6,7 +6,9 @@ $directoryDacl = 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
 
 function Assert-InstallAcl([string]$Path, [bool]$Parent) {
     $item = Get-Item -LiteralPath $Path -Force
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Links and junctions are not supported.' }
+    # Windows PowerShell 5.1 can fail to bind enum -band enum. Keep both
+    # operands numeric for the installer and for the real FileInfo attributes.
+    if (([int]$item.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Links and junctions are not supported.' }
     $acl = Get-Acl -LiteralPath $Path
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($trusted -notcontains $owner) { throw 'A parent or existing installation is owned by an ordinary user. Choose a machine-managed folder.' }
@@ -18,10 +20,10 @@ function Assert-InstallAcl([string]$Path, [bool]$Parent) {
     $raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All))
     if ($null -eq $raw.DiscretionaryAcl) { throw 'A directory has an unrestricted ACL.' }
     foreach ($ace in $raw.DiscretionaryAcl) {
-        if (($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly) -ne 0) { continue }
+        if (([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0) { continue }
         if ($ace.AceType -eq [Security.AccessControl.AceType]::AccessDenied) { continue }
         if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed) { throw 'An unsupported directory ACL was found.' }
-        if (($trusted -notcontains $ace.SecurityIdentifier.Value) -and (($ace.AccessMask -band $forbidden) -ne 0)) {
+        if (($trusted -notcontains $ace.SecurityIdentifier.Value) -and (([long]$ace.AccessMask -band $forbidden) -ne 0)) {
             throw 'A parent or existing installation is writable by ordinary users. Choose a protected folder.'
         }
     }
