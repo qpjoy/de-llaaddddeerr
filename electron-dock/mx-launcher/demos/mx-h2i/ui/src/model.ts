@@ -9,7 +9,7 @@ export function connectionLabel(
     connected: '已连接',
     idle: '未连接',
     connecting: '正在连接',
-    'lease-only': '等待系统授权',
+    'lease-only': '网络未就绪',
     'tunnel-only': '网络需要修复',
     'server-unavailable': '内网服务暂不可达',
     'network-unavailable': '当前网络不可用',

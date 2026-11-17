@@ -631,7 +631,7 @@ func (s *networkService) runWorker(request serviceRequest, sid string) serviceRe
 	if err != nil {
 		return serviceResponse{Code: "windows_unavailable", Message: "Windows system directory could not be resolved"}
 	}
-	command.Env = []string{"ELECTRON_RUN_AS_NODE=1", "SystemRoot=" + systemRoot, "WINDIR=" + systemRoot, "PATH=" + filepath.Join(systemRoot, "System32") + ";" + filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0"), "TEMP=" + s.stateDir, "TMP=" + s.stateDir, "NO_COLOR=1"}
+	command.Env = workerEnvironment(systemRoot, s.stateDir)
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_SUSPENDED}
 	command.Stdin = bytes.NewReader(payload)
 	var output limitedOutput
