@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"golang.org/x/sys/windows"
 	"io/fs"
 	"os"
@@ -14,7 +15,12 @@ import (
 // The existing core coordinates endpoint routes with other elevated Launcher
 // clients in ProgramData/QPJoy/WireGuard. Preserve that shared ownership, while
 // refusing ordinary-user-writable state before SYSTEM reads it.
-func trustedACL(path string, allowCreateChildren bool) error {
+func trustedACL(path string, allowCreateChildren bool) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("verify-network-state-path %q: %w", path, err)
+		}
+	}()
 	if err := rejectReparse(path); err != nil {
 		return err
 	}

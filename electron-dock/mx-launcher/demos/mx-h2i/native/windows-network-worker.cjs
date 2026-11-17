@@ -11,13 +11,17 @@ const core = require('@qpjoy/electron-core-wireguard');
 const exec = promisify(execFile);
 const MAX_CONFIG = 1024 * 1024;
 const PROFILE_NAME = 'mx-h2i';
+// Match the launcher's existing corporate address pools and split-DNS
+// defaults. This fixed service policy still refuses unrelated private/public
+// networks, default routes and public DNS suffixes.
+const OFFICE_DNS_DOMAINS = ['mx.cn', 'mxinfo-inc.cn', 'internal.mx', 'corp.mx', 'h2i.mx'];
 
 function refusal(message, code = 'invalid_network_request') { return Object.assign(new Error(message), { code, safeServiceMessage: true }); }
 function list(value) { return String(value).split(',').map(v => v.trim()).filter(Boolean); }
 function officeIP(value) {
   if (net.isIP(value) !== 4) return false;
   const [a, b] = value.split('.').map(Number);
-  return (a === 10 && b === 88) || (a === 100 && b >= 88 && b <= 91);
+  return (a === 10 && b >= 88 && b <= 90) || (a === 100 && b >= 88 && b <= 91);
 }
 function officeCIDR(value) {
   const [ip, prefix, extra] = value.split('/');
@@ -26,7 +30,10 @@ function officeCIDR(value) {
 function keyValue(value) { return /^[A-Za-z0-9+/]{43}=$/.test(value); }
 function domains(value) {
   const result = list(value).map(v => v.replace(/^\./, '').toLowerCase());
-  if (result.length > 100 || result.some(v => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9-]+\.[a-z]{2,63}$/.test(v) || !(v === 'mxinfo-inc.cn' || v.endsWith('.mxinfo-inc.cn')))) throw refusal('无效的企业 DNS 域名。');
+  if (result.length > 100 || result.some(v =>
+    !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9-]+\.[a-z]{2,63}$/.test(v)
+    || !OFFICE_DNS_DOMAINS.some(domain => v === domain || v.endsWith('.' + domain))
+  )) throw refusal('无效的企业 DNS 域名。');
   return result;
 }
 

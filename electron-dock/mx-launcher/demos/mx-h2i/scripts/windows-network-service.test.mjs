@@ -37,14 +37,25 @@ test('Windows installation ACL policy accepts safe secondary-drive paths and rej
   // Execute the exact installer functions against a deterministic in-memory
   // filesystem/ACL fixture. No real services, folders or permissions change.
   const scenario = `
-function Get-Item { param($LiteralPath, [switch]$Force) [pscustomobject]@{Attributes=0;PSIsContainer=$false} }
+$script:itemAttributes=[IO.FileAttributes]::Directory
+function Get-Item { param($LiteralPath, [switch]$Force) [pscustomobject]@{Attributes=$script:itemAttributes;PSIsContainer=$false} }
 function Get-Acl { param($LiteralPath)
   $sddl = if ($LiteralPath -eq 'D:\\Apps') { $script:parentAcl } else { 'O:BAG:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)' }
   $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetSecurityDescriptorSddlForm($sddl);return $acl
 }
-$script:parentAcl='O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)'
-Assert-InstallAcl 'D:\\Apps' $true
+foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)','O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)(A;OICIIO;FA;;;CO)')) {
+  $script:parentAcl=$sddl
+  Assert-InstallAcl 'D:\\Apps' $true
+}
 Assert-InstallTree 'D:\\Apps\\MinCave'
+$script:itemAttributes=[IO.FileAttributes]([int][IO.FileAttributes]::Directory -bor [int][IO.FileAttributes]::ReparsePoint)
+$rejected=$false
+try { Assert-InstallAcl 'D:\\Apps\\link' $false } catch {
+  if($_.Exception.Message -ne 'Links and junctions are not supported.'){throw}
+  $rejected=$true
+}
+if(-not $rejected){throw 'Reparse-point attributes accepted'}
+$script:itemAttributes=[IO.FileAttributes]::Directory
 foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x40;;;BU)','O:BAG:BAD:(A;;FA;;;BA)(A;;0x100;;;BU)','O:S-1-5-21-1-2-3-1000G:BAD:(A;;FA;;;BA)')) {
   $script:parentAcl=$sddl;$rejected=$false
   try { Assert-InstallAcl 'D:\\Apps' $true } catch { $rejected=$true }
@@ -59,7 +70,14 @@ foreach($value in @('\\\\server\\share\\MinCave','D:\\','D:\\Apps.\\MinCave','D:
   const source = script + '\n' + scenario;
   const env = { ...process.env };
   delete env.MINCAVE_INSTALL_DIRECTORY;
-  const result = execFileSync(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { env, windowsHide: true, timeout: 30000, encoding: 'utf8' });
+  let result;
+  try {
+    result = execFileSync(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { env, windowsHide: true, timeout: 30000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    // execFileSync's default message includes the entire encoded script.
+    // Preserve the actual failure without flooding the packaging log.
+    throw new Error(`Windows PowerShell installation ACL policy failed (exit ${error.status ?? error.code}):\n${String(error.stderr || error.stdout || '').slice(-6000)}`);
+  }
   assert.equal(result, 'directory-policy-ok');
 });
 
@@ -69,6 +87,53 @@ test('privileged profiles allow office networks but reject hooks, default routes
   for (const value of [wireguard+'PostUp = calc.exe\n', wireguard.replace('AllowedIPs = 10.88.0.0/16','AllowedIPs = 0.0.0.0/0'),wireguard.replace('.mxinfo-inc.cn','.minsight-ai.com'),wireguard.replace('10.88.0.1','8.8.8.8'),wireguard.replace('10.88.0.0/16','192.168.0.0/16'), wireguard.replace('[Peer]','PrivateKey = '+Buffer.alloc(32,3).toString('base64')+'\n[Peer]')]) assert.throws(() => validateWireGuardConfig(value));
   assert.throws(() => assertOwner({ownerSID:SID},'S-1-5-21-99'), /另一 Windows/);
   assert.doesNotThrow(() => assertOwner({ownerSID:SID},SID));
+});
+
+test('service accepts generated employee profiles across the existing office and legacy networks', () => {
+  const core = require('../../../../../electron-plugin/packages/electron-core-wireguard/dist/index.js');
+  // Synthetic keys and endpoints, with the same lease/route shape as the
+  // production launcher. No credentials or diagnostic bundle are embedded.
+  for (const network of ['10.88', '10.89', '10.90', '100.88', '100.89', '100.90', '100.91']) {
+    const config = core.renderWireGuardInterface({
+      addresses: [`${network}.50.8/32`],
+      privateKey: Buffer.alloc(32, 1).toString('base64'),
+      hdoDnsServers: ['10.88.0.1'],
+      hdoDnsDomains: ['mxinfo-inc.cn'],
+      hdoRoutePriorityCidrs: [`${network}.0.0/16`, '10.88.88.88/32'],
+      peers: [{
+        publicKey: Buffer.alloc(32, 2).toString('base64'),
+        endpoint: 'office.example.com:51280',
+        allowedIps: [`${network}.0.0/16`, '10.88.100.1/32', '10.88.88.88/32', '10.88.0.1/32'],
+        persistentKeepalive: 25,
+      }],
+    });
+    const validated = validateWireGuardConfig(config);
+    assert.ok(validated.includes(`Address = ${network}.50.8/32`));
+    assert.ok(validated.includes(`AllowedIPs = ${network}.0.0/16, 10.88.100.1/32, 10.88.88.88/32, 10.88.0.1/32`));
+  }
+});
+
+test('service accepts the launcher default split DNS domains without permitting public suffixes', async () => {
+  const runtimeSource = await readFile(new URL('../src/main-runtime.cjs', import.meta.url), 'utf8');
+  const defaults = /const DEFAULT_SPLIT_DNS_DOMAINS = '([^']+)';/.exec(runtimeSource)?.[1].split(' ');
+  assert.ok(defaults?.length, 'use the real launcher defaults to catch policy drift');
+  const config = wireguard.replace('.mxinfo-inc.cn', defaults.map(domain => '.' + domain).join(', '));
+  assert.ok(validateWireGuardConfig(config).includes(`DNS Domains = ${defaults.join(', ')}`));
+  assert.match(validateWireGuardConfig(wireguard.replace('.mxinfo-inc.cn', '.Data.MXINFO-INC.CN')), /DNS Domains = data.mxinfo-inc.cn/);
+  for (const domain of ['cn', 'mx', 'com', 'minsight-ai.com', 'evil-mxinfo-inc.cn', 'mxinfo-inc.cn.evil.com']) {
+    assert.throws(() => validateWireGuardConfig(wireguard.replace('.mxinfo-inc.cn', domain)));
+  }
+});
+
+test('office profile policy still refuses adjacent networks, broad routes, public DNS and hooks', () => {
+  for (const network of ['10.87', '10.91', '10.255', '100.87', '100.92', '192.168']) {
+    assert.throws(() => validateWireGuardConfig(wireguard.replaceAll('10.88', network)));
+  }
+  for (const cidr of ['0.0.0.0/0', '10.0.0.0/8', '10.88.0.0/15', '10.89.0.0/15', '::/0']) {
+    assert.throws(() => validateWireGuardConfig(wireguard.replace('AllowedIPs = 10.88.0.0/16', `AllowedIPs = ${cidr}`)));
+  }
+  assert.throws(() => validateWireGuardConfig(wireguard.replace('DNS Servers = 10.88.0.1', 'DNS Servers = 8.8.8.8')));
+  assert.throws(() => validateWireGuardConfig(wireguard + 'PostUp = calc.exe\n'));
 });
 
 test('TUN reconstructs loopback listeners, secret and provider paths and rejects file access and cycles', () => {
