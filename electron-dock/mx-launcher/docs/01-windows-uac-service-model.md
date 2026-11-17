@@ -1,5 +1,7 @@
 # Windows UAC and Service Model
 
+> 本文为 Launcher 通用设计。MinCave 当前实现及验证范围见 [Windows 安装时授权与网络服务](02-mincave-windows-network-service.md)：只在完整安装器中注册／修复服务，使用中不自动请求 UAC；缺失服务时提示安装完整包。下方的启动时修复与通用发行校验步骤不代表 MinCave 已实现的行为。
+
 The repeated UAC prompt comes from mixing zip / portable startup with privileged
 network operations. The product should use a strict split:
 

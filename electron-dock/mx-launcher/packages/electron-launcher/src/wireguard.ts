@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   buildHdoRouteProbe,
@@ -40,6 +40,10 @@ export interface ElectronLauncherWireGuardRuntimeOptions {
   nrptCleanupDnsDomains?: string[] | null;
   nrptCleanupDnsServer?: string | null;
   beforeDarwinPrivilegedCommand?: () => void;
+  /** MinCave installs this executor with its full Windows installer. No RunAs fallback. */
+  windowsNetworkService?: {
+    tunnel(input: { action: 'up' | 'down' | 'restart' | 'repair'; config: string | null }): Promise<{ ok: boolean; message?: string }>;
+  };
 }
 
 export interface ElectronLauncherWindowsNrptDesiredState {
@@ -359,6 +363,35 @@ export function probeDarwinPhysicalDefaultRoute(): ElectronLauncherDarwinPhysica
   }
 }
 
+async function runLauncherWireGuardCommand(
+  input: ElectronLauncherWireGuardRuntimeOptions,
+  command: Omit<Parameters<typeof setWireGuardTunnelState>[0], 'action'> & { action: ElectronLauncherWireGuardAction | 'repair' }
+) {
+  if (command.runtime.platform !== 'win32' || !input.windowsNetworkService) {
+    if (command.action === 'repair') throw new Error('repair requires the Windows network service');
+    return setWireGuardTunnelState(command as Parameters<typeof setWireGuardTunnelState>[0]);
+  }
+  const base = {
+    action: command.action === 'repair' ? 'up' as const : command.action,
+    mode: command.runtime.method,
+    configPath: command.configPath,
+    runtime: command.runtime,
+    command: 'MinCave Network Service',
+    routeLogPath: null,
+    routeLogTail: null,
+    authorizationCanceled: false,
+  };
+  try {
+    const result = await input.windowsNetworkService.tunnel({
+      action: command.action,
+      config: existsSync(command.configPath) ? readFileSync(command.configPath, 'utf8') : null,
+    });
+    return { ...base, ok: result.ok === true, privilegedExecution: 'started' as const, message: result.message || 'MinCave network operation completed.' };
+  } catch (error) {
+    return { ...base, ok: false, privilegedExecution: 'not-started' as const, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function connectLauncherWireGuardPeer(
   input: ElectronLauncherWireGuardPeerInput & { action?: ElectronLauncherWireGuardAction }
 ) {
@@ -420,7 +453,7 @@ export async function connectLauncherWireGuardPeer(
       message
     };
   }
-  const tunnel = await setWireGuardTunnelState({
+  const tunnel = await runLauncherWireGuardCommand(input, {
     runtime,
     configPath: peer.configPath,
     action
@@ -555,7 +588,7 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
         : runtime.error || 'Darwin LaunchDaemon userspace runtime is unavailable; app-managed fallback was not started.'
     };
   }
-  const tunnel = await setWireGuardTunnelState({
+  const tunnel = await runLauncherWireGuardCommand(input, {
     runtime,
     configPath,
     action: 'down',
@@ -607,7 +640,9 @@ export async function repairLauncherWireGuardPeerRoutes(input: ElectronLauncherW
     };
   }
   const runtime = resolveLauncherWireGuardRuntime(input);
-  const repaired = await repairWireGuardTunnelRoutes({
+  const repaired = runtime.platform === 'win32' && input.windowsNetworkService
+    ? await runLauncherWireGuardCommand(input, { runtime, configPath, action: 'repair' })
+    : await repairWireGuardTunnelRoutes({
     runtime,
     configPath,
     darwinExtraRepairShell: input.darwinServiceIdentity?.darwinExtraInstallShell || null,
@@ -735,7 +770,7 @@ export async function recoverLauncherWireGuardPeer(
       message: runtime.error || 'Darwin LaunchDaemon userspace runtime is unavailable.'
     };
   }
-  const tunnel = await setWireGuardTunnelState({
+  const tunnel = await runLauncherWireGuardCommand(input, {
     runtime,
     configPath,
     action: 'up'

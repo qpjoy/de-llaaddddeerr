@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const { mincaveWindowBounds, mincaveWindowMinimum } = require('./mincave-window-policy.cjs');
 const { createMincaveAdminBridge } = require('./mincave-admin.cjs');
+const { createWindowsNetworkService } = require('./windows-network-service.cjs');
 const http = require('node:http');
 const https = require('node:https');
 const dnsPromises = require('node:dns').promises;
@@ -2474,7 +2475,7 @@ async function promoteEmployeeConnection(options = {}) {
         && runtime.auth?.accessToken === auth.accessToken;
     } catch (err) {
       if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
-      if (MINCAVE_UI_ENABLED && err?.mincaveAccessError && activeForegroundNetworkOperation === foregroundOperation) mincaveLoginError = errorMessage(err);
+      if (MINCAVE_UI_ENABLED && (err?.mincaveAccessError || err?.mincaveServiceError) && activeForegroundNetworkOperation === foregroundOperation) mincaveLoginError = errorMessage(err);
       if (['app_access_denied', 'launcher_product_user_access_denied'].includes(err?.payload?.code)) {
         if (networkFallback) { runtime.connection = networkFallback; runtime.identity = identityFallback; runtime.auth = authFallback; }
         stopAfterApplicationDenial(err, foregroundOperation);
@@ -9606,7 +9607,8 @@ function getH2oTunnelManager() {
     adminPort: current.ports.admin,
     controllerPort: current.ports.controller,
     mixedPort: current.ports.mixed,
-    dnsPort: current.ports.dns
+    dnsPort: current.ports.dns,
+    windowsPrivilegedRuntime: windowsNetworkServiceForRuntime()?.mihomo
   });
   // 进程重启后 manager 是新实例，先补一次控制面白名单，
   // 避免 admin 页 / 订阅刷新触发的 renderConfig 少了直连规则。
@@ -14269,6 +14271,11 @@ async function connectLauncherNetworkWithLocalIdentityRepair(input, options = {}
     const operation = activeForegroundNetworkOperation;
     await mincaveBridge.checkLogin({ accessToken: input.accessToken, subject: `user:${input.userId}`, provider: input.authProvider });
     if (operation) assertForegroundNetworkOperationCurrent(operation, 'mincave-connection-admitted');
+    const windowsService = windowsNetworkServiceForRuntime();
+    if (windowsService) {
+      await windowsService.ensureAvailable();
+      if (operation) assertForegroundNetworkOperationCurrent(operation, 'mincave-windows-service-ready');
+    }
   }
   try {
     return await connectLauncherNetwork(input);
@@ -17458,6 +17465,13 @@ async function reconcileExistingWireGuardAfterStartup() {
   }
 }
 
+let mincaveWindowsNetworkService = null;
+function windowsNetworkServiceForRuntime() {
+  if (process.platform !== 'win32' || !MINCAVE_UI_ENABLED) return null;
+  if (!mincaveWindowsNetworkService) mincaveWindowsNetworkService = createWindowsNetworkService({ resourcesPath: process.resourcesPath });
+  return mincaveWindowsNetworkService;
+}
+
 function wireGuardRuntimeOptions(options = {}) {
   const retainedRoutePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
   const darwinServiceIdentity = {
@@ -17483,7 +17497,9 @@ function wireGuardRuntimeOptions(options = {}) {
       : {}),
     darwinServiceIdentity,
     nrptCleanupDnsDomains: splitDnsDomains(runtime?.config),
-    nrptCleanupDnsServer: retainedRoutePlan?.dnsServer || null
+    nrptCleanupDnsServer: retainedRoutePlan?.dnsServer || null,
+    ...(process.platform === 'win32' && typeof MINCAVE_UI_ENABLED !== 'undefined' && MINCAVE_UI_ENABLED
+      ? { windowsNetworkService: windowsNetworkServiceForRuntime() } : {})
   };
 }
 

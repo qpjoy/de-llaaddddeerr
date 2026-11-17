@@ -15,6 +15,7 @@ test('MinCave refuses unverified new connections before any lease or system muta
   let checks = 0;
   const context = vm.createContext({
     MINCAVE_UI_ENABLED: true,
+    windowsNetworkServiceForRuntime: () => null,
     activeForegroundNetworkOperation: null,
     mincaveBridge: {
       checkLogin: async () => {
@@ -57,6 +58,7 @@ test('cancelling a connection during its admission check prevents the lease requ
   let connects = 0;
   const context = vm.createContext({
     MINCAVE_UI_ENABLED: true,
+    windowsNetworkServiceForRuntime: () => null,
     activeForegroundNetworkOperation: {},
     mincaveBridge: { checkLogin: async () => {} },
     assertForegroundNetworkOperationCurrent: () => {
@@ -124,4 +126,28 @@ test('native macOS titlebar is enabled only for MinCave while legacy and other p
     assert.equal(options.webPreferences.contextIsolation, true);
     assert.equal(options.webPreferences.nodeIntegration, false);
   }
+});
+
+test('Windows service readiness follows enterprise admission and blocks the lease when unavailable or cancelled', async () => {
+  const events = [];
+  const context = vm.createContext({
+    MINCAVE_UI_ENABLED: true, activeForegroundNetworkOperation: {},
+    mincaveBridge: { checkLogin: async () => { events.push('admitted'); } },
+    assertForegroundNetworkOperationCurrent: (_, phase) => { events.push(phase); },
+    windowsNetworkServiceForRuntime: () => ({ ensureAvailable: async () => { events.push('service'); throw new Error('full installer required'); } }),
+    connectLauncherNetwork: async () => { events.push('lease'); },
+    isLauncherPublicKeyConflictError: () => false,
+  });
+  vm.runInContext(functionSource('connectLauncherNetworkWithLocalIdentityRepair'), context);
+  const input = {identityKind:'user',userId:'employee',accessToken:'proof',authProvider:'feishu'};
+  await assert.rejects(context.connectLauncherNetworkWithLocalIdentityRepair(input), /full installer/);
+  assert.deepEqual(events,['admitted','mincave-connection-admitted','service']);
+  events.length=0;
+  context.windowsNetworkServiceForRuntime = () => ({ ensureAvailable: async () => { events.push('service'); } });
+  context.assertForegroundNetworkOperationCurrent = (_,phase) => { if(phase==='mincave-windows-service-ready')throw Error('cancelled'); };
+  await assert.rejects(context.connectLauncherNetworkWithLocalIdentityRepair(input), /cancelled/);
+  assert.equal(events.includes('lease'),false);
+  context.assertForegroundNetworkOperationCurrent = () => {};
+  await context.connectLauncherNetworkWithLocalIdentityRepair(input);
+  assert.equal(events.at(-1),'lease');
 });

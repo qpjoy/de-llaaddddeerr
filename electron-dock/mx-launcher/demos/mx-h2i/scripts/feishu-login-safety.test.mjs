@@ -1419,7 +1419,7 @@ assert.match(
 );
 assert.match(
   functionSource(launcherWireGuardSource, 'connectLauncherWireGuardPeer'),
-  /darwinLaunchDaemon === true[\s\S]*fallbackToAppManaged === false[\s\S]*privilegedExecution: 'not-started'[\s\S]*setWireGuardTunnelState/,
+  /darwinLaunchDaemon === true[\s\S]*fallbackToAppManaged === false[\s\S]*privilegedExecution: 'not-started'[\s\S]*runLauncherWireGuardCommand/,
   'missing Darwin userspace tools must return before the app-managed osascript fallback'
 );
 
