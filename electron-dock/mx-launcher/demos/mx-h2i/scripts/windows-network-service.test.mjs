@@ -6,6 +6,8 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { gunzipSync } from 'node:zlib';
+import { installDirectoryCommand } from './build-windows-network-service.mjs';
 const require = createRequire(import.meta.url);
 const { createWindowsNetworkService } = require('../src/windows-network-service.cjs');
 const pluginRequire = createRequire(new URL('../../../../../electron-plugin/packages/electron-plugin-tunnel/package.json', import.meta.url));
@@ -18,6 +20,48 @@ const SID = 'S-1-5-21-42';
 const wireguard = `[Interface]\nAddress = 10.88.1.3/32\nPrivateKey = ${Buffer.alloc(32,1).toString('base64')}\n# HDO DNS Servers = 10.88.0.1\n# HDO DNS Domains = .mxinfo-inc.cn\n# HDO Route Priority CIDRs = 10.88.0.0/16\n[Peer]\nPublicKey = ${Buffer.alloc(32,2).toString('base64')}\nAllowedIPs = 10.88.0.0/16\nEndpoint = office.example.com:51820\nPersistentKeepalive = 25\n`;
 const YAML = pluginRequire('yaml');
 const proxy = { 'mixed-port':17890, 'external-controller':'127.0.0.1:19090', dns:{listen:'0.0.0.0:15353',nameserver:['https://dns.alidns.com/dns-query']},tun:{stack:'mixed'},proxies:[], 'proxy-groups':[],rules:['MATCH,DIRECT'] };
+
+test('installer embeds its directory validator without treating the selected path as PowerShell code', async () => {
+  const script = await readFile(new URL('../build/prepare-install-directory.ps1', import.meta.url), 'utf8');
+  const encoded = installDirectoryCommand(script);
+  assert.equal(gunzipSync(Buffer.from(encoded.script, 'base64')).toString('utf8'), script);
+  const command = Buffer.from(encoded.command, 'base64').toString('utf16le');
+  assert.match(command, /FromBase64String\(\$env:MINCAVE_INSTALL_DIRECTORY_SCRIPT\)/);
+  assert.doesNotMatch(command, /\$INSTDIR/);
+  assert.ok(encoded.command.length < 7400 && encoded.script.length < 7400);
+});
+
+test('Windows installation ACL policy accepts safe secondary-drive paths and rejects replaceable parents', { skip: process.platform !== 'win32' }, async () => {
+  const { execFileSync } = require('node:child_process');
+  const script = await readFile(new URL('../build/prepare-install-directory.ps1', import.meta.url), 'utf8');
+  // Execute the exact installer functions against a deterministic in-memory
+  // filesystem/ACL fixture. No real services, folders or permissions change.
+  const scenario = `
+function Get-Item { param($LiteralPath, [switch]$Force) [pscustomobject]@{Attributes=0;PSIsContainer=$false} }
+function Get-Acl { param($LiteralPath)
+  $sddl = if ($LiteralPath -eq 'D:\\Apps') { $script:parentAcl } else { 'O:BAG:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)' }
+  $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetSecurityDescriptorSddlForm($sddl);return $acl
+}
+$script:parentAcl='O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)'
+Assert-InstallAcl 'D:\\Apps' $true
+Assert-InstallTree 'D:\\Apps\\MinCave'
+foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x40;;;BU)','O:BAG:BAD:(A;;FA;;;BA)(A;;0x100;;;BU)','O:S-1-5-21-1-2-3-1000G:BAD:(A;;FA;;;BA)')) {
+  $script:parentAcl=$sddl;$rejected=$false
+  try { Assert-InstallAcl 'D:\\Apps' $true } catch { $rejected=$true }
+  if(-not $rejected){throw 'Unsafe parent accepted'}
+}
+foreach($value in @('\\\\server\\share\\MinCave','D:\\','D:\\Apps.\\MinCave','D:\\Apps\\..\\MinCave','D:\\Apps\\NUL')) {
+  $rejected=$false;try { Prepare-MinCaveDirectory $value } catch { $rejected=$true }
+  if(-not $rejected){throw 'Unsafe path accepted'}
+}
+[Console]::Out.Write('directory-policy-ok')
+`;
+  const source = script + '\n' + scenario;
+  const env = { ...process.env };
+  delete env.MINCAVE_INSTALL_DIRECTORY;
+  const result = execFileSync(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { env, windowsHide: true, timeout: 30000, encoding: 'utf8' });
+  assert.equal(result, 'directory-policy-ok');
+});
 
 test('privileged profiles allow office networks but reject hooks, default routes and public NRPT', () => {
   assert.match(validateWireGuardConfig(wireguard), /DNS Domains = mxinfo-inc.cn/);
