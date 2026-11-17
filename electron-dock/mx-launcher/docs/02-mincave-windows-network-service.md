@@ -91,6 +91,8 @@ go test ./...
 
 2026-11-17 自定义目录验证：`pnpm check` 通过；`pnpm check:windows-service` 13 项通过、1 项 Windows PowerShell ACL 策略用例在 macOS 跳过；Go 通用测试通过，Windows 专用 ACL 测试已交叉编译但未执行，Windows x64 `go vet` 和服务构建通过。相同临时预打包样本的安装／卸载 NSIS 编译通过。仍需 Windows 验证默认目录、D/E 盘安全目录、带中文/空格的路径、宽权限父目录拒绝、升级路径保留、文件占用时恢复及完整卸载；以上编译结果不能替代这些实机结果。
 
+Windows 首次执行专项用例发现 `AceFlags -band AceFlags` 会抛出 `InvalidCastException`；这同时影响打包检查和安装器中的同一段目录校验。兼容修复对 ACE 标志、文件属性及访问掩码显式转换为整数后再进行位运算，保留原有权限拒绝规则。回归场景使用实际的 `FileAttributes` 枚举，并覆盖 `InheritOnly` ACE 和重解析点；本机 macOS 不能代替 Windows PowerShell 5.1 的实际执行，合入后需要在 Windows 重跑 `pnpm check:windows-service`。
+
 尚未进行 Windows 实机测试，发布前必须完成：标准用户安装 UAC／取消 UAC、安装后主程序普通权限运行、真实飞书登录到连接、断开／重连／修复无额外 UAC、TUN 启停及模式切换、多 Windows 账号冲突、服务重启／丢失／超时、旧版升级、带活动连接升级与卸载清理。尤其需要检查实际 WireGuard 与 Mihomo 引擎在 Windows 上的服务权限及适配器行为。
 
 实现依据：[Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[electron-builder NSIS](https://www.electron.build/nsis/)。
