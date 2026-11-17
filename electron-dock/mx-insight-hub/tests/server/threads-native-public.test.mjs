@@ -15,7 +15,7 @@ test('the admin listing and tenant social workbench expose the nine separately a
   const catalog = officialProviderCatalog()
   const scraper = catalog.rows.filter(row => operations.includes(row.operation))
   assert.equal(scraper.length, 9)
-  assert.equal(catalog.summary.find(row => row.provider === 'rapidapi').documented, 10)
+  assert.equal(catalog.summary.find(row => row.provider === 'rapidapi').documented, 11)
   const scopes = [{ platforms: ['social'], capabilities: operations }]
   const workbench = productForPath('/data-products/social-content')
   const visible = productEndpoints(tenantOpenApiDocument(scopes), workbench)

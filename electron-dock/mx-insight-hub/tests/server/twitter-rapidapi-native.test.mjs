@@ -3,18 +3,23 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { RapidApiAdapter, RapidApiUpstreamError } from '../../server/adapters/rapidapi.mjs'
 import { normalizeNativeForwardingRequest, nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
-import { TWITTER_RAPIDAPI_COMMENT_ENDPOINT as endpoint } from '../../server/contracts/twitter-rapidapi-endpoints.mjs'
+import { TWITTER_RAPIDAPI_THREAD_ENDPOINT as endpoint,
+  TWITTER_RAPIDAPI_COMMENT_ENDPOINT as legacyEndpoint } from '../../server/contracts/twitter-rapidapi-endpoints.mjs'
 import { officialProviderCatalog } from '../../server/data/provider-catalog.mjs'
 
 const tweetId = '1860685212345678901'
 const key = endpoint.key
 const credential = 'synthetic-rapidapi-key'
 
-test('Twitter replies use the existing listing and a separate, closed native operation', () => {
+test('Twitter TweetDetail uses a new operation while preserving the released replies contract', () => {
   assert.equal(nativeForwardingEndpoint(key), endpoint)
   assert.equal(endpoint.host, 'twitter-aio.p.rapidapi.com')
   assert.equal(endpoint.marketplace, 'twitter')
-  assert.equal(endpoint.operation, 'native.r.twitter_aio_tweet_replies')
+  assert.equal(endpoint.operation, 'native.r.twitter_aio_tweet_thread')
+  assert.equal(endpoint.path, '/tweet/{tweetId}')
+  assert.equal(nativeForwardingEndpoint(legacyEndpoint.key), legacyEndpoint)
+  assert.equal(legacyEndpoint.path, '/tweet/{tweetId}/replies')
+  assert.equal(legacyEndpoint.operation, 'native.r.twitter_aio_tweet_replies')
   const normalized = normalizeNativeForwardingRequest(key, { params: { tweetId } })
   assert.deepEqual(normalized.upstreamQuery, { tweetId, rankingMode: 'Relevance', includePromotedContent: false })
   assert.notDeepEqual(normalized.fingerprintBody,
@@ -36,7 +41,7 @@ test('native transport interpolates only validated path IDs, preserves opaque cu
   const cursor = 'opaque+/=:%cursor'
   const result = await adapter.forwardNative(key, { params: { tweetId, cursor } })
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].url.origin + calls[0].url.pathname, `https://${endpoint.host}/tweet/${tweetId}/replies`)
+  assert.equal(calls[0].url.origin + calls[0].url.pathname, `https://${endpoint.host}/tweet/${tweetId}`)
   assert.deepEqual(Object.fromEntries(calls[0].url.searchParams), { rankingMode: 'Relevance', includePromotedContent: 'false', cursor })
   assert.equal(calls[0].request.method, 'GET')
   assert.equal(calls[0].request.redirect, 'error')
@@ -49,6 +54,14 @@ test('native transport interpolates only validated path IDs, preserves opaque cu
   assert.equal(result.responseArchive.rawPayload.response.rateLimit.retryAfterSeconds, 3)
   assert.equal(JSON.stringify(result).includes(credential), false)
   assert.equal(Object.keys(result).includes('restrictedResponseArchive'), false)
+})
+
+test('historical replies operation retains its original upstream path', async () => {
+  const adapter = new RapidApiAdapter({ apiKey: credential, fetchImpl: async url => {
+    assert.equal(url.origin + url.pathname, `https://${endpoint.host}/tweet/${tweetId}/replies`)
+    return Response.json({ data: { threaded_conversation_with_injections_v2: { instructions: [] } } })
+  } })
+  await adapter.forwardNative(legacyEndpoint.key, { params: { tweetId } })
 })
 
 test('invalid IDs, ads, arbitrary URLs and unsupported pagination are rejected before dispatch', async () => {

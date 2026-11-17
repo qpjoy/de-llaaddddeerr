@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { createDataSearchCursorCodec } from './cursor.mjs'
 import { normalizePostCommentsRequest, POST_COMMENTS_VERSION, POST_COMMENTS_CAPABILITY, POST_COMMENTS_PATH,
-  POST_COMMENTS_RECIPES, postCommentRecipe } from '../contracts/post-comments.mjs'
+  POST_COMMENTS_RECIPES, postCommentRecipe, postCommentRecipeForKey } from '../contracts/post-comments.mjs'
 import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
 import { withSinglePage } from '../contracts/single-page-delivery.mjs'
 import { commentRoutePlatforms } from '../contracts/comment-routes.mjs'
@@ -15,15 +15,18 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
   const request = normalizePostCommentsRequest(body, { maxPageSize, businessId: context.consumer.businessId, provider,
     allowHistoricalRedditCursor: allowHistoricalProviderCursor, allowHistoricalKuaishouCursor: allowHistoricalProviderCursor })
   const { initialParams: _initialParams, cursor: _cursor, page: _page, ...identity } = request.fingerprintBody
-  const recipe = postCommentRecipe(request.platform, request.provider)
+  let recipe = postCommentRecipe(request.platform, request.provider)
   // These platforms changed suppliers, and a routing policy may select any
   // registered supplier. A signed cursor resumes only the supplier that
   // issued it; historical receipt fingerprints stay put. The baseline
   // supplier of an unmigrated platform keeps its original scope identity.
   const migratedProvider = ['twitter', 'reddit', 'kuaishou', 'weibo', 'zhihu', 'threads'].includes(request.platform)
     || recipe.provider !== POST_COMMENTS_RECIPES[request.platform].provider
-  const scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
+  let scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
     ...(migratedProvider ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
+  const historicalRecipe = postCommentRecipeForKey(request.platform, request.provider, 'r.twitter_aio_tweet_replies')
+  const historicalScopeHash = historicalRecipe ? hash({ version: POST_COMMENTS_VERSION, ...identity,
+    recipe: { provider: historicalRecipe.provider, key: historicalRecipe.key } }) : null
   const legacyScopeHash = migratedProvider ? hash({ version: POST_COMMENTS_VERSION, ...identity }) : null
   let page = 1, expiresAt = Date.now() + 86400000, previousDeliveryId = null,
     legacyProviderCursor = request.legacyRedditCursor === true || request.legacyKuaishouCursor === true
@@ -32,6 +35,10 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
     if (importedContinuation) throw invalidCursor()
     try {
       const state = codec.decode(request.cursor)
+      if (historicalRecipe && state.provider === historicalRecipe.provider && state.scopeHash === historicalScopeHash) {
+        recipe = historicalRecipe
+        scopeHash = historicalScopeHash
+      }
       legacyProviderCursor = allowHistoricalProviderCursor && legacyScopeHash !== null && state.scopeHash === legacyScopeHash
       if (state.version !== POST_COMMENTS_VERSION || state.scopeHash !== scopeHash && !legacyProviderCursor
         || state.provider != null && state.provider !== recipe.provider
@@ -42,7 +49,7 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
     } catch { throw invalidCursor() }
   } else if (request.cursor && /^mx[a-z0-9]+\./u.test(request.cursor)
     || request.cursor && !importedContinuation || request.page !== 1 && !importedContinuation) throw invalidCursor()
-  return { ...request, jobs: request.jobs.map(job => ({ ...job, id: scopeHash })), scopeHash, page, expiresAt,
+  return { ...request, recipeKey: recipe.key, jobs: request.jobs.map(job => ({ ...job, id: scopeHash })), scopeHash, page, expiresAt,
     previousDeliveryId, importedContinuation, legacyProviderCursor, deliveryMode: 'live_only',
     // TikHub pages without a trusted end flag buy one page per request. Zhihu
     // still relays Zhihu's own is_end, so it keeps filling count as before.

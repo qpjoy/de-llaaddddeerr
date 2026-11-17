@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { createDataSearchCursorCodec } from './cursor.mjs'
-import { normalizeCommentRepliesRequest, commentReplyRecipe, COMMENT_REPLIES_VERSION,
+import { normalizeCommentRepliesRequest, commentReplyRecipe, commentReplyRecipeForKey, COMMENT_REPLIES_VERSION,
   COMMENT_REPLIES_CAPABILITY, COMMENT_REPLIES_PATH } from '../contracts/comment-replies.mjs'
 import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
 import { withSinglePage } from '../contracts/single-page-delivery.mjs'
@@ -13,21 +13,28 @@ const codecFor = (gateway, context) => createDataSearchCursorCodec(gateway.apiKe
 
 export function normalizeCommentRepliesDelivery(body, { context, maxPageSize, codec, provider = null }) {
   const request = normalizeCommentRepliesRequest(body, { maxPageSize, businessId: context.consumer.businessId, provider })
-  const recipe = commentReplyRecipe(request.platform, request.provider)
+  let recipe = commentReplyRecipe(request.platform, request.provider)
   // The supplier is part of the traversal: a cursor never changes supplier.
-  const scopeHash = hash({ version: COMMENT_REPLIES_VERSION, ...request.fingerprintBody,
+  let scopeHash = hash({ version: COMMENT_REPLIES_VERSION, ...request.fingerprintBody,
     recipe: { provider: recipe.provider, key: recipe.key } })
+  const historicalRecipe = commentReplyRecipeForKey(request.platform, request.provider, 'r.twitter_aio_tweet_replies')
+  const historicalScopeHash = historicalRecipe ? hash({ version: COMMENT_REPLIES_VERSION, ...request.fingerprintBody,
+    recipe: { provider: historicalRecipe.provider, key: historicalRecipe.key } }) : null
   let page = 1, expiresAt = Date.now() + 86400000, previousDeliveryId = null
   if (request.cursor) {
     try {
       const state = codec.decode(request.cursor)
+      if (historicalRecipe && state.provider === historicalRecipe.provider && state.scopeHash === historicalScopeHash) {
+        recipe = historicalRecipe
+        scopeHash = historicalScopeHash
+      }
       if (state.version !== COMMENT_REPLIES_VERSION || state.scopeHash !== scopeHash || state.provider !== recipe.provider
         || !uuid(state.previousDeliveryId) || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
         || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now()) throw new Error('cursor')
       ;({ page, expiresAt, previousDeliveryId } = state)
     } catch { throw invalidCursor() }
   }
-  return { ...request, jobs: request.jobs.map(job => ({ ...job, id: scopeHash })), scopeHash, page, expiresAt,
+  return { ...request, recipeKey: recipe.key, jobs: request.jobs.map(job => ({ ...job, id: scopeHash })), scopeHash, page, expiresAt,
     previousDeliveryId, deliveryMode: 'live_only', manualProviderPagination: recipe.manualPagination,
     fingerprintBody: { ...request.fingerprintBody, cursor: request.cursor ?? null },
     encodeNext: deliveryId => codec.encode({ version: COMMENT_REPLIES_VERSION, scopeHash, provider: recipe.provider,
