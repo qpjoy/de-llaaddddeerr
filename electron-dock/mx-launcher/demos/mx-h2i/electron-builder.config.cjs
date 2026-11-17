@@ -30,6 +30,12 @@ module.exports = {
   // installed MX-H2I clients (userData, safeStorage, upgrades and ownership).
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   beforeBuild: invalidateBetterSqlite3RebuildMarker,
+  beforePack: async (context) => {
+    if (context.electronPlatformName === 'win32') {
+      const { buildWindowsNetworkService } = await import('./scripts/build-windows-network-service.mjs');
+      await buildWindowsNetworkService(context.arch === 1 ? 'x64' : String(context.arch));
+    }
+  },
   asar: true,
   directories: {
     output: 'out/electron-builder'
@@ -87,6 +93,7 @@ module.exports = {
     sign: true
   },
   win: {
+    extraResources: [{ from: 'out/windows-network-service', to: 'network-service', filter: ['*.exe', 'worker.cjs', 'THIRD_PARTY_NOTICES.txt'] }],
     icon: 'build/icon.ico',
     target: [
       {
@@ -105,8 +112,10 @@ module.exports = {
   nsis: {
     shortcutName: 'MinCave',
     oneClick: false,
-    perMachine: false,
-    allowToChangeInstallationDirectory: true
+    perMachine: true,
+    allowElevation: true,
+    allowToChangeInstallationDirectory: false,
+    include: 'build/installer.nsh'
   },
   linux: {
     icon: 'build/icons',

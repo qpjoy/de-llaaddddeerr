@@ -184,6 +184,14 @@ export interface TunnelManagerOptions {
   controllerPort?: number;
   mixedPort?: number;
   dnsPort?: number;
+  /** Restricted IPC provided by the host's installed Windows network service. */
+  windowsPrivilegedRuntime?: {
+    start(config: string): Promise<{ running: boolean; pid: number | null }>;
+    stop(): Promise<unknown>;
+    status(): Promise<{ running: boolean; pid: number | null }>;
+    reload(config: string): Promise<MihomoApiResponse>;
+    api(input: { path: string; method: string; body?: unknown }): Promise<MihomoApiResponse>;
+  };
 }
 
 export interface RenderRuntimeConfigInput {

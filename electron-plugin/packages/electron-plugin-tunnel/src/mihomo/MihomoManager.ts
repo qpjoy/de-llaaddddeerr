@@ -240,6 +240,7 @@ export class MihomoManager extends EventEmitter {
   readonly paths: ManagerPaths;
   private child: ChildProcessWithoutNullStreams | null = null;
   private elevatedPid: number | null = null;
+  private serviceManaged = false;
   private operation: Promise<unknown> = Promise.resolve();
   private lastRuntimeError: string | null = null;
   private closed = false;
@@ -262,7 +263,14 @@ export class MihomoManager extends EventEmitter {
       dns: options.dnsPort
     });
     this.secureRuntimeFiles();
-    this.api = new MihomoApi(() => this.db.getSettings());
+    this.serviceManaged = process.platform === 'win32' && Boolean(options.windowsPrivilegedRuntime) && (needsElevatedTun(this.db.getSettings()) || this.readElevatedPid() !== null);
+    this.api = new MihomoApi(() => this.db.getSettings(), (path, init) => {
+      if (!this.serviceManaged || !this.options.windowsPrivilegedRuntime) return null;
+      return this.options.windowsPrivilegedRuntime.api({
+        path, method: (init.method || 'GET').toUpperCase(),
+        ...(typeof init.body === 'string' ? { body: JSON.parse(init.body) } : {}),
+      });
+    });
   }
 
   status(): TunnelStatus {
@@ -770,6 +778,23 @@ export class MihomoManager extends EventEmitter {
   }
 
   private async startUnlocked(): Promise<void> {
+    if (process.platform === 'win32' && this.options.windowsPrivilegedRuntime) {
+      const status = await this.options.windowsPrivilegedRuntime.status();
+      const previous = this.readElevatedPid();
+      if (previous && isProcessAlive(previous) && (!status.running || status.pid !== previous)) {
+        throw new Error('旧版代理尚未退出，请先在旧客户端中停止 TUN，再使用 MinCave 完整安装包升级。');
+      }
+      if (status.running && status.pid) {
+        this.serviceManaged = true;
+        this.rememberElevatedPid(status.pid);
+        if (needsElevatedTun(this.db.getSettings())) return;
+        // A crash after persisting a mode change must not leave the previous
+        // service TUN active while launching an ordinary proxy on the same ports.
+        await this.options.windowsPrivilegedRuntime.stop();
+      }
+      this.clearElevatedPid();
+      this.serviceManaged = false;
+    }
     if (this.isRunning()) {
       return;
     }
@@ -1078,6 +1103,15 @@ export class MihomoManager extends EventEmitter {
   }
 
   private async startElevatedWindows(corePath: string, configPath: string): Promise<void> {
+    if (this.options.windowsPrivilegedRuntime) {
+      const status = await this.options.windowsPrivilegedRuntime.start(readFileSync(configPath, 'utf8'));
+      if (!status.running || !Number.isInteger(status.pid) || !status.pid) throw new Error('MinCave network service could not start TUN.');
+      this.child = null;
+      this.serviceManaged = true;
+      this.rememberElevatedPid(status.pid);
+      this.log('info', 'Mihomo TUN is managed by the installed MinCave network service');
+      return;
+    }
     const logPath = join(this.paths.runtime, 'mihomo-elevated.log');
     const commandPath = join(this.paths.runtime, 'mihomo-elevated.cmd');
     writeFileSync(logPath, '', 'utf8');
@@ -1190,6 +1224,12 @@ export class MihomoManager extends EventEmitter {
   }
 
   private async stopElevatedProcess(pid: number, options: StopOptions = {}): Promise<void> {
+    if (this.serviceManaged && this.options.windowsPrivilegedRuntime) {
+      await this.options.windowsPrivilegedRuntime.stop();
+      this.serviceManaged = false;
+      this.clearElevatedPid();
+      return;
+    }
     if (!options.allowElevatedPrompt) {
       this.log('info', 'Privileged Mihomo is still running; skipped elevated stop to avoid another administrator prompt');
       return;
@@ -1212,6 +1252,10 @@ export class MihomoManager extends EventEmitter {
     const settings = this.db.getSettings();
     this.lastRuntimeError = null;
     const configPath = this.renderConfig();
+    if (this.serviceManaged && this.options.windowsPrivilegedRuntime) {
+      const response = await this.options.windowsPrivilegedRuntime.reload(readFileSync(configPath, 'utf8'));
+      return response.ok;
+    }
     let response;
     try {
       response = await this.api.reloadConfig(configPath);
@@ -1244,6 +1288,16 @@ export class MihomoManager extends EventEmitter {
 
   private async stopUnlocked(options: StopOptions = {}): Promise<void> {
     const elevatedPid = this.readElevatedPid();
+    if (process.platform === 'win32' && this.options.windowsPrivilegedRuntime && (this.serviceManaged || elevatedPid)) {
+      const status = await this.options.windowsPrivilegedRuntime.status();
+      if (elevatedPid && isProcessAlive(elevatedPid) && (!status.running || status.pid !== elevatedPid)) {
+        throw new Error('旧版代理尚未退出，请先在旧客户端中停止 TUN；MinCave 不会再次请求临时提权。');
+      }
+      await this.options.windowsPrivilegedRuntime.stop();
+      this.clearElevatedPid();
+      this.serviceManaged = false;
+      return;
+    }
     if (elevatedPid) {
       const pid = elevatedPid;
       if (!isProcessAlive(pid)) {
@@ -1336,6 +1390,11 @@ export class MihomoManager extends EventEmitter {
 
       const settings = this.db.getSettings();
       this.assertRuntimeModeAvailable(settings);
+      if (this.serviceManaged && !needsElevatedTun(settings)) {
+        await this.stopUnlocked();
+        await this.startUnlocked();
+        return;
+      }
       if (needsElevatedTun(settings) && !this.isElevatedRunning()) {
         await this.stopUnlocked();
         await this.startUnlocked();

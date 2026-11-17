@@ -685,6 +685,10 @@ export function buildWireGuardTunnelCommand(input: {
   configPath: string;
   action: WireGuardTunnelAction;
   windowsNrptRules?: WireGuardWindowsNrptExpectedRule[] | null;
+  /** Only the protected Windows service worker uses this; it does not elevate. */
+  windowsServiceExecution?: boolean;
+  /** Protected service migration only: release the attested previous profile ownership. */
+  windowsEndpointBypassOwnerPath?: string;
 }): WireGuardTunnelCommand {
   const { runtime, configPath, action } = input;
   if (!configPath.trim()) throw new Error('configPath is required');
@@ -709,7 +713,7 @@ export function buildWireGuardTunnelCommand(input: {
     const nrptRules = action === 'down' && profileNrptRules.length === 0
       ? suppliedNrptRules
       : profileNrptRules;
-    const endpointBypassOwnerKey = windowsEndpointBypassOwnerKey(configPath, tunnelName);
+    const endpointBypassOwnerKey = windowsEndpointBypassOwnerKey(input.windowsServiceExecution && input.windowsEndpointBypassOwnerPath ? input.windowsEndpointBypassOwnerPath : configPath, tunnelName);
     const scripts = windowsElevatedStartProcessScripts(
       command,
       wireGuardArgs,
@@ -732,7 +736,7 @@ export function buildWireGuardTunnelCommand(input: {
       platform: runtime.platform,
       configPath,
       command: powershell,
-      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPaths.wrapper],
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', input.windowsServiceExecution ? scriptPaths.elevated : scriptPaths.wrapper],
       displayCommand: `${powershell} -NoProfile -ExecutionPolicy Bypass -File <wireguard-uac-wrapper.ps1>`,
       needsAdmin: true,
       runtime
@@ -822,6 +826,9 @@ export async function setWireGuardTunnelState(input: {
   configPath: string;
   action: WireGuardTunnelAction;
   windowsNrptRules?: WireGuardWindowsNrptExpectedRule[] | null;
+  windowsServiceExecution?: boolean;
+  /** Protected service migration only: release the attested previous profile ownership. */
+  windowsEndpointBypassOwnerPath?: string;
 }): Promise<WireGuardTunnelResult> {
   let command: WireGuardTunnelCommand;
   try {
@@ -908,6 +915,7 @@ export async function repairWireGuardTunnelRoutes(input: {
   configPath: string;
   darwinExtraRepairShell?: string | null;
   beforeDarwinPrivilegedCommand?: () => void;
+  windowsServiceExecution?: boolean;
 }): Promise<WireGuardRouteRepairResult> {
   const profile = parseWireGuardProfile(input.configPath);
   const realInterfaceName = resolveWireGuardRealInterface(input.runtime, profile.interfaceName, profile.addresses);
@@ -953,7 +961,8 @@ export async function repairWireGuardTunnelRoutes(input: {
       nrptRules,
       routeRules,
       profile.addresses,
-      profile.endpointHosts
+      profile.endpointHosts,
+      input.windowsServiceExecution === true
     );
     try {
       const result = await execFileAsync(command.command, command.args, {
@@ -4240,7 +4249,8 @@ function buildWindowsRepairCommand(
   nrptRules: WindowsNrptRule[],
   routeRules: WindowsRouteRule[],
   interfaceAddresses: string[],
-  endpointHosts: string[]
+  endpointHosts: string[],
+  windowsServiceExecution = false
 ): WireGuardTunnelCommand {
   const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
   const profile = parseWireGuardProfile(configPath);
@@ -4271,7 +4281,7 @@ function buildWindowsRepairCommand(
     platform: runtime.platform,
     configPath,
     command: powershell,
-    args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPaths.wrapper],
+    args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', windowsServiceExecution ? scriptPaths.elevated : scriptPaths.wrapper],
     displayCommand: `${powershell} -NoProfile -ExecutionPolicy Bypass -File <hdo-nrpt-repair-wrapper.ps1>`,
     needsAdmin: true,
     runtime

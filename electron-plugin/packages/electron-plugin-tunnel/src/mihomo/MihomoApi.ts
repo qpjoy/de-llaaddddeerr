@@ -1,9 +1,14 @@
 import type { MihomoApiResponse, RuntimeSettings } from '../types';
 
 export class MihomoApi {
-  constructor(private readonly getSettings: () => RuntimeSettings) {}
+  constructor(
+    private readonly getSettings: () => RuntimeSettings,
+    private readonly transport?: (path: string, init: RequestInit) => Promise<MihomoApiResponse> | null,
+  ) {}
 
   async request<T = unknown>(path: string, init: RequestInit = {}): Promise<MihomoApiResponse<T>> {
+    const delegated = this.transport?.(path, init);
+    if (delegated) return await delegated as MihomoApiResponse<T>;
     const settings = this.getSettings();
     const url = `http://127.0.0.1:${settings.ports.controller}${path}`;
     const headers = new Headers(init.headers);
