@@ -22,6 +22,8 @@ ZIP 解压运行不负责安装服务；没有已安装的服务身份时客户�
 
 现有 endpoint 路由归属继续与其他 Launcher 共用 `ProgramData/QPJoy/WireGuard`；安装前验证文件所有者和 ACL，锁定此网络状态目录，执行前再次拒绝普通用户可写的共享状态，避免读取伪造的路由清理记录。不会清理其他应用登记的路由归属。
 
+服务工作进程的受限环境必须包含 `ProgramData`：从 Windows 已知文件夹得到的受保护状态目录推导，不能继承客户端提供的值。缺少此变量会导致 NRPT 脚本的 `Join-Path $env:ProgramData` 在创建 WireGuard 隧道前失败。2026-11-17 修复此遗漏；需要重新构建并安装 Windows 完整包来更新原生服务，ASAR 更新无法修复。
+
 安装器记录最终落盘的 Electron、worker、WireGuard 和 Mihomo 文件哈希。服务启动校验，执行前检查文件身份、大小和修改时间，变更时重新计算哈希。ASAR 不在 SYSTEM 代码加载路径上。现有 electron-builder 的 EXE 签名流程也覆盖 `extraResources` 中的服务和引擎；发布签名仍取决于构建机已有的代码签名配置，哈希校验不能代替发行者证书。
 
 ## IPC 与操作限制
