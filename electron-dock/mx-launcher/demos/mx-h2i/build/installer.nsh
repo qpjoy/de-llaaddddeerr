@@ -80,9 +80,17 @@
 !macroend
 
 !macro customInstall
-  ExecWait '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" install' $0
+  ; Capture stderr as well as the exit code so ACL/resource/SCM failures
+  ; include their actual reason. No command shell or elevation fallback.
+  nsExec::ExecToStack '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" install'
+  Pop $0
+  Pop $1
   ${If} $0 != 0
-    MessageBox MB_OK|MB_ICONSTOP "MinCave 网络服务安装失败（$0）。请重新运行完整安装包进行修复。"
+    ${If} $1 == ""
+      StrCpy $1 "服务程序没有返回错误详情。请检查 Windows 应用程序事件日志。"
+    ${EndIf}
+    DetailPrint "MinCave network service installation failed ($0): $1"
+    MessageBox MB_OK|MB_ICONSTOP "MinCave 网络服务安装失败（$0）。$\r$\n$\r$\n$1"
     SetErrorLevel 1
     Abort
   ${EndIf}
