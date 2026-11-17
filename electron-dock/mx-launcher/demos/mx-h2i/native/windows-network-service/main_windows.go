@@ -58,11 +58,11 @@ func main() {
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", ".."))
 	if err = verifyInstallRoot(root, executable); err != nil {
-		fatal(err)
+		fatal(fmt.Errorf("verify-installation: %w", err))
 	}
 	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
 	if err != nil {
-		fatal(err)
+		fatal(fmt.Errorf("resolve-program-data: %w", err))
 	}
 	service := &networkService{root: root, stateDir: filepath.Join(programData, "MinCave", "network-service")}
 	if len(os.Args) == 2 && os.Args[1] == "install" {
@@ -152,7 +152,12 @@ func protectStatePath(path string) error {
 }
 
 func verifyStateTree(root string) error {
-	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) (err error) {
+		defer func() {
+			if err != nil {
+				err = fmt.Errorf("verify-state-path %q: %w", path, err)
+			}
+		}()
 		if walkErr != nil {
 			return walkErr
 		}
@@ -202,12 +207,32 @@ func enableInstallPrivilege(name string) error {
 	return windows.AdjustTokenPrivileges(token, false, &privileges, 0, nil, nil)
 }
 
-func (s *networkService) install(executable string) error {
+func networkServiceConfig() mgr.Config {
+	// mgr.CreateService fills a zero ServiceType, but mgr.Service.UpdateConfig
+	// passes it straight to ChangeServiceConfig, where zero is invalid.
+	return mgr.Config{
+		ServiceType:      windows.SERVICE_WIN32_OWN_PROCESS,
+		DisplayName:      "MinCave Network Service",
+		Description:      "MinCave office network and tunnel operations",
+		StartType:        mgr.StartAutomatic,
+		ServiceStartName: "LocalSystem",
+		Dependencies:     []string{"Tcpip", "Nsi"},
+	}
+}
+
+func (s *networkService) install(executable string) (err error) {
+	stage := "connect-service-manager"
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("install/%s: %w", stage, err)
+		}
+	}()
 	manager, err := mgr.Connect()
 	if err != nil {
 		return err
 	}
 	defer manager.Disconnect()
+	stage = "stop-existing-service"
 	if existing, openErr := manager.OpenService(serviceName); openErr == nil {
 		stopErr := stopService(existing)
 		existing.Close()
@@ -217,9 +242,11 @@ func (s *networkService) install(executable string) error {
 	} else if !errors.Is(openErr, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 		return openErr
 	}
+	stage = "enable-restore-privilege"
 	if err = enableInstallPrivilege("SeRestorePrivilege"); err != nil {
 		return err
 	}
+	stage = "prepare-service-state"
 	if err = protectDirectory(filepath.Dir(s.stateDir)); err != nil {
 		return err
 	}
@@ -233,9 +260,11 @@ func (s *networkService) install(executable string) error {
 	if err = protectDirectory(s.stateDir); err != nil {
 		return err
 	}
+	stage = "prepare-shared-endpoint-registry"
 	if err = s.prepareEndpointRegistry(); err != nil {
 		return err
 	}
+	stage = "prepare-service-identity"
 	keyPath := filepath.Join(s.stateDir, "identity.key")
 	key, err := os.ReadFile(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -250,11 +279,12 @@ func (s *networkService) install(executable string) error {
 	if err = protectStatePath(keyPath); err != nil {
 		return err
 	}
+	stage = "record-installed-resources"
 	s.identity = installedIdentity{Protocol: protocolVersion, Version: serviceVersion, PublicKey: base64.StdEncoding.EncodeToString(ed25519.PrivateKey(key).Public().(ed25519.PublicKey)), Hashes: map[string]string{}}
 	for _, name := range []string{"mx-h2i.exe", `resources\network-service\worker.cjs`, `resources\wireguard\win32-x64\wireguard.exe`, `resources\wireguard\win32-x64\wg.exe`, `resources\network-service\mihomo.exe`} {
 		hash, hashError := fileHash(filepath.Join(s.root, name))
 		if hashError != nil {
-			return fmt.Errorf("required service resource is missing: %s", name)
+			return fmt.Errorf("required service resource %q: %w", name, hashError)
 		}
 		s.identity.Hashes[name] = hash
 	}
@@ -269,7 +299,8 @@ func (s *networkService) install(executable string) error {
 	if err = os.WriteFile(filepath.Join(s.root, "resources", "network-service", "identity.json"), publicIdentity, 0644); err != nil {
 		return err
 	}
-	config := mgr.Config{DisplayName: "MinCave Network Service", Description: "MinCave office network and tunnel operations", StartType: mgr.StartAutomatic, ServiceStartName: "LocalSystem", Dependencies: []string{"Tcpip", "Nsi"}}
+	stage = "register-service"
+	config := networkServiceConfig()
 	installed, err := manager.OpenService(serviceName)
 	if err == nil {
 		defer installed.Close()
@@ -287,12 +318,15 @@ func (s *networkService) install(executable string) error {
 	if err != nil {
 		return err
 	}
+	stage = "configure-recovery"
 	if err = installed.SetRecoveryActions([]mgr.RecoveryAction{{Type: mgr.ServiceRestart, Delay: 5 * time.Second}}, 86400); err != nil {
 		return err
 	}
+	stage = "start-service"
 	if err = installed.Start(); err != nil {
 		return err
 	}
+	stage = "wait-for-running"
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		status, queryErr := installed.Query()
@@ -303,7 +337,7 @@ func (s *networkService) install(executable string) error {
 			return nil
 		}
 		if status.State == svc.Stopped {
-			return errors.New("network service stopped during installation")
+			return fmt.Errorf("network service stopped during installation (win32=%d, service=%d)", status.Win32ExitCode, status.ServiceSpecificExitCode)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

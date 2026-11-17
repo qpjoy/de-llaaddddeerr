@@ -93,6 +93,12 @@ go test ./...
 
 Windows 首次执行专项用例发现 `AceFlags -band AceFlags` 会抛出 `InvalidCastException`；这同时影响打包检查和安装器中的同一段目录校验。兼容修复对 ACE 标志、文件属性及访问掩码显式转换为整数后再进行位运算，保留原有权限拒绝规则。回归场景使用实际的 `FileAttributes` 枚举，并覆盖 `InheritOnly` ACE 和重解析点；本机 macOS 不能代替 Windows PowerShell 5.1 的实际执行，合入后需要在 Windows 重跑 `pnpm check:windows-service`。
 
+覆盖安装／修复时，原实现复用新建服务的配置但遗漏 `ServiceType`。`mgr.CreateService` 会将零值补为 `SERVICE_WIN32_OWN_PROCESS`，`mgr.Service.UpdateConfig` 则直接传给 `ChangeServiceConfig`，零值会导致 Windows 返回“参数错误”。修复显式设置独立进程类型，供首次注册与更新共同使用；保留 LocalSystem、自动启动、依赖及现有身份。增加不修改系统的 Windows 配置回归检查，防止再次依赖仅新建接口提供的默认值。[Windows API 契约](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-changeserviceconfigw)。
+
+安装器捕获服务程序的错误输出，并在失败弹窗与安装详情中显示原因，不再只有返回码。原生服务错误包含安装阶段（例如 `prepare-shared-endpoint-registry`、`register-service`、`start-service`），路径校验失败包含实际路径；不会输出身份私钥或网络配置内容。这是诊断能力改进，不代表所有安装失败都已修复。2026-11-17 本机验证：服务专项检查 13 项通过、1 项 Windows PowerShell 用例跳过；Go 通用测试、Windows x64 构建与 `go vet`、NSIS 样本编译通过；Windows 配置回归检查仅交叉编译，尚未在 Windows 执行，也未验证实际失败弹窗。
+
+排查时必须在安装失败的电脑上检查。已有服务程序不带参数运行时只校验安装路径，然后提示通过 Windows Service Control Manager 启动；该提示属于预期行为，不能作为安装失败原因。需要重试安装并读取实际错误时，由管理员显式运行已安装的固定服务程序 `install` 命令并重定向标准错误；不要删除共享状态或放宽目录权限来绕过校验。
+
 尚未进行 Windows 实机测试，发布前必须完成：标准用户安装 UAC／取消 UAC、安装后主程序普通权限运行、真实飞书登录到连接、断开／重连／修复无额外 UAC、TUN 启停及模式切换、多 Windows 账号冲突、服务重启／丢失／超时、旧版升级、带活动连接升级与卸载清理。尤其需要检查实际 WireGuard 与 Mihomo 引擎在 Windows 上的服务权限及适配器行为。
 
 实现依据：[Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[electron-builder NSIS](https://www.electron.build/nsis/)。
