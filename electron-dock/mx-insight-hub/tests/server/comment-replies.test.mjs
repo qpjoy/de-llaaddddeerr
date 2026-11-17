@@ -24,19 +24,19 @@ const capturedAt = '2026-11-07T00:00:00.000Z'
 const PEPPER = 'comment-replies-offline-long-pepper', SECRET = 'synthetic-replies-provider-key'
 const DOUYIN_VIDEO = '7290000000000000000', DOUYIN_COMMENT = '7300000000000000001'
 
-test('every target platform has comments and replies, and deployment defaults match migration 181', () => {
+test('every target platform has comments and replies, and deployment defaults match their seed migrations', () => {
   for (const platform of COMMENT_TARGET_PLATFORMS) {
     assert(POST_COMMENT_PROVIDER_RECIPES[platform], `${platform} comments`)
     assert(COMMENT_REPLY_PROVIDER_RECIPES[platform], `${platform} replies`)
   }
-  const sql = ['181_comment_strategy_routes', '188_threads_strategy_routes'].map(name => readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8')).join('\n')
-  const seeded = [...sql.matchAll(/\('(post-comments|comment-replies)','([a-z]+)','(fixed|priority)','([a-z]+)',(NULL|'[a-z]+')/gu)]
-    .map(([, id, platform, mode, primary, fallback]) => `${id}/${platform}:${mode}:${primary}:${fallback === 'NULL' ? null : fallback.slice(1, -1)}`)
+  const sql = ['181_comment_strategy_routes', '188_threads_strategy_routes', '191_twitter_rapidapi_comments'].map(name => readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8')).join('\n')
+  const seeded = new Map([...sql.matchAll(/\('(post-comments|comment-replies)','([a-z]+)','(fixed|priority)','([a-z]+)',(NULL|'[a-z]+')/gu)]
+    .map(([, id, platform, mode, primary, fallback]) => [`${id}/${platform}`, `${id}/${platform}:${mode}:${primary}:${fallback === 'NULL' ? null : fallback.slice(1, -1)}`]))
   const expected = ['post-comments', 'comment-replies'].flatMap(id => commentRoutePlatforms(id).map(platform => {
     const route = defaultCommentRoute(id, platform)
     return `${id}/${platform}:${route.mode}:${route.primaryProvider}:${route.fallbackProvider}`
   }))
-  assert.deepEqual(seeded.sort(), expected.sort())
+  assert.deepEqual([...seeded.values()].sort(), expected.sort())
   // Main suppliers first; JustOne is the guarantee wherever it has a parser.
   assert.deepEqual(defaultCommentRoute('post-comments', 'douyin'), { mode: 'priority', primaryProvider: 'tikhub', fallbackProvider: 'justone' })
   assert.deepEqual(defaultCommentRoute('post-comments', 'bilibili'), { mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null },
@@ -135,7 +135,12 @@ test('TikHub Douyin comments and JustOne guarantees are selectable recipes with 
 
 test('comment routes are editable per platform, default when unsaved, and pause only new purchases', async () => {
   const store = new StrategySearchRoutingStore()
-  assert.deepEqual(strategyRouteProviders('post-comments', 'twitter'), ['tikhub', 'justone'])
+  assert.deepEqual(strategyRouteProviders('post-comments', 'twitter'), ['rapidapi', 'tikhub', 'justone'])
+  assert.deepEqual(strategyRouteProviders('comment-replies', 'twitter'), ['rapidapi', 'tikhub'])
+  for (const interfaceId of ['post-comments', 'comment-replies']) {
+    const policy = await store.get(interfaceId, 'twitter')
+    assert.deepEqual([policy.mode, policy.primaryProvider, policy.fallbackProvider], ['priority', 'rapidapi', 'tikhub'])
+  }
   assert.deepEqual(strategyRouteProviders('comment-replies', 'reddit'), ['tikhub'])
   assert.deepEqual(strategyRouteProviders('search', 'reddit'), [])
   const route = await store.get('post-comments', 'kuaishou')
@@ -152,17 +157,17 @@ test('comment routes are editable per platform, default when unsaved, and pause 
 
 test('the router pins cursors, falls back only when the primary is not ready, and keeps paused requests on the primary', async () => {
   const store = new StrategySearchRoutingStore()
-  const readiness = { tikhub: false, justone: true }
+  const readiness = { rapidapi: false, tikhub: true, justone: true }
   const gateway = provider => ({ providerKey: provider, apiKeyPepper: PEPPER,
     async nativeReadiness({ operationKeys }) { return Object.fromEntries(operationKeys.map(key => [key, readiness[provider]])) } })
-  const gateways = { twitter: { tikhub: gateway('tikhub'), justone: gateway('justone') } }
+  const gateways = { twitter: { rapidapi: gateway('rapidapi'), tikhub: gateway('tikhub'), justone: gateway('justone') } }
   let pinned = null
   const route = createCommentRouter({ interfaceId: 'post-comments', gateways, policyStore: store, recipeFor: postCommentRecipe,
     platformFor: body => body.platform, cursorProvider: () => pinned, invoke: (selected, context, input) => ({ provider: selected.providerKey, routing: input.routing }) })
   const context = { consumer: { id: 'consumer' }, apiKey: { id: 'key' } }
-  assert.deepEqual(await route(context, { body: { platform: 'twitter' } }), { provider: 'justone', routing: { interface: 'post-comments', provider: 'justone', reason: 'fallback' } })
-  readiness.tikhub = true
-  assert.equal((await route(context, { body: { platform: 'twitter' } })).provider, 'tikhub')
+  assert.deepEqual(await route(context, { body: { platform: 'twitter' } }), { provider: 'tikhub', routing: { interface: 'post-comments', provider: 'tikhub', reason: 'fallback' } })
+  readiness.rapidapi = true
+  assert.equal((await route(context, { body: { platform: 'twitter' } })).provider, 'rapidapi')
   readiness.tikhub = false; pinned = 'tikhub'
   assert.equal((await route(context, { body: { platform: 'twitter' } })).provider, 'tikhub', 'a cursor never changes supplier')
   pinned = 'baseline'
@@ -170,6 +175,19 @@ test('the router pins cursors, falls back only when the primary is not ready, an
   pinned = null
   await store.update('post-comments', 'twitter', { mode: 'paused', primaryProvider: 'tikhub', fallbackProvider: null, expectedRevision: 1, reason: 'pause' })
   assert.equal((await route(context, { body: { platform: 'twitter' } })).provider, 'tikhub', 'replay stays readable while paused')
+})
+
+test('Twitter comments never purchase the fallback after a RapidAPI dispatch failure', async () => {
+  const store = new StrategySearchRoutingStore(), dispatched = []
+  const gateways = { twitter: Object.fromEntries(['rapidapi', 'tikhub', 'justone'].map(provider => [provider, {
+    providerKey: provider, async nativeReadiness({ operationKeys }) { return Object.fromEntries(operationKeys.map(key => [key, true])) },
+  }])) }
+  const failure = Object.assign(new Error('synthetic upstream failure'), { code: 'social_upstream_rejected' })
+  const route = createCommentRouter({ interfaceId: 'post-comments', gateways, policyStore: store, recipeFor: postCommentRecipe,
+    platformFor: body => body.platform, cursorProvider: () => null,
+    invoke: gateway => { dispatched.push(gateway.providerKey); throw failure } })
+  await assert.rejects(route({ consumer: { id: 'consumer' } }, { body: { platform: 'twitter' } }), error => error === failure)
+  assert.deepEqual(dispatched, ['rapidapi'])
 })
 
 async function repliesHarness(payload) {

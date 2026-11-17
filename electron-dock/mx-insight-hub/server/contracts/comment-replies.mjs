@@ -14,6 +14,7 @@ export const COMMENT_REPLIES_ROUTE_INTERFACE = 'comment-replies'
 // The mapping names which Hub identity fills which supplier parameter.
 const definitions = [
   ['twitter', 'tikhub', '/api/v1/twitter/web/fetch_post_comments', { commentId: 'tweet_id' }, ['cursor'], false, true],
+  ['twitter', 'rapidapi', '/tweet/{tweetId}/replies', { commentId: 'tweetId' }, ['cursor'], false, true],
   ['weibo', 'tikhub', '/api/v1/weibo/web_v2/fetch_post_sub_comments', { commentId: 'id' }, ['max_id'], false, true],
   ['douyin', 'tikhub', '/api/v1/douyin/app/v3/fetch_video_comment_replies', { contentId: 'item_id', commentId: 'comment_id' }, ['cursor'], true, false],
   ['zhihu', 'tikhub', '/api/v1/zhihu/web/fetch_sub_comment_v5', { commentId: 'comment_id' }, ['offset'], false, false],

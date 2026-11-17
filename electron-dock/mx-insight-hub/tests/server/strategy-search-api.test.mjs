@@ -86,6 +86,40 @@ test('strategy search administration is authenticated, revisioned and never disp
   assert.equal(store.requests.size, 0)
 })
 
+test('Twitter comments administration exposes RapidAPI defaults and preserves explicit independent choices', async t => {
+  const store = new MemoryStore(), routing = new StrategySearchRoutingStore()
+  const adapter = { search() { throw new Error('administration must not buy provider pages') } }
+  const service = new HubService({ store, adapter, apiKeyPepper: 'twitter-comments-admin-offline-secret' })
+  const server = createServer(createApp({ store, service, adapter, strategySearchRoutingStore: routing,
+    adminToken: 'fixture-admin', listenerMode: 'admin', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const base = `http://127.0.0.1:${server.address().port}/internal/v1/admin/strategy-search`
+  const headers = { authorization: 'Bearer fixture-admin', 'content-type': 'application/json' }
+  const catalog = async () => (await (await fetch(base, { headers })).json()).data.interfaces
+  const initial = await catalog()
+  for (const interfaceId of ['post-comments', 'comment-replies']) {
+    const row = initial.find(item => item.id === interfaceId).platforms.find(item => item.platform === 'twitter')
+    assert.equal(row.editable, true)
+    assert.deepEqual(row.providers, interfaceId === 'post-comments' ? ['rapidapi', 'tikhub', 'justone'] : ['rapidapi', 'tikhub'])
+    assert.equal(row.providerVerification.rapidapi, 'derived', 'synthetic replies coverage is not paid calibration')
+    assert.deepEqual([row.policy.mode, row.policy.primaryProvider, row.policy.fallbackProvider], ['priority', 'rapidapi', 'tikhub'])
+    const save = value => fetch(`${base}/${interfaceId}/twitter`, { method: 'PUT', headers, body: JSON.stringify(value) })
+    const fixed = { mode: 'fixed', primaryProvider: 'tikhub', fallbackProvider: null, expectedRevision: 1, reason: 'Keep reviewed TikHub supplier' }
+    assert.equal((await save(fixed)).status, 200)
+    assert.equal((await save(fixed)).status, 409)
+    assert.equal((await save({ ...fixed, mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub',
+      expectedRevision: 2, reason: 'Use RapidAPI first for this interface' })).status, 200)
+    assert.equal((await save({ ...fixed, mode: 'paused', primaryProvider: 'rapidapi', expectedRevision: 3,
+      reason: 'Pause new purchases for this interface' })).status, 200)
+    assert.equal((await routing.get(interfaceId, 'twitter')).mode, 'paused')
+    assert.equal((await routing.get(interfaceId, 'douyin')).revision, 1)
+  }
+  assert.equal((await routing.get('search', 'twitter')).revision, 1)
+  assert.equal(routing.events.length, 6)
+  assert.equal(store.requests.size, 0)
+})
+
 test('Douyin comments default to TikHub first and Admin can switch them to JustOne, back again, or pause', async t => {
   const { createCommentRouter } = await import('../../server/external-platforms/comment-routing.mjs')
   const { postCommentRecipe } = await import('../../server/contracts/post-comments.mjs')

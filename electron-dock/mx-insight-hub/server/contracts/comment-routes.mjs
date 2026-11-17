@@ -6,9 +6,9 @@
 // Verification levels (strongest first):
 // - verified: a saved paid page from this supplier passed this parser;
 // - sample:   calibrated from the supplier's official free documentation sample;
-// - derived:  the supplier relays the same platform-native page as an already
-//             calibrated parser; enabled, and the first production page must be
-//             inspected with server/ops/inspect-post-comment-contract.mjs;
+// - derived:  adapted from a documented shared response layout or a calibrated
+//             same-platform contract; enabled, and the first production page
+//             must be inspected with server/ops/inspect-post-comment-contract.mjs;
 // - pending:  the request contract is reviewed but the response layout is not.
 //             Never dispatched: requests fail before any supplier call.
 export const COMMENT_INTERFACES = Object.freeze(['post-comments', 'comment-replies'])
@@ -21,7 +21,7 @@ const freeze = rows => Object.freeze(Object.fromEntries(Object.entries(rows)
 
 export const COMMENT_PROVIDER_CATALOG = Object.freeze({
   'post-comments': freeze({
-    twitter: { tikhub: 'verified', justone: 'sample' },
+    twitter: { rapidapi: 'derived', tikhub: 'verified', justone: 'sample' },
     reddit: { tikhub: 'verified', justone: 'sample' },
     kuaishou: { tikhub: 'verified', justone: 'sample' },
     instagram: { tikhub: 'verified' },
@@ -38,7 +38,7 @@ export const COMMENT_PROVIDER_CATALOG = Object.freeze({
   }),
   'comment-replies': freeze({
     // Live paid samples 2026-11-07 (see comment-reply-projection.mjs header).
-    twitter: { tikhub: 'verified' },
+    twitter: { rapidapi: 'derived', tikhub: 'verified' },
     douyin: { tikhub: 'verified' },
     kuaishou: { tikhub: 'verified' },
     bilibili: { tikhub: 'verified' },
@@ -70,9 +70,12 @@ export const commentProviderAvailable = (interfaceId, platform, provider) => {
 // returned only 3 rows on page 1 of 240,390 (live, 2026-11-07), so its full
 // JustOne cursor list stays the default; TikHub remains selectable in Admin.
 // Threads is RapidAPI first by decision (2026-11-11), TikHub as its guarantee.
-const THREADS_ROUTE = Object.freeze({ mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub' })
+// Twitter comments and replies also prefer RapidAPI (2026-11-17). Baseline
+// request recipes remain unchanged for existing receipts and cursors.
+const RAPID_FIRST_ROUTE = Object.freeze({ mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub' })
 const DEFAULT_OVERRIDES = Object.freeze({ 'post-comments/bilibili': Object.freeze({ mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null }),
-  'post-comments/threads': THREADS_ROUTE, 'comment-replies/threads': THREADS_ROUTE })
+  'post-comments/threads': RAPID_FIRST_ROUTE, 'comment-replies/threads': RAPID_FIRST_ROUTE,
+  'post-comments/twitter': RAPID_FIRST_ROUTE, 'comment-replies/twitter': RAPID_FIRST_ROUTE })
 
 export function defaultCommentRoute(interfaceId, platform) {
   const providers = commentProviders(interfaceId, platform)

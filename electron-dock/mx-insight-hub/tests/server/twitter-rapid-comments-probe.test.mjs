@@ -1,0 +1,261 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
+import { previewRapidComments, runRapidCommentVerification, SOURCE_REQUEST_ID, KEYS, OPERATION } from '../../server/ops/verify-twitter-rapid-comments.mjs'
+import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { HubService } from '../../server/hub-service.mjs'
+import { AppError } from '../../server/core/errors.mjs'
+import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
+import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
+import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
+import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
+
+const pepper = 'offline-twitter-rapid-probe-pepper-32-chars', secret = 'synthetic-probe-provider-credential'
+const dbRow = row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/[A-Z]/gu, c => `_${c.toLowerCase()}`), value]))
+const tweet = (id, parent = '100', replies = 0) => ({ __typename: 'Tweet', rest_id: id,
+  legacy: { id_str: id, full_text: `Private synthetic comment ${id}`, conversation_id_str: '100', in_reply_to_status_id_str: parent,
+    created_at: 'Sat Feb 07 04:39:56 +0000 2026', favorite_count: 2, reply_count: replies },
+  core: { user_results: { result: { rest_id: '42', legacy: { name: 'Private author', screen_name: 'private_author' } } } } })
+const page = (tweets, cursor = null) => ({ data: { threaded_conversation_with_injections_v2: { instructions: [{ type: 'TimelineAddEntries',
+  entries: [{ entryId: 'conversationthread-fixture', content: { entryType: 'TimelineTimelineModule', items: tweets.map(result => ({
+    item: { itemContent: { itemType: 'TimelineTweet', tweet_results: { result } } } })) } },
+  ...(cursor ? [{ content: { entryType: 'TimelineTimelineCursor', cursorType: 'Bottom', value: cursor } }] : [])] }] } } })
+
+async function harness({ failAt = 0, rejectAt = 0, empty = false, noReplies = false, fallback = true } = {}) {
+  const store = new MemoryStore(), service = new HubService({ store, apiKeyPepper: pepper })
+  const tenant = await service.createTenant({ name: 'Probe fixture' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Existing owner' })
+  await store.setPlatformGrant(consumer.id, 'twitter', true)
+  await store.putPolicy({ tenantId: tenant.id, consumerId: consumer.id, platform: 'twitter', maxRequests: 10000,
+    windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 1000 })
+  await service.putCapabilityConfiguration('social.comments.list', { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Existing live key', platforms: ['twitter'], capabilities: ['social.comments.list'] })
+  const context = await service.authenticate(key.secret)
+  const source = { id: SOURCE_REQUEST_ID, tenant_id: tenant.id, consumer_id: consumer.id, api_key_id: context.apiKey.id,
+    platform: 'social', status: 'committed', response_status: 200,
+    acquisition_request: { method: 'POST', path: '/api/v1/data/native/t.api_3cd88a6621a01120', body: { params: { tweet_id: '100' } } } }
+  const sourceCall = { id: '8b5beec0-a8b9-4b4b-862a-1d2f6888f492', tenant_id: tenant.id, consumer_id: consumer.id, api_key_id: context.apiKey.id,
+    provider_key: 'tikhub', operation: 'native.t.api_3cd88a6621a01120', endpoint_key: 'native.t.api_3cd88a6621a01120', marketplace: 'twitter',
+    outcome: 'succeeded', http_status: 200, billed: true, contract_version: 'mx-insight-hub.native-forwarding.v1' }
+  const sourceBytes = Buffer.from(JSON.stringify({ code: 200, data: { id: '100', conversation_id: '100', thread: [
+    { id: '200', conversation_id: '100', replies: fallback ? 2 : 0, text: 'Private archived comment' }] } }))
+  const sourceArchive = { body_size: sourceBytes.length, body_sha256: createHash('sha256').update(sourceBytes).digest('hex'), body_bytes: sourceBytes }
+  const owner = { ...source, environment: 'live', key_status: 'active', consumer_status: 'active', tenant_status: 'active',
+    expires_at: '2100-01-01T00:00:00Z', twitter_granted: true, comments_granted: true, page_size: 100 }
+  const controls = new MemoryExternalPlatformControlStore()
+  const config = { configured: true, contractVerified: true, nativeForwardingVerified: true, dispatchEnabled: true, timeoutMs: 100,
+    freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 1000, billing: {} }
+  await controls.updatePolicy('rapidapi', OPERATION, { expectedRevision: 1, desiredState: 'active', reason: 'Offline probe regression',
+    priceBook: { currency: 'USD', pricingAsOf: '2026-11-17T00:00:00Z', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000,
+      unitCostMinorByEndpoint: { [OPERATION]: 1 } } }, { runtime: { config, credentialConfigured: true } })
+  const http = []
+  const adapter = new RapidApiAdapter({ apiKey: secret, timeoutMs: 100, fetchImpl: async url => {
+    http.push(String(url))
+    if (http.length === failAt) throw new Error(`Transport failed with ${secret}`)
+    if (http.length === rejectAt) return Response.json({ message: 'Private supplier refusal' }, { status: 403 })
+    if (empty) return Response.json(page([], 'opaque-private-cursor'))
+    return Response.json(http.length === 1 ? page([tweet('201', '100', noReplies ? 0 : 3)], 'opaque-private-cursor')
+      : url.pathname === '/tweet/100/replies' ? page([tweet('202')]) : page([tweet('203', noReplies ? '200' : '201')]))
+  } })
+  const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'twitter' })
+  const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'rapidapi', apiKeyPepper: pepper,
+    reservationLeaseMs: 150000, operationControlStore: controls, logger: { warn() {} } })
+  let locked = false, lockAvailable = true, ownerLookups = 0, foreignCall = false
+  const lookup = store.findApiKeyById.bind(store)
+  store.findApiKeyById = async value => { ownerLookups++; return lookup(value) }
+  const requests = () => [...store.requests.values()].filter(row => KEYS.includes(row.idempotencyKey))
+  const calls = () => [...platformStore.calls.values()].filter(row => requests().some(request => request.id === row.usageRequestId))
+  const queries = [], routes = [{ interface_key: 'post-comments', mode: 'priority', primary_provider: 'tikhub', fallback_provider: 'justone', revision: 1 },
+    { interface_key: 'comment-replies', mode: 'fixed', primary_provider: 'tikhub', fallback_provider: null, revision: 1 }]
+  const pool = { async query(sql, args = []) {
+    queries.push(sql)
+    if (/^(BEGIN|ROLLBACK|SET LOCAL)/u.test(sql)) return { rows: [] }
+    if (sql.includes('twitter-rapid-check:source-calls')) return { rows: [structuredClone(sourceCall)] }
+    if (sql.includes('twitter-rapid-check:source */')) return { rows: [structuredClone(source)] }
+    if (sql.includes('twitter-rapid-check:owner')) return { rows: [structuredClone(owner)] }
+    if (sql.includes('twitter-rapid-check:routes')) return { rows: structuredClone(routes) }
+    if (sql.includes('twitter-rapid-check:archive')) {
+      if (args[0] === sourceCall.id) return { rows: [sourceArchive] }
+      const value = platformStore.restrictedResponseArchives.get(args[0])
+      return { rows: value ? [dbRow(value)] : [] }
+    }
+    if (sql.includes('twitter-rapid-check:saved')) return { rows: requests().map(dbRow) }
+    if (sql.includes('twitter-rapid-check:budget')) return { rows: calls().map(row => ({ ...dbRow(row),
+      ...(foreignCall ? { provider_key: 'tikhub' } : {}), request_tenant_id: source.tenant_id, request_api_key_id: source.api_key_id })) }
+    if (sql.includes('twitter-rapid-check:lock')) { const acquired = lockAvailable && !locked; locked ||= acquired; return { rows: [{ acquired }] } }
+    if (sql.includes('pg_advisory_unlock')) { locked = false; return { rows: [] } }
+    throw new Error('Unexpected diagnostic SQL')
+  }, async connect() { return { query: pool.query, release() {} } } }
+  const runtime = { pool, store, externalPlatformControlStore: controls,
+    rapidApiCredentialStore: { describeCredential: async () => ({ credentialConfigured: true }) },
+    postCommentProviderGateways: { twitter: { rapidapi: gateway } }, commentReplyGateways: { twitter: { rapidapi: gateway } } }
+  return { runtime, store, gateway, platformStore, adapter, source, sourceArchive, sourceCall, owner, routes, queries, http, context,
+    run: () => runRapidCommentVerification({ runtime, AppError }),
+    preview: options => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }), ...options }),
+    ownerLookups: () => ownerLookups, noLock: () => { lockAvailable = false }, corruptCallOwner: () => { foreignCall = true } }
+}
+
+test('preview verifies source/ownership/routes without authentication telemetry, runtime dispatch or writes, including an old image', async () => {
+  const h = await harness(), result = await h.preview()
+  assert.equal(result.readyForExecute, true, JSON.stringify(result))
+  assert.equal(result.source.hashVerified, true)
+  assert.equal(result.routes[0].primaryProvider, 'tikhub')
+  assert.equal(h.http.length, 0)
+  assert.equal(h.ownerLookups(), 0)
+  assert.equal(h.store.requests.size, 0)
+  assert.ok(h.queries.every(sql => !/\b(?:UPDATE|INSERT|DELETE)\b/u.test(sql)))
+  const old = await h.preview({ installed: false })
+  assert.equal(old.errorCode, 'needs_deploy')
+  assert.equal(old.source.hashVerified, true)
+  assert.equal(old.supplierHttpCallsMade, 0)
+})
+
+test('three installed Rapid gateway stages preserve receipts, old-field aliases, archives and read-only reruns', async () => {
+  const h = await harness(), originalFetch = h.adapter.fetch, originalAuthorize = h.runtime.externalPlatformControlStore.authorizeDispatch
+  const result = await h.run()
+  assert.equal(result.errorCode, undefined, JSON.stringify(result))
+  assert.equal(result.supplierHttpCallsMade, 3)
+  assert.equal(result.coverageComplete, true)
+  assert.equal(result.publicContractValid, true)
+  assert.equal(result.upstreamContinuationVerified, true)
+  assert.equal(result.positiveSamplesComplete, true)
+  assert.equal(result.sourceUnchanged, true)
+  assert.deepEqual(result.stages.map(row => row.resultCount), [1,1,1])
+  assert.ok(result.stages.every(row => row.providerCalls[0].hashVerified && row.rawStringWrapperVerified && row.referencesVerified))
+  assert.equal(new URL(h.http[1]).searchParams.get('cursor'), 'opaque-private-cursor')
+  assert.equal(new URL(h.http[2]).pathname, '/tweet/201/replies')
+  assert.equal(h.adapter.fetch, originalFetch)
+  assert.equal(h.runtime.externalPlatformControlStore.authorizeDispatch, originalAuthorize)
+  const lookups = h.ownerLookups()
+  h.gateway.postComments = () => { throw new Error('rerun must not invoke a gateway') }
+  const again = await h.run()
+  assert.equal(again.mode, 'read_saved_only')
+  assert.equal(again.supplierHttpCallsMade, 0)
+  assert.equal(h.http.length, 3)
+  assert.equal(h.ownerLookups(), lookups)
+  assert.equal((await h.preview()).mode, 'read_saved_only')
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-probe-provider-credential|Private synthetic|Private author|opaque-private-cursor/u)
+  assert.equal(h.routes[0].primary_provider, 'tikhub', 'no route mutation is needed to validate the explicit gateway')
+})
+
+test('unknown first or second outcomes stop every later stage and all subsequent executions', async () => {
+  for (const failAt of [1,2]) {
+    const h = await harness({ failAt }), result = await h.run()
+    assert.ok(result.errorCode)
+    assert.equal(h.http.length, failAt)
+    const again = await h.run()
+    assert.equal(again.mode, 'read_saved_only')
+    assert.equal(h.http.length, failAt)
+    assert.equal(again.supplierHttpCallsMade, 0)
+    assert.equal(result.savedStages[failAt - 1].providerCalls[0].archiveState, 'not_available')
+    assert.doesNotMatch(JSON.stringify(result), /synthetic-probe-provider-credential/u)
+  }
+})
+
+test('missing cursor/reply candidates are explicitly uncovered and old verified reply candidates need no search', async () => {
+  const empty = await harness({ empty: true, fallback: false }), result = await empty.run()
+  assert.equal(result.errorCode, undefined, JSON.stringify(result))
+  assert.equal(empty.http.length, 1)
+  assert.equal(result.coverageComplete, false)
+  assert.equal(result.positiveSamplesComplete, false)
+  assert.equal(result.upstreamContinuationVerified, false)
+  assert.deepEqual(result.stages.slice(1).map(row => row.state), ['not_covered_no_cursor','not_covered_no_reply_candidate'])
+  const fallback = await harness({ noReplies: true }), second = await fallback.run()
+  assert.equal(second.errorCode, undefined, JSON.stringify(second))
+  assert.equal(new URL(fallback.http[2]).pathname, '/tweet/200/replies')
+})
+
+test('source corruption, missing installed gateway, closed operation, grants and concurrent execution fail before purchase', async () => {
+  for (const mutate of [h => { h.sourceArchive.body_sha256 = '0'.repeat(64) },
+    h => { h.source.acquisition_request.body.params.tweet_id = '999' },
+    h => { h.owner.comments_granted = false }, h => h.noLock(),
+    h => { h.runtime.postCommentProviderGateways = {} },
+    h => { h.gateway.nativeReadiness = async () => ({ [OPERATION]: false }) }]) {
+    const h = await harness(); mutate(h)
+    const result = await h.run()
+    assert.ok(result.errorCode)
+    assert.equal(h.http.length, 0)
+  }
+})
+
+test('foreign historical provider evidence never renews allowance or dispatches again', async () => {
+  const h = await harness(); await h.run(); h.corruptCallOwner()
+  const result = await h.run()
+  assert.equal(result.errorCode, 'receipt_owner_mismatch')
+  assert.equal(h.http.length, 3)
+})
+
+test('existing page limits reduce the probe count and rejected response bytes remain verifiable', async () => {
+  const limited = await harness(); limited.owner.page_size = 5
+  const report = await limited.run()
+  assert.equal(report.errorCode, undefined, JSON.stringify(report))
+  assert.equal(report.pageSize, 5)
+  assert.ok([...limited.store.requests.values()].every(row => row.acquisitionRequest.body.count === 5))
+  const rejected = await harness({ rejectAt: 1 }), failure = await rejected.run()
+  assert.equal(rejected.http.length, 1)
+  assert.equal(failure.savedStages[0].providerCalls[0].archiveState, 'verified')
+  assert.equal(failure.savedStages[0].providerCalls[0].hashVerified, true)
+  assert.doesNotMatch(JSON.stringify(failure), /Private supplier refusal/u)
+})
+
+test('one stage cannot dispatch twice even if an installed adapter attempts an automatic retry', async () => {
+  const h = await harness(), original = h.adapter.forwardNative
+  h.adapter.forwardNative = async function (...args) {
+    await original.apply(this, args)
+    return original.apply(this, args)
+  }
+  const result = await h.run()
+  assert.equal(h.http.length, 1)
+  assert.ok(result.errorCode)
+  await h.run()
+  assert.equal(h.http.length, 1)
+})
+
+test('actual PostgreSQL preview SQL intersects consumer grants and Key snapshots and respects both page limits', {
+  skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE,
+}, async t => {
+  const { PGlite } = await import(pathToFileURL(process.env.MX_INSIGHT_TEST_PGLITE_MODULE).href)
+  const db = new PGlite(); t.after(() => db.close())
+  await db.exec(`CREATE SCHEMA control; CREATE SCHEMA external_platform;
+    CREATE TABLE usage_requests(id uuid,tenant_id uuid,consumer_id uuid,api_key_id uuid,platform text,status text,response_status int,
+      acquisition_request jsonb,response_body jsonb,idempotency_key text);
+    CREATE TABLE external_platform.provider_calls(id uuid,usage_request_id uuid,tenant_id uuid,consumer_id uuid,api_key_id uuid,
+      provider_key text,operation text,endpoint_key text,marketplace text,outcome text,http_status int,billed boolean,contract_version text,call_ordinal int);
+    CREATE TABLE control.external_platform_restricted_raw_responses(provider_call_id uuid,body_size int,body_sha256 text,body_bytes bytea);
+    CREATE TABLE api_keys(id uuid,tenant_id uuid,consumer_id uuid,environment text,status text,expires_at timestamptz,scope_mode text);
+    CREATE TABLE consumers(id uuid,status text); CREATE TABLE tenants(id uuid,status text);
+    CREATE TABLE platform_grants(consumer_id uuid,platform text); CREATE TABLE capability_grants(consumer_id uuid,capability text);
+    CREATE TABLE api_key_platform_entitlements(api_key_id uuid,platform text,max_page_size int);
+    CREATE TABLE api_key_capability_entitlements(api_key_id uuid,capability text);
+    CREATE TABLE consumer_platform_policies(consumer_id uuid,platform text,max_page_size int);
+    CREATE TABLE control.strategy_search_routes(interface_key text,platform text,mode text,primary_provider text,fallback_provider text,revision int);`)
+  const h = await harness(), source = h.source, call = h.sourceCall, raw = h.sourceArchive
+  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL)',
+    [source.id,source.tenant_id,source.consumer_id,source.api_key_id,source.platform,source.status,source.response_status,JSON.stringify(source.acquisition_request)])
+  await db.query('INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0)',
+    [call.id,source.id,call.tenant_id,call.consumer_id,call.api_key_id,call.provider_key,call.operation,call.endpoint_key,call.marketplace,
+      call.outcome,call.http_status,call.billed,call.contract_version])
+  await db.query('INSERT INTO control.external_platform_restricted_raw_responses VALUES($1,$2,$3,$4)', [call.id,raw.body_size,raw.body_sha256,raw.body_bytes])
+  await db.query("INSERT INTO api_keys VALUES($1,$2,$3,'live','active','2100-01-01','snapshot')", [source.api_key_id,source.tenant_id,source.consumer_id])
+  await db.query("INSERT INTO consumers VALUES($1,'active')", [source.consumer_id])
+  await db.query("INSERT INTO tenants VALUES($1,'active')", [source.tenant_id])
+  await db.query("INSERT INTO platform_grants VALUES($1,'twitter')", [source.consumer_id])
+  await db.query("INSERT INTO capability_grants VALUES($1,'social.comments.list')", [source.consumer_id])
+  await db.query("INSERT INTO api_key_platform_entitlements VALUES($1,'twitter',12)", [source.api_key_id])
+  await db.query("INSERT INTO api_key_capability_entitlements VALUES($1,'social.comments.list')", [source.api_key_id])
+  await db.query("INSERT INTO consumer_platform_policies VALUES($1,'twitter',20)", [source.consumer_id])
+  const pool = { connect: async () => ({ query: db.query.bind(db), release() {} }) }
+  const preview = () => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }) })
+  const result = await preview()
+  assert.equal(result.errorCode, undefined, JSON.stringify(result))
+  assert.equal(result.pageSize, 12)
+  await db.exec("UPDATE consumer_platform_policies SET max_page_size=5")
+  assert.equal((await preview()).pageSize, 5)
+  await db.exec('DELETE FROM platform_grants')
+  assert.equal((await preview()).errorCode, 'original_grants_unavailable', 'a retained snapshot cannot restore a revoked consumer grant')
+  await db.query("INSERT INTO platform_grants VALUES($1,'twitter')", [source.consumer_id])
+  await db.exec('DELETE FROM capability_grants')
+  assert.equal((await preview()).errorCode, 'original_grants_unavailable')
+  assert.equal(h.http.length, 0)
+})

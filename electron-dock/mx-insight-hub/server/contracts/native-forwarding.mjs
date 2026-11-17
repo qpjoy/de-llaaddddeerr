@@ -3,6 +3,7 @@ import official from '../data/provider-official-contracts.json' with { type: 'js
 import wechat from '../data/wechat-contracts.json' with { type: 'json' }
 import { AppError } from '../core/errors.mjs'
 import { THREADS_RAPIDAPI_ENDPOINTS, THREADS_SCRAPER_RAPIDAPI_ENDPOINTS, validThreadsScraperPostInput } from './threads-rapidapi-endpoints.mjs'
+import { TWITTER_RAPIDAPI_COMMENT_ENDPOINT } from './twitter-rapidapi-endpoints.mjs'
 
 export const NATIVE_FORWARDING_VERSION = 'mx-insight-hub.native-forwarding.v1'
 const PRIVATE_PARAMS = new Set(['cookie', 'token', 'api_key', 'authorization', 'password', 'proxy'])
@@ -99,6 +100,7 @@ export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
   ...wechat.endpoints.map(row => Object.freeze({ ...row, operation: `native.${row.key}`, endpointKey: `native.${row.key}` })),
   ...THREADS_RAPIDAPI_ENDPOINTS,
   ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS,
+  TWITTER_RAPIDAPI_COMMENT_ENDPOINT,
   ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))
     .map(row => Object.freeze({ ...row, id: row.key, operation: `native.${row.key}`, endpointKey: `native.${row.key}`,
       hubPath: `/api/v1/data/native/${row.key}`, schemaVersion: official.version,
