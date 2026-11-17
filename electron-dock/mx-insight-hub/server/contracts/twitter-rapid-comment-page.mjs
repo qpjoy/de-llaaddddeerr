@@ -14,7 +14,7 @@ export function parseRapidApiTwitterCommentPage(payload, subjectId, continuation
   if (!object(payload) || !id(subjectId) || !Array.isArray(instructions) || instructions.length > 1000
     || Array.isArray(payload.errors) && payload.errors.length) unusable()
   const comments = [], roots = new Set(), seen = new Set()
-  let bottom = null
+  let bottom = null, bottomTerminated = false
   const entries = []
   for (const instruction of instructions) {
     if (!object(instruction)) unusable()
@@ -22,6 +22,14 @@ export function parseRapidApiTwitterCommentPage(payload, subjectId, continuation
       if (!Array.isArray(instruction.entries) || instruction.entries.length > 1000) unusable()
       entries.push(...instruction.entries)
     } else if (instruction.type === 'TimelineReplaceEntry') entries.push(instruction.entry)
+    else if (instruction.type === 'TimelineTerminateTimeline') {
+      // X's TerminateTimelineInstructionMarshaller emits these three directions.
+      // This instruction carries no rows; do not discard a valid reply page.
+      if (!['Top', 'Bottom', 'TopAndBottom'].includes(instruction.direction)
+        || Object.keys(instruction).some(key => !['type', '__typename', 'direction'].includes(key))
+        || Object.hasOwn(instruction, '__typename') && instruction.__typename !== 'TimelineTerminateTimeline') unusable()
+      if (instruction.direction !== 'Top') bottomTerminated = true
+    }
     // The official TweetDetail sample includes this metadata-only instruction.
     // Unknown instructions can contain paid rows: fail rather than silently
     // truncate the page. Their complete response remains in the raw archive.
@@ -117,7 +125,7 @@ export function parseRapidApiTwitterCommentPage(payload, subjectId, continuation
   // Official pagination stops on absent/repeated Bottom cursors or pages with
   // no business entries. Never buy extra pages to fill Hub's requested count.
   const repeated = bottom && bottom === continuation?.cursor
-  const nextParams = comments.length && bottom && !repeated ? { cursor: bottom } : null
+  const nextParams = comments.length && bottom && !repeated && !bottomTerminated ? { cursor: bottom } : null
   return { comments, conversationId: [...roots][0] ?? null,
     providerPage: { hasMore: Boolean(nextParams), nextParams, nextPage: null,
       ...(repeated ? { stopReason: 'continuation_repeated' } : {}) } }

@@ -1,6 +1,28 @@
 # Twitter 评论与回复默认 RapidAPI
 
-日期：2026-11-17。最新状态：旧回执状态校验已通过，新 TweetDetail 首屏收到供应商 HTTP 200，但记录为 succeeded_unusable，Hub 交付 HTTP 502。累计 2 次供应商 HTTP 请求，thread-replies 未尝试；两个评论接口仍固定 TikHub、revision 3。兼容验收尚未通过。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+日期：2026-11-17。最新状态：已保存的 TweetDetail 200 响应在只读复验中确认被时间线指令校验拒绝；本地已补齐 TimelineTerminateTimeline，待部署后再次检查同一归档。累计仍为 2 次供应商 HTTP 请求，thread-replies 未尝试；两个评论接口最后确认仍固定 TikHub、revision 3。兼容验收尚未通过。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+
+## TimelineTerminateTimeline 适配修复（当前执行）
+
+用户返回的固定归档 hashVerified=true、jsonSafe=true，保存错误码为 invalid_social_contract。结构摘要为 ClearCache、AddEntries、TerminateTimeline 各一条，1 个 focal 条目、39 个会话模块、1 个非空 Bottom 游标，40 个 Tweet 且无已知字段异常；parser 在原第 29 行的未支持指令分支失败。该解析器未接收 TerminateTimeline，足以导致整个响应成为 succeeded_unusable / Hub 502。结构摘要未给出结束方向，不能据非空游标推断为 Top，也不能据此确认后续所有字段已兼容。
+
+修复严格接收 X 官方定义的 Top、Bottom、TopAndBottom 三种方向及 type / __typename / direction 元数据；如有 __typename，必须与指令类型相符。Top 保留向下游标；Bottom / TopAndBottom 保留本页业务行并停止供应商向下续页，已购溢出仍通过 Hub 缓存分页交付。未知方向、未知指令和夹带业务字段仍拒绝，不静默遗漏评论。依据：[X 官方方向序列化实现](https://github.com/twitter/the-algorithm/blob/c54bec0d4e029fe34926ef3258a86ccacc0d0182/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/functional_component/marshaller/response/urt/TerminateTimelineInstructionMarshaller.scala)。底部结束优先于残留游标是按终止语义采取的保守处理，尚不是本份真实归档已验证的方向组合。
+
+请求参数、标准评论字段、raw_data 别名、签名游标和历史失败回执保持原契约。诊断脚本新增结束方向与字段结构计数，未知值统一为 other，不输出原始字段名或值。
+
+这次修改了镜像内的解析器，**需要重建并滚动更新 Hub**，仅同步诊断脚本不会加载修复。同步代码后在服务器 Hub 目录执行：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - \
+  < server/ops/diagnose-twitter-rapid-comment-page.mjs
+```
+
+第二步只读使用原 200,594 字节归档，供应商新增调用应为零。需要确认 parser、projection、workflow 三项均为 ok=true，并检查 terminateTimeline 方向与计数；若仍失败，使用受审代码行号继续定位，无需重新买首屏。旧 committed/502 回执不会被修改为成功，原幂等键仍回放原失败。总额度仍剩一次，本步骤不使用该额度、不切换生产路由。
+
+本地验证：先以合成三指令响应复现原 parser 失败和真实网关 HTTP 200 → Hub 502，再完成修复；54 项相关测试通过、零跳过，覆盖三方向、指令顺序、异常元数据、评论与回复公共字段、底部结束后的缓存排空、失败回放、TikHub 和手动分页。包含真实迁移 schema 的 PGlite 只读查询测试；没有调用生产供应商。实际归档的修复后结果仍待服务器返回。
 
 ## TweetDetail 200 响应不可交付：只读检查保存归档
 
@@ -14,9 +36,9 @@
 
 专用 `server/ops/diagnose-twitter-rapid-comment-page.mjs` 仅读取上述固定 usage/call 及受限归档，验证身份关联、长度和固定 SHA，再以已部署的解析与投影代码离线检查。输出只包含白名单结构、计数、代码版本哈希与受审文件的行号，不包含正文、作者、帖子 ID、游标或凭据。不初始化运行时、不写 usage、不中转新业务请求。
 
-脚本分别报告 parser、projection 和 workflow 结果。为避免读取供应商凭据，离线回放不执行生产工作流中的凭据回显脱敏步骤；即使离线三阶段全部成功，也不代表原请求或线上交付已经成功。当前没有真实归档字节的离线结果，尚未修改解析规则。
+脚本分别报告 parser、projection 和 workflow 结果。为避免读取供应商凭据，离线回放不执行生产工作流中的凭据回显脱敏步骤；即使离线三阶段全部成功，也不代表原请求或线上交付已经成功。首次复验已定位到未支持的结束指令，修复后的实际归档结果仍待确认。
 
-同步此脚本到服务器 Hub 工作目录后执行，无需重建镜像：
+仅更新诊断脚本时，可同步到服务器 Hub 工作目录后执行，无需重建镜像；本轮解析器修复则需要先执行上节的部署命令：
 
 ```bash
 kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
@@ -26,7 +48,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
 
 已有 thread-first 回执后，原 `--resume-thread` 按设计只读取历史，不自动续买。先依据已保存字节定位并验证字段适配，再决定如何使用剩余的一次授权额度；不修改原失败回放或把旧回执标记为成功。
 
-本次验证：probe 与专用诊断合计 23 项测试全部通过、零跳过，包含真实迁移 schema 的 PGlite 查询、归档哈希拒绝、三阶段失败定位、输出脱敏、stdin 执行，以及 HTTP 200 不可交付后重复诊断不增加供应商调用。测试均使用本地合成数据，未调用生产供应商。
+前次诊断工具验证：probe 与专用诊断合计 23 项测试全部通过、零跳过，包含真实迁移 schema 的 PGlite 查询、归档哈希拒绝、三阶段失败定位、输出脱敏、stdin 执行，以及 HTTP 200 不可交付后重复诊断不增加供应商调用。测试均使用本地合成数据，未调用生产供应商。
 
 ## 续验脚本状态校验修复（已完成）
 

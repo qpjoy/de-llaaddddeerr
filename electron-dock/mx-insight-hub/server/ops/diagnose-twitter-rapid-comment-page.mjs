@@ -37,7 +37,9 @@ export function summarizeTwitterRawShape(payload) {
   const instructions = payload?.data?.threaded_conversation_with_injections_v2?.instructions
   const report = { envelope: kind(payload), instructions: kind(instructions), instructionCount: Array.isArray(instructions) ? instructions.length : null,
     instructionTypes: {}, instructionShapes: {}, entryKinds: {}, contentTypes: {}, itemTypes: {}, resultTypes: {},
-    cursorTypes: {}, bottomValueStates: {}, anomalies: {}, entriesInspected: 0, itemsInspected: 0, truncated: false }
+    cursorTypes: {}, bottomValueStates: {}, anomalies: {}, entriesInspected: 0, itemsInspected: 0, truncated: false,
+    terminateTimeline: { count: 0, directions: {}, directionTypes: {}, typenameStates: {},
+      knownFields: { type: 0, direction: 0, __typename: 0 }, unexpectedFieldCount: 0, instructionsWithUnexpectedFields: 0 } }
   const MAX = 2000
   function item(value) {
     if (report.itemsInspected >= MAX) { report.truncated = true; return }
@@ -87,6 +89,19 @@ export function summarizeTwitterRawShape(payload) {
     for (const instruction of instructions.slice(0, MAX)) {
       add(report.instructionTypes, known(instruction?.type, ['TimelineAddEntries', 'TimelineReplaceEntry', 'TimelineClearCache',
         'TimelineAddToModule', 'TimelineTerminateTimeline', 'TimelinePinEntry']))
+      if (instruction?.type === 'TimelineTerminateTimeline') {
+        const summary = report.terminateTimeline
+        summary.count++
+        add(summary.directions, known(instruction.direction, ['Top', 'Bottom', 'TopAndBottom']))
+        add(summary.directionTypes, kind(instruction.direction))
+        add(summary.typenameStates, !Object.hasOwn(instruction, '__typename') ? 'absent'
+          : instruction.__typename === 'TimelineTerminateTimeline' ? 'matching' : 'other')
+        const allowed = ['type', 'direction', '__typename']
+        for (const key of allowed) if (Object.hasOwn(instruction, key)) summary.knownFields[key]++
+        const unexpected = Object.keys(instruction).filter(key => !allowed.includes(key)).length
+        summary.unexpectedFieldCount += unexpected
+        if (unexpected) summary.instructionsWithUnexpectedFields++
+      }
       for (const key of ['entries', 'entry', 'moduleItems']) {
         if (instruction?.[key] !== undefined) add(report.instructionShapes, `${key}_${kind(instruction[key])}`)
       }

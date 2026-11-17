@@ -80,6 +80,30 @@ test('unknown schema values stay other and full bounded inspection records anoma
   assert.equal(bounded.truncated, true)
 })
 
+test('termination instructions expose only reviewed direction and field-shape counts', () => {
+  const value = payload()
+  value.data.threaded_conversation_with_injections_v2.instructions.push(
+    { type: 'TimelineTerminateTimeline', direction: 'Top' },
+    { type: 'TimelineTerminateTimeline', direction: 'Bottom', __typename: 'TimelineTerminateTimeline' },
+    { type: 'TimelineTerminateTimeline', direction: 'TopAndBottom' },
+    { type: 'TimelineTerminateTimeline', direction: sensitive[2], [sensitive[3]]: sensitive[0] },
+    { type: 'TimelineTerminateTimeline', direction: null, __typename: sensitive[4] },
+    { type: 'TimelineTerminateTimeline', entries: [] },
+  )
+  const result = summarizeTwitterRawShape(value)
+  assert.deepEqual(result.terminateTimeline, { count: 6, directions: { Top: 1, Bottom: 1, TopAndBottom: 1, other: 3 },
+    directionTypes: { string: 4, null: 1, undefined: 1 }, typenameStates: { absent: 4, matching: 1, other: 1 },
+    knownFields: { type: 6, direction: 5, __typename: 2 }, unexpectedFieldCount: 2, instructionsWithUnexpectedFields: 2 })
+  assert.equal(result.instructionTypes.TimelineTerminateTimeline, 6)
+  privateFree(result)
+  const bounded = payload()
+  bounded.data.threaded_conversation_with_injections_v2.instructions = Array.from({ length: 2001 }, () => (
+    { type: 'TimelineTerminateTimeline', direction: 'Top' }))
+  const partial = summarizeTwitterRawShape(bounded)
+  assert.equal(partial.terminateTimeline.count, 2000)
+  assert.equal(partial.truncated, true)
+})
+
 test('workflow validation can fail separately after a successful parser and projection', () => {
   const value = payload()
   value.data.threaded_conversation_with_injections_v2.instructions[0].entries[0].content.items[0]

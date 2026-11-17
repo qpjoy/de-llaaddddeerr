@@ -189,6 +189,72 @@ test('RapidAPI pagination uses only top-level Bottom, accepts replace entries an
   assert.equal(parseRapidApiTwitterCommentPage(page(withThreadCursor), '100').providerPage.nextParams, null)
 })
 
+test('TweetDetail termination preserves paid comments and only stops pagination in the terminated direction', () => {
+  for (const direction of ['Top', 'Bottom', 'TopAndBottom']) {
+    for (const beforeEntries of [false, true]) {
+      const payload = page(flat(tweet('100', null)), module(tweet('201')), cursor('next'))
+      const instructions = payload.data.threaded_conversation_with_injections_v2.instructions
+      const termination = { type: 'TimelineTerminateTimeline', __typename: 'TimelineTerminateTimeline', direction }
+      instructions[beforeEntries ? 'unshift' : 'push'](termination)
+      instructions.unshift({ type: 'TimelineClearCache' })
+      const parsed = parseRapidApiTwitterCommentPage(payload, '100')
+      assert.deepEqual(parsed.comments.map(row => row.values.commentId), ['201'])
+      assert.equal(parsed.providerPage.hasMore, direction === 'Top')
+      assert.deepEqual(parsed.providerPage.nextParams, direction === 'Top' ? { cursor: 'next' } : null)
+      assert.equal(projectPostCommentPage(payload, postStep(), { capturedAt }).records.length, 1)
+      assert.equal(projectCommentReplyPage(payload, replyStep('100'), { capturedAt }).records.length, 1)
+    }
+  }
+})
+
+test('malformed termination metadata cannot silently discard a paid response', () => {
+  for (const fields of [{}, { direction: null }, { direction: 'unknown' }, { direction: {} },
+    { direction: 'Top', __typename: 'unreviewed' }, { direction: 'Top', entries: [module(tweet('202'))] },
+    { direction: 'Bottom', moduleItems: [] }]) {
+    const payload = page(module(tweet('201')), cursor('next'))
+    payload.data.threaded_conversation_with_injections_v2.instructions.push({ type: 'TimelineTerminateTimeline', ...fields })
+    assert.throws(() => parseRapidApiTwitterCommentPage(payload, '100'), { code: 'invalid_upstream_contract' })
+  }
+})
+
+test('terminated TweetDetail pages deliver the existing comments and replies contract with one call and immutable replay', async () => {
+  const h = await rapidHarness(url => {
+    const isPost = url.pathname === '/tweet/100'
+    const payload = isPost
+      ? page(flat(tweet('100', null)), ...Array.from({ length: 39 }, (_, i) => module(tweet(String(201 + i)))), cursor('next'))
+      : page(flat(tweet('100', null)), flat(tweet('201')), module(tweet('240', '201'), tweet('241', '240')), cursor('unused'))
+    payload.data.threaded_conversation_with_injections_v2.instructions.unshift({ type: 'TimelineClearCache' })
+    payload.data.threaded_conversation_with_injections_v2.instructions.push({ type: 'TimelineTerminateTimeline', direction: isPost ? 'Top' : 'Bottom' })
+    return payload
+  })
+  const body = { platform: 'twitter', postId: '100', count: 100, includeRaw: false }
+  const first = await h.comments(body, 'terminated-comments')
+  assert.equal(first.status, 200)
+  assert.equal(first.body.data.items.length, 39, 'focal tweet is context, not a comment')
+  const comment = first.body.data.items[0]
+  assert.equal(comment.commentId, '201')
+  assert.equal(comment.text, '  Complete reply\ntext  ')
+  assert.equal(comment.likeCount, 0)
+  assert.deepEqual(comment.replyRef, { platform: 'twitter', commentId: '201', contentId: '100' })
+  assert.equal(JSON.parse(first.body.data.raw_data).length, 39)
+  assert.match(first.body.data.page.nextCursor, /^mxds1\./u)
+  assert.deepEqual((await h.comments(body, 'terminated-comments')).body, first.body)
+  assert.equal(h.calls.length, 1, 'short page and replay do not buy another page')
+  const replyBody = { platform: 'twitter', replyRef: comment.replyRef, count: 1, includeRaw: false }
+  const replies = await h.replies(replyBody, 'terminated-replies')
+  assert.equal(replies.status, 200)
+  assert.equal(replies.body.data.items.length, 1)
+  assert.equal(replies.body.data.items[0].rootCommentId, '201')
+  assert.equal(replies.body.data.items[0].parentCommentId, '201')
+  assert.match(replies.body.data.page.nextCursor, /^mxds1\./u, 'bottom termination still allows draining already purchased rows')
+  assert.deepEqual((await h.replies(replyBody, 'terminated-replies')).body, replies.body)
+  const buffered = await h.replies({ ...replyBody, cursor: replies.body.data.page.nextCursor }, 'terminated-replies-buffer')
+  assert.equal(buffered.body.data.items[0].commentId, '241')
+  assert.equal(buffered.body.data.items[0].parentCommentId, '240')
+  assert.equal(buffered.body.data.page.nextCursor, null)
+  assert.equal(h.calls.length, 2)
+})
+
 test('RapidAPI malformed/error responses fail as upstream contract errors with no alternate supplier projection', () => {
   for (const payload of [{}, { data: [] }, { errors: [{ message: 'denied' }], ...page() },
     page(module(tweet('201'), tweet('202', '999', '999'))),
