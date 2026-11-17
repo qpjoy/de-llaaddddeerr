@@ -31,7 +31,8 @@ def failed(check, reason):
 
 def run(check, args, timeout=12, stdin=None, include_stderr=False):
     try:
-        result = subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                universal_newlines=True, timeout=timeout)
     except FileNotFoundError:
         failed(check, 'command-not-found')
         return None
@@ -67,7 +68,8 @@ def http(check, url, host=None, real_ip=False):
         args += ['-H', 'X-Real-IP: 10.88.0.1']
     # curl still writes timings on many failures, including its 8 s timeout.
     try:
-        result = subprocess.run(args + [url], capture_output=True, text=True, timeout=12)
+        result = subprocess.run(args + [url], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                universal_newlines=True, timeout=12)
     except FileNotFoundError:
         failed(check, 'command-not-found')
         return
@@ -166,9 +168,65 @@ def domestic():
              note='No matching errors does not prove health; raw logs are never printed.')
     wireguard()
 
+def internal_nginx_errors():
+    # The generated ingress inherits the host's error_log. Inspect only this
+    # default file; nginx -T would include the private identity gateway token.
+    source = '/var/log/nginx/error.log'
+    logs = run('internal-nginx-errors', ['tail', '-c', '1048576', '--', source])
+    if logs is None:
+        emit('internal-nginx-error-source', source=source,
+             note='Default log unavailable; custom paths and rotated logs were not inspected.')
+        return
+    now = datetime.datetime.now()
+    cutoff = now - datetime.timedelta(minutes=15)
+    groups = {}
+    for line in logs.splitlines()[-3000:]:
+        stamp = re.match(r'^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) ', line)
+        server = re.search(r', server: ((?:launcher|auth)\.minsight-ai\.com),', line)
+        if not stamp or not server:
+            continue
+        try:
+            at = datetime.datetime.strptime(stamp[1], '%Y/%m/%d %H:%M:%S')
+        except ValueError:
+            continue
+        if not cutoff <= at <= now:
+            continue
+        # Classify only the error prefix, never request/query/header content.
+        error = line.split(', client:', 1)[0]
+        kind = next((s for s in ('upstream timed out', 'connect() failed', 'no live upstreams',
+            'upstream prematurely closed connection', 'recv() failed',
+            'upstream sent invalid header', 'upstream sent too big header') if s in error), None)
+        if not kind:
+            continue
+        errno_match = re.search(r'\(([0-9]{1,5}):', error)
+        errno = int(errno_match[1]) if errno_match else None
+        stage = next((s for s in ('while connecting to upstream',
+            'while reading response header from upstream', 'while sending request to upstream')
+            if s in error), 'other')
+        origin = 'unavailable'
+        match = re.search(r', upstream: "(https?)://(\[[0-9a-fA-F:]+\]|[0-9.]+)(?::([0-9]+))?(?:/|")', line)
+        if match:
+            try:
+                address = str(ipaddress.ip_address(match[2].strip('[]')))
+                port = int(match[3] or (443 if match[1] == 'https' else 80))
+                if 0 < port < 65536:
+                    origin = '{}://{}:{}'.format(match[1], '[' + address + ']' if ':' in address else address, port)
+            except ValueError:
+                pass
+        group = groups.setdefault((server[1], kind, errno, stage, origin), dict(count=0, first=stamp[1], last=stamp[1]))
+        group['count'] += 1
+        group['first'] = min(group['first'], stamp[1])
+        group['last'] = max(group['last'], stamp[1])
+    emit('internal-nginx-errors', source=source, window='15m, last 1 MiB, at most 3000 lines',
+         time_basis='host-local, no timezone in Nginx timestamps',
+         counts=[dict(server=h, kind=k, errno=e, stage=s, upstream_origin=o, **v)
+                 for (h, k, e, s, o), v in groups.items()],
+         note='No matching errors does not prove health; custom paths and rotated logs were not inspected.')
+
 def internal():
+    internal_nginx_errors()
     pods = json_command('pods', kube + ['get', 'pods', '-o', 'json'])
-    api_ips, api_names = [], []
+    api_ips, api_names, identity_ips = [], [], []
     if isinstance(pods, dict):
         for pod in pods.get('items', []):
             name = pod.get('metadata', {}).get('name', '')
@@ -180,6 +238,10 @@ def internal():
             ready = next((c.get('status') for c in status.get('conditions', []) if c.get('type') == 'Ready'), 'Unknown')
             emit('pod', name=name, phase=status.get('phase'), ready=ready, ip=status.get('podIP'),
                  containers=[dict({k: c.get(k) for k in ('name', 'image', 'ready', 'restartCount')},
+                    state={state: {k: values.get(k) for k in ('reason', 'exitCode', 'signal', 'startedAt', 'finishedAt')
+                                   if k in values}
+                           for state, values in c.get('state', {}).items()
+                           if state in ('waiting', 'running', 'terminated')},
                     last_termination={k: c.get('lastState', {}).get('terminated', {}).get(k)
                     for k in ('reason', 'exitCode', 'finishedAt')}) for c in containers])
             if name.startswith('mx-launcher-internal-') and status.get('phase') == 'Running':
@@ -189,6 +251,11 @@ def internal():
                     emit('api-previous-log', pod=name, status='skipped-no-restarts')
                 try:
                     api_ips.append(str(ipaddress.ip_address(status.get('podIP', ''))))
+                except ValueError:
+                    pass
+            if name.startswith('mx-identity-public-') and status.get('phase') == 'Running':
+                try:
+                    identity_ips.append(str(ipaddress.ip_address(status.get('podIP', ''))))
                 except ValueError:
                     pass
     for name in ('mx-launcher-internal', 'mx-internal-postgres'):
@@ -205,6 +272,9 @@ def internal():
     for path in ('healthz', 'readyz', 'admin/'):
         http('gateway-18090-' + path, 'http://127.0.0.1:18090/' + path)
     http('identity-18444', 'http://10.88.88.88:18444/healthz', 'auth.minsight-ai.com')
+    for ip in sorted(set(identity_ips))[:2]:
+        authority = '[' + ip + ']' if ':' in ip else ip
+        http('identity-pod-' + ip + '-healthz', 'http://' + authority + ':18444/healthz', 'auth.minsight-ai.com')
     for ip in sorted(set(api_ips))[:2]:
         authority = '[' + ip + ']' if ':' in ip else ip
         for path in ('healthz', 'admin/'):

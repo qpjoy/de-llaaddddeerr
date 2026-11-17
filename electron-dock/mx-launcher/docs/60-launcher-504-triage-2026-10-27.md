@@ -2,6 +2,8 @@
 
 状态：2026-10-27 **故障阶段已确认：Domestic 公网 Nginx 到 Internal `10.88.88.88:80` 的 TCP 回源建连超时**；23:34 容器内探针已恢复，底层原因未结案。新增只读采集工具与一个本地验证的后台异常修复，未部署生产。
 
+2026-11-17 新增公网快速 502 的独立采样与诊断，见本文第 7 节；根因及恢复仍待现场核实。
+
 ## 1. 本次证据
 
 开发机对用户截图中的 `https://launcher.minsight-ai.com` 执行两次独立、无 Cookie 的 GET，绕过本机代理，不发送登录、订阅或业务写入：
@@ -278,3 +280,109 @@ curl --noproxy '*' --connect-timeout 3 --max-time 8 -sS -o /dev/null \
 使用现有测试账号和会话验收 MX-H2I 密码/飞书登录、当前用户既有 WG 内网访问、既有海外出口/订阅刷新；不让现有用户统一登出或断开重连。检查 SSO、用户/角色、租约、peer 和密钥未被重置。Hub/DataPort/Pay 仍使用原 SSO 和各自数据库边界。
 
 本轮没有连接生产 SSH/Kubernetes，没有执行恢复、部署或网络配置变更。恢复状态等待操作者回传并逐项确认。
+
+## 7. 2026-11-17 公网 502：优先核对 Internal 身份回源
+
+本次是新的故障采样，**尚未确认根因或恢复**，不能沿用 10 月 27 日的 TCP 建连超时结论。
+开发机于北京时间 16:30–16:32 发送无 Cookie 的只读 GET，得到：
+
+| 路径 | HTTP | 总耗时 | 说明 |
+| --- | --- | --- | --- |
+| `launcher.minsight-ai.com/admin/` | 502，两次 | 0.279 / 0.095 s | 响应头 `nginx/1.30.4`；第二次完整正文为标准 Nginx HTML，页脚 `nginx/1.14.1` |
+| `launcher.minsight-ai.com/auth/admin/session` | 502 | 0.078 s | 响应头 `nginx/1.30.4`，173 字节；没有采集正文 |
+| `auth.minsight-ai.com/identity/.well-known/openid-configuration` | 502 | 0.372 s | 同样 173 字节；没有采集正文 |
+| `h2i.minsight-ai.com/bootstrap-healthz` | 200 | 0.126 s | 仅证明该健康端点在采样时可达 |
+| `h2i.minsight-ai.com/internal-healthz` | 200 | 0.081 s | 不能替代用户登录、既有隧道和出口验收 |
+
+curl 使用 `--noproxy '*'`，但本机报告的远端地址为 `198.18.1.97`，符合本地 Fake-IP 映射，
+不能将它当成源站公网 IP，也不能声称已排除系统透明代理。以上是该开发机访问路径的实测。
+
+历史现场记录将 `1.30.4` 对应到 Domestic 公网 Nginx，将 `1.14.1` 对应到 Internal 宿主 Nginx。
+本次头/正文版本组合支持“公网入口转发了 Internal 错误页”的判断；当前配置及宿主错误日志仍需核验。
+仓库中 `identity-ingress.mjs` 把 launcher Admin 和 auth 身份路由转发至 public identity 的 `18444`。
+identity 自己在 API 回源错误时返回中文纯文本 502，不生成本次标准 HTML 页。
+因此第一排查点是 **Internal Nginx → `mx-identity-public` hostPort `18444`**，
+而不是直接认定 PostgreSQL、WG 或整机内存耗尽。
+
+用户截图为整机 251Gi、available 57Gi、无 swap；用户另报告磁盘仍有余量，尚未取得磁盘读数。
+这些不能排除单容器限额、进程退出或回源拒绝连接。仓库 identity manifest 的内存 limit 为 384Mi，
+线上值和是否发生 OOM 尚未核实，不能仅凭此默认值就扩内存。[Kubernetes 内存限制说明](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/)
+
+下一次现场采集在 `mx-internal-server` 的 `electron-dock/mx-launcher` 目录执行：
+
+```bash
+bash scripts/diagnose-launcher-timeout.sh internal
+```
+
+本地增强版本增加 Internal Nginx 错误摘要和 public identity PodIP/hostPort 同窗对照；服务器需先取得更新后的脚本，
+无需执行 deploy。默认读取 `/var/log/nginx/error.log`，仅汇总有界样本中的错误类型、阶段、上游地址和时间，
+另保留数值 errno，以区分拒绝连接、无路由和权限拒绝；不输出原始请求、query、凭据或完整 Nginx 配置。
+该日志路径是常见默认值，尚未现场确认；缺失或不可读会明确报告，
+不等于 Nginx 无故障。既有探针继续检查 API、Service、数据库等待和主机 I/O。
+
+重点对照 `identity-18444`、`identity-pod-…`、身份 Pod 当前/上次退出状态和 `internal-nginx-errors`：
+hostPort 失败而 PodIP 成功时查 portmap/回源地址；两者失败时查 Pod/进程；两者健康时按错误摘要的实际 upstream
+核对 Nginx 配置。只在证据明确后决定最小恢复动作，保留原身份档案、Secret、用户、网络租约和 peer。
+
+开发机已有 `root@100.89.0.12:22` 的 SSH banner 等待超时，本机 kubeconfig 只有 Docker Desktop，
+本轮未连接生产 Kubernetes、未执行任何线上变更。只读诊断增强是本地取证工具，不是已完成的故障修复。
+
+本地验证：新增 3 项纯 Python 离线测试通过，覆盖错误摘要的脱敏/时间和采样上限、日志读取失败、
+身份 Pod 探针选择及退出状态；Bash 语法和 `git diff --check` 通过。Windows 本机没有可用的 Linux 测试运行时，
+既有 POSIX CLI fixture 套件未执行，也尚未在服务器验证实际日志路径和 hostPort 状态。
+
+### 16:39:52 +08:00 Internal 现场回执
+
+用户在 `mx-internal-server` 执行只读命令，回传：
+
+- 公网身份 Pod `mx-identity-public-776459bf58-fxd4v`：Running / Ready=true / restartCount=0，
+  PodIP `192.168.224.254`；带正确 Host 直连 `:18444/healthz` 返回 **200 / 1.264 ms**。
+- 同窗 `10.88.88.88:18444/healthz`：curl 退出码 7，**立即拒绝连接 / 0.136 ms**。
+  HTTP `000` 是未取得 HTTP 响应，不是服务端状态码。
+- `127.0.0.1:18090/admin/`：**200 / 28.810 ms**。
+- 私网身份 Pod `mx-identity-76fd5f84cb-mxfpq`：Running / Ready=true / restartCount=0，
+  PodIP `192.168.224.4`；本轮尚未测私网 hostPort `18443`。
+- 另有一个旧私网 Failed Pod（lastState=ContainerStatusUnknown）和一个旧公网 Succeeded Pod。
+  不据此判定当前两只身份 Pod 故障，不删除旧 Pod 作为修复步骤。
+- Nginx 采集输出“读取失败”：表示采集器未成功取得日志，不能解释为日志为空、Nginx 正常或日志路径不存在。
+  粘贴版采集器使用 Python 3.7+ 的 `capture_output/text` 参数；服务器 Python 版本尚未回传，兼容性也是待核对项。
+
+证据将当前失败定位到 **Internal 宿主 VIP `18444` 的访问路径**，支持优先检查 hostPort 声明、
+CNI/portmap DNAT 跳转与目标，以及过滤规则；尚未证实规则被清空或某次防火墙 reload 是根因。
+宿主 Nginx 的本地请求经过 NAT OUTPUT，外部入站经过 PREROUTING，需分别检查，
+同时区分 iptables 的 nft/legacy 后端；`ss` 无监听不能单独证明 hostPort 缺失。
+参考 [CNI portmap 规则说明](https://www.cni.dev/plugins/current/meta/portmap/)。
+
+历史相同表现与受控恢复见 [DataPort 2026-10-21 SSO 故障](../../mx-dataport/docs/sso-outage-20261021.md)。
+其中恢复 CLI 的 `--apply` 会重建单副本公网身份 Pod，不是无中断规则修复；本轮尚未执行，
+也不把历史恢复成功或当时用户验收当成本次授权、现状或成功证据。
+
+### 后续回执：hostPort 声明正确，当前 iptables 无匹配规则
+
+用户再次确认上述 Running 公网身份 Pod 的 hostIP 为 `10.88.88.88`，
+hostPort/containerPort 都是 `18444/TCP`，没有启用 hostNetwork；VIP 路由为本机 lo。
+显式绑定源地址 `10.88.88.88` 访问当前 Pod `192.168.224.254:18444/healthz` 返回 **200 / 8.866 ms**。
+`iptables v1.8.4 (nf_tables)` 的 NAT 输出中，18443/18444 和 CNI-HOSTPORT 跳转均未匹配；
+独立 `iptables-nft`、`iptables-legacy` 命令未输出，不能据此宣称所有原生 nft/legacy 规则集都已检查。
+全命名空间 Service 端口列表没有 18444。当前证据支持 hostPort 发布路径缺失/异常；规则消失的触发仍未查明。
+
+服务器 Python 已确认为 **3.6.8**，不支持前述采集器的 `capture_output/text` 参数。
+本地诊断脚本两处 subprocess 调用已改成 `stdout/stderr=PIPE` 与 `universal_newlines=True`。
+新增严格参数签名回归后，4 项 Embedded 测试通过；测试在 Python 3.12 上模拟 3.6 参数约束，
+尚未在真实 Python 3.6 或服务器执行新版脚本，不把兼容修复当成网关修复。
+
+本次准备的定向恢复为新增 `mx-internal-shadow/mx-identity-public-ingress` Service：
+`externalIPs=[10.88.88.88]`、`18444/TCP -> 18444`、selector `app=mx-identity-public`，
+由 Kubernetes 分配 ClusterIP、维护 Ready 端点，不固定 PodIP。
+可审阅清单为 [identity-public-service.yaml](../deploy/recovery/identity-public-service.yaml)，
+放在手工恢复目录，未纳入普通 deploy，也未更改身份 Deployment/Secret、私网 18443、Nginx 或 WG。
+以 `kubectl create` 新建；同名资源已存在或提交结果不明时停止核对，不覆盖或自动重试写入。
+
+这是沿用当前 CoreDNS 的 Service 发布方式来恢复原地址，不是未来架构定案：
+`externalIPs` 从 Kubernetes 1.36 起已弃用但仍支持；后续应单独评估稳定 ClusterIP 回源或其它受管入口，
+不在此次故障中改共享 Nginx 与登录链路。[Kubernetes External IPs](https://kubernetes.io/docs/concepts/services-networking/service/#external-ips)
+
+创建后需核对 EndpointSlice 的 Ready 目标为当前公网身份 Pod，分别验证分配的 ClusterIP 和原 VIP health 200，
+然后复测公网 Admin/SSO discovery 与 H2I 健康端点。失败时保留输出，不自动重启 Pod或重试创建；
+若需回退，只在确认资源 UID 属于本次创建后删除此新 Service，不删除 Deployment 或 Secret。
+**当前仅准备命令和清单，尚未收到创建或恢复成功回执。**

@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).with_name('diagnose-launcher-timeout.sh')
 FAKE = r'''#!/usr/bin/env python3
@@ -63,6 +64,8 @@ elif cmd == 'ip':
     print('[{"type":"local","dst":"10.88.88.88","dev":"lo","prefsrc":"10.88.88.88"}]')
 elif cmd in ('df','iostat','vmstat'):
     print('safe fixture statistics')
+elif cmd == 'tail':
+    pass
 '''
 
 
@@ -74,7 +77,7 @@ class DiagnosticsTest(unittest.TestCase):
         dispatcher = self.root / 'fake.py'
         dispatcher.write_text(FAKE)
         dispatcher.chmod(0o755)
-        for command in ('curl', 'kubectl', 'docker', 'wg', 'df', 'iostat', 'vmstat', 'journalctl', 'hostname', 'ip'):
+        for command in ('curl', 'kubectl', 'docker', 'wg', 'df', 'iostat', 'vmstat', 'journalctl', 'hostname', 'ip', 'tail'):
             (self.root / command).symlink_to(dispatcher)
         self.calls = self.root / 'calls.jsonl'
         self.env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'],
@@ -155,6 +158,144 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertIn('skipped-no-restarts', result.stdout)
         self.assertFalse(any(c['cmd'] == 'kubectl' and 'logs' in c['args'] for c in calls))
         self.assertEqual(json.loads(result.stdout.splitlines()[-1])['failed_checks'], 0)
+
+
+class EmbeddedDiagnosticsTest(unittest.TestCase):
+    """Exercise the embedded Python without invoking Bash or host commands."""
+    def setUp(self):
+        source = SCRIPT.read_text().split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        source = source.split("\nemit('start',", 1)[0]
+        self.scope = {}
+        with mock.patch('sys.argv', ['diagnostic', 'internal']):
+            exec(compile(source, str(SCRIPT), 'exec'), self.scope)
+        self.records = []
+        self.scope['emit'] = lambda check, **values: self.records.append(dict(check=check, **values))
+
+    def nginx_line(self, age, server='launcher.minsight-ai.com', error=None, upstream=None):
+        dt = self.scope['datetime']
+        stamp = (dt.datetime.now() - dt.timedelta(seconds=age)).strftime('%Y/%m/%d %H:%M:%S')
+        error = error or 'connect() failed (111: Connection refused) while connecting to upstream'
+        upstream = upstream or 'http://10.88.88.88:18444/admin/?token=SECRET_DO_NOT_PRINT'
+        return ('{} [error] 1#1: *1 {}, client: CLIENT_DO_NOT_PRINT, server: {}, '
+                'request: "GET /admin/?cookie=SECRET_DO_NOT_PRINT HTTP/1.1", '
+                'upstream: "{}", host: "launcher.minsight-ai.com", '
+                'X-MX-Identity-Gateway: SECRET_DO_NOT_PRINT').format(stamp, error, server, upstream)
+
+    def test_python36_subprocess_options_preserve_results_and_redaction(self):
+        responses = iter([
+            subprocess.CompletedProcess([], 0, 'safe output', 'SECRET_DO_NOT_PRINT'),
+            subprocess.CompletedProcess([], 7, 'SECRET_DO_NOT_PRINT', 'SECRET_DO_NOT_PRINT'),
+            subprocess.CompletedProcess([], 0, json.dumps({'http_code': '200', 'total_s': 0.01,
+                'unexpected': 'SECRET_DO_NOT_PRINT'}), 'SECRET_DO_NOT_PRINT'),
+            subprocess.CompletedProcess([], 28, json.dumps({'http_code': '000', 'total_s': 8.001,
+                'unexpected': 'SECRET_DO_NOT_PRINT'}), 'SECRET_DO_NOT_PRINT'),
+        ])
+        calls = []
+        # Reject the capture_output/text keywords unavailable on Python 3.6.
+        def python36_run(args, *, input=None, stdout=None, stderr=None,
+                         universal_newlines=False, timeout=None):
+            self.assertEqual((stdout, stderr), (subprocess.PIPE, subprocess.PIPE))
+            self.assertTrue(universal_newlines)
+            calls.append((input, timeout))
+            return next(responses)
+
+        with mock.patch.object(self.scope['subprocess'], 'run', side_effect=python36_run):
+            self.assertEqual(self.scope['run']('regular', ['fixture'], timeout=3, stdin='read only'), 'safe output')
+            self.assertIsNone(self.scope['run']('failed', ['fixture']))
+            self.scope['http']('healthy', 'http://127.0.0.1/healthz')
+            self.scope['http']('timeout', 'http://127.0.0.1/healthz')
+        self.assertEqual(calls, [('read only', 3), (None, 12), (None, 12), (None, 12)])
+        self.assertEqual(self.scope['failures'], 2)
+        self.assertEqual(self.records[0]['status'], 'command-exit-7')
+        self.assertEqual(self.records[1]['http_code'], '200')
+        self.assertEqual(self.records[2]['status'], 'curl-exit-28')
+        self.assertEqual(self.records[3]['http_code'], '000')
+        self.assertEqual(self.records[3]['total_s'], 8.001)
+        self.assertNotIn('DO_NOT_PRINT', json.dumps(self.records))
+
+    def test_nginx_summary_is_bounded_timed_and_redacted(self):
+        logs = '\n'.join([
+            self.nginx_line(60), self.nginx_line(30), self.nginx_line(16 * 60),
+            self.nginx_line(20, server='unrelated.example'),
+            self.nginx_line(10, error='unclassified failure',
+                            upstream='http://10.88.88.88:18444/?error=connect() failed'),
+        ])
+        run = mock.Mock(return_value=logs)
+        self.scope['run'] = run
+        self.scope['internal_nginx_errors']()
+        run.assert_called_once_with('internal-nginx-errors',
+                                    ['tail', '-c', '1048576', '--', '/var/log/nginx/error.log'])
+        record = self.records[-1]
+        self.assertEqual(len(record['counts']), 1)
+        group = record['counts'][0]
+        self.assertEqual(group['count'], 2)
+        self.assertEqual(group['server'], 'launcher.minsight-ai.com')
+        self.assertEqual(group['kind'], 'connect() failed')
+        self.assertEqual(group['errno'], 111)
+        self.assertEqual(group['stage'], 'while connecting to upstream')
+        self.assertEqual(group['upstream_origin'], 'http://10.88.88.88:18444')
+        self.assertLess(group['first'], group['last'])
+        self.assertNotIn('DO_NOT_PRINT', json.dumps(self.records))
+        self.assertNotIn('/admin/', json.dumps(self.records))
+
+        self.records.clear()
+        run.return_value = self.nginx_line(1) + '\n' + '\n'.join(['irrelevant'] * 3000)
+        self.scope['internal_nginx_errors']()
+        self.assertEqual(self.records[-1]['counts'], [])
+
+        self.records.clear()
+        run.return_value = '\n'.join(self.nginx_line(1, server='auth.minsight-ai.com',
+            error='connect() failed ({}: SECRET_DO_NOT_PRINT) while connecting to upstream'.format(errno))
+            for errno in (111, 113, 13))
+        self.scope['internal_nginx_errors']()
+        self.assertEqual([group['errno'] for group in self.records[-1]['counts']], [111, 113, 13])
+        self.assertTrue(all(group['server'] == 'auth.minsight-ai.com' for group in self.records[-1]['counts']))
+        self.assertNotIn('DO_NOT_PRINT', json.dumps(self.records))
+
+    def test_nginx_unavailable_is_reported_without_raw_output(self):
+        failure = mock.Mock(returncode=1, stdout='SECRET_DO_NOT_PRINT', stderr='SECRET_DO_NOT_PRINT')
+        with mock.patch.object(self.scope['subprocess'], 'run', return_value=failure) as execute:
+            self.scope['internal_nginx_errors']()
+        self.assertEqual(execute.call_args.kwargs['timeout'], 12)
+        self.assertEqual(self.scope['failures'], 1)
+        self.assertEqual(self.records[0]['status'], 'command-exit-1')
+        self.assertEqual(self.records[-1]['source'], '/var/log/nginx/error.log')
+        self.assertNotIn('counts', self.records[-1])
+        self.assertNotIn('DO_NOT_PRINT', json.dumps(self.records))
+
+    def test_public_identity_probe_and_container_failure_state(self):
+        container = {'name': 'identity', 'image': 'test:identity', 'ready': False, 'restartCount': 2,
+                     'state': {'waiting': {'reason': 'CrashLoopBackOff', 'message': 'SECRET_DO_NOT_PRINT'}},
+                     'lastState': {'terminated': {'reason': 'OOMKilled', 'exitCode': 137,
+                                                 'finishedAt': '2026-11-17T00:01:00Z',
+                                                 'message': 'SECRET_DO_NOT_PRINT'}}}
+        def pod(name, address, phase='Running', state=None):
+            return {'metadata': {'name': name}, 'status': {'phase': phase, 'podIP': address,
+                    'containerStatuses': [state or container]}}
+        pods = [pod('mx-identity-public-a', '192.168.224.31'),
+                pod('mx-identity-public-b', '192.168.224.32', state={**container,
+                    'state': {'terminated': {'reason': 'Error', 'exitCode': 1,
+                                            'message': 'SECRET_DO_NOT_PRINT'}}}),
+                pod('mx-identity-public-c', '192.168.224.33'),
+                pod('mx-identity-private', '192.168.224.34'),
+                pod('mx-identity-public-pending', '192.168.224.35', phase='Pending'),
+                pod('mx-identity-public-invalid', 'invalid.example'),
+                pod('unrelated', '192.168.224.36')]
+        self.scope['json_command'] = lambda check, args: {'items': pods} if check == 'pods' else {}
+        self.scope['run'] = mock.Mock(return_value='')
+        self.scope['http'] = http = mock.Mock()
+        self.scope['internal']()
+        identity = [call for call in http.call_args_list if call.args[0].startswith('identity-pod-')]
+        self.assertEqual(len(identity), 2)
+        self.assertEqual([call.args[1] for call in identity],
+                         ['http://192.168.224.31:18444/healthz', 'http://192.168.224.32:18444/healthz'])
+        self.assertTrue(all(call.args[2] == 'auth.minsight-ai.com' for call in identity))
+        http.assert_any_call('identity-18444', 'http://10.88.88.88:18444/healthz', 'auth.minsight-ai.com')
+        records = [r for r in self.records if r['check'] == 'pod']
+        self.assertEqual(records[0]['containers'][0]['state'], {'waiting': {'reason': 'CrashLoopBackOff'}})
+        self.assertEqual(records[0]['containers'][0]['last_termination']['reason'], 'OOMKilled')
+        self.assertEqual(records[1]['containers'][0]['state'], {'terminated': {'reason': 'Error', 'exitCode': 1}})
+        self.assertNotIn('DO_NOT_PRINT', json.dumps(self.records))
 
 
 if __name__ == '__main__':
