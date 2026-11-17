@@ -89,6 +89,53 @@ test('privileged profiles allow office networks but reject hooks, default routes
   assert.doesNotThrow(() => assertOwner({ownerSID:SID},SID));
 });
 
+test('service accepts generated employee profiles across the existing office and legacy networks', () => {
+  const core = require('../../../../../electron-plugin/packages/electron-core-wireguard/dist/index.js');
+  // Synthetic keys and endpoints, with the same lease/route shape as the
+  // production launcher. No credentials or diagnostic bundle are embedded.
+  for (const network of ['10.88', '10.89', '10.90', '100.88', '100.89', '100.90', '100.91']) {
+    const config = core.renderWireGuardInterface({
+      addresses: [`${network}.50.8/32`],
+      privateKey: Buffer.alloc(32, 1).toString('base64'),
+      hdoDnsServers: ['10.88.0.1'],
+      hdoDnsDomains: ['mxinfo-inc.cn'],
+      hdoRoutePriorityCidrs: [`${network}.0.0/16`, '10.88.88.88/32'],
+      peers: [{
+        publicKey: Buffer.alloc(32, 2).toString('base64'),
+        endpoint: 'office.example.com:51280',
+        allowedIps: [`${network}.0.0/16`, '10.88.100.1/32', '10.88.88.88/32', '10.88.0.1/32'],
+        persistentKeepalive: 25,
+      }],
+    });
+    const validated = validateWireGuardConfig(config);
+    assert.ok(validated.includes(`Address = ${network}.50.8/32`));
+    assert.ok(validated.includes(`AllowedIPs = ${network}.0.0/16, 10.88.100.1/32, 10.88.88.88/32, 10.88.0.1/32`));
+  }
+});
+
+test('service accepts the launcher default split DNS domains without permitting public suffixes', async () => {
+  const runtimeSource = await readFile(new URL('../src/main-runtime.cjs', import.meta.url), 'utf8');
+  const defaults = /const DEFAULT_SPLIT_DNS_DOMAINS = '([^']+)';/.exec(runtimeSource)?.[1].split(' ');
+  assert.ok(defaults?.length, 'use the real launcher defaults to catch policy drift');
+  const config = wireguard.replace('.mxinfo-inc.cn', defaults.map(domain => '.' + domain).join(', '));
+  assert.ok(validateWireGuardConfig(config).includes(`DNS Domains = ${defaults.join(', ')}`));
+  assert.match(validateWireGuardConfig(wireguard.replace('.mxinfo-inc.cn', '.Data.MXINFO-INC.CN')), /DNS Domains = data.mxinfo-inc.cn/);
+  for (const domain of ['cn', 'mx', 'com', 'minsight-ai.com', 'evil-mxinfo-inc.cn', 'mxinfo-inc.cn.evil.com']) {
+    assert.throws(() => validateWireGuardConfig(wireguard.replace('.mxinfo-inc.cn', domain)));
+  }
+});
+
+test('office profile policy still refuses adjacent networks, broad routes, public DNS and hooks', () => {
+  for (const network of ['10.87', '10.91', '10.255', '100.87', '100.92', '192.168']) {
+    assert.throws(() => validateWireGuardConfig(wireguard.replaceAll('10.88', network)));
+  }
+  for (const cidr of ['0.0.0.0/0', '10.0.0.0/8', '10.88.0.0/15', '10.89.0.0/15', '::/0']) {
+    assert.throws(() => validateWireGuardConfig(wireguard.replace('AllowedIPs = 10.88.0.0/16', `AllowedIPs = ${cidr}`)));
+  }
+  assert.throws(() => validateWireGuardConfig(wireguard.replace('DNS Servers = 10.88.0.1', 'DNS Servers = 8.8.8.8')));
+  assert.throws(() => validateWireGuardConfig(wireguard + 'PostUp = calc.exe\n'));
+});
+
 test('TUN reconstructs loopback listeners, secret and provider paths and rejects file access and cycles', () => {
   const raw = structuredClone(proxy);
   raw['allow-lan']=true;raw.secret='client-secret';raw.tun.device='attacker';
