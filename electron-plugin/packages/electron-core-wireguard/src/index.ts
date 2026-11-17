@@ -240,6 +240,7 @@ export interface WireGuardWindowsNrptNamespaceStatus {
   ownedRuleCount: number;
   legacyAmbiguousRuleCount: number;
   foreignOwners: string[];
+  conflictingRules?: Array<{ owner: string; nameServers: string[] }>;
   ready: boolean;
 }
 
@@ -1675,6 +1676,12 @@ export function evaluateWindowsWireGuardNrptStatus(input: {
     const foreignNameServerConflict = foreign.some(
       (rule) => !stringSetsEqual(expected.nameServers, normalizeWindowsNrptNameServers(rule.nameServers))
     );
+    const conflictingRules = foreign
+      .filter((rule) => !stringSetsEqual(expected.nameServers, normalizeWindowsNrptNameServers(rule.nameServers)))
+      .map((rule) => ({
+        owner: rule.comment || rule.displayName || '<untagged>',
+        nameServers: normalizeWindowsNrptNameServers(rule.nameServers)
+      }));
     return {
       namespace: expected.namespace,
       expectedNameServers: expected.nameServers,
@@ -1682,6 +1689,7 @@ export function evaluateWindowsWireGuardNrptStatus(input: {
       ownedRuleCount: owned.length,
       legacyAmbiguousRuleCount: legacyAmbiguous.length,
       foreignOwners,
+      conflictingRules,
       ready: owned.length > 0
         && stringSetsEqual(expected.nameServers, installedNameServers)
         && !foreignNameServerConflict

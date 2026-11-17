@@ -56,6 +56,52 @@ Windows 额外文件：
 
 ## Windows DNS / NRPT 排查顺序
 
+### 2026-11-16 现场：HDO 与 MX-H2I 同域冲突
+
+Windows 2.1.19 的两次连接均取得员工租约，Internal API 与 WG 路由检查通过。
+MX-H2I 自身十条规则的 DNS 均正确；失败的两个 namespace 为 `mxinfo-inc.cn` 和
+`.mxinfo-inc.cn`，同时存在 HDO 的 `100.88.0.1` 与 MX-H2I 的 `10.88.0.1`。
+NRPT 所有权校验因此拒绝 ready，即使抽样主机的三层 DNS 查询都返回 Internal VIP。
+这与 MinCave 界面无关，不能归因于账号密码登录或仅凭代理网卡存在归因于 Clash。
+
+2026-11-17 的客户端改动保留所有 ready/ownership 门禁及规则写入行为，只补充
+`namespaces[].conflictingRules`（owner 与 DNS），并让连接提示显示实际冲突来源。
+旧 core 没有此字段时仍能显示已有 `foreignOwners`，不会猜测对方 DNS。
+正常 disconnected/bootstrap 阶段不再因未安装 MX 规则而记录 WARNING；真实解析错误、
+断开后本产品规则/全局恢复残留仍记录异常。其他产品独立保留的规则不算本产品清理残留。
+
+重复修复只重建本产品规则，不会移除 HDO 的规则。不能通过删除其他产品规则、忽略
+冲突门禁，或自动把整个父域缩到诊断用的单个主机来宣称共存成功。后者会丢失现有
+Internal 域名契约；HTTP reverse-proxy 清单也不是全部 DNS 主机清单。真正共存需要
+Internal 明确各产品的主机/子域归属，结合 V1 域名保留和 V2 新域名迁移再验证。
+
+### 客户端兼容与包发布边界
+
+旧 MX-H2I runtime 默认保留 legacy 入口，避免升级后被 MinCave 的飞书准入检查阻断。
+新安装同样默认 legacy，MinCave 单独启用；没有显式选择的新入口标记时，已有密码身份优先保留 legacy，
+包括曾被新版本误切到 MinCave 的用户；其他已有 MinCave 窗口记录的安装保持 MinCave。显式
+`MX_H2I_UI=legacy|mincave` 优先。入口选择随 runtime 保存，登出、token 过期或读取旧
+状态失败不会自动把旧用户迁移到新入口。此选择仅控制界面，不授予任何管理或网络权限。
+
+2026-11-17 只读检查 npm 时，`@qpjoy/electron-core-wireguard@2.3.17` 仍缺少本地
+`7c082921` 的 Windows 服务探测修复（系统 `sc.exe` 路径与服务不存在 `1060` 的区分）。
+NRPT 同域冲突检测在该 npm 版本中已经存在；补服务探测不会消除 HDO 同域冲突。
+`scripts/manage.sh status` 仅比较版本号，不能证明同版本源码改动已经发布。
+
+- `./scripts/manage.sh prepare-core`：选择 `@qpjoy/electron-core-wireguard`，使用未发布过的
+  新版本准备客户端库。本次不要求更换 WireGuard engine 或重部署服务端。
+- `prepare-mx-h2i-npm` 包组不包含 `electron-core-wireguard`；只有 Launcher 等包本身
+  也有待发布修改时才准备对应包。此次检查的 npm Launcher 为 `2.3.19`。
+- 本地 workspace 构建会编译本地库，不必先发布 npm；npm 模式必须核对 lockfile 和实际
+  安装依赖。已有 node_modules 时 `ensure` 不会重新安装，重新执行 make 不保证升级依赖。
+- 采用新的正式客户端版本并在 Windows 执行 `pnpm make:win`，交付全量安装包。
+  单 ASAR 只含应用代码，继续使用基座 node_modules，不会带入新的 WG/Launcher 库。
+
+本次代码回归可以验证入口选择、冲突判定和诊断输出；仍需 Windows 真机验证 2.1.19
+覆盖升级、安全存储、账号密码/飞书重连、HDO/Luopan/Clash 共存及断开清理，才能发布。
+
+### 通用排查顺序
+
 NRPT rule 只应包含 Internal/AppCenter 下发的 exact domain/suffix，并指向产品 DNS。
 “global policy” 表示这些 namespace rules 可在所有网络 profile 上被评估，不表示接管所有
 DNS 查询。

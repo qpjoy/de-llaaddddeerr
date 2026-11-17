@@ -5,6 +5,7 @@ const fsSync = require('node:fs');
 const { mincaveWindowBounds, mincaveWindowMinimum } = require('./mincave-window-policy.cjs');
 const { createMincaveAdminBridge } = require('./mincave-admin.cjs');
 const { createWindowsNetworkService } = require('./windows-network-service.cjs');
+const { normalizeUiEntryMode, selectUiEntryMode } = require('./ui-entry-policy.cjs');
 const http = require('node:http');
 const https = require('node:https');
 const dnsPromises = require('node:dns').promises;
@@ -14,6 +15,7 @@ const { execFile } = require('node:child_process');
 const { createHash, randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { inspectOrRepairWindowsOwnership } = require('./windows-ownership-recovery.cjs');
+const { networkDiagnosticsProblem, windowsNrptOwnershipConflictMessage } = require('./network-diagnostic-policy.cjs');
 const {
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   darwinSupersedableOwnershipOwnerIds,
@@ -68,7 +70,7 @@ const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: ele
 
 loadDotEnvFiles();
 
-const MINCAVE_UI_ENABLED = process.env.MX_H2I_UI !== 'legacy';
+let MINCAVE_UI_ENABLED = false;
 const APP_ID = 'dev.qpjoy.mx-h2i';
 const STATE_FILE = 'mx-h2i-runtime.json';
 const H2O_RUNTIME_STORE_FILE = 'mx-h2i-h2o-runtime.json';
@@ -293,6 +295,7 @@ app.on('second-instance', () => {
 if (gotSingleInstanceLock) {
   app.whenReady().then(async () => {
     runtime = await loadRuntime();
+    MINCAVE_UI_ENABLED = runtime.uiMode === 'mincave';
     if (MINCAVE_UI_ENABLED) {
       mincaveBridge = createMincaveAdminBridge({
         getRuntime: () => runtime,
@@ -328,7 +331,8 @@ if (gotSingleInstanceLock) {
       baseVersion: app.getVersion(),
       platform: process.platform,
       arch: process.arch,
-      packaged: app.isPackaged
+      packaged: app.isPackaged,
+      uiMode: runtime.uiMode
     });
     await initializeSystemDomainProxy();
     const credentialStorageRecovery = await reconcileCredentialStorageFailureAfterStartup();
@@ -5432,11 +5436,12 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
       : ['bootstrap-dns-or-host-resolve', 'system-proxy-or-dns', 'external-dns'],
     updatedAt: nowIso()
   };
-  if (resolution?.severity === 'error' || windowsNrpt?.ready === false) {
+  const problem = networkDiagnosticsProblem({ phase, resolution, windowsNrpt });
+  if (problem) {
     queueDiagnosticLog(
-      resolution?.severity === 'error' ? 'error' : 'warning',
+      problem.level,
       'network.diagnostics-problem',
-      resolution?.message || `Windows NRPT state: ${windowsNrpt.state}`,
+      problem.message,
       { reason, phase, host, resolution, windowsNrpt, systemDomainProxy: diagnostics.systemDomainProxy }
     );
   }
@@ -5538,6 +5543,8 @@ function annotateResolutionWithWindowsNrpt(resolution, windowsNrpt) {
 
 function windowsNrptResolutionHint(windowsNrpt) {
   if (!windowsNrpt || typeof windowsNrpt !== 'object') return '';
+  const conflict = windowsNrptOwnershipConflictMessage(windowsNrpt);
+  if (conflict) return `；${conflict}`;
   if (windowsNrpt.state === 'legacy-hdo-script') {
     return '；审计日志检测到旧 MX-H2I NRPT 标记，请安装最新包后用管理员授权重连。NRPT 只接管配置的 Internal 域名，不会接管微信、豆包或 Steam 等公网域名。';
   }
@@ -8154,13 +8161,25 @@ function clamp(value, min, max) {
 }
 
 async function loadRuntime() {
-  let loaded;
+  let persistedRuntime = {};
   try {
     const raw = await fs.readFile(runtimePath(), 'utf8');
-    loaded = await normalizeRuntime(unprotectPersistedRuntime(JSON.parse(raw)));
+    persistedRuntime = JSON.parse(raw);
+  } catch {
+    // Missing or unreadable state must not opt a client into MinCave's
+    // different login/authorization flow.
+  }
+  const uiMode = selectUiEntryMode({
+    requestedMode: process.env.MX_H2I_UI,
+    persistedRuntime
+  });
+  let loaded;
+  try {
+    loaded = await normalizeRuntime(unprotectPersistedRuntime(persistedRuntime));
   } catch {
     loaded = await normalizeRuntime({});
   }
+  loaded.uiMode = uiMode;
   const persistedH2oRuntime = await loadPersistedH2oRuntime();
   const merged = mergePersistedH2oRuntime(loaded, persistedH2oRuntime);
   await maybeSnapshotAppsState(merged.apps);
@@ -8175,6 +8194,7 @@ async function normalizeRuntime(input) {
     currentReleaseVersion()
   );
   return {
+    uiMode: normalizeUiEntryMode(row.uiMode),
     config,
     installation: normalizeInstallation(row.installation),
     auth: normalizeAuth(row.auth),
@@ -17816,6 +17836,8 @@ function wireGuardConnectionNotReadyMessage(
     if (windowsNrpt?.state === 'probe-failed') {
       return `Windows NRPT 实时校验失败：${windowsNrpt.error || '无法读取系统策略'}。当前仅确认隧道与 Internal API 可用，不能把 split DNS 标记为 ready。`;
     }
+    const conflict = windowsNrptOwnershipConflictMessage(windowsNrpt);
+    if (conflict) return conflict;
     const details = [
       arrayValue(windowsNrpt?.missingNamespaces, []).length
         ? `缺少 ${windowsNrpt.missingNamespaces.join(', ')}`

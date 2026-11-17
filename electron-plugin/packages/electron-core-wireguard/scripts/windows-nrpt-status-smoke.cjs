@@ -114,6 +114,8 @@ const mismatched = evaluate({
 assert.equal(mismatched.ready, false);
 assert.equal(mismatched.state, 'name-server-mismatch');
 assert.deepEqual(mismatched.mismatchedNamespaces, expectedRules.map((rule) => rule.namespace));
+assert.ok(mismatched.namespaces.every((row) => row.conflictingRules.length === 0),
+  'an owned DNS mismatch must not be attributed to another product');
 
 const exactLegacy = evaluate({
   queryPolicy: 'QueryBoth',
@@ -134,6 +136,34 @@ const foreignConflict = evaluate({
 assert.equal(foreignConflict.ready, false);
 assert.equal(foreignConflict.state, 'name-server-mismatch');
 assert.deepEqual(foreignConflict.mismatchedNamespaces, expectedRules.map((rule) => rule.namespace));
+for (const row of foreignConflict.namespaces) {
+  assert.deepEqual(row.conflictingRules, [{ owner: 'Other Product', nameServers: ['10.88.0.1'] }]);
+}
+
+// Reproduce the field case without changing either product's rules: MX-H2I's
+// own DNS is correct, but HDO has the same two namespaces with its V1 DNS.
+const hdoConflict = evaluate({
+  queryPolicy: 'QueryBoth',
+  enableDaForAllNetworks: 'EnableAlways',
+  rules: [
+    ...rules(currentComment, ['10.88.0.1']),
+    ...rules('MX HDO / QPJoy HDO hdo-client', ' 100.88.0.1,100.88.0.1 '),
+    ...rules('Compatible Product', ['10.88.0.1']),
+    { namespace: 'unrelated.example', nameServers: ['192.0.2.53'], comment: 'Unrelated Product' }
+  ]
+}, 'mx-h2i', expectedRules.map((rule) => ({ ...rule, nameServers: ['10.88.0.1'] })));
+assert.equal(hdoConflict.ready, false);
+assert.equal(hdoConflict.state, 'name-server-mismatch');
+assert.deepEqual(hdoConflict.missingNamespaces, []);
+assert.deepEqual(hdoConflict.mismatchedNamespaces, expectedRules.map((rule) => rule.namespace));
+for (const row of hdoConflict.namespaces) {
+  assert.deepEqual(row.installedNameServers, ['10.88.0.1']);
+  assert.equal(row.ownedRuleCount, 1);
+  assert.deepEqual(row.conflictingRules, [{
+    owner: 'MX HDO / QPJoy HDO hdo-client',
+    nameServers: ['100.88.0.1']
+  }]);
+}
 
 const compatibleForeign = evaluate({
   queryPolicy: 'QueryBoth',
@@ -145,6 +175,8 @@ const compatibleForeign = evaluate({
 });
 assert.equal(compatibleForeign.ready, true);
 assert.equal(compatibleForeign.totalOwnedRuleCount, expectedRules.length);
+assert.ok(compatibleForeign.namespaces.every((row) => row.conflictingRules.length === 0),
+  'foreign rules with the same DNS must remain compatible');
 
 const legacyAmbiguous = evaluate({
   queryPolicy: 'QueryBoth',
