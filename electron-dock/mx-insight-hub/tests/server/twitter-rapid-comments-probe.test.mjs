@@ -24,7 +24,7 @@ const page = (tweets, cursor = null) => ({ data: { threaded_conversation_with_in
   ...(cursor ? [{ content: { entryType: 'TimelineTimelineCursor', cursorType: 'Bottom', value: cursor } }] : [])] }] } } })
 
 async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Private supplier refusal' }, rejectedStatus = 403, rejectedHeaders = {},
-  empty = false, noReplies = false, fallback = true, legacyReceipt = true } = {}) {
+  empty = false, noReplies = false, fallback = true, legacyReceipt = true, responseFactory = null } = {}) {
   const store = new MemoryStore(), service = new HubService({ store, apiKeyPepper: pepper })
   const tenant = await service.createTenant({ name: 'Probe fixture' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Existing owner' })
@@ -74,6 +74,7 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
     http.push(String(url))
     if (http.length === failAt) throw new Error(`Transport failed with ${secret}`)
     if (http.length === rejectAt) return Response.json(rejectedBody, { status: rejectedStatus, headers: rejectedHeaders })
+    if (responseFactory) return responseFactory(url, http.length)
     if (empty) return Response.json(page([], 'opaque-private-cursor'))
     return Response.json(http.length === 1 ? page([tweet('201', '100', noReplies ? 0 : 3)], 'opaque-private-cursor')
       : page([tweet('203', noReplies ? '200' : '201')]))
@@ -144,6 +145,7 @@ test('thread resume buys two pages within the original three-call budget and pre
   assert.equal(result.supplierHttpCallsMade, 2)
   assert.equal(result.supplierCallsBefore, 1)
   assert.equal(result.supplierCallsAfter, 3)
+  assert.equal(result.remainingSupplierCalls, 0)
   assert.equal(result.coverageComplete, false)
   assert.equal(result.publicContractValid, true)
   assert.equal(result.upstreamContinuationVerified, false)
@@ -173,7 +175,7 @@ test('thread resume buys two pages within the original three-call budget and pre
 test('unknown first or second outcomes stop every later stage and all subsequent executions', async () => {
   for (const failAt of [1,2]) {
     const h = await harness({ failAt }), result = await h.run()
-    assert.ok(result.errorCode)
+    assert.equal(result.errorCode, 'upstream_outcome_unknown')
     assert.equal(h.http.length, failAt)
     const again = await h.run()
     assert.equal(again.mode, 'read_saved_only')
@@ -256,6 +258,61 @@ test('real RapidAPI 404 failure settlement commits the immutable Hub 502 receipt
     path: '/api/v1/data/social/post-comments', body: { platform: 'twitter', postId: '100', count: 100, includeRaw: false } }),
   { code: 'external_platform_rejected' })
   assert.equal(h.http.length, 1, 'the committed 502 replays without another supplier request')
+})
+
+test('HTTP 200 projection failures retain the concrete public error and become read-only without spending the final call', async () => {
+  const h = await harness({ responseFactory: () => Response.json({ data: { unsupportedTimeline: [] }, token: secret }) })
+  const report = await h.run()
+  assert.equal(report.errorCode, 'external_platform_response_unusable')
+  assert.equal(report.supplierCallsBefore, 1)
+  assert.equal(report.supplierCallsAfter, 2)
+  assert.equal(report.remainingSupplierCalls, 1)
+  assert.equal(h.http.length, 1)
+  const failed = report.savedStages.find(row => row.stage === 'thread-first'), call = failed.providerCalls[0]
+  assert.equal(failed.usageStatus, 'committed')
+  assert.equal(failed.httpStatus, 502)
+  assert.equal(failed.publicErrorCode, 'external_platform_response_unusable')
+  assert.equal(failed.publicErrorCodeKnown, true)
+  assert.equal(call.outcome, 'succeeded_unusable')
+  assert.equal(call.httpStatus, 200)
+  assert.equal(call.errorCode, 'invalid_social_contract')
+  assert.equal(call.errorCodeKnown, true)
+  assert.equal(call.failurePhase, 'projection_contract_failed')
+  assert.equal(call.hashVerified, true)
+  assert.equal(report.savedStages.find(row => row.stage === 'thread-replies').state, 'not_attempted')
+  const saved = structuredClone([...h.store.requests.values()])
+  for (const read of [() => h.run(), () => h.preview(), () => h.run({ resumeThread: false })]) {
+    const again = await read()
+    assert.equal(again.mode, 'read_saved_only')
+    assert.equal(again.supplierHttpCallsMade, 0)
+    assert.equal(again.stages.find(row => row.stage === 'thread-first').providerCalls[0].failurePhase, 'projection_contract_failed')
+  }
+  assert.deepEqual([...h.store.requests.values()], saved)
+  assert.equal(h.http.length, 1)
+  assert.doesNotMatch(JSON.stringify(report), /synthetic-probe-provider-credential|unsupportedTimeline/u)
+})
+
+test('decode failures require their own known code and unknown saved errors never expose arbitrary values', async () => {
+  const h = await harness({ responseFactory: () => new Response('not JSON: private-body', { headers: { 'content-type': 'application/json' } }) })
+  const report = await h.run(), failed = report.savedStages.find(row => row.stage === 'thread-first')
+  assert.equal(report.errorCode, 'external_platform_response_unusable')
+  assert.equal(failed.providerCalls[0].errorCode, 'social_upstream_response_unusable')
+  assert.equal(failed.providerCalls[0].failurePhase, 'response_decode_or_envelope_failed')
+  const request = [...h.store.requests.values()][0], call = [...h.platformStore.calls.values()][0]
+  request.errorCode = secret
+  request.responseBody.error.code = secret
+  call.errorCode = secret
+  const inspection = await h.preview(), saved = inspection.stages.find(row => row.stage === 'thread-first')
+  assert.equal(saved.usageErrorCode, null)
+  assert.equal(saved.usageErrorCodeKnown, false)
+  assert.equal(saved.publicErrorCode, null)
+  assert.equal(saved.publicErrorCodeKnown, false)
+  assert.equal(saved.providerCalls[0].errorCode, null)
+  assert.equal(saved.providerCalls[0].errorCodeKnown, false)
+  assert.equal(saved.providerCalls[0].failurePhase, 'unclassified')
+  assert.equal(inspection.supplierHttpCallsMade, 0)
+  assert.equal(h.http.length, 1)
+  assert.doesNotMatch(JSON.stringify(inspection), /synthetic-probe-provider-credential|private-body/u)
 })
 
 test('one stage cannot dispatch twice even if an installed adapter attempts an automatic retry', async () => {
@@ -386,9 +443,9 @@ test('actual PostgreSQL preview SQL intersects consumer grants and Key snapshots
   const db = new PGlite(); t.after(() => db.close())
   await db.exec(`CREATE SCHEMA control; CREATE SCHEMA external_platform;
     CREATE TABLE usage_requests(id uuid,tenant_id uuid,consumer_id uuid,api_key_id uuid,platform text,status text,response_status int,
-      acquisition_request jsonb,response_body jsonb,idempotency_key text);
+      acquisition_request jsonb,response_body jsonb,idempotency_key text,error_code text);
     CREATE TABLE external_platform.provider_calls(id uuid,usage_request_id uuid,tenant_id uuid,consumer_id uuid,api_key_id uuid,
-      provider_key text,operation text,endpoint_key text,marketplace text,outcome text,http_status int,billed boolean,contract_version text,call_ordinal int);
+      provider_key text,operation text,endpoint_key text,marketplace text,outcome text,http_status int,billed boolean,contract_version text,call_ordinal int,error_code text);
     CREATE TABLE control.external_platform_restricted_raw_responses(provider_call_id uuid,body_size int,body_sha256 text,body_bytes bytea);
     CREATE TABLE api_keys(id uuid,tenant_id uuid,consumer_id uuid,environment text,status text,expires_at timestamptz,scope_mode text);
     CREATE TABLE consumers(id uuid,status text); CREATE TABLE tenants(id uuid,status text);
@@ -398,9 +455,9 @@ test('actual PostgreSQL preview SQL intersects consumer grants and Key snapshots
     CREATE TABLE consumer_platform_policies(consumer_id uuid,platform text,max_page_size int);
     CREATE TABLE control.strategy_search_routes(interface_key text,platform text,mode text,primary_provider text,fallback_provider text,revision int);`)
   const h = await harness(), source = h.source, call = h.sourceCall, raw = h.sourceArchive
-  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL)',
+  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL,NULL)',
     [source.id,source.tenant_id,source.consumer_id,source.api_key_id,source.platform,source.status,source.response_status,JSON.stringify(source.acquisition_request)])
-  await db.query('INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0)',
+  await db.query('INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,NULL)',
     [call.id,source.id,call.tenant_id,call.consumer_id,call.api_key_id,call.provider_key,call.operation,call.endpoint_key,call.marketplace,
       call.outcome,call.http_status,call.billed,call.contract_version])
   await db.query('INSERT INTO control.external_platform_restricted_raw_responses VALUES($1,$2,$3,$4)', [call.id,raw.body_size,raw.body_sha256,raw.body_bytes])
@@ -426,10 +483,10 @@ test('actual PostgreSQL preview SQL intersects consumer grants and Key snapshots
   assert.equal((await preview()).errorCode, 'original_grants_unavailable')
   await db.query("INSERT INTO capability_grants VALUES($1,'social.comments.list')", [source.consumer_id])
   const old = h.legacyRequest, oldCall = h.legacyCall, oldRaw = h.legacyArchive
-  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9)',
+  await db.query("INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,'social_upstream_rejected')",
     [old.id,old.tenant_id,old.consumer_id,old.api_key_id,old.platform,old.status,old.response_status,
       JSON.stringify(old.acquisition_request),old.idempotency_key])
-  await db.query('INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0)',
+  await db.query("INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,'social_upstream_rejected')",
     [oldCall.id,old.id,oldCall.tenant_id,oldCall.consumer_id,oldCall.api_key_id,oldCall.provider_key,oldCall.operation,
       oldCall.endpoint_key,oldCall.marketplace,oldCall.outcome,oldCall.http_status,oldCall.billed,oldCall.contract_version])
   await db.query('INSERT INTO control.external_platform_restricted_raw_responses VALUES($1,$2,$3,$4)',
@@ -441,15 +498,34 @@ test('actual PostgreSQL preview SQL intersects consumer grants and Key snapshots
   assert.equal(saved.savedProviderCalls, 1)
   assert.equal(saved.stages[0].providerCalls[0].billed, false)
   assert.equal(saved.stages[0].providerCalls[0].hashVerified, true)
+  assert.equal(saved.stages[0].usageErrorCode, 'social_upstream_rejected')
+  assert.equal(saved.stages[0].usageErrorCodeKnown, true)
+  assert.equal(saved.stages[0].providerCalls[0].errorCode, 'social_upstream_rejected')
+  assert.equal(saved.stages[0].providerCalls[0].failurePhase, 'unclassified')
   const resumePreview = () => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }),
     resumeThread: true, resumeEvidenceCheck: h.resumeEvidenceCheck })
   assert.equal((await resumePreview()).readyForExecute, true)
-  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9)',
+  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,NULL)',
     ['33333333-3333-3333-3333-333333333333',old.tenant_id,old.consumer_id,old.api_key_id,old.platform,'released',503,
       JSON.stringify(old.acquisition_request),THREAD_KEYS[0]])
   const interrupted = await resumePreview()
   assert.equal(interrupted.mode, 'read_saved_only')
   assert.equal(interrupted.stages[3].state, 'saved_failure_or_pending')
   assert.deepEqual(interrupted.stages[3].providerCalls, [])
+  await db.query(`UPDATE usage_requests SET status='committed',response_status=502,error_code='invalid_social_contract',
+    response_body=$2 WHERE id=$1`, ['33333333-3333-3333-3333-333333333333',
+    JSON.stringify({ error: { code: 'external_platform_response_unusable', message: secret } })])
+  await db.query(`INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,'rapidapi',$6,$6,'twitter',
+    'succeeded_unusable',200,NULL,'mx-insight-hub.native-forwarding.v1',0,'invalid_social_contract')`,
+  ['44444444-4444-4444-4444-444444444444','33333333-3333-3333-3333-333333333333',old.tenant_id,old.consumer_id,old.api_key_id,THREAD_OPERATION])
+  const failedProjection = await resumePreview(), failure = failedProjection.stages[3]
+  assert.equal(failedProjection.mode, 'read_saved_only')
+  assert.equal(failedProjection.savedProviderCalls, 2)
+  assert.equal(failure.usageErrorCode, 'invalid_social_contract')
+  assert.equal(failure.publicErrorCode, 'external_platform_response_unusable')
+  assert.equal(failure.providerCalls[0].errorCode, 'invalid_social_contract')
+  assert.equal(failure.providerCalls[0].failurePhase, 'projection_contract_failed')
+  assert.equal(failedProjection.supplierHttpCallsMade, 0)
+  assert.doesNotMatch(JSON.stringify(failedProjection), /synthetic-probe-provider-credential/u)
   assert.equal(h.http.length, 0)
 })

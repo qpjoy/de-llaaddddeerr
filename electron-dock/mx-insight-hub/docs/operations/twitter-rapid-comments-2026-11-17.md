@@ -1,8 +1,34 @@
 # Twitter 评论与回复默认 RapidAPI
 
-日期：2026-11-17。最新状态：用户回执确认 TweetDetail 合同已安装，两个评论接口仍固定 TikHub、revision 3。续验因脚本的旧回执状态条件错误而停止，累计仍为 1 次供应商 HTTP 请求，两个 thread 阶段均未尝试。归档确认 RapidAPI 未注册旧 `/tweet/{id}/replies` 路径，记录 `billed=false`。兼容验收尚未通过。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+日期：2026-11-17。最新状态：旧回执状态校验已通过，新 TweetDetail 首屏收到供应商 HTTP 200，但记录为 succeeded_unusable，Hub 交付 HTTP 502。累计 2 次供应商 HTTP 请求，thread-replies 未尝试；两个评论接口仍固定 TikHub、revision 3。兼容验收尚未通过。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
 
-## 续验脚本状态校验修复（当前执行）
+## TweetDetail 200 响应不可交付：只读检查保存归档
+
+最新 usage 为 `e531d032-0bfa-463e-9e0f-ff10e2457a5d`，provider call 为 `783683dc-0dde-45ac-9c9c-76753f9c8949`。usage 为 committed/502，供应商回执为 succeeded_unusable/200/billed=null。完整响应 200,594 字节，SHA-256 为 `34747817708f7dd6e4ab1b8dd9f4b92f20f2fd5c8f96165e347532d3a35fa2a6`，归档长度和哈希已验证。
+
+这是新接口已经返回响应、但尚未形成可交付评论结果的证据，不是业务兼容验收成功。`billed=null` 表示账本尚不能确认供应商计费。原 TikHub 源、首次 404 回执和固定 TikHub 路由均保持不变；总三次额度还剩一次，不能再次购买首屏来获取相同诊断材料。
+
+本次顶层 `verification_unavailable` 还暴露了验证工具错误码白名单遗漏：评论工作流明确抛 `external_platform_response_unusable`，旧脚本未收录，因而泛化显示。读取已存 usage/provider/public 错误码可进一步确定失败阶段；仅凭 HTTP 200 和字节数不能判断具体字段或指令问题。
+
+同时修正执行报告中的剩余额度显示：`remainingSupplierCalls` 现在按执行后的保存调用数计算；这份回执累计两次，应剩一次，原来的数字二是执行前的值。预算门槛和采购流程没有变化。
+
+专用 `server/ops/diagnose-twitter-rapid-comment-page.mjs` 仅读取上述固定 usage/call 及受限归档，验证身份关联、长度和固定 SHA，再以已部署的解析与投影代码离线检查。输出只包含白名单结构、计数、代码版本哈希与受审文件的行号，不包含正文、作者、帖子 ID、游标或凭据。不初始化运行时、不写 usage、不中转新业务请求。
+
+脚本分别报告 parser、projection 和 workflow 结果。为避免读取供应商凭据，离线回放不执行生产工作流中的凭据回显脱敏步骤；即使离线三阶段全部成功，也不代表原请求或线上交付已经成功。当前没有真实归档字节的离线结果，尚未修改解析规则。
+
+同步此脚本到服务器 Hub 工作目录后执行，无需重建镜像：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - \
+  < server/ops/diagnose-twitter-rapid-comment-page.mjs
+```
+
+已有 thread-first 回执后，原 `--resume-thread` 按设计只读取历史，不自动续买。先依据已保存字节定位并验证字段适配，再决定如何使用剩余的一次授权额度；不修改原失败回放或把旧回执标记为成功。
+
+本次验证：probe 与专用诊断合计 23 项测试全部通过、零跳过，包含真实迁移 schema 的 PGlite 查询、归档哈希拒绝、三阶段失败定位、输出脱敏、stdin 执行，以及 HTTP 200 不可交付后重复诊断不增加供应商调用。测试均使用本地合成数据，未调用生产供应商。
+
+## 续验脚本状态校验修复（已完成）
 
 用户返回 `read_saved_only / resume_source_unverified`，新增供应商调用为 0；固定的原 request/call ID、77 字节 SHA-256、502/404、rejected、billed=false 及路径匹配均通过显示。代码检查发现 guard 错误要求旧 usage 为 `released`。真实 RapidAPI `finishFailure` 会把明确拒绝保存为 `committed + HTTP 502 + units_actual=0`，这里 committed 表示失败响应已经存档，不代表成功交付。原测试也手写了 released，遗漏了真实失败生命周期。
 

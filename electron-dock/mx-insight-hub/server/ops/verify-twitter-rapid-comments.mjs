@@ -34,12 +34,21 @@ const SAFE_ERRORS = new Set(['needs_deploy', 'invalid_arguments', 'public_postgr
   'verification_in_progress', 'receipt_owner_mismatch', 'saved_call_budget_exceeded', 'unexpected_diagnostic_operation',
   'unexpected_diagnostic_request', 'stage_already_dispatched', 'saved_receipt_unverified', 'compatibility_unverified',
   'source_changed', 'saved_outcome_not_successful', 'request_outcome_unknown', 'request_in_progress', 'insufficient_balance',
-  'external_platform_outcome_unknown', 'social_upstream_response_unusable', 'social_upstream_rejected',
+  'external_platform_outcome_unknown', 'upstream_outcome_unknown', 'social_upstream_outcome_unknown',
+  'external_platform_response_unusable', 'social_upstream_response_unusable', 'social_upstream_rejected',
+  'social_upstream_timeout_or_size_limit', 'social_egress_unavailable', 'upstream_rate_limited',
   'external_platform_rejected', 'external_platform_operation_blocked', 'external_platform_operation_disabled',
   'external_platform_operation_paused', 'external_platform_operation_canary', 'external_platform_rate_limited',
   'external_platform_busy', 'invalid_social_contract', 'invalid_upstream_contract', 'page_size_exceeded',
   'platform_not_granted', 'capability_not_granted', 'comment_acquisition_paused', 'resume_source_unverified', 'recovered_routes_required'])
 const safeCode = error => SAFE_ERRORS.has(error?.code) ? error.code : 'verification_unavailable'
+const savedErrorCode = value => ({ code: SAFE_ERRORS.has(value) ? value : null, known: SAFE_ERRORS.has(value) })
+const savedFailurePhase = call => {
+  if (call.outcome !== 'succeeded_unusable' || call.http_status !== 200) return 'unclassified'
+  if (call.error_code === 'invalid_social_contract') return 'projection_contract_failed'
+  if (call.error_code === 'social_upstream_response_unusable') return 'response_decode_or_envelope_failed'
+  return 'unclassified'
+}
 
 // Classify only fixed error phrases from hash-verified archives. Never return
 // arbitrary supplier messages, echoed credentials, target IDs or URLs.
@@ -130,7 +139,7 @@ async function readOwner(executor, source) {
 
 async function savedAttempts(executor, source) {
   const { rows } = await executor.query(`SELECT /* twitter-rapid-check:saved */ id,tenant_id,consumer_id,api_key_id,
-    idempotency_key,platform,status,response_status,
+    idempotency_key,platform,status,response_status,error_code,
     CASE WHEN octet_length(response_body::text)<=$3 THEN response_body END AS response_body,
     CASE WHEN octet_length(acquisition_request::text)<=32768 THEN acquisition_request END AS acquisition_request
     FROM public.usage_requests WHERE consumer_id=$1 AND idempotency_key=ANY($2::text[]) ORDER BY idempotency_key LIMIT 6`,
@@ -138,7 +147,7 @@ async function savedAttempts(executor, source) {
   requireValue(rows.length <= ALL_KEYS.length && rows.every(row => owned(row, source) && ALL_KEYS.includes(row.idempotency_key))
     && new Set(rows.map(row => row.idempotency_key)).size === rows.length, 'receipt_owner_mismatch')
   const { rows: calls } = await executor.query(`SELECT /* twitter-rapid-check:budget */ call.id,call.usage_request_id,
-    call.tenant_id,call.consumer_id,call.api_key_id,call.provider_key,call.operation,call.endpoint_key,call.outcome,call.http_status,call.billed,
+    call.tenant_id,call.consumer_id,call.api_key_id,call.provider_key,call.operation,call.endpoint_key,call.outcome,call.http_status,call.billed,call.error_code,
     request.tenant_id AS request_tenant_id,request.api_key_id AS request_api_key_id
     FROM external_platform.provider_calls call JOIN public.usage_requests request ON request.id=call.usage_request_id
     WHERE request.consumer_id=$1 AND request.idempotency_key=ANY($2::text[]) LIMIT 4`, [source.consumer_id, ALL_KEYS])
@@ -208,14 +217,19 @@ async function summarizeSaved(executor, saved, source) {
         if (call.outcome === 'succeeded') throw error
         evidence = { archiveState: 'integrity_unverified', hashVerified: false }
       }
+      const error = savedErrorCode(call.error_code)
       summaries.push({ callId: call.id, outcome: ['succeeded','succeeded_unusable','rejected','unknown','pending'].includes(call.outcome) ? call.outcome : 'other',
         httpStatus: Number.isInteger(call.http_status) ? call.http_status : null,
-        billed: typeof call.billed === 'boolean' ? call.billed : null, ...evidence })
+        billed: typeof call.billed === 'boolean' ? call.billed : null,
+        errorCode: error.code, errorCodeKnown: error.known, failurePhase: savedFailurePhase(call), ...evidence })
     }
     const successful = row.status === 'committed' && row.response_status === 200
       && (calls.length === 1 || kind === 'next') && calls.every(call => call.outcome === 'succeeded' && call.http_status === 200)
+    const usageError = savedErrorCode(row.error_code), publicError = savedErrorCode(row.response_body?.error?.code)
     stages.push({ stage, state: successful ? 'saved_success' : 'saved_failure_or_pending', requestId: row.id,
       usageStatus: ['reserved', 'committed', 'released', 'unknown'].includes(row.status) ? row.status : 'other',
+      usageErrorCode: usageError.code, usageErrorCodeKnown: usageError.known,
+      publicErrorCode: publicError.code, publicErrorCodeKnown: publicError.known,
       httpStatus: Number.isInteger(row.response_status) ? row.response_status : null, providerCalls: summaries,
       ...(kind === 'next' ? { upstreamContinuationVerified: successful && calls.length === 1 } : {}),
       ...(successful ? pageSummary(row.response_body, request.body, kind) : {}) })
@@ -414,6 +428,7 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
       try {
         const saved = await savedAttempts(runtime.pool, source.source)
         report.supplierCallsAfter = saved.calls.length
+        report.remainingSupplierCalls = MAX_CALLS - saved.calls.length
         report.savedStages = await summarizeSaved(runtime.pool, saved, source)
         if (originalFailureDigest) {
           report.originalFailureUnchanged = originalAttemptDigest(saved, report.savedStages) === originalFailureDigest
