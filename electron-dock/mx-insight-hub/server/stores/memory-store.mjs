@@ -1,6 +1,7 @@
 import { createInternalTrafficPolicy, isInternalTraffic, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { normalizeRequestFailureDiagnostic, normalizeRequestFailureId } from '../core/request-failure-diagnostic.mjs'
+import { normalizeAuthorizationRejection } from '../core/authorization-rejection.mjs'
 import { strategySearchUsageDay } from '../data/strategy-search-usage.mjs'
 import { assertMemoryKeyAccessLimits } from './key-access-limits.mjs'
 import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs'
@@ -407,6 +408,7 @@ export class MemoryStore {
     this.creditAdjustmentKeys = new Map()
     this.requests = new Map()
     this.requestFailures = new Map()
+    this.authorizationRejections = new Map()
     this.requestsByScope = new Map()
     this.usageAuthorizationScopes = new Map()
     this.connectorCalls = new Map()
@@ -2222,6 +2224,13 @@ export class MemoryStore {
     if (record.status === 'reserved') this.#settleCustomerCharge(record, 'unknown')
     Object.assign(record, { status: 'unknown', errorCode, completedAt: nowIso() })
     return clone(record)
+  }
+
+  async recordAuthorizationRejection(value) {
+    const record = normalizeAuthorizationRejection(value)
+    if (this.authorizationRejections.has(record.eventId)) return { recorded: false }
+    this.authorizationRejections.set(record.eventId, { ...record, occurredAt: nowIso() })
+    return { recorded: true }
   }
 
   async recordRequestFailure(requestId, diagnostic) {

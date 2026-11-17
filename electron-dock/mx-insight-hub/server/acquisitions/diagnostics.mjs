@@ -4,6 +4,7 @@ import { projectNightAllFailureEvidence } from '../data/night-all-failure-eviden
 import { analyzeRequestDiagnostic } from '../operations/request-diagnostic-analysis.mjs'
 import { FAILURE_EVIDENCE_WINDOW_MS } from '../external-platforms/availability-errors.mjs'
 import { projectTransportFailure } from '../core/transport-failure-evidence.mjs'
+import { AUTHORIZATION_REJECTION_PLATFORMS, AUTHORIZATION_REJECTION_ROUTES } from '../core/authorization-rejection.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const LIMIT = 20
@@ -30,6 +31,32 @@ export function diagnosticIdentifier(value) {
     throw new AppError(400, 'invalid_diagnostic_identifier', '请输入完整的请求 ID（最多 191 个字母、数字、点、冒号、下划线或连字符）')
   }
   return value.trim()
+}
+
+async function authorizationRejections(client, identifier) {
+  const available = (await client.query(`/* request-diagnostics:admission-schema */
+    SELECT to_regclass('control.request_authorization_rejections') IS NOT NULL AS available`)).rows[0]?.available === true
+  if (!available) return { admissionFailures: [], admissionEvidenceAvailable: false, admissionFailuresTruncated: false }
+  const { rows } = await client.query(`/* request-diagnostics:admissions */
+    SELECT event_id,request_id,request_id_source,tenant_id,consumer_id,api_key_id,
+      platform,route_path,scope_mode,error_code,http_status,occurred_at
+    FROM control.request_authorization_rejections WHERE request_id = $1
+    ORDER BY occurred_at,event_id LIMIT 21`, [identifier])
+  const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value) ? value : null
+  return { admissionEvidenceAvailable: true, admissionFailuresTruncated: rows.length > LIMIT,
+    admissionFailures: rows.slice(0, LIMIT).map(row => ({
+      eventId: uuid(row.event_id), requestId: row.request_id === identifier ? identifier : null,
+      requestIdSource: ['server', 'client'].includes(row.request_id_source) ? row.request_id_source : null,
+      tenantId: uuid(row.tenant_id), consumerId: uuid(row.consumer_id), apiKeyId: uuid(row.api_key_id),
+      platform: AUTHORIZATION_REJECTION_PLATFORMS.includes(row.platform) ? row.platform : null,
+      routePath: AUTHORIZATION_REJECTION_ROUTES.includes(row.route_path) ? row.route_path : null,
+      scopeMode: ['snapshot', 'legacy_dynamic'].includes(row.scope_mode) ? row.scope_mode : null,
+      errorCode: row.error_code === 'platform_not_granted' ? row.error_code : null,
+      httpStatus: row.http_status === 403 ? 403 : null,
+      occurredAt: row.occurred_at != null && Number.isFinite(new Date(row.occurred_at).getTime())
+        ? new Date(row.occurred_at).toISOString() : null,
+    })),
+  }
 }
 
 // Plain-language names for Hub's normalized upstream classifications.
@@ -104,6 +131,7 @@ export async function lookupRequestDiagnostics(pool, input) {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
     await client.query("SET LOCAL statement_timeout = '3s'")
     await client.query("SET LOCAL lock_timeout = '1s'")
+    const admissions = await authorizationRejections(client, identifier)
     const matches = await client.query(`/* request-diagnostics:lookup */
       WITH direct AS (SELECT id FROM public.usage_requests WHERE id = $2::uuid)
       SELECT id FROM (
@@ -229,7 +257,7 @@ export async function lookupRequestDiagnostics(pool, input) {
       runs.push(run)
     }
     await client.query('COMMIT')
-    return { identifier, runs, truncated: matches.rows.length > LIMIT,
+    return { identifier, runs, ...admissions, truncated: matches.rows.length > LIMIT,
       checkedAt: new Date().toISOString() }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})

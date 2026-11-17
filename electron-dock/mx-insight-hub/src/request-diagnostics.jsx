@@ -17,6 +17,21 @@ const stateName = value => statuses[value] || shown(value)
 function Facts({ entries }) {
   return <dl className="mih-diagnostic-facts">{entries.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{shown(value)}</dd></div>)}</dl>
 }
+export function AuthorizationRejection({ failure }) {
+  return <article className="mih-diagnostic-run mih-diagnostic-authorization" aria-label="Hub 权限校验拒绝">
+    <h3>Hub 权限校验拒绝</h3>
+    <p>有效平台授权范围未包含目标平台。此记录是权限校验的拒绝证据，不是供应商响应或业务交付。</p>
+    <Facts entries={[
+      ['请求 ID', failure.requestId], ['证据事件 ID', failure.eventId],
+      ['ID 来源', failure.requestIdSource === 'client' ? '调用方提供，可对应多次请求' : failure.requestIdSource === 'server' ? 'Hub 生成' : null],
+      ['目标平台', failure.platform], ['调用接口', failure.routePath], ['响应 HTTP', failure.httpStatus], ['错误码', failure.errorCode],
+      ['租户 ID', failure.tenantId], ['应用 / Consumer ID', failure.consumerId], ['API Key ID（非密钥）', failure.apiKeyId],
+      ['Key 范围模式', failure.scopeMode === 'snapshot' ? 'Key 独立权限范围（snapshot）' : failure.scopeMode === 'legacy_dynamic' ? '旧版动态权限' : null],
+      ['拒绝时间', formatDate(failure.occurredAt)],
+    ]}/>
+    <p className="mih-diagnostic-guidance">先确认调用接口支持该平台，再核对原应用授权与原 Key 的有效范围。此记录无法区分应用授权与 Key 范围缺项，也不能证明该接口已经接入目标平台。</p>
+  </article>
+}
 function EvidenceAnalysis({ analysis }) {
   if (!analysis) return null
   return <section className="mih-diagnostic-analysis" aria-label="已存证据分析">
@@ -121,6 +136,7 @@ function RequestValidation({ token, run, session, onUnauthorized }) {
 
 export default function RequestDiagnostics({ token, onUnauthorized, session, setSession, comparisonSessions, autoIdentifier = '' }) {
   const current = session?.token === token ? session : { identifier: '', data: null, error: null }
+  const admissionFailures = current.data?.admissionFailures || []
   const [busy, setBusy] = useState(false)
   const active = useRef(null)
   const localComparisonSessions = useRef(null)
@@ -165,12 +181,15 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
       <label htmlFor="diagnostic-request-id">Hub / 上游请求 ID<input id="diagnostic-request-id" className="qp-input" value={current.identifier || ''} maxLength={191} placeholder="Hub UUID 或 Night-All req_…" onChange={event => update({ identifier: event.target.value })} /></label>
       <button className="qp-button qp-button--primary" disabled={busy || !current.identifier?.trim()}><MagnifyingGlass/>{busy ? '查询中…' : '查询诊断'}</button>
     </form>
-    <p className="mih-diagnostic-note">支持 Hub 原始请求 ID，或 Hub 调用账本已保存的上游 requestId。复现操作自身的 ID、下游采集 Run 和未经过 Hub 的请求可能查不到。</p>
+    <p className="mih-diagnostic-note">支持 Hub 原始请求 ID、已保存的权限拒绝请求 ID，或 Hub 调用账本已保存的上游 requestId。复现操作自身的 ID、下游采集 Run 和未经过 Hub 的请求可能查不到。</p>
     <div aria-live="polite" aria-busy={busy}>
       {current.error ? <ErrorState error={current.error}/> : null}
       {current.data ? <>
-        <div className="mih-diagnostic-result-heading"><p>查询 ID：<code>{current.data.identifier}</code> · {current.data.runs.length} 条关联请求 · {formatDate(current.data.checkedAt)}</p><button type="button" className="qp-button qp-button--secondary" onClick={() => exportDiagnostics(current.data)}><DownloadSimple/>导出诊断证据</button></div>
-        {!current.data.runs.length ? <div className="mih-diagnostic-empty"><h3>未找到关联记录</h3><p>请核对环境、ID 类型与保留期。上游 ID 只有已被 Hub 保存才可反查；未匹配不代表请求成功，也不能证明上游未执行。</p></div> : null}
+        <div className="mih-diagnostic-result-heading"><p>查询 ID：<code>{current.data.identifier}</code> · {current.data.runs.length} 条业务请求 · {admissionFailures.length} 条权限拒绝 · {formatDate(current.data.checkedAt)}</p><button type="button" className="qp-button qp-button--secondary" onClick={() => exportDiagnostics(current.data)}><DownloadSimple/>导出诊断证据</button></div>
+        {current.data.admissionEvidenceAvailable !== true ? <p className="mih-diagnostic-note" role="status">权限拒绝证据当前不可用，请核对 Hub 版本与数据库迁移；本次查询仅覆盖已有业务账本。</p> : null}
+        {!current.data.runs.length && !admissionFailures.length ? <div className="mih-diagnostic-empty"><h3>未找到关联记录</h3><p>请核对环境、ID 类型与保留期。部分历史权限拒绝发生在业务请求入库前，旧版本未保存其证据；上游 ID 只有已被 Hub 保存才可反查。未匹配不代表请求成功，也不能证明上游未执行。</p></div> : null}
+        {current.data.admissionFailuresTruncated ? <p role="status">权限拒绝证据超过 20 条，仅显示前 20 条；调用方提供的相同 ID 可能关联多次请求，请结合事件 ID 和身份核对。</p> : null}
+        {admissionFailures.map(failure => <AuthorizationRejection key={failure.eventId} failure={failure}/>)}
         {current.data.truncated ? <p role="status">关联请求超过 20 条，仅显示前 20 条；请使用具体 Hub requestId 查询。</p> : null}
         {current.data.runs.map(run => <article className="mih-diagnostic-run" key={run.requestId}>
           <h3>Hub 请求 <code>{run.requestId}</code></h3>

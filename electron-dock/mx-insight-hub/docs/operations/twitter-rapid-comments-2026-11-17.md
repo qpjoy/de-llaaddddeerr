@@ -1,8 +1,26 @@
 # Twitter 评论与回复默认 RapidAPI
 
-日期：2026-11-17。最新状态：用户已确认两个评论接口恢复为固定 TikHub、revision 3。归档确认 RapidAPI 未注册 `/tweet/{id}/replies` 路径，记录 `billed=false`；不是帖子不可用或未订阅。首轮累计 1 次供应商 HTTP 请求，兼容验收尚未通过。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+日期：2026-11-17。最新状态：用户回执确认 TweetDetail 合同已安装，两个评论接口仍固定 TikHub、revision 3。续验因脚本的旧回执状态条件错误而停止，累计仍为 1 次供应商 HTTP 请求，两个 thread 阶段均未尝试。归档确认 RapidAPI 未注册旧 `/tweet/{id}/replies` 路径，记录 `billed=false`。兼容验收尚未通过。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
 
-## 当前恢复结果与下一步
+## 续验脚本状态校验修复（当前执行）
+
+用户返回 `read_saved_only / resume_source_unverified`，新增供应商调用为 0；固定的原 request/call ID、77 字节 SHA-256、502/404、rejected、billed=false 及路径匹配均通过显示。代码检查发现 guard 错误要求旧 usage 为 `released`。真实 RapidAPI `finishFailure` 会把明确拒绝保存为 `committed + HTTP 502 + units_actual=0`，这里 committed 表示失败响应已经存档，不代表成功交付。原测试也手写了 released，遗漏了真实失败生命周期。
+
+修复只把此状态条件改为真实的 committed/502；保留所有固定身份、哈希、供应商拒绝和调用预算条件，继续拒绝 reserved/unknown/released。新增 `resumeSourceInspection`，仅显示固定状态、逐项布尔校验及 `failedChecks`，不输出帖子 ID、请求正文或供应商原始消息。guard 修订为 `twitter-rapid-thread-guard.v2`；原诊断 revision、五个幂等键及所有历史记录不变。
+
+本次只需同步 `server/ops/verify-twitter-rapid-comments.mjs` 到服务器工作目录，**无需重建镜像、重新部署或执行数据库迁移**。然后在 Hub 目录运行：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - --resume-thread \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+可选：去掉 `--resume-thread` 只读查看新增校验摘要。正常原回执应显示 `usageStatus=committed`、`usageHttpStatus=502`、`failedChecks=[]`。有任何不匹配仍停止。续验最多剩余 2 次请求，默认路由保持 TikHub；不删除或重置旧记录，也不重买旧 `/replies` 请求。
+
+本次专项 14/14 通过（含真实 PGlite 查询，0 跳过）。新增离线 RapidAPI 404 → 网关 → 实际 Memory store `finishFailure` 回归，确认 committed/502/零交付用量以及同键失败回放零新增采购；released/reserved/unknown 均不能续验。固定归档及总三次预算未放宽。`git diff --check` 通过，未调用生产供应商。
+
+## TweetDetail 首次安装与恢复步骤（保留记录）
 
 恢复事务已提交：`post-comments` 与 `comment-replies` 均为 `fixed / tikhub / null / revision 3`。本次恢复和归档诊断没有供应商请求。`billed=false` 是保存的采购记录，不能用它推断 RapidAPI 月账单；该 HTTP 请求仍占本轮最多 3 次额度中的 1 次。
 

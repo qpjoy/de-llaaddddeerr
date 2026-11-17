@@ -2,6 +2,7 @@ import { quotaRecoverySql } from '../core/admission-recovery.mjs'
 import { createInternalTrafficPolicy, isInternalTraffic, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { normalizeRequestFailureDiagnostic, normalizeRequestFailureId } from '../core/request-failure-diagnostic.mjs'
+import { normalizeAuthorizationRejection } from '../core/authorization-rejection.mjs'
 import { STRATEGY_DATA_CONNECTORS, STRATEGY_DATA_STREAMS } from '../data/strategy-search-data-statistics.mjs'
 import { ensurePostgresAdminExecution } from './admin-execution.mjs'
 import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
@@ -3423,6 +3424,40 @@ export class PostgresStore {
        WHERE id = $1 AND status IN ('reserved', 'committed') RETURNING *`,
       [id, errorCode],
     )
+  }
+
+  async recordAuthorizationRejection(value) {
+    const record = normalizeAuthorizationRejection(value)
+    // Do not leave a diagnostic waiting in the pool after its response budget.
+    // If a queued checkout arrives late, release it without running any SQL.
+    let checkoutExpired = false, timer, client
+    const checkout = this.pool.connect().then(connection => {
+      if (checkoutExpired) { connection.release(); return null }
+      return connection
+    })
+    try {
+      client = await Promise.race([checkout, new Promise((_, reject) => {
+        timer = setTimeout(() => { checkoutExpired = true; reject(new Error('Diagnostic checkout deadline')) }, 500)
+      })])
+    } finally { clearTimeout(timer) }
+    let releaseError = null
+    try {
+      await client.query('BEGIN')
+      await client.query("SET LOCAL lock_timeout='250ms'")
+      await client.query("SET LOCAL statement_timeout='500ms'")
+      await client.query("SET LOCAL idle_in_transaction_session_timeout='1s'")
+      const result = await client.query(`INSERT INTO control.request_authorization_rejections
+        (event_id,request_id,request_id_source,tenant_id,consumer_id,api_key_id,platform,scope_mode,route_path,error_code,http_status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(event_id) DO NOTHING RETURNING event_id`,
+      [record.eventId, record.requestId, record.requestIdSource, record.tenantId, record.consumerId,
+        record.apiKeyId, record.platform, record.scopeMode, record.routePath, record.errorCode, record.httpStatus])
+      await client.query('COMMIT')
+      return { recorded: result.rows.length > 0 }
+    } catch (error) {
+      releaseError = error
+      await client.query('ROLLBACK').catch(rollbackError => { releaseError = rollbackError })
+      throw error
+    } finally { client.release(releaseError) }
   }
 
   async recordRequestFailure(requestId, diagnostic) {

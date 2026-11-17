@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 
 export const REVISION = 'twitter-rapid-comments-check.v1'
+export const RESUME_GUARD_REVISION = 'twitter-rapid-thread-guard.v2'
 export const SOURCE_REQUEST_ID = '7e7cd2d0-aa97-4aa5-a113-5a92f8b3143b'
 export const OPERATION = 'native.r.twitter_aio_tweet_replies'
 export const KEYS = Object.freeze(['first', 'next', 'replies'].map(stage => `ops-twitter-rapid-comments-7e7cd2d0-v1-${stage}`))
@@ -214,6 +215,7 @@ async function summarizeSaved(executor, saved, source) {
     const successful = row.status === 'committed' && row.response_status === 200
       && (calls.length === 1 || kind === 'next') && calls.every(call => call.outcome === 'succeeded' && call.http_status === 200)
     stages.push({ stage, state: successful ? 'saved_success' : 'saved_failure_or_pending', requestId: row.id,
+      usageStatus: ['reserved', 'committed', 'released', 'unknown'].includes(row.status) ? row.status : 'other',
       httpStatus: Number.isInteger(row.response_status) ? row.response_status : null, providerCalls: summaries,
       ...(kind === 'next' ? { upstreamContinuationVerified: successful && calls.length === 1 } : {}),
       ...(successful ? pageSummary(row.response_body, request.body, kind) : {}) })
@@ -222,20 +224,47 @@ async function summarizeSaved(executor, saved, source) {
 }
 
 // This guard consumes only summaries produced after archive integrity checks.
-// The one rejected HTTP attempt still consumes one of the original three calls.
-export function assertThreadResumeEvidence(saved, stages) {
+// RapidAPI finishFailure commits a saved HTTP 502 with zero delivered units;
+// "committed" describes persistence, not a successful supplier response. It
+// does not use the released state of the separate IP/Qixin failure branches.
+// The rejected HTTP attempt still consumes one of the original three calls.
+export function inspectThreadResumeEvidence(saved, stages) {
   const rows = saved.rows.filter(row => KEYS.includes(row.idempotency_key))
   const calls = saved.calls.filter(call => rows.some(row => row.id === call.usage_request_id))
   const first = stages.find(row => row.stage === 'first'), evidence = first?.providerCalls?.[0]
-  requireValue(rows.length === 1 && rows[0].id === RESUME_SOURCE.requestId && rows[0].idempotency_key === KEYS[0]
-    && rows[0].status === 'released' && rows[0].response_status === 502
-    && calls.length === 1 && calls[0].id === RESUME_SOURCE.callId && calls[0].operation === OPERATION
-    && calls[0].endpoint_key === OPERATION && calls[0].outcome === 'rejected'
-    && calls[0].http_status === 404 && calls[0].billed === false
-    && first?.requestId === RESUME_SOURCE.requestId && evidence?.callId === RESUME_SOURCE.callId
-    && evidence.hashVerified === true && evidence.bodySize === RESUME_SOURCE.bodySize && evidence.sha256 === RESUME_SOURCE.sha256
-    && evidence.errorInspection?.category === 'endpoint_path_not_found'
-    && evidence.errorInspection.signals.some(row => row.matchesRequestedRepliesPath === true), 'resume_source_unverified')
+  const checks = {
+    singleLegacyUsage: rows.length === 1,
+    knownUsageId: rows[0]?.id === RESUME_SOURCE.requestId,
+    knownFirstKey: rows[0]?.idempotency_key === KEYS[0],
+    usageCommitted: rows[0]?.status === 'committed',
+    hubHttp502: rows[0]?.response_status === 502,
+    singleLegacyCall: calls.length === 1,
+    knownCallId: calls[0]?.id === RESUME_SOURCE.callId,
+    legacyOperation: calls[0]?.operation === OPERATION,
+    legacyEndpoint: calls[0]?.endpoint_key === OPERATION,
+    rejected: calls[0]?.outcome === 'rejected',
+    upstreamHttp404: calls[0]?.http_status === 404,
+    explicitlyUnbilled: calls[0]?.billed === false,
+    summaryRequestId: first?.requestId === RESUME_SOURCE.requestId,
+    summaryCallId: evidence?.callId === RESUME_SOURCE.callId,
+    hashVerified: evidence?.hashVerified === true,
+    expectedBodySize: evidence?.bodySize === RESUME_SOURCE.bodySize,
+    expectedSha256: evidence?.sha256 === RESUME_SOURCE.sha256,
+    endpointPathNotFound: evidence?.errorInspection?.category === 'endpoint_path_not_found',
+    requestedRepliesPathMatched: Array.isArray(evidence?.errorInspection?.signals)
+      && evidence.errorInspection.signals.some(row => row.matchesRequestedRepliesPath === true),
+  }
+  const failedChecks = Object.keys(checks).filter(key => !checks[key])
+  return { revision: RESUME_GUARD_REVISION,
+    usageStatus: ['reserved', 'committed', 'released', 'unknown'].includes(rows[0]?.status) ? rows[0].status : 'other',
+    usageHttpStatus: Number.isInteger(rows[0]?.response_status) ? rows[0].response_status : null,
+    legacyUsageRows: rows.length, legacyProviderCalls: calls.length,
+    threadUsageRows: saved.rows.filter(row => THREAD_KEYS.includes(row.idempotency_key)).length,
+    checks, failedChecks, verified: failedChecks.length === 0 }
+}
+
+export function assertThreadResumeEvidence(saved, stages) {
+  requireValue(inspectThreadResumeEvidence(saved, stages).verified, 'resume_source_unverified')
 }
 
 async function readRoutes(executor) {
@@ -265,6 +294,7 @@ export async function previewRapidComments({ pool, installed = true, readiness =
     report.savedProviderCalls = saved.calls.length
     if (saved.rows.length || saved.calls.length) {
       report.mode = 'read_saved_only'; report.stages = await summarizeSaved(client, saved, source)
+      report.resumeSourceInspection = inspectThreadResumeEvidence(saved, report.stages)
       if (!resumeThread || saved.rows.some(row => THREAD_KEYS.includes(row.idempotency_key))) return report
     }
     if (resumeThread) {
@@ -298,6 +328,7 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
     const before = await savedAttempts(lock, source.source); report.supplierCallsBefore = before.calls.length
     if (before.rows.length || before.calls.length) {
       const summaries = await summarizeSaved(lock, before, source)
+      report.resumeSourceInspection = inspectThreadResumeEvidence(before, summaries)
       if (!resumeThread || before.rows.some(row => THREAD_KEYS.includes(row.idempotency_key))) {
         report.mode = 'read_saved_only'; report.stages = summaries; return report
       }

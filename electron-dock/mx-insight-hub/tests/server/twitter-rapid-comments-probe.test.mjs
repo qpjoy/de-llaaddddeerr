@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
-import { previewRapidComments, runRapidCommentVerification, inspectRapidCommentError, assertThreadResumeEvidence,
+import { previewRapidComments, runRapidCommentVerification, inspectRapidCommentError, inspectThreadResumeEvidence, assertThreadResumeEvidence,
   SOURCE_REQUEST_ID, KEYS, OPERATION, THREAD_KEYS, THREAD_OPERATION, RESUME_SOURCE } from '../../server/ops/verify-twitter-rapid-comments.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
@@ -23,7 +23,7 @@ const page = (tweets, cursor = null) => ({ data: { threaded_conversation_with_in
     item: { itemContent: { itemType: 'TimelineTweet', tweet_results: { result } } } })) } },
   ...(cursor ? [{ content: { entryType: 'TimelineTimelineCursor', cursorType: 'Bottom', value: cursor } }] : [])] }] } } })
 
-async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Private supplier refusal' }, rejectedStatus = 403,
+async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Private supplier refusal' }, rejectedStatus = 403, rejectedHeaders = {},
   empty = false, noReplies = false, fallback = true, legacyReceipt = true } = {}) {
   const store = new MemoryStore(), service = new HubService({ store, apiKeyPepper: pepper })
   const tenant = await service.createTenant({ name: 'Probe fixture' })
@@ -43,7 +43,7 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
   const sourceBytes = Buffer.from(JSON.stringify({ code: 200, data: { id: '100', conversation_id: '100', thread: [
     { id: '200', conversation_id: '100', replies: fallback ? 2 : 0, text: 'Private archived comment' }] } }))
   const sourceArchive = { body_size: sourceBytes.length, body_sha256: createHash('sha256').update(sourceBytes).digest('hex'), body_bytes: sourceBytes }
-  const legacyRequest = { ...source, id: RESUME_SOURCE.requestId, platform: 'twitter', status: 'released', response_status: 502,
+  const legacyRequest = { ...source, id: RESUME_SOURCE.requestId, platform: 'twitter', status: 'committed', response_status: 502,
     idempotency_key: KEYS[0], acquisition_request: { method: 'POST', path: '/api/v1/data/social/post-comments',
       body: { platform: 'twitter', postId: '100', count: 100, includeRaw: false } } }
   const legacyCall = { ...sourceCall, id: RESUME_SOURCE.callId, usage_request_id: legacyRequest.id, provider_key: 'rapidapi',
@@ -73,7 +73,7 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
   const adapter = new RapidApiAdapter({ apiKey: secret, timeoutMs: 100, fetchImpl: async url => {
     http.push(String(url))
     if (http.length === failAt) throw new Error(`Transport failed with ${secret}`)
-    if (http.length === rejectAt) return Response.json(rejectedBody, { status: rejectedStatus })
+    if (http.length === rejectAt) return Response.json(rejectedBody, { status: rejectedStatus, headers: rejectedHeaders })
     if (empty) return Response.json(page([], 'opaque-private-cursor'))
     return Response.json(http.length === 1 ? page([tweet('201', '100', noReplies ? 0 : 3)], 'opaque-private-cursor')
       : page([tweet('203', noReplies ? '200' : '201')]))
@@ -232,6 +232,32 @@ test('existing page limits reduce the probe count and rejected response bytes re
   assert.doesNotMatch(JSON.stringify(failure), /Private supplier refusal/u)
 })
 
+test('real RapidAPI 404 failure settlement commits the immutable Hub 502 receipt with zero delivered units', async () => {
+  const h = await harness({ rejectAt: 1, rejectedStatus: 404, rejectedHeaders: { 'x-rapidapi-proxy-response': 'true' },
+    rejectedBody: { message: "Endpoint '/tweet/100' does not exist" } })
+  const idempotencyKey = 'offline-rapid-404-lifecycle'
+  await assert.rejects(h.gateway.postComments(h.context, { platform: 'twitter', idempotencyKey,
+    path: '/api/v1/data/social/post-comments', body: { platform: 'twitter', postId: '100', count: 100, includeRaw: false } }),
+  { code: 'external_platform_rejected' })
+  const saved = await h.store.getUsageRequestByIdempotencyKey(h.context.consumer.id, idempotencyKey)
+  assert.equal(saved.status, 'committed', 'a definitive Rapid refusal commits its replayable error, independent of supplier billing')
+  assert.equal(saved.responseStatus, 502)
+  assert.equal(saved.unitsActual, 0)
+  assert.equal(saved.responseBody.error.code, 'external_platform_rejected')
+  assert.equal(h.legacyRequest.status, saved.status, 'the historical fixture must follow the real failure lifecycle')
+  const calls = [...h.platformStore.calls.values()]
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].usageRequestId, saved.id)
+  assert.equal(calls[0].outcome, 'rejected')
+  assert.equal(calls[0].httpStatus, 404)
+  assert.equal(calls[0].billed, false)
+  assert.ok(h.platformStore.restrictedResponseArchives.has(calls[0].id))
+  await assert.rejects(h.gateway.postComments(h.context, { platform: 'twitter', idempotencyKey,
+    path: '/api/v1/data/social/post-comments', body: { platform: 'twitter', postId: '100', count: 100, includeRaw: false } }),
+  { code: 'external_platform_rejected' })
+  assert.equal(h.http.length, 1, 'the committed 502 replays without another supplier request')
+})
+
 test('one stage cannot dispatch twice even if an installed adapter attempts an automatic retry', async () => {
   const h = await harness(), original = h.adapter.forwardNative
   h.adapter.forwardNative = async function (...args) {
@@ -252,6 +278,10 @@ test('saved 404 error diagnosis distinguishes a missing route without replaying 
   assert.equal(report.supplierHttpCallsMade, 0)
   assert.equal(report.savedErrorInspectionVersion, 1)
   assert.equal(h.http.length, 0)
+  assert.equal(report.stages[0].usageStatus, 'committed')
+  assert.equal(report.resumeSourceInspection.usageStatus, 'committed')
+  assert.equal(report.resumeSourceInspection.usageHttpStatus, 502)
+  assert.equal(report.resumeSourceInspection.checks.usageCommitted, true)
   const call = report.stages[0].providerCalls[0]
   assert.equal(call.hashVerified, true)
   assert.equal(call.billed, false, 'the saved billing observation is preserved independently of status')
@@ -272,6 +302,26 @@ test('resume requires the exact known failed attempt and fixed archive digest; n
   const receipt = stages[0].providerCalls[0]
   receipt.sha256 = RESUME_SOURCE.sha256; receipt.bodySize = RESUME_SOURCE.bodySize
   assert.doesNotThrow(() => assertThreadResumeEvidence(saved, stages))
+  const accepted = inspectThreadResumeEvidence(saved, stages)
+  assert.equal(accepted.verified, true)
+  assert.equal(accepted.usageStatus, 'committed')
+  assert.deepEqual(accepted.failedChecks, [])
+  for (const status of ['released', 'reserved', 'unknown']) {
+    const candidate = structuredClone(saved); candidate.rows[0].status = status
+    const inspection = inspectThreadResumeEvidence(candidate, stages)
+    assert.equal(inspection.verified, false)
+    assert.equal(inspection.usageStatus, status)
+    assert.deepEqual(inspection.failedChecks, ['usageCommitted'])
+    assert.equal(inspection.checks.usageCommitted, false)
+    assert.throws(() => assertThreadResumeEvidence(candidate, stages), { code: 'resume_source_unverified' })
+    h.legacyRequest.status = status
+    const preflight = await h.resumePreview()
+    assert.equal(preflight.errorCode, 'resume_source_unverified')
+    assert.equal(preflight.resumeSourceInspection.usageStatus, status)
+    assert.ok(preflight.resumeSourceInspection.failedChecks.includes('usageCommitted'))
+    assert.equal(h.http.length, 0)
+  }
+  h.legacyRequest.status = 'committed'
   for (const mutate of [value => { value.saved.rows[0].id = SOURCE_REQUEST_ID },
     value => { value.saved.rows[0].status = 'unknown' }, value => { value.saved.rows[0].response_status = 200 },
     value => { value.saved.rows.push({ ...value.saved.rows[0], idempotency_key: KEYS[1] }) },
@@ -286,6 +336,15 @@ test('resume requires the exact known failed attempt and fixed archive digest; n
   const realGuard = await h.resumePreview({ resumeEvidenceCheck: assertThreadResumeEvidence })
   assert.equal(realGuard.errorCode, 'resume_source_unverified', 'synthetic bytes cannot pass the production archive fingerprint')
   assert.equal(h.http.length, 0)
+  const privateEvidence = structuredClone({ saved, stages })
+  privateEvidence.saved.rows[0].status = secret
+  privateEvidence.saved.rows[0].acquisition_request.body.postId = '99999999999999999999'
+  privateEvidence.saved.calls[0].endpoint_key = secret
+  const privateInspection = inspectThreadResumeEvidence(privateEvidence.saved, privateEvidence.stages)
+  assert.equal(privateInspection.verified, false)
+  assert.equal(privateInspection.usageStatus, 'other')
+  assert.ok(privateInspection.failedChecks.every(key => privateInspection.checks[key] === false))
+  assert.doesNotMatch(JSON.stringify(privateInspection), /synthetic-probe-provider-credential|99999999999999999999|\/tweet\/100/u)
 })
 
 test('resume preview remains read-only and incomplete thread intents permanently block additional procurement', async () => {
