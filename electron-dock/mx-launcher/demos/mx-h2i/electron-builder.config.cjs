@@ -114,7 +114,7 @@ module.exports = {
     oneClick: false,
     perMachine: true,
     allowElevation: true,
-    allowToChangeInstallationDirectory: false,
+    allowToChangeInstallationDirectory: true,
     include: 'build/installer.nsh'
   },
   linux: {

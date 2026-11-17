@@ -116,18 +116,10 @@ func rejectReparse(path string) error {
 }
 
 func verifyInstallRoot(root, executable string) error {
-	programFiles, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
-	if err != nil {
-		return err
-	}
-	relative, err := filepath.Rel(programFiles, root)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, `..\`) || filepath.IsAbs(relative) {
-		return errors.New("install the full MinCave package under Program Files before using the network service")
-	}
 	if !strings.EqualFold(executable, filepath.Join(root, "resources", "network-service", "MinCaveNetworkService.exe")) {
 		return errors.New("unexpected network service installation path")
 	}
-	return rejectReparse(root)
+	return verifyInstallationDirectory(root)
 }
 
 func protectDirectory(path string) error {

@@ -2,7 +2,7 @@
 
 ## 行为与部署范围
 
-Windows 完整 NSIS 安装包改为所有用户安装到 Program Files。安装、完整升级、修复和卸载由安装器请求 UAC，安装 `MinCaveNetworkService`。Electron 主程序仍为 `asInvoker`；正常连接、断开、重连、修复网络和内置 Mihomo TUN 通过已安装的服务执行，不再在使用时启动 `RunAs` PowerShell。
+Windows 完整 NSIS 安装包使用所有用户安装，默认安装到 Program Files，保留目录选择页，允许选择其他本地固定磁盘上的 NTFS/ReFS 目录（例如 `D:\Apps\MinCave`）。安装、完整升级、修复和卸载由安装器请求 UAC，安装 `MinCaveNetworkService`。Electron 主程序仍为 `asInvoker`；正常连接、断开、重连、修复网络和内置 Mihomo TUN 通过已安装的服务执行，不再在使用时启动 `RunAs` PowerShell。
 
 飞书企业登录、MinCave 成员与角色准入保持在原有流程中，Windows 服务可用性检查位于准入之后、申请连接 lease 之前。macOS、Linux 和未注入此执行器的其他 Launcher 客户端沿用原有实现。Windows 当前仅支持 x64。
 
@@ -14,7 +14,7 @@ ZIP 解压运行不负责安装服务；没有已安装的服务身份时客户�
 
 ## 安装内容与权限边界
 
-- `Program Files/.../resources/network-service/MinCaveNetworkService.exe`：Go 编写的 LocalSystem SCM 服务，自动启动，异常退出由 SCM 重启。
+- `<所选安装目录>/resources/network-service/MinCaveNetworkService.exe`：Go 编写的 LocalSystem SCM 服务，自动启动，异常退出由 SCM 重启。
 - 同目录 `worker.cjs`：完整安装时构建的固定网络工作程序，使用已安装的 Electron `ELECTRON_RUN_AS_NODE` 执行。它从不加载 ASAR、下载的代码或用户指定的脚本。
 - 同目录 `mihomo.exe`：从工作区 Windows 引擎构建资源复制，不接受调用方指定引擎路径。
 - 同目录 `identity.json`：安装器写入的服务公钥，客户端用于认证服务。
@@ -25,6 +25,14 @@ ZIP 解压运行不负责安装服务；没有已安装的服务身份时客户�
 服务工作进程的受限环境必须包含 `ProgramData`：从 Windows 已知文件夹得到的受保护状态目录推导，不能继承客户端提供的值。缺少此变量会导致 NRPT 脚本的 `Join-Path $env:ProgramData` 在创建 WireGuard 隧道前失败。2026-11-17 修复此遗漏；需要重新构建并安装 Windows 完整包来更新原生服务，ASAR 更新无法修复。
 
 安装器记录最终落盘的 Electron、worker、WireGuard 和 Mihomo 文件哈希。服务启动校验，执行前检查文件身份、大小和修改时间，变更时重新计算哈希。ASAR 不在 SYSTEM 代码加载路径上。现有 electron-builder 的 EXE 签名流程也覆盖 `extraResources` 中的服务和引擎；发布签名仍取决于构建机已有的代码签名配置，哈希校验不能代替发行者证书。
+
+### 自定义目录与升级
+
+安装器在清理旧安装和写入新文件之前运行内嵌的固定目录校验程序。所选路径通过环境变量传递，不拼接成 PowerShell 代码；仅加载系统 PowerShell 模块。允许新建空应用目录，或使用现有 MinCave 目录，不接管无关的非空目录。
+
+安装目录及所有祖先不能是链接、junction 或重解析点。现有路径所有者必须为 SYSTEM、Administrators 或 TrustedInstaller；祖先不能允许普通用户修改权限、属性或删除子目录。允许普通用户在祖先中新建文件夹，但安装目录本身只授予普通用户读取与执行，SYSTEM/管理员可修改。安装器只保护新建路径和 MinCave 目录，不更改磁盘根目录或其他现有父目录的权限。不满足条件时停止并提示更换目录。因此，普通用户可随意修改的下载/桌面目录、网络盘、FAT/exFAT 和权限过宽的磁盘或父目录不支持直接安装此系统服务。
+
+服务启动时再次检查磁盘能力、路径链及整个安装树的 ACL，覆盖 Electron DLL 和支持文件，替代旧的 Program Files 字符串限制。升级沿用 electron-builder 已有安装目录记录；更新时沿用原有文件迁移/失败恢复逻辑，并保留安装根目录及其 ACL。完整卸载仍删除安装目录。首次迁入其他盘符、覆盖升级和卸载需要 Windows 实机验收。
 
 ## IPC 与操作限制
 
@@ -67,7 +75,7 @@ cd electron-dock/mx-launcher/demos/mx-h2i
 pnpm make:win
 ```
 
-产物仍在 `out/electron-builder`，使用 `MinCave-<版本>-win-x64.exe` 完整安装包安装。NSIS 安装位置固定，禁止改到用户可写目录。
+产物仍在 `out/electron-builder`，使用 `MinCave-<版本>-win-x64.exe` 完整安装包安装。正常向导显示目录选择；静默升级也会校验目录。自定义目录功能需要重新构建完整包，ASAR 无法修改安装器或原生服务。
 
 专项检查：
 
@@ -80,6 +88,8 @@ go test ./...
 ```
 
 2026-11-16 本机验证：原有客户端检查通过（UI 62 项及原有安全回归），新增服务专项检查通过，涉及修改的 TypeScript 包构建通过；Go 协议测试、Windows x64 交叉编译与 Windows `go vet` 通过。使用临时预打包样本和 NSIS 工具集 1.2.1 成功编译安装／卸载钩子；它仅用于编译验证，不是可安装验收产物。macOS ARM 上默认旧 x64 NSIS 工具无法运行，因此这次编译验证临时指定了 ARM 兼容工具集，未改正式工具集配置。
+
+2026-11-17 自定义目录验证：`pnpm check` 通过；`pnpm check:windows-service` 13 项通过、1 项 Windows PowerShell ACL 策略用例在 macOS 跳过；Go 通用测试通过，Windows 专用 ACL 测试已交叉编译但未执行，Windows x64 `go vet` 和服务构建通过。相同临时预打包样本的安装／卸载 NSIS 编译通过。仍需 Windows 验证默认目录、D/E 盘安全目录、带中文/空格的路径、宽权限父目录拒绝、升级路径保留、文件占用时恢复及完整卸载；以上编译结果不能替代这些实机结果。
 
 尚未进行 Windows 实机测试，发布前必须完成：标准用户安装 UAC／取消 UAC、安装后主程序普通权限运行、真实飞书登录到连接、断开／重连／修复无额外 UAC、TUN 启停及模式切换、多 Windows 账号冲突、服务重启／丢失／超时、旧版升级、带活动连接升级与卸载清理。尤其需要检查实际 WireGuard 与 Mihomo 引擎在 Windows 上的服务权限及适配器行为。
 
