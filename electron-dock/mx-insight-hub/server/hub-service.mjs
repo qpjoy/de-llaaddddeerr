@@ -61,7 +61,7 @@ import { JUSTONE_OPERATION } from './contracts/justone.mjs'
 import { JUSTONE_RESOURCE_OPERATION_KEYS } from './contracts/justone-resources.mjs'
 import { SOCIAL_ACCOUNT_SEARCH_OPERATION } from './contracts/social-accounts.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
-import { COLLECT_CAPABILITY_KEYS } from '../shared/collect-engines.mjs'
+import { COLLECT_CAPABILITIES, COLLECT_CAPABILITY_KEYS } from '../shared/collect-engines.mjs'
 import {
   normalizeTelegramMonitorQuery,
   normalizeTelegramEntityQuery,
@@ -351,7 +351,8 @@ export function businessApiScopes(crawlerPlatforms = []) {
 export function lcyFullApiScopes(crawlerPlatforms = []) {
   const ordinary = businessApiScopes(crawlerPlatforms)
   return {
-    platforms: [...new Set([...ordinary.platforms, ...FILE_DATASETS.map(dataset => dataset.platform)])].sort(),
+    platforms: [...new Set([...ordinary.platforms, ...FILE_DATASETS.map(dataset => dataset.platform),
+      ...COLLECT_CAPABILITIES.map(definition => definition.platform)])].sort(),
     capabilities: [...PUBLIC_CAPABILITIES].sort(),
   }
 }

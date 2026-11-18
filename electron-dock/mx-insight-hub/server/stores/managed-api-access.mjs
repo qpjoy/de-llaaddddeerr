@@ -3,10 +3,17 @@ import { isLcyHubLimitIdentity } from '../core/internal-traffic-policy.mjs'
 import { listCrawlerSpecs } from '../ingest/crawler/source-contract.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../../shared/web-search.mjs'
 
+// Stdin operations scripts must reject older Pods that ignore the target option.
+export const MANAGED_API_ACCESS_SYNC_VERSION = 2
+
 // Caller owns the migration transaction/lock. Grants stay materialized and
 // auditable, so all existing authorization intersections continue to apply.
-export async function syncManagedApiAccess(client, scopes) {
-  const managed = await client.query("SELECT id,tenant_id,consumer_id FROM api_keys WHERE access_profile='managed_full' ORDER BY tenant_id,id")
+export async function syncManagedApiAccess(client, scopes, { apiKeyId = null } = {}) {
+  if (apiKeyId !== null && (typeof apiKeyId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(apiKeyId))) {
+    throw new Error('Managed API access refused: invalid target Key ID')
+  }
+  const managed = await client.query(`SELECT id,tenant_id,consumer_id FROM api_keys WHERE access_profile='managed_full'
+    ${apiKeyId === null ? '' : 'AND id=$1'} ORDER BY tenant_id,id`, apiKeyId === null ? [] : [apiKeyId])
   if (!managed.rowCount) return { keys: 0, changed: 0 }
   if (!scopes) {
     const specs = await listCrawlerSpecs({ listExternalSources: async () =>

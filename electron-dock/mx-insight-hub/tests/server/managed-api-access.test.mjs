@@ -8,7 +8,7 @@ import { syncManagedApiAccess } from '../../server/stores/managed-api-access.mjs
 import { businessApiScopes, lcyFullApiScopes } from '../../server/hub-service.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import { FILE_DATASETS } from '../../shared/file-datasets.mjs'
-import { COLLECT_CAPABILITY_KEYS } from '../../shared/collect-engines.mjs'
+import { COLLECT_CAPABILITIES, COLLECT_CAPABILITY_KEYS } from '../../shared/collect-engines.mjs'
 
 const migration = name => readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8')
 test('managed scope registry includes WeChat and native APIs without control-plane/ingestion privileges', () => {
@@ -23,6 +23,12 @@ test('managed scope registry includes WeChat and native APIs without control-pla
     assert.ok(!scopes.capabilities.includes(dataset.searchCapability))
   }
   assert.ok(COLLECT_CAPABILITY_KEYS.every(value => !scopes.capabilities.includes(value)))
+  // Ecommerce is shared with ordinary business APIs; the other collection
+  // platforms must not become implicit grants for ordinary managed Keys.
+  assert.ok(scopes.platforms.includes('ecommerce'))
+  for (const { platform } of COLLECT_CAPABILITIES) {
+    if (platform !== 'ecommerce') assert.ok(!scopes.platforms.includes(platform), platform)
+  }
 })
 
 test('LCY full access follows every file dataset and collection capability without granting Admin authority', () => {
@@ -31,7 +37,10 @@ test('LCY full access follows every file dataset and collection capability witho
     assert.ok(scopes.platforms.includes(dataset.platform), dataset.platform)
     assert.ok(scopes.capabilities.includes(dataset.searchCapability), dataset.searchCapability)
   }
-  for (const capability of COLLECT_CAPABILITY_KEYS) assert.ok(scopes.capabilities.includes(capability), capability)
+  for (const { key, platform } of COLLECT_CAPABILITIES) {
+    assert.ok(scopes.platforms.includes(platform), platform)
+    assert.ok(scopes.capabilities.includes(key), key)
+  }
   assert.ok(scopes.capabilities.includes('public_opinion.all_ingested.read'))
   assert.ok(scopes.platforms.includes('data_center_saved_records_new'))
   assert.ok(scopes.capabilities.every(value => !value.startsWith('admin.') && !value.startsWith('ingest.')))
@@ -135,6 +144,11 @@ test('PostgreSQL managed grants preserve identities/siblings and synchronize new
   // Even another live managed Key with identical name, tenant and consumer
   // must not inherit LCY-delta's file-dataset or collection access.
   await db.query("UPDATE api_keys SET access_profile='managed_full' WHERE id=$1", [sibling])
+  await db.query('BEGIN')
+  assert.deepEqual(await syncManagedApiAccess(db, scopes, { apiKeyId: key }), { keys: 1, changed: 0 })
+  await db.query('COMMIT')
+  assert.deepEqual(await store.listEffectiveCapabilityGrants(consumer, sibling), [])
+  assert.deepEqual(await syncManagedApiAccess(db, scopes, { apiKeyId: randomUUID() }), { keys: 0, changed: 0 })
   assert.equal((await sync()).changed, 1)
   assert.deepEqual((await store.listEffectiveCapabilityGrants(consumer, sibling)).sort(), scopes.capabilities)
   assert.deepEqual((await store.listEffectiveGrants(consumer, sibling)).sort(), scopes.platforms)

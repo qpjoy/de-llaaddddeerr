@@ -15,12 +15,35 @@
 | 操作 | 所需授权 |
 |---|---|
 | 提交采集任务 | 调用方与 API Key 的有效能力授权包含 `collect.tieba.posts.search` |
+| 开启计费后的采集派发 | 计费预留同时检查有效能力授权 `collect.tieba.posts.search` 和平台授权 `tieba`；仅提交成功不代表可以派发 |
 | 查询自己的任务与交付结果 | 现有 collect 调用方归属校验 |
 | 查询已入 Hub 的帖子 | 调用方与 API Key 的有效平台授权包含 `tieba` |
 
-采集能力授权不隐含已存数据授权；`tieba` 平台授权也不授予实时采集。已有论坛平台授权不会自动扩大为 `tieba`。授权检查同时考虑调用方授权和 Key 的范围快照。
+采集能力授权不隐含已存数据授权；`tieba` 平台授权也不授予实时采集。已有论坛平台授权不会自动扩大为 `tieba`。授权检查同时考虑调用方授权和 Key 的范围快照。完整的采集、计费与已存检索验收应同时授予这两项权限；关闭采集计费时，单独的采集能力授权可以用于采集试跑，但不能查询已存帖子。
 
 能力目前为 `candidate`。标准引擎 `night-all-a.tieba` 的类型为 `night_all_a`、容量为 1；新建默认 `enabled=false`、`billingEnabled=false`。候选能力不会因加入目录而自动授予 `managed_full` Key。必须完成引擎配置、显式授权和启用，才能派发任务。
+
+### 给专用验收调用方与 Key 授权
+
+由 Hub 平台管理员对已存在的测试调用方分别请求以下两个接口，请求体均为 `{"tenantId":"<租户 UUID>","consumerId":"<调用方 UUID>","enabled":true}`：
+
+- `PUT /internal/v1/admin/capabilities/collect.tieba.posts.search`
+- `PUT /internal/v1/admin/platforms/tieba`
+
+随后通过 `POST /internal/v1/admin/api-keys` 签发只包含这两项范围的专用 Key：
+
+```json
+{
+  "consumerId": "<调用方 UUID>",
+  "name": "tieba-acceptance",
+  "platforms": ["tieba"],
+  "capabilities": ["collect.tieba.posts.search"]
+}
+```
+
+以上请求使用 Hub 管理认证；下方公共接口使用新 Key 的 Bearer 认证。已有 Key 可以通过现有 scopes 更新流程补权，但必须保留其其他范围并满足 `expected` 校验，不能把新增两项直接当成全量覆盖请求。租户业务开通会影响该租户已有 Key，不适合作为只验收一把 Key 的替代操作；管理台首次授权选项未展示采集能力时，可使用上面的能力管理接口。
+
+使用验收 Key 调用 `GET /api/v1/data/collect/capabilities`，找到 `collect.tieba.posts.search`，确认 `granted=true`；`ready=true` 仅说明存在已启用、未隔离的路由，仍需单独探测和真实任务验收。
 
 ## 引擎和平台会话
 
@@ -155,7 +178,7 @@ ingest worker 核验已提交的 collect 任务状态、公开结果摘要及完
 node scripts/collect-acceptance.mjs smoke --only collect.tieba.posts.search --key-file /root/collect-acceptance.key
 ```
 
-首次没有验收 Key 时，将 `--key-file` 换成 `--create-key /root/collect-acceptance.key`。脚本新建的验收 Key 授予全部 smoke 能力、`platforms=[]`，写到 0600 文件且不打印；已有 Key 不会自动补权。该 Key 因而不能直接完成 `tieba` 已存检索验收，需另外显式配置平台授权。
+首次没有验收 Key 时，将 `--key-file` 换成 `--create-key /root/collect-acceptance.key`。脚本新建的验收 Key 授予全部 smoke 能力、`platforms=[]`，写到 0600 文件且不打印；已有 Key 不会自动补权。该 Key 因而不能直接完成 `tieba` 已存检索验收，也不能在引擎开启计费时完成采集派发，需另外显式配置平台授权。只验收贴吧时，优先使用同时具有 `collect.tieba.posts.search` 和 `tieba` 授权的专用 Key，避免新建覆盖全部 smoke 能力的 Key。
 
 当前 smoke 输入是 `query=新能源汽车`、`maxResults=2`、`maxPages=1`。脚本只提交并轮询任务终态，不会读取 result、等待 ingest 或验证搜索命中。完整验收还需独立确认：
 
