@@ -37,7 +37,33 @@ function Assert-InstallTree([string]$Path) {
     }
 }
 
-function Prepare-MinCaveDirectory([string]$Selected, [switch]$CheckOnly) {
+function Test-EmptyUnownedInstallDirectory([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if (-not $item.PSIsContainer -or (([int]$item.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0)) { return $false }
+    $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    return ($trusted -notcontains $owner -and @(Get-ChildItem -LiteralPath $Path -Force).Count -eq 0)
+}
+
+function Replace-EmptyInstallDirectory([string]$Path, [Security.AccessControl.DirectorySecurity]$Security) {
+    $parent = [IO.Path]::GetDirectoryName($Path)
+    $staged = Join-Path $parent ('.mincave-install-' + [Guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($staged, $Security)
+    Assert-InstallAcl $staged $false
+    $moved = $false
+    try {
+        if (-not (Test-EmptyUnownedInstallDirectory $Path)) { throw ('The empty directory changed after confirmation: ' + $Path) }
+        # Nonrecursive removal refuses a directory that has acquired content.
+        # Move never overwrites a replacement created by another process.
+        [IO.Directory]::Delete($Path, $false)
+        [IO.Directory]::Move($staged, $Path)
+        $moved = $true
+    } finally {
+        if (-not $moved) { [IO.Directory]::Delete($staged, $false) }
+    }
+    Assert-InstallAcl $Path $false
+}
+
+function Prepare-MinCaveDirectory([string]$Selected, [switch]$CheckOnly, [switch]$RepairEmpty) {
     if ($Selected -notmatch '^[A-Za-z]:\\' -or $Selected.Substring(2) -match '[:<>"|?*\x00-\x1f]') { throw 'Choose an absolute local installation directory.' }
     foreach ($part in $Selected.Substring(3).Split('\')) {
         if (-not $part -or $part -match '[. ]$' -or $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'The installation directory contains an unsupported path component.' }
@@ -55,21 +81,29 @@ function Prepare-MinCaveDirectory([string]$Selected, [switch]$CheckOnly) {
         $missing.Add($current)
         $current = [IO.Path]::GetDirectoryName($current)
     }
-    if ($missing.Count -eq 0) {
-        $contents = @(Get-ChildItem -LiteralPath $target -Force)
-        if ($contents.Count -gt 0 -and -not (Test-Path -LiteralPath (Join-Path $target 'mx-h2i.exe') -PathType Leaf)) { throw 'Choose an empty folder or the existing MinCave installation.' }
-        Assert-InstallTree $target
-        $current = [IO.Path]::GetDirectoryName($target)
-    }
+    if ($missing.Count -eq 0) { $current = [IO.Path]::GetDirectoryName($target) }
     while ($current) {
         Assert-InstallAcl $current $true
         $current = [IO.Path]::GetDirectoryName($current)
     }
 
+    $canRepair = $missing.Count -eq 0 -and (Test-EmptyUnownedInstallDirectory $target)
+    if ($RepairEmpty -and -not $canRepair) { throw ('The empty directory changed after confirmation: ' + $target) }
+    if ($CheckOnly -and $canRepair) { return 'repair-available' }
+    if ($missing.Count -eq 0 -and -not $RepairEmpty) {
+        # Validate the target before enumerating it, including reparse points.
+        Assert-InstallTree $target
+        $contents = @(Get-ChildItem -LiteralPath $target -Force)
+        if ($contents.Count -gt 0 -and -not (Test-Path -LiteralPath (Join-Path $target 'mx-h2i.exe') -PathType Leaf)) { throw 'Choose an empty folder or the existing MinCave installation.' }
+    }
     if ($CheckOnly) { return }
 
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetSecurityDescriptorSddlForm('O:BAG:BA' + $directoryDacl)
+    if ($RepairEmpty) {
+        Replace-EmptyInstallDirectory $target $security
+        return
+    }
     for ($index = $missing.Count - 1; $index -ge 0; $index--) {
         # CreateDirectory with an explicit descriptor protects each new path
         # component at creation, without inheriting an unsafe write grant.
@@ -84,7 +118,9 @@ function Prepare-MinCaveDirectory([string]$Selected, [switch]$CheckOnly) {
 
 if ($env:MINCAVE_INSTALL_DIRECTORY) {
     try {
-        Prepare-MinCaveDirectory $env:MINCAVE_INSTALL_DIRECTORY -CheckOnly:($env:MINCAVE_INSTALL_DIRECTORY_CHECK_ONLY -eq '1')
+        $mode = $env:MINCAVE_INSTALL_DIRECTORY_MODE
+        $result = Prepare-MinCaveDirectory $env:MINCAVE_INSTALL_DIRECTORY -CheckOnly:($mode -eq 'preview') -RepairEmpty:($mode -eq 'repair-empty')
+        if ($result -eq 'repair-available') { exit 2 }
         exit 0
     } catch {
         [Console]::Out.WriteLine($_.Exception.Message)
