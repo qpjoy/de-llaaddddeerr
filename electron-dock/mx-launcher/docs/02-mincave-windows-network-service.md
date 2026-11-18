@@ -24,6 +24,8 @@ ZIP 解压运行不负责安装服务；没有已安装的服务身份时客户�
 
 服务工作进程的受限环境必须包含 `ProgramData`：从 Windows 已知文件夹得到的受保护状态目录推导，不能继承客户端提供的值。缺少此变量会导致 NRPT 脚本的 `Join-Path $env:ProgramData` 在创建 WireGuard 隧道前失败。2026-11-17 修复此遗漏；需要重新构建并安装 Windows 完整包来更新原生服务，ASAR 更新无法修复。
 
+2026-11-18 进一步现场验证：endpoint bypass 脚本通过 .NET `CommonApplicationData` 查询公共目录，仅提供 `ProgramData`（甚至再补 `ALLUSERSPROFILE`）仍会得到空路径，隧道在调用 WireGuard 前即退出。出错电脑的只读受限子进程对照测试中，补充 `SystemDrive` 后查询恢复为实际公共目录。原生服务现在从系统 Windows 目录推导 `SystemDrive`，并从已知公共状态目录推导 `ProgramData` 与 `ALLUSERSPROFILE`；不继承客户端的路径或 Node 注入变量，不更改机器环境、目录权限或其他产品的 DNS。新增 Windows 只读回归执行与 endpoint bypass 相同的 .NET 查询，避免只覆盖 `Join-Path` 而遗漏已知目录 API。本改动需要重新构建并安装 Windows 完整包，仍需实际连接验收。 本机 Go 通用测试通过，两项 Windows PowerShell 集成检查在 macOS 跳过；Windows x64 `go vet`、测试交叉编译与服务构建通过，服务专项检查 16 项通过、1 项 Windows ACL 用例跳过。现场对照仅验证了目录解析，不代表完整内网连接已经恢复。
+
 安装器记录最终落盘的 Electron、worker、WireGuard 和 Mihomo 文件哈希。服务启动校验，执行前检查文件身份、大小和修改时间，变更时重新计算哈希。ASAR 不在 SYSTEM 代码加载路径上。现有 electron-builder 的 EXE 签名流程也覆盖 `extraResources` 中的服务和引擎；发布签名仍取决于构建机已有的代码签名配置，哈希校验不能代替发行者证书。
 
 ### 自定义目录与升级
