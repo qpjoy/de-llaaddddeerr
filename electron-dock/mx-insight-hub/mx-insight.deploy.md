@@ -125,6 +125,31 @@ sudo ss -lntp '( sport = :6443 or sport = :2379 )'
 
 Docker 和 Kubernetes/containerd 是两个镜像存储。共享镜像缺失时优先导入本机 Docker 缓存，没有缓存才拉取；`MX_INSIGHT_BUILD_PROXY` 只控制 Hub 构建，不会替 Docker daemon 或 containerd 配置仓库代理。
 
+#### Dockerfile 前端退出（2026-11-18）
+
+若输出停在 `docker-image://docker.io/docker/dockerfile:1.7`，随后报
+`frontend grpc server closed unexpectedly`，失败点是外部 Dockerfile 前端启动，尚未执行 Hub 的
+`FROM` / npm 构建、Admin 冻结、权限迁移或 rollout。此前 mx-common 协调和数据库核对已执行。
+`CACHED` 不证明前端进程能启动；仅此错误无法确定是进程被杀、运行时问题或其他原因。
+
+本次现场为 Docker 26.1.3、Buildx 0.14.0、BuildKit 0.33.1；专用 builder 仍在运行。
+Hub Dockerfile 已移除外部 `# syntax=docker/dockerfile:1.7` 指令，改用 BuildKit 自带前端，
+保留 `ui_design`、`mx_common`、`mx_pay` 命名构建目录和原有构建步骤。
+未指定 syntax 时使用内建前端是 [Docker 支持的行为](https://docs.docker.com/reference/dockerfile/#syntax)。
+这是绕开外部前端启动失败的恢复措施，不是对进程退出根因的判定。
+
+同步 Dockerfile 后，在服务器 Hub 目录重试：
+
+```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+```
+
+这次修改无需重启 Docker/containerd、删除 builder 或清理缓存。构建应越过原失败位置进入 Node 基础镜像和 npm 阶段；
+最终仍以迁移与全部 Hub 工作负载就绪为验收。若不再加载外部前端却仍失败，保留新的错误与对应 builder 日志继续排查。
+本地已用 BuildKit 0.20.2 解析完整 Dockerfile，并用三个真实命名目录完成无基础镜像的多阶段 COPY 校验；
+这不等同于服务器完整镜像构建或部署成功。
+
 #### Docker Hub 令牌请求 EOF（2026-10-12）
 
 若构建停在 `load metadata for node:22-bookworm-slim`，并显示 `auth.docker.io/token ... EOF`，失败发生在基础镜像认证阶段，尚未编译 Hub，也与 npm 镜像源无关。EOF 本身不能确定是代理端口、出口节点还是上游连接问题。

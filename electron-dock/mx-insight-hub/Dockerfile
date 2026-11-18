@@ -1,4 +1,6 @@
-# syntax=docker/dockerfile:1.7
+# Use BuildKit's bundled Dockerfile frontend. The named build contexts below
+# need BuildKit >=0.10; no external Dockerfile frontend features are required.
+# This avoids starting a separate docker/dockerfile frontend container.
 # Keep the Node 22 line instead of an exact patch tag so existing deployment
 # caches remain eligible rather than forcing a new base-image pull. Native
 # TypeScript still has a hard minimum, enforced immediately below.
