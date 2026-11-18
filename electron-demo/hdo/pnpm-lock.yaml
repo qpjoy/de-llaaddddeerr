@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@qpjoy/electron-launcher':
-        specifier: ^2.3.16
-        version: 2.3.16
+        specifier: ^2.3.19
+        version: 2.3.19
       '@qpjoy/electron-market':
         specifier: ^0.4.2
         version: 0.4.2(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
@@ -126,8 +126,8 @@ packages:
   '@qpjoy/electron-core-wireguard@2.3.17':
     resolution: {integrity: sha512-t83UbQ/5dISATnxfpvr6vyC2N3vqOGqgZ19L4Ll4IZf9KtFonL/q+oU0fJ1R8hbfGpgQxyXB6L8JQHsj2Df0SQ==}
 
-  '@qpjoy/electron-launcher@2.3.16':
-    resolution: {integrity: sha512-YTceo7+TH4TMfpNSg8kmavPMVs8KF73bbpT6Oeo45x0ruRoqZG2ZFdw7jIZUVRqPSYVpLWMl9cFsD1VwTQmnAw==}
+  '@qpjoy/electron-launcher@2.3.19':
+    resolution: {integrity: sha512-dyhhbEkMdYkt7V0qb1phwOmt3q5CYVv/VXRtupi4kysHke0hUTIF+wk9ZLG4COzNfwlSoesCVZpqpQ3nubDcTQ==}
 
   '@qpjoy/electron-market@0.4.2':
     resolution: {integrity: sha512-5+nUlRaoTYjP0koBh8Y5sZ9yTD4uVEAkJ827dQbZ6MUMwcWmEcnlTb031iKc6FWLMqu/RRZ8cYPUKa/I26x5cw==}
@@ -185,14 +185,14 @@ packages:
   '@qpjoy/marketplace-db@0.1.1':
     resolution: {integrity: sha512-3eL0XkHVe3zaEH97z0hL88OZDIT30/k5LOI5bhgZ6M9xfIVeP+L5CahjAZ/DAoVTfH4vb7ZjjXIzHTJMrnbqPA==}
 
-  '@qpjoy/mx-launcher-core@2.3.16':
-    resolution: {integrity: sha512-uL6J5/IAGF3KAlCPvo+doaJgq7oTEo4uy+1gcVljklS12oMHKmuLMb3542TgOcH9F2N1e04cug3p2+35rzo4RA==}
+  '@qpjoy/mx-launcher-core@2.3.19':
+    resolution: {integrity: sha512-8pk2crWho3XDTpMBYKpWDq6UukqcB0g63MYu4GKDkp6s+K5ZHySK6LaBHClE7OghLj3QJnFq2niO2nOsjtu1jA==}
 
-  '@qpjoy/mx-launcher-embed-sdk@2.3.16':
-    resolution: {integrity: sha512-lr+HBPAbWVvCucqgVRz/TSz+pA7VboJVLrk/XWL5hCT0vTfhEpg10QXrHIsFk+RhyPJxNhLswLFv+mbcNDglaQ==}
+  '@qpjoy/mx-launcher-embed-sdk@2.3.19':
+    resolution: {integrity: sha512-Eoc+AH9lFAHXg0kHSbMZJYMIbrve8i1HNJy9f8bkGgqJJR1baNQlLH11AC7whiFT5d8E4owbh2D+zRi6atgf3Q==}
 
-  '@qpjoy/mx-launcher-standalone@2.3.16':
-    resolution: {integrity: sha512-ct5Ck+/7mMuy5KR7+yOqpvgq1plPhZq6dJisaZB+zp2+M4irSx0+caqXpZCA6INC6v67YpqB+8Ne8X43EB9t1g==}
+  '@qpjoy/mx-launcher-standalone@2.3.19':
+    resolution: {integrity: sha512-pzqMYiBCvF9BQ0uzEmaoMGCs1HZzDrHE9JT/SaYqbZP7Zi1T167xig/YxrKaRi9JE1b6XV9p+e/Y6FCTaWmMCQ==}
 
   '@sindresorhus/is@4.6.0':
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
@@ -227,8 +227,8 @@ packages:
   '@types/node@20.19.43':
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
 
-  '@types/node@26.1.2':
-    resolution: {integrity: sha512-Vu4a5UFA9rIIFJ7rB/Vaafh9lrCQszopTCx6KjFboXTGQbPNasehVR5TEiithSDGyd1DEiUByggTZsg8jukeIg==}
+  '@types/node@26.6.4':
+    resolution: {integrity: sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==}
 
   '@types/plist@3.0.5':
     resolution: {integrity: sha512-E6OCaRmAe4WDmWNsL/9RMqdkkzDCY1etutkflWk4c+AcjDU07Pcz1fQwTX0TQz+Pxqn9i4L1TU3UFpjnrcDgxA==}
@@ -1093,8 +1093,8 @@ packages:
     resolution: {integrity: sha512-myRT3DiWPHqho5PrJaIRyaMv2kgYf0mUVgBNOYMuCH5Ki1yEiQaf/ZJuQ62nvpc44wL5WDbTX7yGJi1Neevw8w==}
     engines: {node: '>= 0.6'}
 
-  node-abi@3.94.0:
-    resolution: {integrity: sha512-W5ZNO5KRPB5TkYmGVD9F6YqhsglXJzE6etpbmT+f6EQElhiX/UTG551cnsRGvLG3fyZEg9HwaDmNmj5nwJ4z9g==}
+  node-abi@3.96.0:
+    resolution: {integrity: sha512-rebQ/lz7i0EkoLzUVSrKRzA69zMkwLp95kKMWoMDkkM00Suxz0D7zEQPwRml5fQum24mj7bPvmlgLAmu2JCiYg==}
     engines: {node: '>=10'}
 
   node-addon-api@1.7.2:
@@ -1438,8 +1438,8 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
-  undici-types@8.3.0:
-    resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   unique-filename@2.0.1:
     resolution: {integrity: sha512-ODWHtkkdx3IAR+veKxFV+VBkUMcN+FaqzUUd7IZzt+0zhDZFPFxhlqwPF3YQvMHx1TD0tdgYl+kuPnJ8E6ql7A==}
@@ -1583,7 +1583,7 @@ snapshots:
       detect-libc: 2.1.2
       fs-extra: 10.1.0
       got: 11.8.6
-      node-abi: 3.94.0
+      node-abi: 3.96.0
       node-api-version: 0.2.1
       node-gyp: 9.4.1
       ora: 5.4.1
@@ -1671,12 +1671,12 @@ snapshots:
       '@qpjoy/electron-core-wireguard-engine-linux-x64': 0.1.2
       '@qpjoy/electron-core-wireguard-engine-win32-x64': 0.1.2
 
-  '@qpjoy/electron-launcher@2.3.16':
+  '@qpjoy/electron-launcher@2.3.19':
     dependencies:
       '@qpjoy/electron-core-wireguard': 2.3.17
-      '@qpjoy/mx-launcher-core': 2.3.16
-      '@qpjoy/mx-launcher-embed-sdk': 2.3.16
-      '@qpjoy/mx-launcher-standalone': 2.3.16
+      '@qpjoy/mx-launcher-core': 2.3.19
+      '@qpjoy/mx-launcher-embed-sdk': 2.3.19
+      '@qpjoy/mx-launcher-standalone': 2.3.19
 
   '@qpjoy/electron-market@0.4.2(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
     dependencies:
@@ -1729,15 +1729,15 @@ snapshots:
     dependencies:
       better-sqlite3: 11.10.0
 
-  '@qpjoy/mx-launcher-core@2.3.16': {}
+  '@qpjoy/mx-launcher-core@2.3.19': {}
 
-  '@qpjoy/mx-launcher-embed-sdk@2.3.16':
+  '@qpjoy/mx-launcher-embed-sdk@2.3.19':
     dependencies:
-      '@qpjoy/mx-launcher-core': 2.3.16
+      '@qpjoy/mx-launcher-core': 2.3.19
 
-  '@qpjoy/mx-launcher-standalone@2.3.16':
+  '@qpjoy/mx-launcher-standalone@2.3.19':
     dependencies:
-      '@qpjoy/mx-launcher-core': 2.3.16
+      '@qpjoy/mx-launcher-core': 2.3.19
 
   '@sindresorhus/is@4.6.0': {}
 
@@ -1760,7 +1760,7 @@ snapshots:
 
   '@types/fs-extra@9.0.13':
     dependencies:
-      '@types/node': 26.1.2
+      '@types/node': 26.6.4
 
   '@types/http-cache-semantics@4.2.0': {}
 
@@ -1774,13 +1774,13 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
-  '@types/node@26.1.2':
+  '@types/node@26.6.4':
     dependencies:
-      undici-types: 8.3.0
+      undici-types: 8.9.0
 
   '@types/plist@3.0.5':
     dependencies:
-      '@types/node': 26.1.2
+      '@types/node': 26.6.4
       xmlbuilder: 15.1.1
     optional: true
 
@@ -2798,7 +2798,7 @@ snapshots:
 
   negotiator@0.6.4: {}
 
-  node-abi@3.94.0:
+  node-abi@3.96.0:
     dependencies:
       semver: 7.8.5
 
@@ -2905,7 +2905,7 @@ snapshots:
       minimist: 1.2.8
       mkdirp-classic: 0.5.3
       napi-build-utils: 2.0.0
-      node-abi: 3.94.0
+      node-abi: 3.96.0
       pump: 3.0.4
       rc: 1.2.8
       simple-get: 4.0.1
@@ -3176,7 +3176,7 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  undici-types@8.3.0: {}
+  undici-types@8.9.0: {}
 
   unique-filename@2.0.1:
     dependencies:

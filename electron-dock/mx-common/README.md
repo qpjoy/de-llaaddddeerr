@@ -212,6 +212,10 @@ await withTransaction(pool, async (client) => {
 
 Hub 的 `deploy` 会自动调用它，不需要手动执行。
 
+建库的每次 SQL 执行前会重新检查 `mx-common-postgres-0`：Pod 未终止、容器 Ready，TCP 已接受连接，通过原有本地管理认证执行只读 SQL 确认数据库非恢复、非只读状态，且探测前后的 Pod/容器身份未变化。每条 SQL 前的默认等待预算为 120 秒，可用 `MX_COMMON_PROVISION_WAIT_TIMEOUT` 调整（1–3600 秒）。等待仅重试只读检查，不重启数据库，也不自动重放已经发出的建库 SQL；等待信息走 stderr，不混入返回的 DSN。
+
+若部署报 `the database system is shutting down`，而 Pod 随后又显示 Running，应检查容器最近一次退出信息、`kubectl logs --previous` 和 Pod events。当前 Ready 不能解释之前的重启原因；`pg_advisory_xact_lock` 的等待日志也不等同于死锁或重启原因。不要通过重建数据卷或轮换凭据处理暂态连接错误。
+
 ### 本机开发连接 PostgreSQL
 
 在运行 PostgreSQL 的 Internal 节点，mx-common 的 `deploy` 会同时部署一个只监听

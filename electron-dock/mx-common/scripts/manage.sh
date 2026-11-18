@@ -127,6 +127,7 @@ Environment:
   MX_COMMON_HOST_DATA_ROOT      Host path for local PVs (default /var/lib/mx-common/k8s)
   MX_COMMON_DISK_WARN_PERCENT   Warn above this disk usage during deploy (default 85)
   MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 1200)
+  MX_COMMON_PROVISION_WAIT_TIMEOUT  Readiness budget before each provision SQL (1-3600 seconds, default 120)
   MX_COMMON_SNAPSHOT_SCHEDULE   SLM cron (default "0 30 1 * * ?", 01:30 daily)
   MX_COMMON_SNAPSHOT_S3_BUCKET  Target off-node repository (requires configured ES S3 client/keystore)
   MX_COMMON_SNAPSHOT_S3_CLIENT  Configured ES client name (default mx_backup)
@@ -1230,11 +1231,79 @@ cmd_snapshot() {
 # Per-product provisioning
 # ---------------------------------------------------------------------------
 
+# A StatefulSet's readyReplicas can lag a terminating or restarting container.
+# Return only the identity of a currently ready PostgreSQL container; callers
+# compare this around the SQL probe so an observation from the old process
+# cannot qualify its replacement.
+postgres_provision_pod_identity() {
+  local pod="$1" request_timeout="$2" state uid deleting phase ready container_ready started container_id restarts
+  state="$(kubectl -n "$NAMESPACE" --request-timeout="${request_timeout}s" get pod "$pod" \
+    -o jsonpath='{.metadata.uid}|{.metadata.deletionTimestamp}|{.status.phase}|{.status.conditions[?(@.type=="Ready")].status}|{.status.containerStatuses[?(@.name=="postgres")].ready}|{.status.containerStatuses[?(@.name=="postgres")].state.running.startedAt}|{.status.containerStatuses[?(@.name=="postgres")].containerID}|{.status.containerStatuses[?(@.name=="postgres")].restartCount}' 2>/dev/null)" || return 1
+  IFS='|' read -r uid deleting phase ready container_ready started container_id restarts <<<"$state"
+  [ -n "$uid" ] && [ -z "$deleting" ] && [ "$phase" = Running ] && [ "$ready" = True ] \
+    && [ "$container_ready" = true ] && [ -n "$started" ] && [ -n "$container_id" ] || return 1
+  case "$restarts" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s|%s|%s\n' "$uid" "$container_id" "$restarts"
+}
+
+# Only this read-only gate retries. Replaying a failed provisioning statement
+# could repeat SQL that committed before the connection was lost. The probe
+# has no stdin and uses the existing local-socket administrative authentication.
+wait_postgres_provision_ready() {
+  local pod="$1" timeout="${MX_COMMON_PROVISION_WAIT_TIMEOUT:-120}"
+  case "$timeout" in ''|*[!0-9]*) warn "MX_COMMON_PROVISION_WAIT_TIMEOUT must be a positive integer"; return 1 ;; esac
+  # Strip leading zeroes before arithmetic; Bash otherwise interprets 08/09
+  # as invalid octal numbers. Bound the operator wait without risking overflow.
+  while [ "${timeout#0}" != "$timeout" ]; do timeout="${timeout#0}"; done
+  [ -n "$timeout" ] && [ "${#timeout}" -le 4 ] && [ "$timeout" -le 3600 ] \
+    || { warn "MX_COMMON_PROVISION_WAIT_TIMEOUT must be between 1 and 3600 seconds"; return 1; }
+  local started=$SECONDS deadline=$((SECONDS + timeout)) remaining request_timeout before after answer last_report=-30
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS)); request_timeout="$remaining"
+    [ "$request_timeout" -le 5 ] || request_timeout=5
+    before="$(postgres_provision_pod_identity "$pod" "$request_timeout")" || before=""
+    if [ -n "$before" ] && [ "$SECONDS" -lt "$deadline" ]; then
+      remaining=$((deadline - SECONDS)); request_timeout="$remaining"
+      [ "$request_timeout" -le 5 ] || request_timeout=5
+      answer="$(kubectl -n "$NAMESPACE" --request-timeout="${request_timeout}s" exec "$pod" -c postgres -- \
+        sh -ec 'pg_isready -h 127.0.0.1 -U mx_common -d mx_common -t 3 >/dev/null || exit 2
+          PGCONNECT_TIMEOUT=3 PGOPTIONS="-c statement_timeout=3000" \
+          psql -w -X -U mx_common -d mx_common -Atq -v ON_ERROR_STOP=1 -c "$1"' \
+        mx-common-provision-probe \
+        "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AND current_setting('default_transaction_read_only') = 'off'" \
+        2>/dev/null)" || answer=""
+      if [ "$answer" = t ] && [ "$SECONDS" -lt "$deadline" ]; then
+        remaining=$((deadline - SECONDS)); request_timeout="$remaining"
+        [ "$request_timeout" -le 5 ] || request_timeout=5
+        after="$(postgres_provision_pod_identity "$pod" "$request_timeout")" || after=""
+        [ -n "$after" ] && [ "$before" = "$after" ] && [ "$SECONDS" -lt "$deadline" ] && return 0
+      fi
+    fi
+    if [ $((SECONDS - started - last_report)) -ge 30 ]; then
+      say "waiting for ${pod}/postgres to accept writable TCP connections ($((SECONDS - started))s of ${timeout}s)" >&2
+      last_report=$((SECONDS - started))
+    fi
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    [ "$remaining" -le 5 ] || remaining=5
+    sleep "$remaining"
+  done
+  warn "${pod}/postgres did not become ready for provisioning in ${timeout}s; this provisioning statement was not sent; earlier statements may have completed"
+  return 1
+}
+
 psql_super() {
-  local database="${1:-mx_common}"
+  local database="${1:-mx_common}" pod=mx-common-postgres-0
   shift
-  kubectl -n "$NAMESPACE" exec -i statefulset/mx-common-postgres -- \
-    psql -v ON_ERROR_STOP=1 -U mx_common -d "$database" -q "$@"
+  wait_postgres_provision_ready "$pod" || return 1
+  # Preserve the existing local-socket administrative authentication. This
+  # final TCP check and SQL execute in one container shell; any failure here
+  # is returned, never retried. stdin reaches psql untouched, without a file.
+  kubectl -n "$NAMESPACE" exec -i "$pod" -c postgres -- \
+    sh -ec 'pg_isready -h 127.0.0.1 -U mx_common -d mx_common -t 3 >/dev/null || exit 2
+      export PGCONNECT_TIMEOUT=3
+      exec psql -w -X -v ON_ERROR_STOP=1 -U mx_common -d "$@"' \
+    mx-common-provision "$database" -q "$@"
 }
 
 # `mx-insight-hub` -> `mx_insight_hub`. Identifiers cannot contain hyphens
