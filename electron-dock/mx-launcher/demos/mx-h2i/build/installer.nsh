@@ -2,18 +2,54 @@
 ; application remains asInvoker and never starts this helper with RunAs.
 !ifndef BUILD_UNINSTALLER
   !include "${PROJECT_DIR}\out\windows-network-service\install-directory.nsh"
-!endif
+  !include "nsDialogs.nsh"
 
-; This hidden section precedes electron-builder's install section, including
-; for silent upgrades. Check/protect the destination before old files are
-; removed or any new executable is written or started there.
-!macro customHeader
-  !ifndef BUILD_UNINSTALLER
-    Section "-MinCave installation directory"
+  ; Use the standard directory page with our own leave callback. The
+  ; electron-builder page has no hook for validating the edited path.
+  !macro customWelcomePage
+    !ifdef allowToChangeInstallationDirectory
+      !undef allowToChangeInstallationDirectory
+      !define MINCAVE_INSTALL_DIRECTORY_PAGE
+    !endif
+  !macroend
+
+  !macro customPageAfterChangeDir
+    !ifdef MINCAVE_INSTALL_DIRECTORY_PAGE
+      !insertmacro skipPageIfUpdated
+      !define MUI_PAGE_CUSTOMFUNCTION_LEAVE MinCaveDirectoryLeave
+      !define MUI_DIRECTORYPAGE_TEXT_TOP "请选择由系统或管理员管理的本地 NTFS/ReFS 目录。可以使用默认目录，或选择其他符合要求的磁盘子目录。"
+      !insertmacro MUI_PAGE_DIRECTORY
+      !define allowToChangeInstallationDirectory
+
+      Function MinCaveDirectoryLeave
+        ; MUI stores the final edit into $INSTDIR after the leave callback.
+        Push $9
+        ${NSD_GetText} $mui.DirectoryPage.Directory $9
+        !insertmacro MinCaveValidateDirectory "$9" "1"
+        Pop $9
+        ${If} $0 != 0
+          !insertmacro MinCaveDirectoryError
+          Abort
+        ${EndIf}
+      FunctionEnd
+    !endif
+  !macroend
+
+  !macro MinCaveDirectoryError
+    MessageBox MB_OK|MB_ICONSTOP "无法安装到所选目录。请选择默认目录，或由系统或管理员管理的本地 NTFS/ReFS 磁盘子目录。$\r$\n$\r$\n$1"
+  !macroend
+
+  !macro MinCaveValidateDirectory TARGET CHECK_ONLY
       ; Pass the selected path as a register value, never System plugin source.
       Push $9
-      StrCpy $9 $INSTDIR
+      Push $2
+      StrCpy $9 ${TARGET}
       System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY", w r9) i.r0'
+      ${If} $0 == 0
+        SetErrorLevel 1
+        Quit
+      ${EndIf}
+      System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_CHECK_ONLY", w "${CHECK_ONLY}") i.r0'
       ${If} $0 == 0
         SetErrorLevel 1
         Quit
@@ -33,17 +69,28 @@
         SetErrorLevel 1
         Quit
       ${EndIf}
-      nsExec::ExecToStack /TIMEOUT=120000 '"$2" -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${MINCAVE_INSTALL_DIRECTORY_COMMAND}'
+      nsExec::ExecToStack /TIMEOUT=120000 '"$2" -NoProfile -NonInteractive -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand ${MINCAVE_INSTALL_DIRECTORY_COMMAND}'
       Pop $0
       Pop $1
       System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY", p 0)'
       System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_SCRIPT", p 0)'
+      System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_CHECK_ONLY", p 0)'
+      Pop $2
+      Pop $9
+  !macroend
+!endif
+
+; Check again and protect the destination before old files are removed or
+; new files are written, including installs that skip the directory page.
+!macro customHeader
+  !ifndef BUILD_UNINSTALLER
+    Section "-MinCave installation directory"
+      !insertmacro MinCaveValidateDirectory "$INSTDIR" "0"
       ${If} $0 != 0
-        MessageBox MB_OK|MB_ICONSTOP "无法安全安装到所选目录。请选择本地 NTFS/ReFS 磁盘上的空目录或原 MinCave 目录；父目录必须由系统或管理员管理，不能允许普通用户修改。$\r$\n$\r$\n$1"
+        !insertmacro MinCaveDirectoryError
         SetErrorLevel 1
         Quit
       ${EndIf}
-      Pop $9
     SectionEnd
 
     ; The registered uninstaller still runs the old service helper. Drain
