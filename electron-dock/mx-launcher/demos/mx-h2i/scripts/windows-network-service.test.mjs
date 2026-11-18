@@ -91,7 +91,7 @@ test('Windows installation ACL policy accepts safe secondary-drive paths and rej
 $script:itemAttributes=[IO.FileAttributes]::Directory
 function Get-Item { param($LiteralPath, [switch]$Force) [pscustomobject]@{Attributes=$script:itemAttributes;PSIsContainer=$false} }
 function Get-Acl { param($LiteralPath)
-  $sddl = if ($LiteralPath -eq 'D:\\Apps') { $script:parentAcl } else { 'O:BAG:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)' }
+  $sddl = if ($LiteralPath -in @('D:\\Apps', 'D:\\')) { $script:parentAcl } else { 'O:BAG:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)' }
   $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetSecurityDescriptorSddlForm($sddl);return $acl
 }
 foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)','O:BAG:BAD:(A;;FA;;;BA)(A;;0x4;;;AU)(A;OICIIO;FA;;;CO)')) {
@@ -102,11 +102,18 @@ Assert-InstallTree 'D:\\Apps\\MinCave'
 $script:itemAttributes=[IO.FileAttributes]([int][IO.FileAttributes]::Directory -bor [int][IO.FileAttributes]::ReparsePoint)
 $rejected=$false
 try { Assert-InstallAcl 'D:\\Apps\\link' $false } catch {
-  if($_.Exception.Message -ne 'Links and junctions are not supported.'){throw}
+  if($_.Exception.Message -ne 'Links and junctions are not supported: D:\\Apps\\link'){throw}
   $rejected=$true
 }
 if(-not $rejected){throw 'Reparse-point attributes accepted'}
 $script:itemAttributes=[IO.FileAttributes]::Directory
+$script:parentAcl='O:S-1-5-21-1-2-3-1000G:BAD:(A;;FA;;;BA)'
+$rejected=$false
+try { Assert-InstallAcl 'D:\\' $true } catch {
+  if($_.Exception.Message -ne 'Owned by an ordinary user: D:\\'){throw}
+  $rejected=$true
+}
+if(-not $rejected){throw 'Ordinary-user-owned drive root accepted'}
 foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x40;;;BU)','O:BAG:BAD:(A;;FA;;;BA)(A;;0x100;;;BU)','O:S-1-5-21-1-2-3-1000G:BAD:(A;;FA;;;BA)')) {
   $script:parentAcl=$sddl;$rejected=$false
   try { Assert-InstallAcl 'D:\\Apps' $true } catch { $rejected=$true }
@@ -116,6 +123,11 @@ foreach($value in @('\\\\server\\share\\MinCave','D:\\','D:\\Apps.\\MinCave','D:
   $rejected=$false;try { Prepare-MinCaveDirectory $value } catch { $rejected=$true }
   if(-not $rejected){throw 'Unsafe path accepted'}
 }
+$script:parentAcl='O:BAG:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)'
+function Test-Path { param($LiteralPath) $true }
+function Get-ChildItem { param($LiteralPath,[switch]$Force) }
+function Set-Acl { throw 'Directory page validation attempted to write permissions' }
+Prepare-MinCaveDirectory ($env:SystemDrive + '\\MinCaveDirectoryValidationFixture') -CheckOnly
 [Console]::Out.Write('directory-policy-ok')
 `;
   const source = script + '\n' + scenario;

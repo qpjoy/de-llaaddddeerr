@@ -1,6 +1,7 @@
 # Embedded into the signed installer as an encoded command. The selected path
 # is data passed through the installer environment, never PowerShell source.
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $trusted = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 $directoryDacl = 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
 
@@ -8,10 +9,10 @@ function Assert-InstallAcl([string]$Path, [bool]$Parent) {
     $item = Get-Item -LiteralPath $Path -Force
     # Windows PowerShell 5.1 can fail to bind enum -band enum. Keep both
     # operands numeric for the installer and for the real FileInfo attributes.
-    if (([int]$item.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Links and junctions are not supported.' }
+    if (([int]$item.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) { throw ('Links and junctions are not supported: ' + $Path) }
     $acl = Get-Acl -LiteralPath $Path
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if ($trusted -notcontains $owner) { throw 'A parent or existing installation is owned by an ordinary user. Choose a machine-managed folder.' }
+    if ($trusted -notcontains $owner) { throw ('Owned by an ordinary user: ' + $Path) }
     if (-not $acl.AreAccessRulesCanonical) { throw 'The installation directory has a noncanonical ACL.' }
     # Parent directories may allow creating children, but must not let a user
     # rename/delete the protected child or change the parent's security/attrs.
@@ -24,7 +25,7 @@ function Assert-InstallAcl([string]$Path, [bool]$Parent) {
         if ($ace.AceType -eq [Security.AccessControl.AceType]::AccessDenied) { continue }
         if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed) { throw 'An unsupported directory ACL was found.' }
         if (($trusted -notcontains $ace.SecurityIdentifier.Value) -and (([long]$ace.AccessMask -band $forbidden) -ne 0)) {
-            throw 'A parent or existing installation is writable by ordinary users. Choose a protected folder.'
+            throw ('Writable or replaceable by ordinary users: ' + $Path)
         }
     }
 }
@@ -36,7 +37,7 @@ function Assert-InstallTree([string]$Path) {
     }
 }
 
-function Prepare-MinCaveDirectory([string]$Selected) {
+function Prepare-MinCaveDirectory([string]$Selected, [switch]$CheckOnly) {
     if ($Selected -notmatch '^[A-Za-z]:\\' -or $Selected.Substring(2) -match '[:<>"|?*\x00-\x1f]') { throw 'Choose an absolute local installation directory.' }
     foreach ($part in $Selected.Substring(3).Split('\')) {
         if (-not $part -or $part -match '[. ]$' -or $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'The installation directory contains an unsupported path component.' }
@@ -65,6 +66,8 @@ function Prepare-MinCaveDirectory([string]$Selected) {
         $current = [IO.Path]::GetDirectoryName($current)
     }
 
+    if ($CheckOnly) { return }
+
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetSecurityDescriptorSddlForm('O:BAG:BA' + $directoryDacl)
     for ($index = $missing.Count - 1; $index -ge 0; $index--) {
@@ -81,10 +84,10 @@ function Prepare-MinCaveDirectory([string]$Selected) {
 
 if ($env:MINCAVE_INSTALL_DIRECTORY) {
     try {
-        Prepare-MinCaveDirectory $env:MINCAVE_INSTALL_DIRECTORY
+        Prepare-MinCaveDirectory $env:MINCAVE_INSTALL_DIRECTORY -CheckOnly:($env:MINCAVE_INSTALL_DIRECTORY_CHECK_ONLY -eq '1')
         exit 0
     } catch {
-        [Console]::Error.WriteLine($_.Exception.Message)
+        [Console]::Out.WriteLine($_.Exception.Message)
         exit 1
     }
 }
