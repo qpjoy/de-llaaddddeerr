@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
+import { canonicalJson } from '../ingest/normalizers.mjs'
 
 // Durable state for collection engines (migration 183).
 //
@@ -84,6 +86,30 @@ function resultRecord(outcome) {
   if (outcome.result == null) return null
   const text = JSON.stringify(outcome.result)
   return { text, bytes: Buffer.byteLength(text), sha256: sha256(text), itemCount: Number.isInteger(outcome.itemCount) ? outcome.itemCount : null }
+}
+
+// Only the reviewed Tieba result may enter this pipeline. Raw source records
+// stay in the restricted queue; job_results contains the public projection.
+function tiebaIngestJob(job, outcome, record) {
+  const capability = job.capability
+  if (capability !== 'collect.tieba.posts.search') {
+    if (outcome.ingestion != null) throw new Error('collect_ingestion_contract_mismatch')
+    return null
+  }
+  if (outcome.status !== 'succeeded') return null
+  const input = outcome.ingestion
+  const fields = ['kind', 'version', 'items', 'input', 'taskId', 'runId', 'capturedAt']
+  if (!record || !input || typeof input !== 'object' || !isPostgresSafeJsonValue(input) || Array.isArray(input)
+    || input.kind !== 'tieba-post-search-result' || input.version !== 1
+    || Object.keys(input).some(key => !fields.includes(key))
+    || !Array.isArray(input.items) || input.items.length > 100
+    || input.items.some(item => item?.record_type !== 'tieba.thread')) {
+    throw new Error('collect_ingestion_contract_mismatch')
+  }
+  const payload = { ...structuredClone(input), jobId: job.id, resultSha256: record.sha256 }
+  if (Buffer.byteLength(JSON.stringify(payload)) > 4 * 1024 * 1024) throw new Error('collect_ingestion_too_large')
+  return { queue: 'ingest', payload, dedupeKey: `collect:tieba-post-search:${job.id}`,
+    ingestionSha256: sha256(canonicalJson(payload)) }
 }
 
 const lateEvidence = (owner, outcome, httpStatus) => ({ at: new Date().toISOString(), owner, status: outcome.status,
@@ -475,9 +501,21 @@ export class PostgresCollectStore {
         await client.query('UPDATE collect.jobs SET late_evidence = $2::jsonb WHERE id = $1', [jobId, JSON.stringify(lateEvidence(owner, outcome, httpStatus))])
         return { fenced: true, job: null }
       }
+      const ingestion = tiebaIngestJob(row, outcome, record)
       if (record) {
         await client.query(`INSERT INTO collect.job_results (job_id, payload, bytes, sha256, item_count) VALUES ($1, $2::jsonb, $3, $4, $5)
           ON CONFLICT (job_id) DO NOTHING`, [jobId, record.text, record.bytes, record.sha256, record.itemCount])
+      }
+      if (ingestion) {
+        // Seal the complete restricted evidence independently of the public
+        // result. JSONB may reorder keys, so this uses canonical JSON hashing.
+        await client.query(`UPDATE collect.jobs SET upstream_state = COALESCE(upstream_state, '{}'::jsonb)
+          || jsonb_build_object('ingestionSha256', $2::text) WHERE id = $1`, [jobId, ingestion.ingestionSha256])
+        row.upstream_state = { ...row.upstream_state, ingestionSha256: ingestion.ingestionSha256 }
+        await client.query(`INSERT INTO mxq.jobs (queue, payload, dedupe_key, priority)
+          VALUES ($1, $2::jsonb, $3, 100)
+          ON CONFLICT (queue, dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('pending','running')
+          DO NOTHING`, [ingestion.queue, JSON.stringify(ingestion.payload), ingestion.dedupeKey])
       }
       if (outcome.quarantine) {
         await client.query(`UPDATE collect.engine_slots SET quarantine_reason = $4, quarantined_at = clock_timestamp()
@@ -624,8 +662,10 @@ export class PostgresCollectStore {
   // Terminal jobs older than the retention window, in bounded batches.
   // Unknown runs and anything awaiting billing review stay for an operator.
   async prune(retentionMs, limit = 5_000) {
-    const { rowCount } = await this.pool.query(`DELETE FROM collect.jobs WHERE id IN (SELECT id FROM collect.jobs
+    const { rowCount } = await this.pool.query(`DELETE FROM collect.jobs WHERE id IN (SELECT job.id FROM collect.jobs job
       WHERE status IN ('succeeded', 'failed', 'cancelled', 'expired') AND billing <> 'pending_review'
+        AND NOT EXISTS (SELECT 1 FROM mxq.jobs queued WHERE queued.queue = 'ingest'
+          AND queued.dedupe_key = 'collect:tieba-post-search:' || job.id::text AND queued.status <> 'done')
         AND finished_at < clock_timestamp() - $1::bigint * interval '1 millisecond' LIMIT $2)`, [retentionMs, limit])
     await this.pool.query(`DELETE FROM collect.batches batch WHERE batch.created_at < clock_timestamp() - $1::bigint * interval '1 millisecond'
       AND NOT EXISTS (SELECT 1 FROM collect.jobs job WHERE job.batch_id = batch.id)`, [retentionMs])
@@ -642,6 +682,7 @@ export class MemoryCollectStore {
     this.routes = new Map() // `${capability}:${routeKey}` → engineId
     this.jobs = new Map()
     this.results = new Map()
+    this.ingestJobs = new Map()
     this.batches = new Map()
     this.engineEvents = []
     this.lastQueuedAt = 0
@@ -927,9 +968,14 @@ export class MemoryCollectStore {
       return { fenced: true, job: null }
     }
     const record = resultRecord(outcome)
+    const ingestion = tiebaIngestJob(job, outcome, record)
     Object.assign(job, { status: outcome.status, phase: null, dataStatus: outcome.dataStatus || null, error: outcome.error || null, httpStatus,
       durationMs, billing, cost: outcome.cost || null, finishedAt: new Date().toISOString(), leaseUntil: null, nextCheckAt: null })
     if (record) this.results.set(jobId, { payload: JSON.parse(record.text), bytes: record.bytes, sha256: record.sha256, itemCount: record.itemCount, createdAt: job.finishedAt })
+    if (ingestion) {
+      job.upstreamState = { ...job.upstreamState, ingestionSha256: ingestion.ingestionSha256 }
+      this.ingestJobs.set(ingestion.dedupeKey, { ...structuredClone(ingestion), status: 'pending' })
+    }
     const engine = this.engines.get(job.engineId)
     const slotKey = `${job.engineId}:${job.slotNo}`
     const slot = this.slots.get(slotKey)
@@ -1052,6 +1098,7 @@ export class MemoryCollectStore {
     for (const job of [...this.jobs.values()]) {
       if (removed >= limit) break
       if (['succeeded', 'failed', 'cancelled', 'expired'].includes(job.status) && job.billing !== 'pending_review'
+        && (!this.ingestJobs.has(`collect:tieba-post-search:${job.id}`) || this.ingestJobs.get(`collect:tieba-post-search:${job.id}`).status === 'done')
         && job.finishedAt && new Date(job.finishedAt).getTime() < cutoff) {
         this.jobs.delete(job.id); this.results.delete(job.id); removed++
       }

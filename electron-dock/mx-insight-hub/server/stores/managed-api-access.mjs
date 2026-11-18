@@ -1,7 +1,6 @@
-import { businessApiScopes } from '../hub-service.mjs'
+import { businessApiScopes, lcyFullApiScopes } from '../hub-service.mjs'
 import { isLcyHubLimitIdentity } from '../core/internal-traffic-policy.mjs'
 import { listCrawlerSpecs } from '../ingest/crawler/source-contract.mjs'
-import { TWITTER_USER_EMAIL_SCOPES } from '../../shared/access-limits.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../../shared/web-search.mjs'
 
 // Caller owns the migration transaction/lock. Grants stay materialized and
@@ -14,14 +13,15 @@ export async function syncManagedApiAccess(client, scopes) {
       (await client.query('SELECT source_key AS "sourceKey" FROM catalog.external_sources')).rows })
     scopes = businessApiScopes(specs.map(row => row.platform))
   }
+  const completeScopes = lcyFullApiScopes()
   let changed = 0
   for (const identity of managed.rows) {
-    // Only the original LCY-delta identity was granted this dictionary. Other
-    // managed profiles keep the ordinary catalog, even under the same consumer.
+    // Complete business access belongs to the original tenant/consumer/Key
+    // identity, never its mutable name or other managed Keys in that consumer.
     const keyScopes = isLcyHubLimitIdentity({ apiKey: { id: identity.id },
       tenant: { id: identity.tenant_id }, consumer: { id: identity.consumer_id } }) ? {
-      platforms: [...new Set([...scopes.platforms, TWITTER_USER_EMAIL_SCOPES.platform])],
-      capabilities: [...new Set([...scopes.capabilities, TWITTER_USER_EMAIL_SCOPES.search, TWITTER_USER_EMAIL_SCOPES.reveal])],
+      platforms: [...new Set([...scopes.platforms, ...completeScopes.platforms])],
+      capabilities: [...new Set([...scopes.capabilities, ...completeScopes.capabilities])],
     } : scopes
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${identity.tenant_id}`])
     for (const [kind, names] of [['platform', keyScopes.platforms], ['capability', keyScopes.capabilities]]) {
@@ -29,6 +29,9 @@ export async function syncManagedApiAccess(client, scopes) {
     }
     const siblings = await client.query('SELECT * FROM api_keys WHERE consumer_id=$1 ORDER BY id FOR UPDATE', [identity.consumer_id])
     const key = siblings.rows.find(row => row.id === identity.id)
+    if (key && (key.tenant_id !== identity.tenant_id || key.consumer_id !== identity.consumer_id)) {
+      throw new Error('Managed API access refused: Key ownership changed during synchronization')
+    }
     if (key?.access_profile !== 'managed_full' || key.status !== 'active' || key.environment !== 'live'
       || key.scope_mode !== 'snapshot' || !key.expires_at || new Date(key.expires_at) <= new Date()) continue
     const active = await client.query(`SELECT 1 FROM tenants t JOIN consumers c ON c.tenant_id=t.id
@@ -36,6 +39,20 @@ export async function syncManagedApiAccess(client, scopes) {
     if (!active.rowCount) continue
     if (siblings.rows.some(row => row.id !== key.id && row.status === 'active' && row.scope_mode === 'legacy_dynamic')) {
       throw new Error('Managed API access refused: sibling dynamic Key could inherit access')
+    }
+    // A revoked consumer grant can leave a sibling's snapshot entitlement
+    // behind. Restoring that grant must not silently restore sibling access.
+    for (const [column, names, grantTable, entitlementTable] of [
+      ['platform', keyScopes.platforms, 'platform_grants', 'api_key_platform_entitlements'],
+      ['capability', keyScopes.capabilities, 'capability_grants', 'api_key_capability_entitlements'],
+    ]) {
+      const inherited = await client.query(`SELECT 1 FROM ${entitlementTable} e
+        JOIN api_keys sibling ON sibling.id=e.api_key_id
+        WHERE sibling.consumer_id=$1 AND sibling.id<>$2 AND sibling.status='active'
+          AND sibling.scope_mode='snapshot' AND e.${column}=ANY($3::text[])
+          AND NOT EXISTS (SELECT 1 FROM ${grantTable} g WHERE g.consumer_id=$1 AND g.${column}=e.${column})
+        LIMIT 1`, [key.consumer_id, key.id, names])
+      if (inherited.rowCount) throw new Error('Managed API access refused: sibling snapshot Key could regain access')
     }
     const snapshot = async () => ({ accessProfile: 'managed_full', scopeMode: 'snapshot',
       platforms: (await client.query('SELECT platform FROM api_key_platform_entitlements WHERE api_key_id=$1 ORDER BY platform', [key.id])).rows.map(row => row.platform),

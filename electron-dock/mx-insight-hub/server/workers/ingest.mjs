@@ -35,6 +35,8 @@ import {
 } from '../ingest/telegram/sqlite-pipeline.mjs'
 import { isTelegramMonitorSourceKey } from '../ingest/telegram/monitor-pipeline.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
+import { normalizeTiebaIngestion } from '../ingest/tieba.mjs'
+import { canonicalJson, sha256 } from '../ingest/normalizers.mjs'
 
 // Ingest worker: drains queued search results and runs Night-All backfills.
 //
@@ -46,6 +48,27 @@ import { createPostgresStore } from '../stores/postgres-store.mjs'
 const logger = console
 const INGEST_QUEUE = 'ingest'
 const BACKFILL_QUEUE = 'backfill'
+
+// This retries only captured records, never the collection request. The public
+// result and restricted queue entry were committed together by collect.finish.
+export async function ingestTiebaPostSearchResult(payload, { pool, store }) {
+  if (payload?.kind !== 'tieba-post-search-result' || payload.version !== 1
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.jobId || '')
+    || !/^[0-9a-f]{64}$/.test(payload.resultSha256 || '')) {
+    throw new Error('tieba_ingest_contract_mismatch')
+  }
+  const { rows: [job] } = await pool.query(`SELECT job.capability, job.status, result.sha256,
+      job.upstream_state->>'ingestionSha256' AS ingestion_sha256
+    FROM collect.jobs job JOIN collect.job_results result ON result.job_id = job.id
+    WHERE job.id = $1`, [payload.jobId])
+  if (job?.capability !== 'collect.tieba.posts.search' || job.status !== 'succeeded'
+    || job.sha256 !== payload.resultSha256) throw new Error('tieba_ingest_result_mismatch')
+  if (!/^[0-9a-f]{64}$/.test(job.ingestion_sha256 || '')
+    || job.ingestion_sha256 !== sha256(canonicalJson(payload))) throw new Error('tieba_ingest_evidence_mismatch')
+  const records = normalizeTiebaIngestion(payload)
+  return store.ingestExternalRecords({ datasetId: 'tieba.posts.v1', platform: 'tieba',
+    connectorId: 'collect:tieba-post-search', importRunId: null, records })
+}
 
 // A ready continuation releases its worker slot until runAt; source checkpoints
 // and batch identities remain unchanged while other sources can make progress.
@@ -127,6 +150,11 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'))
 
   async function handleIngest(payload) {
+    if (payload?.kind === 'tieba-post-search-result') {
+      const result = await ingestTiebaPostSearchResult(payload, { pool, store })
+      logger.log(`[ingest] collect/tieba job=${payload.jobId} ingested=${result.ingested} changed=${result.changed}`)
+      return
+    }
     if (payload?.kind === 'external-platform-result') {
       const { enterprise, justOne, hubRaw } = classifyExternalPlatformIngest(payload)
       const records = justOne || enterprise

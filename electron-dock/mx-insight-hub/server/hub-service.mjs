@@ -326,10 +326,9 @@ const PUBLIC_CAPABILITIES = new Set([
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])
-// Personal-data access is explicitly selected for each Key. Keep it out of
-// the automatic execution and managed-full profiles. Collection capabilities
-// are granted explicitly too: each one is enabled only after its integration
-// slot passes acceptance (spider_man 07), never by a deploy.
+// Ordinary automatic execution and managed profiles require explicit grants
+// for personal-data products and collection capabilities. The original LCY
+// identity has a separately authorized complete business catalog below.
 const AUTOMATIC_BUSINESS_CAPABILITIES = [...PUBLIC_CAPABILITIES]
   .filter(value => !value.includes('ingest') && !isExplicitOnlyKeyScope(value) && !COLLECT_CAPABILITY_KEYS.includes(value)).sort()
 // Shared by explicit Admin credentials and the deployment-managed full-access
@@ -341,6 +340,18 @@ export function businessApiScopes(crawlerPlatforms = []) {
       'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk', 'web_search',
       ...crawlerPlatforms].filter(platform => platform && !isExplicitOnlyKeyScope(platform)))].sort(),
     capabilities: [...AUTOMATIC_BUSINESS_CAPABILITIES],
+  }
+}
+
+// The user authorized the original LCY Key for every current and future public
+// business API. Derive this from the same registries used to admit API scopes,
+// including file datasets and collection engines; do not maintain exceptions
+// for individual products. Runtime readiness and Admin authorization are separate.
+export function lcyFullApiScopes(crawlerPlatforms = []) {
+  const ordinary = businessApiScopes(crawlerPlatforms)
+  return {
+    platforms: [...new Set([...ordinary.platforms, ...FILE_DATASETS.map(dataset => dataset.platform)])].sort(),
+    capabilities: [...PUBLIC_CAPABILITIES].sort(),
   }
 }
 const NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES = Object.freeze({

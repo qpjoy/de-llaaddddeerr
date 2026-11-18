@@ -3813,7 +3813,9 @@ export class PostgresStore {
 
       const sourceRunColumn = apiLineage ? 'ingest_run_id' : 'external_import_run_id'
       const sourceRunId = apiLineage ? ingestRunId : importRunId
-      if (apiLineage
+      const orderedTieba = datasetId === 'tieba.posts.v1' && platform === 'tieba'
+        && connectorId === 'collect:tieba-post-search'
+      if (apiLineage || orderedTieba
         || records.some(record => isSeparatedWeiboBody(datasetId, platform, record))) {
         // Lock overlapping identities in a stable order. Search observations
         // and detail repairs may arrive out of order, including first inserts;
@@ -3839,6 +3841,28 @@ export class PostgresStore {
       for (const record of records) {
         if (record.deletedAt != null) deleted += 1
         const rawPayloadSha256 = record.rawPayloadSha256 || record.payloadSha256
+        if (orderedTieba) {
+          const { rows: [current] } = await client.query(`SELECT source.id, source.source_updated_at,
+              canonical.collected_at
+            FROM ingest.source_objects source
+            LEFT JOIN core.canonical_records canonical ON canonical.dataset_id=$1 AND canonical.platform=$2
+              AND canonical.object_type=source.object_type AND canonical.external_id=source.source_key
+            WHERE source.connector_id=$3 AND source.stream_id=$4 AND source.object_type=$5 AND source.source_key=$6
+            FOR UPDATE OF source`, [datasetId, platform, connectorId, stream, record.objectType, record.externalId])
+          const currentTime = Math.max(new Date(current?.source_updated_at || 0).getTime(), new Date(current?.collected_at || 0).getTime())
+          if (current && new Date(record.collectedAt).getTime() < currentTime) {
+            // A delayed queue retry is still evidence. Retain it without
+            // regressing the current source payload, canonical text or index.
+            // All writers for this dedicated connector hold the identity lock.
+            await client.query(`INSERT INTO ingest.source_object_revisions
+              (source_object_id, revision, payload_sha256, payload_hash_version, raw_payload, source_updated_at, ${sourceRunColumn})
+              SELECT $1, (SELECT COALESCE(max(revision),0)+1 FROM ingest.source_object_revisions WHERE source_object_id=$1),
+                $2, 1, $3, $4, $5
+              WHERE NOT EXISTS (SELECT 1 FROM ingest.source_object_revisions WHERE source_object_id=$1 AND payload_sha256=$2)`,
+            [current.id, rawPayloadSha256, record.rawItem, record.collectedAt, sourceRunId])
+            continue
+          }
+        }
         // Most sightings of an item repeat its stored raw and canonical values.
         // Assigning EXCLUDED.* would still write a new TOAST copy (and its WAL)
         // each time. Returning the stored value instead lets PostgreSQL reuse
@@ -3857,7 +3881,10 @@ export class PostgresStore {
                                 THEN ingest.source_objects.raw_payload ELSE EXCLUDED.raw_payload END,
              source_updated_at = EXCLUDED.source_updated_at,
              ${sourceRunColumn} = EXCLUDED.${sourceRunColumn},
-             current_revision = ingest.source_objects.current_revision
+             current_revision = ${orderedTieba ? `CASE WHEN ingest.source_objects.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256
+               THEN GREATEST(ingest.source_objects.current_revision,
+                 (SELECT COALESCE(max(revision),0) FROM ingest.source_object_revisions WHERE source_object_id=ingest.source_objects.id)) + 1
+               ELSE ingest.source_objects.current_revision END` : `ingest.source_objects.current_revision
                + CASE
                    WHEN ingest.source_objects.raw_payload_hash_version = 0 THEN
                      ((CASE
@@ -3872,7 +3899,7 @@ export class PostgresStore {
                        END))::int
                    ELSE (ingest.source_objects.payload_sha256
                      IS DISTINCT FROM EXCLUDED.payload_sha256)::int
-                 END,
+                 END`},
              last_seen_at = now()
            RETURNING id, current_revision, raw_payload_hash_version`,
           [

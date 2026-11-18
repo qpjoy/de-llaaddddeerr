@@ -18,7 +18,9 @@
   Elasticsearch、HanLP 或向量化；查询只读已发布版本，不触发任何采集。
 - 不经过 Launcher、登录、DNS、WireGuard：不影响 MX-H2I 的用户登录与联网。
 - 都是个人数据：数据域与查询权限只能显式授予 snapshot Key（`isExplicitOnlyKeyScope`），历史动态范围 Key 返回
-  `403 snapshot_key_required`；托管全量 Key 不会自动获得。
+  `403 snapshot_key_required`；普通托管全量 Key 不会自动获得。用户已明确授权的原 LCY-delta
+  三元身份例外：每次发布通过 `lcyFullApiScopes()` 同步所有已注册文件数据集的数据域与查询权限，
+  包括后续新增产品；仍使用 snapshot Key 和现有授权交集，不绕过运行时鉴权。
 - 默认返回完整值，`reveal:false` 返回脱敏值；查询内容只以 HMAC 记入 `access_events` 和计量证据。
 
 ## 代码结构

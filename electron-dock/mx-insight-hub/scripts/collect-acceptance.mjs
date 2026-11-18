@@ -43,12 +43,17 @@ export function standardEngines({ runnerUrl = 'http://127.0.0.1:18190' } = {}) {
   // One Apify run at a time until the account's concurrency is known (Q9).
   engines.push({ id: 'apify.main', kind: 'apify', displayName: 'Apify', capacity: 1, credentialProvider: COLLECT_KINDS.apify.defaultCredentialProvider,
     routes: routesFor(capability => capability.kinds.includes('apify')) })
+  engines.push({ id: 'night-all-a.tieba', kind: 'night_all_a', displayName: '百度贴吧帖子搜索', capacity: 1,
+    baseUrl: COLLECT_KINDS.night_all_a.defaultBaseUrl, credentialProvider: 'collect-night-all-a-session',
+    routes: routesFor(capability => capability.kinds.includes('night_all_a')) })
   return engines
 }
 
 // One minimal, real, public call per capability (route). Inputs are the
 // ones used in local acceptance. `paid` calls spend supplier money or quota.
 export const SMOKE_CASES = Object.freeze([
+  // This also persists posts in the upstream and Hub. Select it explicitly.
+  { capability: 'collect.tieba.posts.search', input: { query: '新能源汽车', maxResults: 2, maxPages: 1 }, explicitOnly: true },
   ...[['xiaomi', ['1359']], ['vivo', ['40439']], ['tencent', ['com.tencent.mobileqq']], ['baidu', ['com.tencent.mobileqq']], ['lenovo', ['com.tencent.mobileqq']],
     ['wandoujia', ['566489']], ['googleplay', ['com.google.android.apps.translate']]]
     .map(([market, appIds]) => ({ capability: 'collect.app.details', input: { market, appIds } })),
@@ -110,7 +115,8 @@ const sameRoutes = (a, b) => JSON.stringify([...a].map(r => `${r.capability}:${r
 async function plan(admin, options, { quiet = false } = {}) {
   const catalog = await admin('GET', '/internal/v1/admin/collect/catalog')
   if (catalog.status !== 200) throw new Error(`collect admin API unavailable (HTTP ${catalog.status} ${catalog.error?.code || ''}); is this Hub version deployed?`)
-  const missingKinds = ['runner', 'native', 'shodan', 'apify'].filter(kind => !catalog.data.kinds.some(row => row.kind === kind && row.available))
+  const missingKinds = [...new Set(standardEngines().map(engine => engine.kind))]
+    .filter(kind => !catalog.data.kinds.some(row => row.kind === kind && row.available))
   if (missingKinds.length) throw new Error(`deployed Hub lacks engine kinds: ${missingKinds.join(', ')}`)
   const existing = (await admin('GET', '/internal/v1/admin/collect/engines')).data?.engines || []
   const rows = standardEngines(options).map(spec => {
@@ -209,7 +215,7 @@ async function acceptanceKey(admin, file, capabilities) {
 
 async function smoke(admin, options) {
   const only = options.only ? options.only.split(',').map(value => value.trim()) : null
-  const cases = SMOKE_CASES.filter(item => (options['include-paid'] || !item.paid) && (!only || only.some(prefix => item.capability.startsWith(prefix) || label(item).startsWith(prefix))))
+  const cases = SMOKE_CASES.filter(item => (!item.explicitOnly || only) && (options['include-paid'] || !item.paid) && (!only || only.some(prefix => item.capability.startsWith(prefix) || label(item).startsWith(prefix))))
   const capabilities = [...new Set(cases.map(item => item.capability))]
   let key
   if (options['key-file'] && existsSync(options['key-file'])) key = readFileSync(options['key-file'], 'utf8').trim()

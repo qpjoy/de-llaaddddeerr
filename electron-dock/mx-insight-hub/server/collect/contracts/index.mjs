@@ -3,6 +3,7 @@ import { runnerContract } from './runner.mjs'
 import { apifyContract } from './apify.mjs'
 import { nativeContract } from './native.mjs'
 import { shodanContract } from './shodan.mjs'
+import { nightAllAContract } from './night-all-a.mjs'
 
 // One contract module per execution kind. A contract only builds requests
 // and classifies answers; the store and executor own every state change.
@@ -18,7 +19,9 @@ import { shodanContract } from './shodan.mjs'
 //
 // outcome: { status: succeeded|failed|unknown, dataStatus?, result?, itemCount?,
 //            error?, quarantine?: 'slot' | 'engine' | null, charge, cooldownUntil?, cost? }
-const BUILT_IN = [runnerContract, apifyContract, nativeContract, shodanContract]
+// Reviewed Tieba outcomes also carry restricted `ingestion` evidence. The store
+// seals and enqueues it atomically; it never becomes part of the public result.
+const BUILT_IN = [runnerContract, apifyContract, nativeContract, shodanContract, nightAllAContract]
 
 export function createCollectContracts(extra = []) {
   const contracts = new Map()

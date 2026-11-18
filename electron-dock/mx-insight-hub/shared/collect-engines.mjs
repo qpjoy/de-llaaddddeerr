@@ -68,6 +68,13 @@ export const COLLECT_KINDS = Object.freeze({
     sync: true,
     phase: 3,
   }),
+  night_all_a: Object.freeze({
+    label: 'Night-All-A 采集任务',
+    description: '通过固定内网入口提交已审核的采集能力，保存任务回执并异步查询结果。平台会话使用独立凭据库，不复用调用方登录。',
+    baseUrl: 'required',
+    credential: 'optional',
+    defaultBaseUrl: 'http://100.127.0.1:8100',
+  }),
 })
 
 // Reviewed packages the runner can execute (mx-crawler-runner/packages.json),
@@ -125,6 +132,14 @@ export function collectEgressProvider(engine) {
 // grants, docs and pricing stay reviewable; engines bind to them in the
 // console. `stage` follows the integration-slot acceptance ladder.
 export const COLLECT_CAPABILITIES = Object.freeze([
+  Object.freeze({
+    key: 'collect.tieba.posts.search',
+    label: '百度贴吧 · 帖子搜索',
+    description: '按关键词匿名搜索公开主题，保留有界分页与完整性说明；采集结果异步清洗入 Hub，已存查询另需 tieba 数据权限。',
+    platform: 'tieba',
+    kinds: Object.freeze(['night_all_a']),
+    stage: 'candidate',
+  }),
   Object.freeze({
     key: 'collect.app.details',
     label: '应用商店 · 应用详情',

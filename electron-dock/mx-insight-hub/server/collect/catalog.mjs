@@ -7,6 +7,7 @@ import { DNS_RESOLVERS, DNS_TYPES, dnsLookup } from './native/dns.mjs'
 import { rdapDomain } from './native/rdap.mjs'
 import { ctIssuances } from './native/ct.mjs'
 import { subdomains } from './native/subdomains.mjs'
+import { projectTiebaSearchResult } from '../ingest/tieba.mjs'
 
 // Request validation for each public collection capability, and how its
 // normalized input becomes an engine call. Pure functions; no I/O.
@@ -382,6 +383,23 @@ const showCount = input => input.podcastIds?.length ?? input.episodeIds?.length 
 const audioItems = envelope => (Array.isArray(envelope?.result?.items) ? envelope.result.items.length : null)
 
 const DEFINITIONS = Object.freeze({
+  'collect.tieba.posts.search': {
+    normalize(input) {
+      object(input, 'input')
+      onlyFields(input, ['query', 'maxResults', 'page', 'maxPages'], 'input')
+      return {
+        query: text(input.query, 'query', 200),
+        maxResults: integer(input.maxResults, 'maxResults', 1, 100, 20),
+        page: integer(input.page, 'page', 1, 1000, 1),
+        maxPages: integer(input.maxPages, 'maxPages', 1, 10, 1),
+      }
+    },
+    nightAllA: Object.freeze({ connectorId: 'tieba', capability: 'content.search' }),
+    taskParameters: input => ({ query: input.query, auth_mode: 'anonymous', max_results: input.maxResults,
+      page: input.page, max_pages: input.maxPages }),
+    projectResult: projectTiebaSearchResult,
+    resultLimit: input => input.maxResults,
+  },
   'collect.audio.shows': {
     normalize: input => audioShows(input, AUDIO_SHOWS_MAX),
     routeKey: input => input.platform,

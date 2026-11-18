@@ -43,9 +43,9 @@ export async function checkAccess() {
       && key.status === 'active' && key.environment === 'live' && Date.parse(key.expires_at) > Date.now()
     let fullScopeCheck = null
     if (key.access_profile === 'managed_full') {
-      const { businessApiScopes } = await import(pathToFileURL(resolve('server/hub-service.mjs')).href)
+      const { lcyFullApiScopes } = await import(pathToFileURL(resolve('server/hub-service.mjs')).href)
       const { listCrawlerSpecs } = await import(pathToFileURL(resolve('server/ingest/crawler/source-contract.mjs')).href)
-      const expected = businessApiScopes((await listCrawlerSpecs(store)).map(row => row.platform))
+      const expected = lcyFullApiScopes((await listCrawlerSpecs(store)).map(row => row.platform))
       fullScopeCheck = {
         platformCount: platforms.length, capabilityCount: capabilities.length,
         missingPlatforms: expected.platforms.filter(value => !platforms.includes(value)),

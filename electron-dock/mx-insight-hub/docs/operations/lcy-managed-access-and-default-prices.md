@@ -3,18 +3,22 @@
 2026-10-10 用户进一步要求原 LCY-delta Key 不受请求配额限制、迁移已有 API，并让新接口自动定价。
 用户随后明确：**客户扣费保留，通过内部设置余额使用**。此决策扩大了此前只修复 12 项微信授权的范围。
 
+2026-11-18 用户再次明确：原 LCY-delta Key 拥有全部当前与后续新增业务 API 的权限，包含手机号库、邮箱库和各采集应用。此次修正原同步器只为 Twitter 用户邮箱添加例外的遗漏。
+
 ## 生效行为
 
 - 迁移 141 只将原 Key `fd2f8cc9-0ff1-4052-a538-8cc8150bde83` 标记为 `managed_full`，严格核对原 tenant/consumer。
   不更换 secret，不按名字匹配。每次 Hub 迁移完成后，从当前业务合同和数据源目录补齐 Consumer 与此 Key 的快照权限。
   新业务接口随部署自动加入，记录 scope audit；既有快照兄弟 Key 不扩权，活跃动态兄弟 Key 会使同步拒绝并报错。
+  如果补回调用者授权会使其他活跃快照 Key 的遗留权限重新生效，同步也会拒绝，保留原配置供管理员核对。
   托管 Key 被撤销、过期或所属身份停用后不会自动恢复。后来注册的数据源在下一次迁移/部署时同步。
 - 此 Key 免除 Key 总次数/速率、Consumer 窗口及套餐月度/窗口/突发请求配额，继承现有内部流量的 TikHub 本地限流豁免。
   正常身份校验、套餐有效性、请求合同/分页上限、共享并发容量、供应商可用性及资金检查继续生效。
   业务权限不授予 Admin Token 权限，也不自动购买独立订阅产品或消除供应商限制。
-- 每次 Hub 迁移也会给原 LCY-delta 补齐 Twitter 用户邮箱权限。产品页刷新调用身份后可直接查已发布的字典。
-  已获 `twitter_user_email` 数据域和 `twitter.user_email.search` 查询权限的 Key 默认收到完整邮箱，
-  元数据接口返回 `defaultReveal: true`。客户端传 `reveal: false` 可选择隐藏邮箱。
+- 原 LCY 身份使用 `lcyFullApiScopes()`：从完整公共业务能力目录与文件数据集目录生成权限，包括 Twitter 用户邮箱、邮箱库、手机号库、`collect.*` 和 `public_opinion.all_ingested.read`。
+  每次 Hub 迁移均补齐调用者授权及原 Key 快照；未来登记到目录的新接口同次发布自动加入，无须逐产品维护例外。
+  其他托管 Key 和普通 Key 继续使用原授权规则。文件数据集已发布后即可查询；完整邮箱、手机号遵循查询接口现有 `reveal` 约定。
+  此同步仅授予业务调用资格，采集引擎、供应商凭据、人工暂停、计费和合同验证继续使用各自运行配置；不会自动触发采集。
 - 迁移 142 将已有租户的零默认价改为 1 最小货币单位；默认币种为 CNY，已有其他币种保留。
   默认 CNY 0.01/次覆盖没有套餐独立报价的现有及未来业务计费项。套餐明确价格（含免费）和已有非零租户默认价优先。
   计费模式、倍率、余额、已生成订单/账单不变。之后仍可在管理页把默认价或单项价改成其他值，包括 0。
@@ -33,7 +37,7 @@
 先将本次 Hub 改动同步到服务器项目目录，再在 `electron-dock/mx-insight-hub` 执行：
 
 ```bash
-bash scripts/manage.sh ops internal-production deploy
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
 
 kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -- \
   node --input-type=module - < scripts/check-lcy-wechat-access.mjs
@@ -58,6 +62,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -- \
 
 验收报告应有 `identityUsable: true`、`accessProfile: managed_full`、`requestQuotaExempt: true`，
 `fullScopeCheck` 中两项 missing 数组为空；默认价 `unitPriceMinor: 1`（人工覆盖除外）。
+此检查现在使用完整 LCY 目录，也会报告缺失的手机号库、邮箱库和采集能力，避免旧检查因过滤它们而误报完整。
 微信 12 项应显示 granted；运行需要 active，或 canary 且包含当前 Consumer。余额不足仍返回 `insufficient_credit`。
 `upstreamVerified: false` 表示没有发起真实付费采集。**线上部署和供应商实际可用性须以用户执行结果为准。**
 
