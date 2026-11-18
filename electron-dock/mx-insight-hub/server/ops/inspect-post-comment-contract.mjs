@@ -61,6 +61,7 @@ ENDPOINTS.set('xiaohongshu.app-v2.note-comments.v1', { provider: 'tikhub', platf
 ENDPOINTS.set('native.t.api_fe58186e16adc3bb', { provider: 'tikhub', platform: 'threads' })
 ENDPOINTS.set('native.r.threads_post_comments', { provider: 'rapidapi', platform: 'threads' })
 ENDPOINTS.set('native.r.twitter_aio_tweet_replies', { provider: 'rapidapi', platform: 'twitter' })
+ENDPOINTS.set('native.r.twitter_aio_tweet_thread', { provider: 'rapidapi', platform: 'twitter' })
 
 // Unknown keys use anonymous aliases, including when traversing their children.
 // Explicit Twitter shape inspection additionally lists schema-like keys directly

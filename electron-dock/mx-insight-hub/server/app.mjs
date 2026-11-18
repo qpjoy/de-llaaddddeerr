@@ -1,4 +1,5 @@
 import { workspaceRoute } from './portal/workspace.mjs'
+import { recordAuthorizationRejection } from './core/authorization-rejection.mjs'
 import { TELEGRAM_SEMANTIC_PATH, TELEGRAM_SEMANTIC_INTERNAL_PATH } from './retrieval/telegram-semantic-proxy.mjs'
 import { normalizeTelegramSemanticQuery } from './retrieval/telegram-semantic.mjs'
 import { currentDatabaseLane, enterAdmissionLane, hubDatabaseFailure, runWithDatabaseLane } from './core/postgres-pool.mjs'
@@ -7159,6 +7160,7 @@ export function createApp({
       throw new AppError(404, 'not_found', 'Route not found')
     } catch (error) {
       if (response.destroyed || response.writableEnded) return
+      await recordAuthorizationRejection({ error, requestId, clientRequestId: Boolean(request.headers['x-request-id']), store, logger })
       const databaseFailure = error instanceof AppError ? null : hubDatabaseFailure(error)
       const appError = error instanceof AppError
         ? error

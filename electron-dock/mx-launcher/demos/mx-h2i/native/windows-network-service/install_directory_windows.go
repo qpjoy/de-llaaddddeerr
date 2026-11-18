@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -66,7 +67,12 @@ func verifyInstallationDirectory(root string) error {
 	if flags&windows.FILE_PERSISTENT_ACLS == 0 {
 		return errors.New("MinCave installation requires a filesystem with persistent ACLs")
 	}
-	check := func(path string, parent bool) error {
+	check := func(path string, parent bool) (err error) {
+		defer func() {
+			if err != nil {
+				err = fmt.Errorf("verify-install-path %q: %w", path, err)
+			}
+		}()
 		if err := rejectReparse(path); err != nil {
 			return err
 		}
@@ -89,7 +95,7 @@ func verifyInstallationDirectory(root string) error {
 	// sufficient for a custom installation outside Program Files.
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("walk-install-path %q: %w", path, err)
 		}
 		return check(path, false)
 	})

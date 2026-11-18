@@ -14,7 +14,7 @@ export const COMMENT_REPLIES_ROUTE_INTERFACE = 'comment-replies'
 // The mapping names which Hub identity fills which supplier parameter.
 const definitions = [
   ['twitter', 'tikhub', '/api/v1/twitter/web/fetch_post_comments', { commentId: 'tweet_id' }, ['cursor'], false, true],
-  ['twitter', 'rapidapi', '/tweet/{tweetId}/replies', { commentId: 'tweetId' }, ['cursor'], false, true],
+  ['twitter', 'rapidapi', '/tweet/{tweetId}', { commentId: 'tweetId' }, ['cursor'], false, true],
   ['weibo', 'tikhub', '/api/v1/weibo/web_v2/fetch_post_sub_comments', { commentId: 'id' }, ['max_id'], false, true],
   ['douyin', 'tikhub', '/api/v1/douyin/app/v3/fetch_video_comment_replies', { contentId: 'item_id', commentId: 'comment_id' }, ['cursor'], true, false],
   ['zhihu', 'tikhub', '/api/v1/zhihu/web/fetch_sub_comment_v5', { commentId: 'comment_id' }, ['offset'], false, false],
@@ -48,8 +48,14 @@ for (const [platform, providers] of Object.entries(COMMENT_PROVIDER_CATALOG[COMM
 // Baseline: the supplier used when no routing policy chose one.
 export const COMMENT_REPLY_RECIPES = Object.freeze(Object.fromEntries(Object.entries(COMMENT_REPLY_PROVIDER_RECIPES)
   .map(([platform, providers]) => [platform, providers.tikhub || Object.values(providers)[0]])))
+const historicalTwitterRapidRecipe = recipe(['twitter', 'rapidapi', '/tweet/{tweetId}/replies', { commentId: 'tweetId' }, ['cursor'], false, true])
 export const commentReplyRecipe = (platform, provider = null) => provider == null ? COMMENT_REPLY_RECIPES[platform] || null
   : COMMENT_REPLY_PROVIDER_RECIPES[platform]?.[provider] || null
+export function commentReplyRecipeForKey(platform, provider, key) {
+  const selected = commentReplyRecipe(platform, provider)
+  if (key == null || selected?.key === key) return selected
+  return platform === 'twitter' && provider === 'rapidapi' && key === historicalTwitterRapidRecipe.key ? historicalTwitterRapidRecipe : null
+}
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const invalid = message => { throw new AppError(400, 'invalid_comment_replies_request', message) }
@@ -181,7 +187,7 @@ export function replyProviderQuery(request, recipe, continuation) {
 }
 
 export function buildCommentRepliesDispatch(request, job = {}, buffer = null) {
-  const recipe = commentReplyRecipe(request.platform, request.provider)
+  const recipe = commentReplyRecipeForKey(request.platform, request.provider, request.recipeKey ?? null)
   if (!recipe?.available) throw new AppError(503, 'external_platform_contract_unverified',
     'Replies on this platform require supplier response calibration before acquisition', { platform: request.platform, provider: request.provider })
   const continuation = buffer ? buffer.providerCursor : job.providerCursor ?? null

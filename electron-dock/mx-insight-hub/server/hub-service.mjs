@@ -27,6 +27,7 @@ import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
 import { randomUUID } from 'node:crypto'
 import { hmacSecret, issueApiKey, requestFingerprint } from './core/crypto.mjs'
 import { AppError, UpstreamAmbiguousError, UpstreamRejectedError, assert } from './core/errors.mjs'
+import { assertSearchPlatformGranted } from './core/authorization-rejection.mjs'
 import {
   buildNightAllLegacySearchCapabilities,
   NIGHT_ALL_LEGACY_OPERATIONS,
@@ -4589,7 +4590,7 @@ export class HubService {
     assert(!RESERVED_PLATFORM_NAMES.has(requestedPlatform), 400, 'invalid_platform', 'A single explicit platform is required')
     const grants = await this.#effectivePlatformGrants(context)
     const matchingGrant = grants.find((grant) => canonicalPlatform(grant) === requestedPlatform)
-    assert(matchingGrant, 403, 'platform_not_granted', 'Platform is not granted')
+    assertSearchPlatformGranted(matchingGrant, context, requestedPlatform, path)
     if (requestedPlatform === 'xiaohongshu' && NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]) {
       const requiredCapability = NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
       const capabilityGrants = await this.#effectiveCapabilityGrants(context)
@@ -5038,7 +5039,7 @@ export class HubService {
       const idempotencyKey = requiredIdempotencyKey(input.idempotencyKey)
       assert(input.retryOfRequestId == null || body.platform === 'twitter', 400, 'uncertain_retry_not_supported', 'Explicit v2 retry is only supported for Twitter')
       assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'v2 acquisition requires a Live API key')
-      assert((await this.#effectivePlatformGrants(context)).includes(body.platform), 403, 'platform_not_granted', 'Platform is not granted')
+      assertSearchPlatformGranted((await this.#effectivePlatformGrants(context)).includes(body.platform), context, body.platform, input.path)
       if (body.platform === 'xiaohongshu') assert((await this.#effectiveCapabilityGrants(context)).includes(XIAOHONGSHU_SEARCH_OPERATION),
         403, 'capability_not_granted', `${XIAOHONGSHU_SEARCH_OPERATION} is not granted`)
       assert(body.pageSize <= (await this.#effectivePlatformPolicy(context, body.platform)).maxPageSize,
@@ -5104,7 +5105,7 @@ export class HubService {
     const query = requiredString(body.query, 'query')
     assert(query.length <= 500, 400, 'invalid_request', 'query must not exceed 500 characters')
     const grants = await this.#effectivePlatformGrants(context)
-    assert(grants.includes(platform), 403, 'platform_not_granted', 'Platform is not granted')
+    assertSearchPlatformGranted(grants.includes(platform), context, platform, path)
     assert(
       !platform.startsWith(CRAWLER_SAVED_RECORDS_PLATFORM_PREFIX),
       400,

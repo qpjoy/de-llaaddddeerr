@@ -24,6 +24,8 @@ ZIP 解压运行不负责安装服务；没有已安装的服务身份时客户�
 
 服务工作进程的受限环境必须包含 `ProgramData`：从 Windows 已知文件夹得到的受保护状态目录推导，不能继承客户端提供的值。缺少此变量会导致 NRPT 脚本的 `Join-Path $env:ProgramData` 在创建 WireGuard 隧道前失败。2026-11-17 修复此遗漏；需要重新构建并安装 Windows 完整包来更新原生服务，ASAR 更新无法修复。
 
+2026-11-18 进一步现场验证：endpoint bypass 脚本通过 .NET `CommonApplicationData` 查询公共目录，仅提供 `ProgramData`（甚至再补 `ALLUSERSPROFILE`）仍会得到空路径，隧道在调用 WireGuard 前即退出。出错电脑的只读受限子进程对照测试中，补充 `SystemDrive` 后查询恢复为实际公共目录。原生服务现在从系统 Windows 目录推导 `SystemDrive`，并从已知公共状态目录推导 `ProgramData` 与 `ALLUSERSPROFILE`；不继承客户端的路径或 Node 注入变量，不更改机器环境、目录权限或其他产品的 DNS。新增 Windows 只读回归执行与 endpoint bypass 相同的 .NET 查询，避免只覆盖 `Join-Path` 而遗漏已知目录 API。本改动需要重新构建并安装 Windows 完整包，仍需实际连接验收。 本机 Go 通用测试通过，两项 Windows PowerShell 集成检查在 macOS 跳过；Windows x64 `go vet`、测试交叉编译与服务构建通过，服务专项检查 16 项通过、1 项 Windows ACL 用例跳过。现场对照仅验证了目录解析，不代表完整内网连接已经恢复。
+
 安装器记录最终落盘的 Electron、worker、WireGuard 和 Mihomo 文件哈希。服务启动校验，执行前检查文件身份、大小和修改时间，变更时重新计算哈希。ASAR 不在 SYSTEM 代码加载路径上。现有 electron-builder 的 EXE 签名流程也覆盖 `extraResources` 中的服务和引擎；发布签名仍取决于构建机已有的代码签名配置，哈希校验不能代替发行者证书。
 
 ### 自定义目录与升级
@@ -50,7 +52,9 @@ ZIP 解压运行不负责安装服务；没有已安装的服务身份时客户�
 | mihomo.stop/status | 仅服务登记且路径、PID、启动时间均匹配的引擎 |
 | mihomo.api | 版本、节点、连接查询及选定节点；不转发任意 API |
 
-WireGuard 配置被重新解析、重建：只允许既有企业网段 `10.88.0.0/16`、历史 `100.88.0.0/16` 至 `100.91.0.0/16` 及其更具体路由，企业 DNS 限于这些网段，NRPT 限于 `mxinfo-inc.cn` 和子域。不接受默认路由、配置钩子或任意系统操作。拓展网段或 DNS 域需要更新受信任服务资源，不能通过 ASAR 放宽。
+WireGuard 配置被重新解析、重建：只允许客户端既有企业网段 `10.88.0.0/16`、`10.89.0.0/16`、`10.90.0.0/16`、历史 `100.88.0.0/16` 至 `100.91.0.0/16` 及其更具体路由，企业 DNS 限于这些网段。NRPT 限于客户端默认的 `mx.cn`、`mxinfo-inc.cn`、`internal.mx`、`corp.mx`、`h2i.mx` 及各自子域。不接受默认路由、其他私网或公网网段、公共 DNS 后缀、配置钩子或任意系统操作。拓展网段或 DNS 域需要更新受信任服务资源，不能通过 ASAR 放宽。
+
+2026-11-17 现场诊断显示员工 lease 已分配，但服务返回“网络配置字段超出允许范围”，WireGuard 状态为 `NOT_FOUND`。原因是新增服务错误地只接受 `10.88.*`，与产品现有飞书地址池 `10.89.0.0/16` 不一致；同时漏掉客户端其他默认 split-DNS 域。修正固定白名单以匹配这些现有配置，保留其余校验。回归使用核心库实际渲染的合成员工配置（无真实密钥），覆盖各既有网段、实际默认域名以及邻接网段、过宽路由、公网 DNS 和脚本指令拒绝。修复前两个兼容用例均失败，修复后专项检查 16 项通过、1 项 Windows PowerShell ACL 用例在 macOS 跳过；Windows x64 服务构建通过，生成的受保护 worker 也已单独验证接受员工配置并拒绝默认路由。尚未验证 Windows 实际隧道连接。该修改位于完整安装部署的受保护 worker，需要重新构建并安装 Windows 完整 EXE；不需要后端部署，ASAR 不会替换此 worker。
 
 Mihomo 重建监听、控制密钥、TUN 选项和 provider 缓存路径；仅回环监听，控制密钥不交给 UI。不接受文件 provider、外部证书／密钥路径、脚本、任意监听器或 SSH 文件凭据。HTTP provider 的文件位置由服务生成。每次控制请求校验端口所属 PID，不跟随 HTTP 重定向，限制响应大小。
 
@@ -92,6 +96,12 @@ go test ./...
 2026-11-17 自定义目录验证：`pnpm check` 通过；`pnpm check:windows-service` 13 项通过、1 项 Windows PowerShell ACL 策略用例在 macOS 跳过；Go 通用测试通过，Windows 专用 ACL 测试已交叉编译但未执行，Windows x64 `go vet` 和服务构建通过。相同临时预打包样本的安装／卸载 NSIS 编译通过。仍需 Windows 验证默认目录、D/E 盘安全目录、带中文/空格的路径、宽权限父目录拒绝、升级路径保留、文件占用时恢复及完整卸载；以上编译结果不能替代这些实机结果。
 
 Windows 首次执行专项用例发现 `AceFlags -band AceFlags` 会抛出 `InvalidCastException`；这同时影响打包检查和安装器中的同一段目录校验。兼容修复对 ACE 标志、文件属性及访问掩码显式转换为整数后再进行位运算，保留原有权限拒绝规则。回归场景使用实际的 `FileAttributes` 枚举，并覆盖 `InheritOnly` ACE 和重解析点；本机 macOS 不能代替 Windows PowerShell 5.1 的实际执行，合入后需要在 Windows 重跑 `pnpm check:windows-service`。
+
+覆盖安装／修复时，原实现复用新建服务的配置但遗漏 `ServiceType`。`mgr.CreateService` 会将零值补为 `SERVICE_WIN32_OWN_PROCESS`，`mgr.Service.UpdateConfig` 则直接传给 `ChangeServiceConfig`，零值会导致 Windows 返回“参数错误”。修复显式设置独立进程类型，供首次注册与更新共同使用；保留 LocalSystem、自动启动、依赖及现有身份。增加不修改系统的 Windows 配置回归检查，防止再次依赖仅新建接口提供的默认值。[Windows API 契约](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-changeserviceconfigw)。
+
+安装器捕获服务程序的错误输出，并在失败弹窗与安装详情中显示原因，不再只有返回码。原生服务错误包含安装阶段（例如 `prepare-shared-endpoint-registry`、`register-service`、`start-service`），路径校验失败包含实际路径；不会输出身份私钥或网络配置内容。这是诊断能力改进，不代表所有安装失败都已修复。2026-11-17 本机验证：服务专项检查 13 项通过、1 项 Windows PowerShell 用例跳过；Go 通用测试、Windows x64 构建与 `go vet`、NSIS 样本编译通过；Windows 配置回归检查仅交叉编译，尚未在 Windows 执行，也未验证实际失败弹窗。
+
+排查时必须在安装失败的电脑上检查。已有服务程序不带参数运行时只校验安装路径，然后提示通过 Windows Service Control Manager 启动；该提示属于预期行为，不能作为安装失败原因。需要重试安装并读取实际错误时，由管理员显式运行已安装的固定服务程序 `install` 命令并重定向标准错误；不要删除共享状态或放宽目录权限来绕过校验。
 
 尚未进行 Windows 实机测试，发布前必须完成：标准用户安装 UAC／取消 UAC、安装后主程序普通权限运行、真实飞书登录到连接、断开／重连／修复无额外 UAC、TUN 启停及模式切换、多 Windows 账号冲突、服务重启／丢失／超时、旧版升级、带活动连接升级与卸载清理。尤其需要检查实际 WireGuard 与 Mihomo 引擎在 Windows 上的服务权限及适配器行为。
 

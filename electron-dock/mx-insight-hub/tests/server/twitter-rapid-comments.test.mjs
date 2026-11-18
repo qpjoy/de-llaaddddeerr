@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { parseRapidApiTwitterCommentPage } from '../../server/contracts/twitter-rapid-comment-page.mjs'
 import { projectPostCommentPage } from '../../server/contracts/post-comment-projection.mjs'
 import { projectCommentReplyPage } from '../../server/contracts/comment-reply-projection.mjs'
@@ -39,7 +40,7 @@ const replyStep = contentId => ({ provider: 'rapidapi', commentReplies: { reques
 const pepper = 'twitter-rapid-comments-offline-pagination', commentsPath = '/api/v1/data/social/post-comments'
 const repliesPath = '/api/v1/data/social/comment-replies'
 
-async function rapidHarness(response) {
+async function rapidHarness(response, { historicalOperation = false } = {}) {
   const calls = [], store = new MemoryStore(), service = new HubService({ store, apiKeyPepper: pepper })
   const tenant = await service.createTenant({ name: 'Offline Rapid comments' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Comments' })
@@ -53,33 +54,36 @@ async function rapidHarness(response) {
     timeoutMs: 100, freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3,
     maxRequestsPerMinute: 1000, billing: {} }
   const controls = new MemoryExternalPlatformControlStore()
-  const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.key === 'r.twitter_aio_tweet_replies')
-  await controls.updatePolicy('rapidapi', endpoint.operation, { expectedRevision: 1, desiredState: 'active', reason: 'Offline regression',
-    priceBook: { currency: 'USD', pricingAsOf: capturedAt, monthlyBudgetMinor: 100000,
-      monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 2 } } },
-  { runtime: { config, credentialConfigured: true } })
+  for (const key of ['r.twitter_aio_tweet_thread', ...(historicalOperation ? ['r.twitter_aio_tweet_replies'] : [])]) {
+    const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.key === key)
+    await controls.updatePolicy('rapidapi', endpoint.operation, { expectedRevision: 1, desiredState: 'active', reason: 'Offline regression',
+      priceBook: { currency: 'USD', pricingAsOf: capturedAt, monthlyBudgetMinor: 100000,
+        monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 2 } } },
+    { runtime: { config, credentialConfigured: true } })
+  }
   const adapter = new RapidApiAdapter({ apiKey: 'synthetic-provider-key', timeoutMs: 100, fetchImpl: async url => {
     calls.push(String(url))
-    return Response.json(response(new URL(url), calls.length))
+    const result = response(new URL(url), calls.length)
+    return result instanceof Response ? result : Response.json(result)
   } })
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'twitter' })
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'rapidapi',
     apiKeyPepper: pepper, reservationLeaseMs: 150000, operationControlStore: controls, logger: { warn() {} } })
   service.externalPostComments = (current, input) => gateway.postComments(current, { ...input, platform: 'twitter', path: commentsPath })
-  return { calls, context, service, platformStore,
+  return { calls, context, service, store, platformStore,
     comments: (body, idempotencyKey) => service.postComments(context, { body, idempotencyKey, path: commentsPath }),
     replies: (body, idempotencyKey) => gateway.commentReplies(context, { body, idempotencyKey, platform: 'twitter', path: repliesPath }) }
 }
 
-test('RapidAPI comment recipes keep historical TikHub identities and pin the reviewed replies endpoint', () => {
+test('RapidAPI comment recipes keep historical TikHub identities and pin the separately reviewed TweetDetail endpoint', () => {
   assert.equal(postCommentRecipe('twitter').provider, 'tikhub')
   assert.equal(commentReplyRecipe('twitter').provider, 'tikhub')
   assert.equal(postCommentRecipe('twitter', 'rapidapi').verification, 'derived')
   assert.equal(commentReplyRecipe('twitter', 'rapidapi').manualPagination, true)
   const request = normalizePostCommentsRequest({ platform: 'twitter', postId: '100', count: 100 }, { provider: 'rapidapi' })
   const step = buildPostCommentsDispatch(request)
-  assert.equal(step.key, 'r.twitter_aio_tweet_replies')
-  assert.equal(step.endpointPath, '/tweet/{tweetId}/replies')
+  assert.equal(step.key, 'r.twitter_aio_tweet_thread')
+  assert.equal(step.endpointPath, '/tweet/{tweetId}')
   assert.deepEqual(step.upstreamQuery, { tweetId: '100', rankingMode: 'Relevance', includePromotedContent: false })
   const replies = normalizeCommentRepliesRequest({ platform: 'twitter', commentId: '200', count: 100 }, { provider: 'rapidapi' })
   assert.deepEqual(buildCommentRepliesDispatch(replies, { providerCursor: { cursor: 'next-page' } }).upstreamQuery,
@@ -139,6 +143,37 @@ test('RapidAPI replies preserve direct parent evidence and derive the conversati
   assert.deepEqual(unresolved.records, [], 'unknown root stays delivered and archived, without invented canonical parent')
 })
 
+test('TweetDetail focal and ancestor context never become comments, even when context repeats in reply modules', () => {
+  const focal = tweet('200', '150'), ancestor = tweet('150', '100'), root = tweet('100', null)
+  const payload = page(
+    // Presentation order cannot let an ancestor through before the focal row.
+    module(ancestor, root, tweet('201', '200'), tweet('202', '201')),
+    flat(tweet('901', '100')), // A sibling in the same conversation is not a reply to the target.
+    flat(tweet('902', null, '902')), // Suggested unrelated tweet.
+    { entryId: 'tweet-200', content: { itemContent: content({ __typename: 'TweetWithVisibilityResults', tweet: focal }) } },
+    flat(ancestor), flat(root), cursor('next'))
+  const result = parseRapidApiTwitterCommentPage(payload, '200')
+  assert.equal(result.conversationId, '100')
+  assert.deepEqual(result.comments.map(row => row.values.commentId), ['201', '202'])
+  assert.deepEqual(result.comments.map(row => row.values.parentExternalId), ['200', '201'])
+  const delivered = projectCommentReplyPage(payload, replyStep(null), { capturedAt })
+  assert.deepEqual(delivered.projected.acquiredItems.map(row => [row.commentId, row.contentId, row.rootCommentId]),
+    [['201', '100', '200'], ['202', '100', '200']])
+  const empty = parseRapidApiTwitterCommentPage(page(flat(root), flat(ancestor), flat(focal), cursor('unused')), '200')
+  assert.deepEqual(empty.comments, [])
+  assert.equal(empty.conversationId, '100', 'focal context establishes the post even with no replies')
+  assert.equal(empty.providerPage.nextParams, null)
+})
+
+test('TweetDetail rejects foreign conversation modules against the focal identity without interpreting suggestions as replies', () => {
+  const payload = page(module(tweet('991', '990', '990')), flat(tweet('100', null)))
+  assert.throws(() => parseRapidApiTwitterCommentPage(payload, '100'), { code: 'invalid_upstream_contract' })
+  const mismatch = page({ entryId: 'tweet-100', content: { itemContent: content(tweet('999', null, '999')) } })
+  assert.throws(() => parseRapidApiTwitterCommentPage(mismatch, '100'), { code: 'invalid_upstream_contract' })
+  const nextPage = parseRapidApiTwitterCommentPage(page(module(tweet('201')), cursor('next-2')), '100', { cursor: 'next-1' })
+  assert.deepEqual(nextPage.comments.map(row => row.values.commentId), ['201'], 'continuation can omit focal context')
+})
+
 test('RapidAPI pagination uses only top-level Bottom, accepts replace entries and stops on repeated or empty pages', () => {
   const payload = page(module(tweet('201')), cursor('ignored', 'Top'))
   payload.data.threaded_conversation_with_injections_v2.instructions.push({ type: 'TimelineReplaceEntry', entry: cursor('replacement') })
@@ -152,6 +187,72 @@ test('RapidAPI pagination uses only top-level Bottom, accepts replace entries an
   const withThreadCursor = module(tweet('201'))
   withThreadCursor.content.items.push({ item: { itemContent: { itemType: 'TimelineTimelineCursor', cursorType: 'Bottom', value: 'inner' } } })
   assert.equal(parseRapidApiTwitterCommentPage(page(withThreadCursor), '100').providerPage.nextParams, null)
+})
+
+test('TweetDetail termination preserves paid comments and only stops pagination in the terminated direction', () => {
+  for (const direction of ['Top', 'Bottom', 'TopAndBottom']) {
+    for (const beforeEntries of [false, true]) {
+      const payload = page(flat(tweet('100', null)), module(tweet('201')), cursor('next'))
+      const instructions = payload.data.threaded_conversation_with_injections_v2.instructions
+      const termination = { type: 'TimelineTerminateTimeline', __typename: 'TimelineTerminateTimeline', direction }
+      instructions[beforeEntries ? 'unshift' : 'push'](termination)
+      instructions.unshift({ type: 'TimelineClearCache' })
+      const parsed = parseRapidApiTwitterCommentPage(payload, '100')
+      assert.deepEqual(parsed.comments.map(row => row.values.commentId), ['201'])
+      assert.equal(parsed.providerPage.hasMore, direction === 'Top')
+      assert.deepEqual(parsed.providerPage.nextParams, direction === 'Top' ? { cursor: 'next' } : null)
+      assert.equal(projectPostCommentPage(payload, postStep(), { capturedAt }).records.length, 1)
+      assert.equal(projectCommentReplyPage(payload, replyStep('100'), { capturedAt }).records.length, 1)
+    }
+  }
+})
+
+test('malformed termination metadata cannot silently discard a paid response', () => {
+  for (const fields of [{}, { direction: null }, { direction: 'unknown' }, { direction: {} },
+    { direction: 'Top', __typename: 'unreviewed' }, { direction: 'Top', entries: [module(tweet('202'))] },
+    { direction: 'Bottom', moduleItems: [] }]) {
+    const payload = page(module(tweet('201')), cursor('next'))
+    payload.data.threaded_conversation_with_injections_v2.instructions.push({ type: 'TimelineTerminateTimeline', ...fields })
+    assert.throws(() => parseRapidApiTwitterCommentPage(payload, '100'), { code: 'invalid_upstream_contract' })
+  }
+})
+
+test('terminated TweetDetail pages deliver the existing comments and replies contract with one call and immutable replay', async () => {
+  const h = await rapidHarness(url => {
+    const isPost = url.pathname === '/tweet/100'
+    const payload = isPost
+      ? page(flat(tweet('100', null)), ...Array.from({ length: 39 }, (_, i) => module(tweet(String(201 + i)))), cursor('next'))
+      : page(flat(tweet('100', null)), flat(tweet('201')), module(tweet('240', '201'), tweet('241', '240')), cursor('unused'))
+    payload.data.threaded_conversation_with_injections_v2.instructions.unshift({ type: 'TimelineClearCache' })
+    payload.data.threaded_conversation_with_injections_v2.instructions.push({ type: 'TimelineTerminateTimeline', direction: isPost ? 'Top' : 'Bottom' })
+    return payload
+  })
+  const body = { platform: 'twitter', postId: '100', count: 100, includeRaw: false }
+  const first = await h.comments(body, 'terminated-comments')
+  assert.equal(first.status, 200)
+  assert.equal(first.body.data.items.length, 39, 'focal tweet is context, not a comment')
+  const comment = first.body.data.items[0]
+  assert.equal(comment.commentId, '201')
+  assert.equal(comment.text, '  Complete reply\ntext  ')
+  assert.equal(comment.likeCount, 0)
+  assert.deepEqual(comment.replyRef, { platform: 'twitter', commentId: '201', contentId: '100' })
+  assert.equal(JSON.parse(first.body.data.raw_data).length, 39)
+  assert.match(first.body.data.page.nextCursor, /^mxds1\./u)
+  assert.deepEqual((await h.comments(body, 'terminated-comments')).body, first.body)
+  assert.equal(h.calls.length, 1, 'short page and replay do not buy another page')
+  const replyBody = { platform: 'twitter', replyRef: comment.replyRef, count: 1, includeRaw: false }
+  const replies = await h.replies(replyBody, 'terminated-replies')
+  assert.equal(replies.status, 200)
+  assert.equal(replies.body.data.items.length, 1)
+  assert.equal(replies.body.data.items[0].rootCommentId, '201')
+  assert.equal(replies.body.data.items[0].parentCommentId, '201')
+  assert.match(replies.body.data.page.nextCursor, /^mxds1\./u, 'bottom termination still allows draining already purchased rows')
+  assert.deepEqual((await h.replies(replyBody, 'terminated-replies')).body, replies.body)
+  const buffered = await h.replies({ ...replyBody, cursor: replies.body.data.page.nextCursor }, 'terminated-replies-buffer')
+  assert.equal(buffered.body.data.items[0].commentId, '241')
+  assert.equal(buffered.body.data.items[0].parentCommentId, '240')
+  assert.equal(buffered.body.data.page.nextCursor, null)
+  assert.equal(h.calls.length, 2)
 })
 
 test('RapidAPI malformed/error responses fail as upstream contract errors with no alternate supplier projection', () => {
@@ -230,8 +331,8 @@ test('RapidAPI short and empty pages buy once, replay without another call and b
 
 test('RapidAPI replies to a reply-target comment accept its replyRef and keep standard raw aliases and manual pagination', async () => {
   const h = await rapidHarness((url, ordinal) => {
-    if (ordinal === 1) { assert.equal(url.pathname, '/tweet/200/replies'); return page(module(tweet('201', '200'))) }
-    assert.equal(url.pathname, '/tweet/201/replies')
+    if (ordinal === 1) { assert.equal(url.pathname, '/tweet/200'); return page(module(tweet('201', '200'))) }
+    assert.equal(url.pathname, '/tweet/201')
     return page(module(tweet(ordinal === 2 ? '202' : '203', '201')), cursor(ordinal === 2 ? 'reply-next' : 'reply-last'))
   })
   const first = await h.comments({ platform: 'twitter', postId: '200' }, 'reply-target-comments')
@@ -302,4 +403,100 @@ test('RapidAPI standard comment fields retain TikHub/JustOne delivery types with
   assert.equal(delivered({ ...rapid, postId: '200', contentId: '200' }).replyRef.contentId, '100')
   assert.equal(delivered({ ...rapid, conversationId: null, postId: '200', contentId: '200' }).replyRef.contentId, '200',
     'the old fallback remains when the conversation root is unknown')
+})
+
+test('old signed RapidAPI comment cursors retain /replies while fresh requests use TweetDetail', () => {
+  const context = { consumer: { id: '7ab54c87-1561-4301-8262-e24c947fe2ba', businessId: 'synthetic' },
+    apiKey: { id: '42b18420-66b6-4c5c-9052-625380c2e958' } }
+  const deliveryId = '8014976c-1fcb-4f4a-9362-1a9490e449a9', oldKey = 'r.twitter_aio_tweet_replies'
+  const cases = [
+    { interfaceId: 'post-comments', body: { platform: 'twitter', postId: '100' },
+      // Frozen pre-TweetDetail recipe scopes, not hashes of the new recipe.
+      scopeHash: 'a68c069b5a7bcaa612b9bdd38698b9bd3cae7ad939d745ef0ce06a6c84def539',
+      normalize: normalizePostCommentsDelivery, dispatch: buildPostCommentsDispatch },
+    { interfaceId: 'comment-replies', body: { platform: 'twitter', commentId: '200', contentId: '100' },
+      scopeHash: '817af1feafad412ba4df2ef4c9ba4c9f678b036f2ce9dab055e839a673923465',
+      normalize: normalizeCommentRepliesDelivery, dispatch: buildCommentRepliesDispatch },
+  ]
+  for (const { interfaceId, body, scopeHash, normalize, dispatch } of cases) {
+    const version = `mx-insight-hub.${interfaceId}.v1`
+    const codec = createDataSearchCursorCodec(pepper, `${context.consumer.id}:${context.apiKey.id}:${interfaceId}`)
+    const options = { context, maxPageSize: 100, codec, provider: 'rapidapi' }
+    const oldCursor = codec.encode({ version, scopeHash, provider: 'rapidapi', previousDeliveryId: deliveryId,
+      page: 2, expiresAt: Date.now() + 60000 })
+    const fresh = normalize(body, options)
+    assert.equal(dispatch(fresh).key, 'r.twitter_aio_tweet_thread')
+    assert.notEqual(fresh.scopeHash, scopeHash)
+    const continued = normalize({ ...body, cursor: oldCursor }, options)
+    assert.equal(continued.recipeKey, oldKey)
+    assert.equal(continued.scopeHash, scopeHash)
+    assert.equal(continued.jobs[0].id, scopeHash)
+    assert.equal(continued.previousDeliveryId, deliveryId)
+    const oldStep = dispatch(continued, { providerCursor: { cursor: 'old-bottom' } })
+    assert.equal(oldStep.key, oldKey)
+    assert.equal(oldStep.endpointPath, '/tweet/{tweetId}/replies')
+    assert.equal(oldStep.upstreamQuery.cursor, 'old-bottom')
+    const next = continued.encodeNext(deliveryId)
+    assert.equal(codec.decode(next).scopeHash, scopeHash)
+    assert.equal(dispatch(normalize({ ...body, cursor: next }, options)).key, oldKey)
+    assert.throws(() => normalize({ ...body, cursor: oldCursor, count: 21 }, options), { code: 'invalid_cursor' })
+    assert.throws(() => normalize({ ...body, cursor: oldCursor }, { ...options, provider: 'tikhub' }), { code: 'invalid_cursor' })
+    assert.throws(() => normalize({ ...body, recipeKey: oldKey }, options),
+      { code: interfaceId === 'post-comments' ? 'invalid_post_comments_request' : 'invalid_comment_replies_request' })
+    const unknown = codec.encode({ ...codec.decode(oldCursor), scopeHash: 'f'.repeat(64) })
+    assert.throws(() => normalize({ ...body, cursor: unknown }, options), { code: 'invalid_cursor' })
+  }
+})
+
+test('a saved /replies buffer drains without HTTP and its next failure replays under the original endpoint and fingerprint', async () => {
+  const h = await rapidHarness(url => {
+    assert.equal(url.pathname, '/tweet/100/replies')
+    assert.equal(url.searchParams.get('cursor'), 'legacy-next')
+    return Response.json({ message: 'synthetic legacy endpoint failure' }, { status: 404 })
+  }, { historicalOperation: true })
+  const version = 'mx-insight-hub.post-comments.v1', oldKey = 'r.twitter_aio_tweet_replies'
+  const scopeHash = 'a68c069b5a7bcaa612b9bdd38698b9bd3cae7ad939d745ef0ce06a6c84def539'
+  const previousId = '8014976c-1fcb-4f4a-9362-1a9490e449a9', callId = '707a2a6b-96a2-4b8f-8d4a-9d44a4e125a5'
+  const stamp = new Date().toISOString(), body = { platform: 'twitter', postId: '100' }
+  const identity = { tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id }
+  const request = { ...normalizePostCommentsRequest(body, { provider: 'rapidapi' }), recipeKey: oldKey }
+  const step = buildPostCommentsDispatch(request)
+  const expected = { provider: 'rapidapi', operation: step.operationKey, endpointKey: step.endpointKey,
+    endpointVersion: step.endpointVersion, contractVersion: step.endpointContractVersion }
+  const payload = page(module(...Array.from({ length: 25 }, (_, index) => tweet(String(201 + index)))), cursor('legacy-next'))
+  const { projected } = projectPostCommentPage(payload, step, { capturedAt: stamp })
+  const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  const bytes = Buffer.from(JSON.stringify(payload)), bodySha256 = createHash('sha256').update(bytes).digest('hex')
+  // A pre-change committed receipt: twenty delivered rows and five archived
+  // overflow rows, with the original endpoint descriptor and signed scope.
+  h.store.requests.set(previousId, { id: previousId, ...identity, platform: 'twitter', status: 'committed', responseStatus: 200,
+    acquisitionRequest: { path: commentsPath, socialSearch: { version, scopeHash, previousDeliveryId: null,
+      capturedAt: stamp, deliveredIds: [projected.acquiredItems.slice(0, 20).map(row => row.commentId)],
+      state: { jobs: [{ query: scopeHash, providerCursor: null, providerPage: 1, upstreamPages: 1,
+        started: true, done: false, resolvedIdentity: null, profiles: [], dispatchedTokens: [],
+        buffer: { callId, offset: 20, hash: hash(projected.acquiredItems), projectionHash: hash(projected),
+          expected, providerCursor: null, providerPage: 1 } }] } } } })
+  h.platformStore.calls.set(callId, { id: callId, ...identity, usageRequestId: previousId, providerKey: 'rapidapi',
+    ...expected, outcome: 'succeeded', httpStatus: 200, businessCode: null, completedAt: stamp })
+  h.platformStore.restrictedResponseArchives.set(callId, { bodyBytes: bytes, bodySize: bytes.length, bodySha256, capturedAt: stamp })
+  const codec = createDataSearchCursorCodec(pepper, `${identity.consumerId}:${identity.apiKeyId}:post-comments`)
+  const oldCursor = codec.encode({ version, scopeHash, provider: 'rapidapi', previousDeliveryId: previousId,
+    page: 2, expiresAt: Date.now() + 60000 })
+  const buffered = await h.comments({ ...body, cursor: oldCursor }, 'old-buffer-delivery')
+  assert.deepEqual(buffered.body.data.items.map(row => row.commentId), ['221', '222', '223', '224', '225'])
+  assert.equal(h.calls.length, 0)
+  assert.equal(buffered.body.data.meta.providerCalls, 0)
+  assert.equal(codec.decode(buffered.body.data.page.nextCursor).scopeHash, scopeHash)
+  const nextBody = { ...body, cursor: buffered.body.data.page.nextCursor }
+  let failureId
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(h.comments(nextBody, 'old-upstream-failure'), error => {
+      assert.equal(error.code, 'external_platform_rejected')
+      if (attempt === 0) failureId = error.details.requestId
+      else assert.equal(error.details.requestId, failureId)
+      return true
+    })
+  }
+  assert.equal(h.calls.length, 1, 'failure replay cannot purchase the new or old endpoint again')
+  assert.equal([...h.platformStore.calls.values()].filter(row => row.operation === 'native.r.twitter_aio_tweet_thread').length, 0)
 })

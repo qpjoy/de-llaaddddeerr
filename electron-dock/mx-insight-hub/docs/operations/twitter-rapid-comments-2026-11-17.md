@@ -1,6 +1,176 @@
 # Twitter 评论与回复默认 RapidAPI
 
-日期：2026-11-17。状态：本地实现与离线验证完成，未部署、未执行供应商付费采样。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+首次记录：2026-11-17；更新：2026-11-18。真实首屏归档的 36 条评论已通过三层复验；受限回复验证成功交付 4 条回复，公共合同、别名与引用校验均通过。用户已明确追加最多一次同帖原游标翻页验证，原三次调用额度不重置，累计上限为四次。新增调用尚未执行。两个评论接口最后确认仍固定 TikHub、revision 3，上次 globalPolicyWrites=0。真实上游翻页、外部 HTTP 入口和整体线上切换尚未验收。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+
+## 2026-11-18 追加一次翻页授权
+
+用户明确选择“追加 1 次翻页验证”，范围为从原首屏归档读取同帖 Bottom 游标，最多新增一次可能计费的 RapidAPI 请求，不重买首屏、不切换生产路由。总预算由既有三次加本次专用一次构成；旧执行模式不获得新的采购权限，历史回执和幂等键保持原样。
+
+这次验证使用显式 Rapid 网关的 `params.cursor` 导入同帖供应商游标，启动新的 imported_continuation 遍历。原首屏为失败 usage，不能给它伪造成功 manifest 或签名 nextCursor。因此验收范围为真实供应商续页响应、标准字段与正常交付回执，不能据此宣称原首屏的 Hub 签名分页链、跨页去重或外部 HTTP 入口已验证。游标过期、拒绝或响应丢失都不会自动重买首屏或重试。
+
+新增专用 `--resume-next`，使用独立固定幂等键 `ops-twitter-rapid-comments-7e7cd2d0-v1-thread-next`。原 `--execute`、`--resume-thread`、`--resume-replies` 的执行上限仍为三次；新入口要求准确存在前三笔固定回执，再允许第四次。读取包含全部六个阶段的幂等键，发现第五笔调用即拒绝。任何已有 thread-next usage（包括预留、失败、未知、没有上游调用的记录）都会使重跑只读。
+
+预检会再次核对固定 UUID、owner、端点版本、归档长度和 SHA，并用容器已安装的 parser/projection/workflow 重验首屏 36 条与成功回复 4 条；回复离线投影还须与已交付 DTO 一致。实际 HTTP 发出前再次核对原来源和三笔回执，要求当前两个生产评论策略仍固定 TikHub，只允许原帖子路径、原归档游标及完整预期查询参数的一次 GET。正常权限、采购控制、价格、账本与归档流程继续生效。
+
+**仅同步更新后的 `server/ops/verify-twitter-rapid-comments.mjs` 到服务器 Hub 工作目录，不需要重建镜像。** 在该目录执行：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - --resume-next \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+首次实际执行应为 `mode=resume_next`、`supplierCallsBefore=3`、`supplierHttpCallsMade=1`、`supplierCallsAfter=4`、`remainingSupplierCalls=0`。若前置条件不满足则零调用停止。成功交付要求 thread-next 为 saved_success/HTTP 200、publicContractValid=true，且 sourceUnchanged/originalFailureUnchanged/threadFailureUnchanged/replySuccessUnchanged 均为 true；报告还会返回 routesAfter 供核对。
+
+`cursorTransmissionVerified` 确认发送的是原游标，`upstreamContinuationVerified` 确认存在实际成功续页回执。`overlapCount` / `newCommentCount` 比较本页与原首屏，只有新评论大于零才标记 `continuationAdvanceObserved=true`；空页或全重复页不能作为正向推进证据。报告保持 `signedCursorChainVerified=false`、`crossPageDeduplicationVerified=false`、`httpIngressVerified=false`、`coverageComplete=false`，不要据此切换所有 Twitter 接口。验证结果待服务器执行后记录。
+
+本次本地回归 53 项通过、零失败、零跳过：28 项限额验证、8 项归档诊断、17 项 Rapid 评论合同测试。包含真实网关的精确游标传输、成功/空页/重复页/拒绝/过期/未知结果、并发互斥、重复执行只读、旧选项不获追加额度、历史证据漂移与真实 PGlite SQL 检查；`git diff --check` 通过。本机未发出真实供应商请求。
+
+## 回复正样本验证通过，原三次额度已用完
+
+用户返回 `resume_replies` 的 thread-replies 为 saved_success，usage `c352b401-4351-407e-9a1d-aaff849c6394` 为 committed/200；provider call `0b053805-603a-4bc8-b228-23e6d370d548` 为 succeeded/200/billed=null，原始响应 26,874 字节，SHA-256 `818bf762557a59853959fc63162562e4ef13e9b0876b5bf4dddb0e163b3bf47e`，长度及哈希已验证。billed=null 仍不能确认供应商实际计费金额。
+
+publicContractValid=true、positiveRowsObserved=true，resultCount/textCount/authorIdCount/publishedAtCount 均为 4，aliasesVerified/rawStringWrapperVerified/referencesVerified 均为 true。该回复页 hasMore=false、nextCursorPresent=false、paginationStatus=exhausted。因此有真实回复正样本证据，但不能把“回复已耗尽”当作原帖子非空游标的翻页验证。用户本次粘贴在 originalStages 中截断，未展示报告末尾的三项 unchanged 和 routesAfter；这里只记录已提供的成功阶段及 globalPolicyWrites=0，不补造缺失字段。
+
+此次 supplierCallsBefore=2，新增一个已成功回执，原三次授权已耗尽。旧模式保持 MAX_CALLS=3，不重置幂等键或删除回执。随后用户明确追加一次，专用入口及执行范围见本文顶部；不自动切换生产路由。
+
+若继续验证上游翻页，具体范围应为：只读核验同一首屏归档及已成功的回复回执，从首屏归档取原帖子的 Bottom 游标，最多请求原帖子下一页一次，不重买首屏、不采集其他帖子、不修改全局路由。当前 Twitter 合同允许通过 initialParams 导入供应商游标；这可验证真实上游续页及返回投影，但原首屏是失败 usage，没有成功交付的 Hub nextCursor，不能伪造其签名游标或把该测试称为原交付的完整游标恢复验证。新增付费执行入口及调用额度须在追加授权后启用。
+
+## 真实首屏归档复验通过
+
+在 Public rollout 成功后，固定的 200,594 字节归档仍匹配 SHA-256 `34747817708f7dd6e4ab1b8dd9f4b92f20f2fd5c8f96165e347532d3a35fa2a6`。用户返回 parser.ok=true / commentCount=36 / continuationPresent=true；projection.ok=true / itemCount=36 / recordCount=36 / jsonSafe=true / recordFieldsJsonSafe=true；workflow.ok=true / itemCount=36 / recordCount=36，error=null，本次供应商请求数为零。
+
+这确认当前部署代码能处理该真实首屏并投影到 Hub 的现有合同；不把原 committed/502 历史回执改写为成功，也不宣称外部 HTTP 入口、真实回复或下一页已经通过。非空游标只说明存在续页参数，尚无上游续页成功证据。原三次授权仍剩一次，下一步仅用于受限回复验证，生产路由先保持原状。
+
+## 剩余一次回复验证（已执行，重跑只读）
+
+新增 `verify-twitter-rapid-comments.mjs --resume-replies`，只使用原来尚未执行的 `THREAD_KEYS[1]`。普通无参、`--execute` 和 `--resume-thread` 不会绕过现有回执重买首屏。无参预览的 installedContract 已改为检查当前 TweetDetail 合同，避免新版本因仍比对旧 recipe 而误报未安装。
+
+新入口必须同时匹配原 404 失败和本次 200/invalid_social_contract 失败的固定 usage、call、owner、端点版本、长度和 SHA，现有两次调用数必须准确。它会用容器内已安装代码再次复验 36 条首屏记录，并选取同一帖子下有正回复数的评论构造 replyRef；没有候选则零调用停止，不另买首屏或改用其他候选来源。二次读取归档及实际 HTTP 发起前均复核证据，仍要求两条生产评论路由固定 TikHub。
+
+执行使用原 advisory lock、正常身份授权/采购控制/价格和账本；只允许一次 GET `/tweet/{replyId}`，不携带续页 cursor，本轮累计不超过三次。任何已有 thread-replies usage（包括无上游调用的预留或失败）都会使重跑只读。历史失败回执和原 TikHub 来源保留，工具不改全局路由。
+
+**仅同步更新后的验证脚本到服务器 Hub 目录即可，无需再次构建镜像。** 以下命令明确使用用户原已授权额度中剩余的一次上游请求：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - --resume-replies \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+成功验收需要 `supplierHttpCallsMade=1`、`supplierCallsAfter=3`、`firstArchiveRevalidated` 的三层计数为 36、thread-replies 为 saved_success/HTTP 200、publicContractValid=true、positiveRowsObserved=true，以及 sourceUnchanged/originalFailureUnchanged/threadFailureUnchanged 均为 true。空页只证明空响应契约，不算正样本兼容验收。失败、未知结果或零调用前置阻断应读取报告，不删除回执或换幂等键重试。
+
+即使回复正样本通过，upstreamContinuationVerified 和 coverageComplete 仍为 false：本轮没有购买真正的下一页，也没有从外部 HTTP 入口调用。不能据此宣称 Twitter 全部接口均已切换或完成全链路验证。下一步切换须按接口范围和已有验收证据处理。
+
+本次本地验证 48 项通过、零跳过：23 项 probe 测试、8 项归档诊断测试、17 项 Rapid 评论合同测试；包含真实网关的成功/空页/拒绝/未知结果、并发互斥、已有回复回执只读、证据漂移、防额外派发和 PGlite 查询。未从本机发起真实供应商请求。
+
+## 运行代码版本确认
+
+用户返回 Public Pod `mx-insight-hub-public-6f8dc97cd6-ctphw`，创建时间 `2026-11-17T11:24:48Z`，镜像标签 `mx-insight-hub:shadow`，imageID `sha256:9028c1c8db4d7bcd47bcef0b834121f31c3182e61bbaa52644331c69dec29328`。解析器 LF 归一化 SHA-256 为 `dfcf8d09142de5de2976c8e41f6987f4068906aecf76b79b62953e0599aa97da`，与本地 Git 的 a0d791dd 文件完全一致；Top / Bottom / TopAndBottom 接受测试均为 false。可确认的是解析器未更新，不能据此断言整个镜像对应哪个 commit，也不能归因于构建缓存。
+
+ca1d512e 修复版解析器的 LF 归一化 SHA-256 为 `bbb60c50042eb0d7922a551758a00868a71b51f85489d9b62cd5ae7ef80cb378`。应先核对服务器 Hub 目录内源码，再执行完整 deploy；部署成功后对实际 Public Pod 验证相同哈希，最后在同一 Pod 只读检查固定归档。任何前置检查或部署失败均停止后续流程。完整 deploy 会构建、导入镜像并更新 Public；apply、单独 restart 或 stdin 新诊断脚本都不能替代构建导入步骤。当前无需强制 no-cache 或更换标签。Public 为 Recreate 策略，更新时有重建窗口，部署失败不保证旧 Pod 仍在线。
+
+## TimelineTerminateTimeline 适配修复（已部署，归档复验通过）
+
+用户返回的固定归档 hashVerified=true、jsonSafe=true，保存错误码为 invalid_social_contract。结构摘要为 ClearCache、AddEntries、TerminateTimeline 各一条，1 个 focal 条目、39 个会话模块、1 个非空 Bottom 游标，40 个 Tweet 且无已知字段异常；parser 在原第 29 行的未支持指令分支失败。该解析器未接收 TerminateTimeline，足以导致整个响应成为 succeeded_unusable / Hub 502。后续诊断已确认结束方向 Top、无额外字段、无 __typename；当时解析器仍为旧版本，尚不能确认修复后的所有字段均已兼容。
+
+修复严格接收 X 官方定义的 Top、Bottom、TopAndBottom 三种方向及 type / __typename / direction 元数据；如有 __typename，必须与指令类型相符。Top 保留向下游标；Bottom / TopAndBottom 保留本页业务行并停止供应商向下续页，已购溢出仍通过 Hub 缓存分页交付。未知方向、未知指令和夹带业务字段仍拒绝，不静默遗漏评论。依据：[X 官方方向序列化实现](https://github.com/twitter/the-algorithm/blob/c54bec0d4e029fe34926ef3258a86ccacc0d0182/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/functional_component/marshaller/response/urt/TerminateTimelineInstructionMarshaller.scala)。底部结束优先于残留游标是按终止语义采取的保守处理，尚不是本份真实归档已验证的方向组合。
+
+请求参数、标准评论字段、raw_data 别名、签名游标和历史失败回执保持原契约。诊断脚本新增结束方向与字段结构计数，未知值统一为 other，不输出原始字段名或值。
+
+这次修改了镜像内的解析器，**需要重建并滚动更新 Hub**，仅同步诊断脚本不会加载修复。同步代码后在服务器 Hub 目录执行：
+
+```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - \
+  < server/ops/diagnose-twitter-rapid-comment-page.mjs
+```
+
+用户确认服务器构建出网需要本地 7788。`MX_INSIGHT_BUILD_PROXY` 使用脚本现有的专用 host-network Buildx builder，使构建走此 HTTP 代理，并保留上述 Launcher 同步和数据采样关闭项；不修改全局 Docker daemon 代理或 MX-H2I 网络。服务器源码与容器内解析器哈希的前后检查仍须保留。
+
+第二步只读使用原 200,594 字节归档，供应商新增调用应为零。需要确认 parser、projection、workflow 三项均为 ok=true，并检查 terminateTimeline 方向与计数；若仍失败，使用受审代码行号继续定位，无需重新买首屏。旧 committed/502 回执不会被修改为成功，原幂等键仍回放原失败。总额度仍剩一次，本步骤不使用该额度、不切换生产路由。
+
+本地验证：先以合成三指令响应复现原 parser 失败和真实网关 HTTP 200 → Hub 502，再完成修复；54 项相关测试通过、零跳过，覆盖三方向、指令顺序、异常元数据、评论与回复公共字段、底部结束后的缓存排空、失败回放、TikHub 和手动分页。包含真实迁移 schema 的 PGlite 只读查询测试；没有调用生产供应商。实际归档的修复后结果仍待服务器返回。
+
+## TweetDetail 200 响应不可交付：只读检查保存归档
+
+最新 usage 为 `e531d032-0bfa-463e-9e0f-ff10e2457a5d`，provider call 为 `783683dc-0dde-45ac-9c9c-76753f9c8949`。usage 为 committed/502，供应商回执为 succeeded_unusable/200/billed=null。完整响应 200,594 字节，SHA-256 为 `34747817708f7dd6e4ab1b8dd9f4b92f20f2fd5c8f96165e347532d3a35fa2a6`，归档长度和哈希已验证。
+
+这是新接口已经返回响应、但尚未形成可交付评论结果的证据，不是业务兼容验收成功。`billed=null` 表示账本尚不能确认供应商计费。原 TikHub 源、首次 404 回执和固定 TikHub 路由均保持不变；总三次额度还剩一次，不能再次购买首屏来获取相同诊断材料。
+
+本次顶层 `verification_unavailable` 还暴露了验证工具错误码白名单遗漏：评论工作流明确抛 `external_platform_response_unusable`，旧脚本未收录，因而泛化显示。读取已存 usage/provider/public 错误码可进一步确定失败阶段；仅凭 HTTP 200 和字节数不能判断具体字段或指令问题。
+
+同时修正执行报告中的剩余额度显示：`remainingSupplierCalls` 现在按执行后的保存调用数计算；这份回执累计两次，应剩一次，原来的数字二是执行前的值。预算门槛和采购流程没有变化。
+
+专用 `server/ops/diagnose-twitter-rapid-comment-page.mjs` 仅读取上述固定 usage/call 及受限归档，验证身份关联、长度和固定 SHA，再以已部署的解析与投影代码离线检查。输出只包含白名单结构、计数、代码版本哈希与受审文件的行号，不包含正文、作者、帖子 ID、游标或凭据。不初始化运行时、不写 usage、不中转新业务请求。
+
+脚本分别报告 parser、projection 和 workflow 结果。为避免读取供应商凭据，离线回放不执行生产工作流中的凭据回显脱敏步骤；即使离线三阶段全部成功，也不代表原请求或线上交付已经成功。首次复验已定位到未支持的结束指令，修复后的实际归档结果仍待确认。
+
+仅更新诊断脚本时，可同步到服务器 Hub 工作目录后执行，无需重建镜像；本轮解析器修复则需要先执行上节的部署命令：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - \
+  < server/ops/diagnose-twitter-rapid-comment-page.mjs
+```
+
+已有 thread-first 回执后，原 `--resume-thread` 按设计只读取历史，不自动续买。先依据已保存字节定位并验证字段适配，再决定如何使用剩余的一次授权额度；不修改原失败回放或把旧回执标记为成功。
+
+前次诊断工具验证：probe 与专用诊断合计 23 项测试全部通过、零跳过，包含真实迁移 schema 的 PGlite 查询、归档哈希拒绝、三阶段失败定位、输出脱敏、stdin 执行，以及 HTTP 200 不可交付后重复诊断不增加供应商调用。测试均使用本地合成数据，未调用生产供应商。
+
+## 续验脚本状态校验修复（已完成）
+
+用户返回 `read_saved_only / resume_source_unverified`，新增供应商调用为 0；固定的原 request/call ID、77 字节 SHA-256、502/404、rejected、billed=false 及路径匹配均通过显示。代码检查发现 guard 错误要求旧 usage 为 `released`。真实 RapidAPI `finishFailure` 会把明确拒绝保存为 `committed + HTTP 502 + units_actual=0`，这里 committed 表示失败响应已经存档，不代表成功交付。原测试也手写了 released，遗漏了真实失败生命周期。
+
+修复只把此状态条件改为真实的 committed/502；保留所有固定身份、哈希、供应商拒绝和调用预算条件，继续拒绝 reserved/unknown/released。新增 `resumeSourceInspection`，仅显示固定状态、逐项布尔校验及 `failedChecks`，不输出帖子 ID、请求正文或供应商原始消息。guard 修订为 `twitter-rapid-thread-guard.v2`；原诊断 revision、五个幂等键及所有历史记录不变。
+
+本次只需同步 `server/ops/verify-twitter-rapid-comments.mjs` 到服务器工作目录，**无需重建镜像、重新部署或执行数据库迁移**。然后在 Hub 目录运行：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - --resume-thread \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+可选：去掉 `--resume-thread` 只读查看新增校验摘要。正常原回执应显示 `usageStatus=committed`、`usageHttpStatus=502`、`failedChecks=[]`。有任何不匹配仍停止。续验最多剩余 2 次请求，默认路由保持 TikHub；不删除或重置旧记录，也不重买旧 `/replies` 请求。
+
+本次专项 14/14 通过（含真实 PGlite 查询，0 跳过）。新增离线 RapidAPI 404 → 网关 → 实际 Memory store `finishFailure` 回归，确认 committed/502/零交付用量以及同键失败回放零新增采购；released/reserved/unknown 均不能续验。固定归档及总三次预算未放宽。`git diff --check` 通过，未调用生产供应商。
+
+## TweetDetail 首次安装与恢复步骤（保留记录）
+
+恢复事务已提交：`post-comments` 与 `comment-replies` 均为 `fixed / tikhub / null / revision 3`。本次恢复和归档诊断没有供应商请求。`billed=false` 是保存的采购记录，不能用它推断 RapidAPI 月账单；该 HTTP 请求仍占本轮最多 3 次额度中的 1 次。
+
+新修复使用供应商 [Tweet with replies 文档](https://www.twittrapi.com/docs/reference/tweet-tweetid)中的 `GET /tweet/{tweetId}`，新增独立操作 `native.r.twitter_aio_tweet_thread`。旧 `/replies` 操作、历史回执及游标合同保留。新路径同样需要真实回执确认，文档存在不代表当前订阅一定可用。
+
+标准接口、请求参数、返回字段及旧别名不变；Hub 内部投影会过滤 focal 帖子、会话根和明确祖先，保留回复身份、真实父级关系及未知计数的 null。迁移 192 只登记新采购操作，不修改两条已经恢复的路由。此前迁移 191 已部署，不改写它。
+
+同步本次代码后，在服务器 Hub 项目目录执行：
+
+```bash
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+```
+
+部署成功后，使用新的显式续验命令：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - --resume-thread \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+工具先校验原失败 usage/call UUID、77 字节、固定 SHA-256、404/rejected/billed=false、目标路径匹配，以及两条路由仍固定 TikHub。随后仅用新操作最多请求“帖子评论首屏”和“评论回复”各一次；使用原调用方身份，正常权限、采购、计费与归档控制生效。旧 1 次与新最多 2 次共同计入原 3 次预算。遇到失败或未知结果立即停止，不自动重试；已有任一 thread 验证记录时，重跑只读取保存结果。
+
+本轮剩余额度不覆盖真实上游下一页，报告明确保持 `upstreamContinuationVerified=false`；不能将两次成功解释为全链路验收完成。此工具也不覆盖公网 Ingress。不会自动把路由改回 RapidAPI。默认无参数或原 `--execute` 命令只读取已存在的旧回执。
+
+本次修复的本地回归：134 项通过、0 失败、0 跳过，包含真实 PGlite 迁移/恢复/预算查询、原生传输、标准字段及别名、旧 signed cursor 的缓冲排空和固定旧端点续页、失败幂等回放。`npm run typecheck`、`git diff --check` 通过。未从本机调用生产供应商；新的 TweetDetail 修复尚待服务器同步、部署和真实限额验证，验证等级仍为 `derived`。
+
+## 之前的实施与诊断记录
+
+以下保留首次部署与失败诊断时的历史步骤；当前执行命令以上一节为准。
 
 用户随后授权少量付费请求验证兼容性。本轮最多 3 次 RapidAPI 上游请求：帖子评论首屏、其续页、一个评论的回复页。使用已有 TikHub 归档作对照，不重新付费搜索帖子或重采 TikHub。取得真实回执前仍保留 `derived` 标记。
 
@@ -97,3 +267,29 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 合并运行原生转发、RapidAPI 传输证据、Threads 兼容、评论与回复、游标、策略管理 API 和实际 PGlite SQL 迁移回归：112 项通过。补充策略 UI、目录、归档检查及既有自动补价测试：70 项通过，1 项现有运行时测试在 Windows 因缺少 `fs.constants.O_NOFOLLOW` 而失败，尚待 Linux 补验；失败发生于未修改的 `ServerFileReader.create` 初始化。共 182 项通过。`npm run typecheck` 和 `git diff --check` 通过。没有供应商 HTTP 请求，没有生产变更。
 
 用户追加付费验证请求后，本轮复核的 37 项相关测试通过（包含真实 PGlite 预检 SQL、路由保留及迁移顺序、限三次/防重复采购、旧字段/别名、回复帖引用及未知响应归档）。仍未从本机发出生产供应商请求：服务器不可直连，等待操作人在服务器运行限额工具并回传摘要；不能据此将 `derived` 升为 `verified`。
+
+## 首轮服务器回执：RapidAPI 404，停止后续采购
+
+用户已确认部署并运行 `--execute`。新 usage 为 `e813c900-44b2-45e8-bf84-6eb8786b1a5e`，唯一 provider call 为 `dc07998d-21c6-44cd-8f48-5f99f7e7918c`：上游 HTTP 404 / rejected，Hub HTTP 502 / `external_platform_rejected`。错误原始归档 77 字节，SHA-256 为 `a8f881027fc841cd737652640dbc864c94af4fe55f612ace64236059ed25a9a2`，长度及 hash 已验证。累计只发生 1 次上游调用；next/replies 均未尝试，原 TikHub 源归档保持不变。
+
+此回执尚不能区分端点路径未注册和目标帖子不可用，也不能证明实际供应商扣费。失败发生在上游 HTTP 阶段，尚未验证成功响应的字段投影。官网仍列出 [/tweet/{tweetId}/replies](https://www.twittrapi.com/docs/reference/tweet-tweetid-replies) 和 [/tweet/{tweetId}](https://www.twittrapi.com/docs/reference/tweet-tweetid)，但文档不能代替本次实际错误内容。不根据响应长度猜根因，不修改已发布原生合同的路径，不换幂等键重购。
+
+已给现有验证脚本增加保存错误分类。只同步 `server/ops/verify-twitter-rapid-comments.mjs` 到服务器工作目录，无需重建镜像或部署，执行以下**不带 `--execute`** 的命令：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+应返回 `savedErrorInspectionVersion:1`、`mode:read_saved_only`、`supplierHttpCallsMade:0`，以及当前两个 Twitter 评论策略。`stages[0].providerCalls[0].errorInspection` 只从 hash 验证成功的旧归档识别固定错误短语：`endpoint_path_not_found`、`tweet_unavailable`、`subscription_required`，其他文本为 `unclassified`。路径只显示模板和是否匹配原目标的布尔值，不输出帖子 ID、供应商任意文本或密钥。`billed:null` 仍表示实际供应商收费未知；不把 404 当成免费。
+
+只读诊断与限额工具的 11 项测试通过，含 PGlite 实际 SQL、缺路由 404、保留失败回执及零新增采购。修复端点或更换目标的决定待这次零采购诊断回传后做；3 次总预算与已消费的首个槽位保持不变。
+
+### 后续回执：当前线上实际已选 RapidAPI，需先恢复业务路由
+
+用户回传的只读结果仍缺少 `savedErrorInspectionVersion`、`errorInspection` 和 `billed`，说明使用的还是旧版脚本，不能据此认定 77 字节错误已经分析。该结果同时确认两个 Twitter 评论策略均为 `priority / rapidapi / tikhub / revision 2`；部署前保留步骤没有在这两行上生效。此前“保持 TikHub”的预期不等于实际线上状态。
+
+立即恢复无游标新请求至 `fixed / tikhub / null`，原因记录为 `Temporary TikHub routing after RapidAPI 404; compatibility validation pending`。恢复函数 `server/ops/restore-twitter-comment-routes.mjs` 仅匹配用户报告的两行 revision 2 及完整模式/供应商值，在同一连接事务中按接口排序加行锁，连同两条审计一起提交；已固定 TikHub 的行不改，其他新状态整体拒绝。此处依据用户已报告的当前状态恢复，不额外假定审计 actor。真实 PGlite 回归验证了两行恢复、审计冲突全回滚、并发新修订不覆盖、其他平台不变及重复零变更。
+
+策略每次请求读取数据库，提交后无需重启即可影响新选路。已经在途的请求、已有 RapidAPI 游标及历史失败回放保持原身份，不能承诺全部 RapidAPI 调用立刻停止，也不换幂等键重新购买旧失败。此恢复不修改采购操作启停、凭据、价格、历史 usage/call、登录或联网配置。实际恢复仍须以服务器返回的两条 fixed/TikHub 结果确认；恢复提交后，错误归档诊断失败应单独报告，不误报已提交的恢复失败。

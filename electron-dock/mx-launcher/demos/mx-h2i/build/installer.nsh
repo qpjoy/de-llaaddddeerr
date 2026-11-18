@@ -45,6 +45,40 @@
       ${EndIf}
       Pop $9
     SectionEnd
+
+    ; The registered uninstaller still runs the old service helper. Drain
+    ; its tunnel first with the new helper, using the verified old resources.
+    Section "-MinCave network upgrade preparation"
+      ReadRegStr $4 HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation
+      ${If} $4 != ""
+      ${AndIf} ${FileExists} "$4\resources\network-service\MinCaveNetworkService.exe"
+        ClearErrors
+        GetTempFileName $3 "$INSTDIR"
+        ${If} ${Errors}
+          MessageBox MB_OK|MB_ICONSTOP "无法在安装目录中准备 MinCave 升级。"
+          SetErrorLevel 1
+          Quit
+        ${EndIf}
+        ; Extract to the protected destination validated by the first section.
+        File /oname=$3 "${PROJECT_DIR}\out\windows-network-service\MinCaveNetworkService.exe"
+        ${If} ${Errors}
+          Delete "$3"
+          MessageBox MB_OK|MB_ICONSTOP "无法解压 MinCave 升级程序。"
+          SetErrorLevel 1
+          Quit
+        ${EndIf}
+        nsExec::ExecToStack '"$3" prepare-upgrade "$4"'
+        Pop $0
+        Pop $1
+        Delete "$3"
+        ${If} $0 != 0
+          DetailPrint "MinCave network upgrade preparation failed ($0): $1"
+          MessageBox MB_OK|MB_ICONSTOP "MinCave 升级准备失败（$0），安装已停止。$\r$\n$\r$\n$1"
+          SetErrorLevel 1
+          Quit
+        ${EndIf}
+      ${EndIf}
+    SectionEnd
   !endif
 !macroend
 
@@ -80,9 +114,17 @@
 !macroend
 
 !macro customInstall
-  ExecWait '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" install' $0
+  ; Capture stderr as well as the exit code so ACL/resource/SCM failures
+  ; include their actual reason. No command shell or elevation fallback.
+  nsExec::ExecToStack '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" install'
+  Pop $0
+  Pop $1
   ${If} $0 != 0
-    MessageBox MB_OK|MB_ICONSTOP "MinCave 网络服务安装失败（$0）。请重新运行完整安装包进行修复。"
+    ${If} $1 == ""
+      StrCpy $1 "服务程序没有返回错误详情。请检查 Windows 应用程序事件日志。"
+    ${EndIf}
+    DetailPrint "MinCave network service installation failed ($0): $1"
+    MessageBox MB_OK|MB_ICONSTOP "MinCave 网络服务安装失败（$0）。$\r$\n$\r$\n$1"
     SetErrorLevel 1
     Abort
   ${EndIf}
@@ -93,13 +135,16 @@
     ${If} ${isUpdated}
       ; Preserve identity and registration, but drain owned tunnels and stop
       ; the service so no engine executable remains in use during replacement.
-      ExecWait '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" stop' $0
+      nsExec::ExecToStack '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" stop'
     ${Else}
       ; Full uninstall first cleans only MinCave-owned routes, NRPT and TUN.
-      ExecWait '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" uninstall' $0
+      nsExec::ExecToStack '"$INSTDIR\resources\network-service\MinCaveNetworkService.exe" uninstall'
     ${EndIf}
+    Pop $0
+    Pop $1
     ${If} $0 != 0
-      MessageBox MB_OK|MB_ICONSTOP "MinCave 网络服务尚未停止或网络清理失败（$0），卸载已停止。请稍后重试。"
+      DetailPrint "MinCave network service cleanup failed ($0): $1"
+      MessageBox MB_OK|MB_ICONSTOP "MinCave 网络服务清理失败（$0），卸载已停止。$\r$\n$\r$\n$1"
       SetErrorLevel 1
       Abort
     ${EndIf}

@@ -2,7 +2,8 @@
 // Derived from Twitter AIO / TwittrAPI's documented TweetDetail raw layout:
 // https://www.twittrapi.com/docs/reference/tweet-tweetid-replies
 // https://www.twittrapi.com/docs/reference/tweet-tweetid
-// The replies endpoint has no published response example or paid calibration.
+// The raw TweetDetail sample includes the focal tweet and reply modules. It is
+// also the documented layout of /replies (without focal/ancestor context).
 export function parseRapidApiTwitterCommentPage(payload, subjectId, continuation = null) {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   const id = value => typeof value === 'string' && /^\d{1,30}$/u.test(value) ? value : null
@@ -13,29 +14,76 @@ export function parseRapidApiTwitterCommentPage(payload, subjectId, continuation
   if (!object(payload) || !id(subjectId) || !Array.isArray(instructions) || instructions.length > 1000
     || Array.isArray(payload.errors) && payload.errors.length) unusable()
   const comments = [], roots = new Set(), seen = new Set()
-  let bottom = null
-
-  function append(itemContent, inConversation) {
+  let bottom = null, bottomTerminated = false
+  const entries = []
+  for (const instruction of instructions) {
+    if (!object(instruction)) unusable()
+    if (instruction.type === 'TimelineAddEntries') {
+      if (!Array.isArray(instruction.entries) || instruction.entries.length > 1000) unusable()
+      entries.push(...instruction.entries)
+    } else if (instruction.type === 'TimelineReplaceEntry') entries.push(instruction.entry)
+    else if (instruction.type === 'TimelineTerminateTimeline') {
+      // X's TerminateTimelineInstructionMarshaller emits these three directions.
+      // This instruction carries no rows; do not discard a valid reply page.
+      if (!['Top', 'Bottom', 'TopAndBottom'].includes(instruction.direction)
+        || Object.keys(instruction).some(key => !['type', '__typename', 'direction'].includes(key))
+        || Object.hasOwn(instruction, '__typename') && instruction.__typename !== 'TimelineTerminateTimeline') unusable()
+      if (instruction.direction !== 'Top') bottomTerminated = true
+    }
+    // The official TweetDetail sample includes this metadata-only instruction.
+    // Unknown instructions can contain paid rows: fail rather than silently
+    // truncate the page. Their complete response remains in the raw archive.
+    else if (instruction.type !== 'TimelineClearCache'
+      || Object.keys(instruction).some(key => !['type', '__typename'].includes(key))) unusable()
+  }
+  function rawTweet(itemContent) {
     if (!object(itemContent)) unusable()
-    if (itemContent.promotedMetadata) return
+    if (itemContent.promotedMetadata) return null
     const result = itemContent.tweet_results?.result
     if (!object(result)) {
       if (itemContent.itemType === 'TimelineTweet') unusable()
-      return
+      return null
     }
     const raw = result.__typename === 'TweetWithVisibilityResults' ? result.tweet : result
     // Unavailable/deleted tweets are not fabricated into empty comments.
     if (!object(raw)) unusable()
-    if (['TweetTombstone', 'TweetUnavailable'].includes(raw.__typename)) return
+    if (['TweetTombstone', 'TweetUnavailable'].includes(raw.__typename) || raw.promotedMetadata) return null
+    return raw
+  }
+  // TweetDetail's top-level tweet entries contain the focal tweet and its
+  // ancestors. Establish that context before reading modules: entry order is
+  // presentation metadata, not proof that an earlier row is an ancestor.
+  const contextTweets = new Map()
+  for (const row of entries) {
+    if (!object(row) || !object(row.content)) unusable()
+    if (typeof row.entryId !== 'string' || !row.entryId.startsWith('tweet-')) continue
+    const raw = rawTweet(row.content.itemContent)
+    if (!raw) continue
+    const tweetId = id(raw.rest_id ?? raw.legacy?.id_str)
+    if (row.entryId === `tweet-${subjectId}` && tweetId !== subjectId) unusable()
+    if (tweetId) contextTweets.set(tweetId, raw)
+  }
+  const focal = contextTweets.get(subjectId), focalRoot = id(focal?.legacy?.conversation_id_str)
+  const ancestors = new Set()
+  let ancestor = id(focal?.legacy?.in_reply_to_status_id_str)
+  while (ancestor) {
+    if (ancestor === subjectId || ancestors.has(ancestor)) unusable()
+    ancestors.add(ancestor)
+    ancestor = id(contextTweets.get(ancestor)?.legacy?.in_reply_to_status_id_str)
+  }
+  if (focalRoot) roots.add(focalRoot)
+
+  function append(itemContent, inConversation) {
+    const raw = rawTweet(itemContent)
+    if (!raw) return
     const legacy = raw.legacy, commentId = id(raw.rest_id ?? legacy?.id_str)
     if (!object(legacy) || !commentId || legacy.id_str != null && legacy.id_str !== commentId) unusable()
     const conversationId = id(legacy.conversation_id_str), parent = id(legacy.in_reply_to_status_id_str)
     if (legacy.conversation_id_str != null && !conversationId || legacy.in_reply_to_status_id_str != null && !parent) unusable()
-    if (commentId === subjectId || commentId === conversationId || seen.has(commentId)) return
+    if (commentId === subjectId || commentId === conversationId || ancestors.has(commentId) || seen.has(commentId)) return
     // A flat detail timeline also includes ancestors and recommendations. Only
     // explicit direct replies establish membership outside conversation modules.
     if (!inConversation && parent !== subjectId) return
-    if (raw.promotedMetadata) return
     const note = raw.note_tweet?.note_tweet_results?.result
     const text = note?.text ?? note?.richtext?.text ?? legacy.full_text
     if (typeof text !== 'string') unusable()
@@ -73,23 +121,11 @@ export function parseRapidApiTwitterCommentPage(payload, subjectId, continuation
       for (const child of content.items) append(child?.item?.itemContent, true)
     } else if (typeof row.entryId === 'string' && row.entryId.startsWith('tweet-')) append(content.itemContent, false)
   }
-  for (const instruction of instructions) {
-    if (!object(instruction)) unusable()
-    if (instruction.type === 'TimelineAddEntries') {
-      if (!Array.isArray(instruction.entries) || instruction.entries.length > 1000) unusable()
-      for (const row of instruction.entries) entry(row)
-    } else if (instruction.type === 'TimelineReplaceEntry') entry(instruction.entry)
-    // The official TweetDetail sample includes this metadata-only instruction.
-    // Other instructions (notably AddToModule) can carry paid business rows,
-    // but have no reviewed replies layout yet. Preserve their archive and fail
-    // instead of publishing a silently truncated or falsely exhausted page.
-    else if (instruction.type !== 'TimelineClearCache'
-      || Object.keys(instruction).some(key => !['type', '__typename'].includes(key))) unusable()
-  }
+  for (const row of entries) entry(row)
   // Official pagination stops on absent/repeated Bottom cursors or pages with
   // no business entries. Never buy extra pages to fill Hub's requested count.
   const repeated = bottom && bottom === continuation?.cursor
-  const nextParams = comments.length && bottom && !repeated ? { cursor: bottom } : null
+  const nextParams = comments.length && bottom && !repeated && !bottomTerminated ? { cursor: bottom } : null
   return { comments, conversationId: [...roots][0] ?? null,
     providerPage: { hasMore: Boolean(nextParams), nextParams, nextPage: null,
       ...(repeated ? { stopReason: 'continuation_repeated' } : {}) } }

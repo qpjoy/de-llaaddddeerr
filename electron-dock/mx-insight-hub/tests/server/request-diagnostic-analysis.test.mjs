@@ -129,7 +129,8 @@ test('lookup attaches analysis inside the existing read-only boundary with no ex
   assert.equal(result.runs[0].analysis.semanticRelevance, 'not_assessed')
   assert.equal(queries[0], 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   assert.equal(queries.at(-1), 'COMMIT')
-  assert.equal(queries.filter(sql => /request-diagnostics:/u.test(sql)).length, 6)
+  assert.equal(queries.filter(sql => /request-diagnostics:/u.test(sql) && !/request-diagnostics:admission/u.test(sql)).length, 6)
+  assert.equal(result.admissionEvidenceAvailable, false)
 })
 
 test('TikHub rate evidence shows official tiers without assuming the account tier or final failure', () => {

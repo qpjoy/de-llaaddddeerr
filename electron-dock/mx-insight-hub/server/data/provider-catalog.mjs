@@ -1,7 +1,7 @@
 import official from './provider-official-contracts.json' with { type: 'json' }
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { THREADS_SCRAPER_RAPIDAPI_ENDPOINTS } from '../contracts/threads-rapidapi-endpoints.mjs'
-import { TWITTER_RAPIDAPI_COMMENT_ENDPOINT } from '../contracts/twitter-rapidapi-endpoints.mjs'
+import { TWITTER_RAPIDAPI_ENDPOINTS } from '../contracts/twitter-rapidapi-endpoints.mjs'
 import { PROVIDER_CATALOG_ADDITIONS } from './provider-catalog-additions.mjs'
 import tikPrices from './tikhub-official-prices.json' with { type: 'json' }
 import wechat from './wechat-contracts.json' with { type: 'json' }
@@ -23,7 +23,7 @@ export function officialProviderCatalog(operations = []) {
   const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [`${row.provider}:${row.method}:${row.path}`,row]))
   const policies = new Map(operations.map(row => [`${row.provider}:${row.operation}`,row.current]))
   const wechatByPath = new Map(wechat.endpoints.map(row => [row.path, row]))
-  const rows = [...official.endpoints, ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS, TWITTER_RAPIDAPI_COMMENT_ENDPOINT].map(original => {
+  const rows = [...official.endpoints, ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS, ...TWITTER_RAPIDAPI_ENDPOINTS].map(original => {
     const row = original.provider === 'tikhub' && wechatByPath.has(original.path) ? { ...original, ...wechatByPath.get(original.path) } : original
     const endpoint = row.marketplace === 'threads-scraper' ? row : native.get(`${row.provider}:${row.method}:${row.path}`)
     const policy = endpoint && policies.get(`${row.provider}:${endpoint.operation}`)

@@ -5,6 +5,7 @@
 .mih-diagnostic-form button { flex-shrink: 0; }
 .mih-diagnostic-run { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--qp-line); }
 .mih-diagnostic-run h3 { font-size: 16px; }
+.mih-diagnostic-authorization { border-left: 3px solid var(--qp-accent, #15caba); padding: 20px; background: var(--qp-bg-2); }
 .mih-request-diagnostics code, .mih-diagnostic-facts dd { overflow-wrap: anywhere; }
 .mih-diagnostic-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 24px; }
 .mih-diagnostic-facts dt { color: var(--qp-text-3); font-size: 12px; margin-bottom: 6px; }

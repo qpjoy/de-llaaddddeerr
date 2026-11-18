@@ -191,8 +191,8 @@ MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-p
 
 ## Twitter 评论与回复默认 RapidAPI（2026-11-17）
 
-帖子评论与评论回复现在都提供 RapidAPI，并以 RapidAPI 优先、TikHub 保底作为默认策略；复用现有 Twitter AIO 的 `/tweet/{tweetId}/replies` 和 RapidAPI 凭据。标准搜索、账号内容和账号资料沿用既有 RapidAPI 路由。管理页继续支持固定、优先与保底、暂停；帖子评论也保留 JustOne 选项。
+帖子评论与评论回复提供 RapidAPI 选项，目标是以 RapidAPI 优先、TikHub 保底。首次部署的 `/tweet/{tweetId}/replies` 收到 RapidAPI 路径未注册的 404；生产已恢复为固定 TikHub、修订 3。修复为同一 Twitter AIO 产品的 `/tweet/{tweetId}` 独立操作，待受控验证后再选择 RapidAPI。标准搜索、账号内容和账号资料沿用既有 RapidAPI 路由。管理页继续支持固定、优先与保底、暂停；帖子评论也保留 JustOne 选项。
 
 迁移 191 仅更新未修改的 migration-181 默认配置，保留人工已保存策略及审计、历史结果和原供应商游标。RapidAPI 每次最多采购一页，不为填满 `count` 自动补买；仅在首次派发前未就绪时走 TikHub，派发后不自动换供应商重购。回复结构依据供应商公开合同适配，标记为 `derived`，首个正常生产业务页仍待核对。
 
-本轮本地验证完成、尚未部署。新增操作的就绪与发布流程、采购估算价格及只读验收见 [Twitter RapidAPI 评论接入记录](../operations/twitter-rapid-comments-2026-11-17.md)。
+迁移 192 只登记新的 TweetDetail 采购操作，保留当前固定 TikHub 路由。调用方标准接口与字段不变，原生历史接口及游标保留。首次失败占原三次 HTTP 预算的一次，新版本限额工具最多续验评论首屏、评论回复各一次，不覆盖真实上游下一页，也不自动切换生产策略。部署、采购估算价格及回执核对见 [Twitter RapidAPI 评论接入记录](../operations/twitter-rapid-comments-2026-11-17.md)。

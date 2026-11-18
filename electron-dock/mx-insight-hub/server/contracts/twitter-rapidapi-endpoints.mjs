@@ -22,3 +22,19 @@ export const TWITTER_RAPIDAPI_COMMENT_ENDPOINT = Object.freeze({
   ]),
   fixedQuery: Object.freeze({}),
 })
+
+// Keep the released /replies operation unchanged for archived receipts and
+// existing cursors. RapidAPI rejected that path on 2026-11-17; TweetDetail is
+// separately registered and must be verified before changing live routing.
+const threadKey = 'r.twitter_aio_tweet_thread'
+export const TWITTER_RAPIDAPI_THREAD_ENDPOINT = Object.freeze({
+  ...TWITTER_RAPIDAPI_COMMENT_ENDPOINT,
+  key: threadKey, id: threadKey, path: '/tweet/{tweetId}',
+  summary: 'Twitter / X 帖子与回复线程',
+  operation: `native.${threadKey}`, endpointKey: `native.${threadKey}`, hubPath: `/api/v1/data/native/${threadKey}`,
+  schemaVersion: 'twitter-aio.tweet-thread.2026-11-17',
+  sourceUrl: 'https://www.twittrapi.com/docs/reference/tweet-tweetid',
+})
+export const TWITTER_RAPIDAPI_ENDPOINTS = Object.freeze([
+  TWITTER_RAPIDAPI_COMMENT_ENDPOINT, TWITTER_RAPIDAPI_THREAD_ENDPOINT,
+])

@@ -31,7 +31,7 @@ const definitions = [
 // Alternative suppliers selectable through Strategy Search routing. JustOne
 // rows reuse the layouts calibrated from its official samples on 2026-11-02.
 const alternatives = [
-  ['twitter', 'rapidapi', '/tweet/{tweetId}/replies', 'tweetId', ['cursor'], []],
+  ['twitter', 'rapidapi', '/tweet/{tweetId}', 'tweetId', ['cursor'], []],
   ['twitter', 'justone', '/api/twitter/get-post-comments/v1', 'tweetId', ['cursor'], []],
   ['reddit', 'justone', '/api/reddit/get-post-comments/v1', 'postId', ['cursor'], []],
   ['kuaishou', 'justone', '/api/kuaishou/get-video-comment/v1', 'videoId', ['pcursor'], []],
@@ -62,8 +62,16 @@ export const POST_COMMENT_PROVIDER_RECIPES = Object.freeze(Object.fromEntries(Ob
 for (const [platform, providers] of Object.entries(COMMENT_PROVIDER_CATALOG[POST_COMMENTS_ROUTE_INTERFACE])) {
   if (Object.keys(providers).some(provider => !POST_COMMENT_PROVIDER_RECIPES[platform]?.[provider])) throw new Error(`Missing comment recipe for registered supplier: ${platform}`)
 }
+// A signed traversal started under /replies must keep that endpoint. This
+// compatibility recipe is not a default or a caller-selectable request field.
+const historicalTwitterRapidRecipe = recipe(['twitter', 'rapidapi', '/tweet/{tweetId}/replies', 'tweetId', ['cursor'], []])
 export const postCommentRecipe = (platform, provider = null) => provider == null ? POST_COMMENTS_RECIPES[platform] || null
   : POST_COMMENT_PROVIDER_RECIPES[platform]?.[provider] || null
+export function postCommentRecipeForKey(platform, provider, key) {
+  const selected = postCommentRecipe(platform, provider)
+  if (key == null || selected?.key === key) return selected
+  return platform === 'twitter' && provider === 'rapidapi' && key === historicalTwitterRapidRecipe.key ? historicalTwitterRapidRecipe : null
+}
 
 // Bilibili's public BV identifier is a reversible encoding of the numeric AID.
 // Algorithm: https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/bvid_desc.md
@@ -280,7 +288,7 @@ export function providerQuery(request, recipe, continuation) {
 }
 export function buildPostCommentsDispatch(request, job = {}, buffer = null) {
   if (request.legacyRedditCursor || request.legacyKuaishouCursor || request.legacyProviderCursor) throw new AppError(400, 'invalid_cursor', 'Historical comment cursors are replay-only')
-  const recipe = postCommentRecipe(request.platform, request.provider ?? null)
+  const recipe = postCommentRecipeForKey(request.platform, request.provider ?? null, request.recipeKey ?? null)
   if (!recipe?.available) throw new AppError(503, 'external_platform_contract_unverified', 'This platform requires comment response calibration before acquisition', { platform: request.platform, provider: recipe?.provider ?? request.provider ?? null })
   const continuation = buffer ? buffer.providerCursor : job.providerCursor ?? request.initialParams
   const continued = Boolean(recipe.continuationKey && typeof continuation?.cursor === 'string' && /^commenttree:/u.test(continuation.cursor))
