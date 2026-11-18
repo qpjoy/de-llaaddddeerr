@@ -9,11 +9,13 @@ import { createRequire } from 'node:module';
 import { gunzipSync } from 'node:zlib';
 import { installDirectoryCommand } from './build-windows-network-service.mjs';
 const require = createRequire(import.meta.url);
+const workerRequire = createRequire(new URL('../native/windows-network-worker.cjs', import.meta.url));
+const { legacyHdoCleanupScript } = require('../native/windows-legacy-hdo.cjs');
 const { createWindowsNetworkService } = require('../src/windows-network-service.cjs');
 const pluginRequire = createRequire(new URL('../../../../../electron-plugin/packages/electron-plugin-tunnel/package.json', import.meta.url));
 const workerModule = { exports: {} };
 new Function('require', 'module', 'exports', await readFile(new URL('../native/windows-network-worker.cjs', import.meta.url), 'utf8'))(
-  name => name === 'yaml' ? pluginRequire('yaml') : name === '@qpjoy/electron-core-wireguard' ? {} : require(name), workerModule, workerModule.exports,
+  name => name === 'yaml' ? pluginRequire('yaml') : name === '@qpjoy/electron-core-wireguard' ? {} : workerRequire(name), workerModule, workerModule.exports,
 );
 const { validateWireGuardConfig, safeMihomoConfig, assertOwner, validateAPI } = workerModule.exports;
 const SID = 'S-1-5-21-42';
@@ -29,6 +31,55 @@ test('installer embeds its directory validator without treating the selected pat
   assert.match(command, /FromBase64String\(\$env:MINCAVE_INSTALL_DIRECTORY_SCRIPT\)/);
   assert.doesNotMatch(command, /\$INSTDIR/);
   assert.ok(encoded.command.length < 7400 && encoded.script.length < 7400);
+});
+
+test('legacy HDO repair requires a matching account and live collision before stopping or removing rules', { skip: process.platform !== 'win32' }, () => {
+  const { execFileSync } = require('node:child_process');
+  const { randomUUID } = require('node:crypto');
+  const script = legacyHdoCleanupScript(SID).replace('Global\\QPJoy.MXLauncher.NRPT.v1', 'Local\\MinCaveTest.' + randomUUID());
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const fixture = String.raw`
+$root = 'C:\Users\Test\AppData\Roaming\罗盘AI情报系统\plugin-data\qpjoy.electron-plugin-hdo'
+$correct = '"{0}\bin\wireguard.exe" /tunnelservice "{0}\wireguard\hdo-client.conf"' -f $root
+$script:hdo = 'MX HDO / QPJoy HDO hdo-client'
+$script:mx = 'MX-H2I / QPJoy MX-H2I mx-h2i'
+function Rule($name, $owner, $namespace, $server) {
+  [pscustomobject]@{Name=$name;Comment=$owner;DisplayName=$owner;Namespace=@($namespace);NameServers=@([ipaddress]$server)}
+}
+function Get-ItemProperty { param($LiteralPath) [pscustomobject]@{ProfileImagePath='C:\Users\Test'} }
+function Get-CimInstance { param($ClassName,$Filter) [pscustomobject]@{PathName=$script:registered} }
+function Get-DnsClientNrptRule { $script:rules }
+function Get-Service {
+  param($Name,$ErrorAction)
+  $status = if ($Name -eq 'WireGuardTunnel$mx-h2i') { $script:mincaveStatus } else { $script:serviceStatus }
+  [pscustomobject]@{Status=$status}
+}
+function Stop-Service { param($InputObject) $script:events.Add('stop'); $script:serviceStatus='Stopped' }
+function Remove-DnsClientNrptRule { param($Name,[switch]$Force) $script:events.Add($Name) }
+function Export-Clixml {
+  param([Parameter(ValueFromPipeline=$true)]$InputObject,$LiteralPath)
+  begin { $script:events.Add('backup') }
+  process {}
+}
+$cleanup = [scriptblock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encoded}')))
+foreach ($scenario in @('wrong-account','mincave-down','no-conflict','confirmed')) {
+  $script:events = [Collections.Generic.List[string]]::new()
+  $script:serviceStatus = 'Running'
+  $script:mincaveStatus = if ($scenario -eq 'mincave-down') { 'Stopped' } else { 'Running' }
+  $script:registered = if ($scenario -eq 'wrong-account') { $correct.Replace('C:\Users\Test\','C:\Users\Other\') } else { $correct }
+  $script:rules = @(
+    (Rule 'overlap' $script:hdo 'mxinfo-inc.cn' '100.88.0.1')
+    (Rule 'subdomain' $script:hdo 'hr.mxinfo-inc.cn' '100.88.0.1')
+    (Rule 'other' 'Another VPN' 'mxinfo-inc.cn' '100.88.0.1')
+  )
+  if ($scenario -ne 'no-conflict') { $script:rules += Rule 'mincave' $script:mx 'mxinfo-inc.cn' '10.88.0.1' }
+  & $cleanup
+  [Console]::Write('|' + ($script:events -join ',') + '|')
+}
+`;
+  const powershell = path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const actual = execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(fixture, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 30000 });
+  assert.equal(actual, 'failed:verify||no-conflict||no-conflict||cleaned|backup,stop,subdomain,overlap|');
 });
 
 test('Windows installation ACL policy accepts safe secondary-drive paths and rejects replaceable parents', { skip: process.platform !== 'win32' }, async () => {
@@ -327,7 +378,7 @@ test('legacy handoff proves the Windows owner and key, runs only protected scrip
     }};
     const module={exports:{}};
     new Function('require','module','exports','process',(await readFile(new URL('../native/windows-network-worker.cjs',import.meta.url),'utf8'))+'\nmodule.exports.execute=execute;')(
-      name=>name==='yaml'?YAML:name==='@qpjoy/electron-core-wireguard'?core:name==='node:child_process'?{execFile:fakeExec,spawn:()=>{throw Error('must not spawn user code');}}:require(name),module,module.exports,{platform:'win32',env:{SystemRoot:'C:\\Windows'}},
+      name=>name==='yaml'?YAML:name==='@qpjoy/electron-core-wireguard'?core:name==='node:child_process'?{execFile:fakeExec,spawn:()=>{throw Error('must not spawn user code');}}:workerRequire(name),module,module.exports,{platform:'win32',env:{SystemRoot:'C:\\Windows'}},
     );
     const request={operation:'wireguard',ownerSID:SID,root,stateDir,input:{action:'up',config:wireguard}};
     if(failFirst){

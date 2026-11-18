@@ -8,6 +8,7 @@ const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const YAML = require('yaml');
 const core = require('@qpjoy/electron-core-wireguard');
+const { legacyHdoCleanupScript } = require('./windows-legacy-hdo.cjs');
 const exec = promisify(execFile);
 const MAX_CONFIG = 1024 * 1024;
 const PROFILE_NAME = 'mx-h2i';
@@ -254,6 +255,17 @@ async function execute(request) {
   if (process.platform !== 'win32' || typeof root !== 'string' || typeof stateDir !== 'string' || !/^(SYSTEM|S-1-5-(?:\d+-)*\d+)$/.test(ownerSID || '')) throw refusal('无效的网络服务上下文。');
   const state = await readState(stateDir);
   if (operation !== 'uninstall') assertOwner(state, ownerSID);
+  if (operation === 'legacy-hdo.cleanup') {
+    if (input != null || ownerSID === 'SYSTEM') throw refusal('无效的旧 HDO 清理请求。');
+    const encoded = Buffer.from(legacyHdoCleanupScript(ownerSID), 'utf16le').toString('base64');
+    const { stdout } = await exec(systemPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, timeout: 45000, maxBuffer: 1024 * 1024 });
+    const status = stdout.trim();
+    if (status === 'cleaned' || status === 'no-conflict') return { status };
+    if (status === 'failed:verify') {
+      throw refusal('无法确认旧 HDO 隧道属于当前 Windows 账号，请从罗盘断开。', 'legacy_hdo_owner_unverified');
+    }
+    throw refusal('旧 HDO 未能完整断开，请稍后重试或从罗盘断开。', 'legacy_hdo_cleanup_failed');
+  }
   const profileDir = path.join(stateDir, 'wireguard');
   const profile = path.join(profileDir, PROFILE_NAME + '.conf');
   const runtime = () => core.resolveWireGuardConnectionRuntime({ installDir: path.join(root, 'resources', 'wireguard', 'win32-x64'), bundledDir: path.join(root, 'resources', 'wireguard', 'win32-x64'), allowSystemFallback: false });

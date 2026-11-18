@@ -120,7 +120,7 @@ func openRequest(aead cipher.AEAD, frame sealedFrame) (serviceRequest, error) {
 		return request, errors.New("invalid request")
 	}
 	switch request.Operation {
-	case "capabilities", "wireguard", "mihomo.start", "mihomo.stop", "mihomo.status", "mihomo.api", "mihomo.reload":
+	case "capabilities", "wireguard", "legacy-hdo.cleanup", "mihomo.start", "mihomo.stop", "mihomo.status", "mihomo.api", "mihomo.reload":
 		return request, nil
 	default:
 		return request, errors.New("unsupported network operation")

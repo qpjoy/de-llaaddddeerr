@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
-const { networkDiagnosticsProblem, windowsNrptOwnershipConflictMessage } = require('../src/network-diagnostic-policy.cjs');
+const { networkDiagnosticsProblem, windowsNrptOwnershipConflictMessage, hasLegacyLuopanHdoConflict } = require('../src/network-diagnostic-policy.cjs');
 const publicResolution = { severity: 'ok', ok: true, message: 'disconnected 状态已回到系统/外部解析路径。' };
 const internalResolution = { severity: 'ok', ok: true, message: '已由 V2 split DNS 指向 Internal。' };
 const cleanDisconnected = {
@@ -66,4 +66,18 @@ test('older core metadata still identifies owners without inventing their DNS', 
   assert.ok(!message.includes('100.88.0.1'));
   assert.equal(windowsNrptOwnershipConflictMessage({ namespaces: old.namespaces.map(row => ({ ...row, installedNameServers: ['10.88.0.2'] })) }), null);
   assert.equal(windowsNrptOwnershipConflictMessage({ namespaces: old.namespaces.map(row => ({ ...row, ready: true })) }), null);
+});
+
+test('one-click cleanup is offered only for an observed legacy Luopan HDO collision', () => {
+  assert.equal(hasLegacyLuopanHdoConflict(conflict), true);
+  assert.equal(hasLegacyLuopanHdoConflict(cleanDisconnected), false);
+  for (const override of [
+    { namespace: 'internal.mx' },
+    { ownedRuleCount: 0 },
+    { conflictingRules: [{ owner: 'Another VPN', nameServers: ['100.88.0.1'] }] },
+    { conflictingRules: [{ owner: 'MX HDO / QPJoy HDO hdo-client', nameServers: ['192.168.1.1'] }] },
+    { conflictingRules: undefined }
+  ]) {
+    assert.equal(hasLegacyLuopanHdoConflict({ namespaces: [{ ...conflict.namespaces[0], ...override }] }), false);
+  }
 });

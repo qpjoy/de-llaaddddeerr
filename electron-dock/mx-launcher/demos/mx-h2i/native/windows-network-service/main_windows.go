@@ -663,7 +663,7 @@ func (s *networkService) handleConnection(connection net.Conn) {
 	deadline := time.Now().Add(3 * time.Minute)
 	connection.SetDeadline(deadline)
 	s.operations.Lock()
-	result := serviceResponse{OK: true, Value: json.RawMessage(`{"protocol":1,"version":"1.0.0","capabilities":["wireguard","mihomo-tun"]}`)}
+	result := serviceResponse{OK: true, Value: json.RawMessage(`{"protocol":1,"version":"1.0.0","capabilities":["wireguard","mihomo-tun","legacy-hdo-cleanup"]}`)}
 	if time.Now().After(deadline.Add(-150 * time.Second)) {
 		result = serviceResponse{Code: "service_busy", Message: "MinCave 网络服务正忙，请确认连接状态后重试。"}
 	} else if s.poisoned {
