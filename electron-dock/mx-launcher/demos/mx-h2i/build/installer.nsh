@@ -3,6 +3,26 @@
 !ifndef BUILD_UNINSTALLER
   !include "${PROJECT_DIR}\out\windows-network-service\install-directory.nsh"
   !include "nsDialogs.nsh"
+  !include "StrFunc.nsh"
+  ${Using:StrFunc} StrRep
+  Var MinCaveApprovedEmptyDirectory
+
+  ; Only normalize separators. The PowerShell check still rejects relative
+  ; components and special names before Windows can reinterpret them.
+  !macro MinCaveNormalizeDirectory
+    Push $8
+    ${StrRep} $9 "$9" "/" "\"
+    StrLen $8 $9
+    ${While} $8 > 3
+      StrCpy $8 $9 1 -1
+      ${If} $8 != "\"
+        ${Break}
+      ${EndIf}
+      StrCpy $9 $9 -1
+      StrLen $8 $9
+    ${EndWhile}
+    Pop $8
+  !macroend
 
   ; Use the standard directory page with our own leave callback. The
   ; electron-builder page has no hook for validating the edited path.
@@ -23,9 +43,22 @@
 
       Function MinCaveDirectoryLeave
         ; MUI stores the final edit into $INSTDIR after the leave callback.
+        StrCpy $MinCaveApprovedEmptyDirectory ""
         Push $9
         ${NSD_GetText} $mui.DirectoryPage.Directory $9
-        !insertmacro MinCaveValidateDirectory "$9" "1"
+        !insertmacro MinCaveNormalizeDirectory
+        !insertmacro MinCaveValidateDirectory "$9" "preview"
+        ${If} $0 == 2
+          MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "所选空目录由普通用户拥有。是否修正权限并继续？$\r$\n$\r$\n安装器会在原路径重新创建一个由管理员组管理的空目录。$\r$\n$\r$\n$9" IDYES approveEmptyDirectory
+          Pop $9
+          Abort
+          approveEmptyDirectory:
+          StrCpy $MinCaveApprovedEmptyDirectory $9
+          StrCpy $0 0
+        ${EndIf}
+        ${If} $0 == 0
+          ${NSD_SetText} $mui.DirectoryPage.Directory "$9"
+        ${EndIf}
         Pop $9
         ${If} $0 != 0
           !insertmacro MinCaveDirectoryError
@@ -39,7 +72,7 @@
     MessageBox MB_OK|MB_ICONSTOP "无法安装到所选目录。请选择默认目录，或由系统或管理员管理的本地 NTFS/ReFS 磁盘子目录。$\r$\n$\r$\n$1"
   !macroend
 
-  !macro MinCaveValidateDirectory TARGET CHECK_ONLY
+  !macro MinCaveValidateDirectory TARGET MODE
       ; Pass the selected path as a register value, never System plugin source.
       Push $9
       Push $2
@@ -49,7 +82,7 @@
         SetErrorLevel 1
         Quit
       ${EndIf}
-      System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_CHECK_ONLY", w "${CHECK_ONLY}") i.r0'
+      System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_MODE", w "${MODE}") i.r0'
       ${If} $0 == 0
         SetErrorLevel 1
         Quit
@@ -74,7 +107,7 @@
       Pop $1
       System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY", p 0)'
       System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_SCRIPT", p 0)'
-      System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_CHECK_ONLY", p 0)'
+      System::Call 'kernel32::SetEnvironmentVariableW(w "MINCAVE_INSTALL_DIRECTORY_MODE", p 0)'
       Pop $2
       Pop $9
   !macroend
@@ -85,7 +118,19 @@
 !macro customHeader
   !ifndef BUILD_UNINSTALLER
     Section "-MinCave installation directory"
-      !insertmacro MinCaveValidateDirectory "$INSTDIR" "0"
+      Push $9
+      StrCpy $9 $INSTDIR
+      !insertmacro MinCaveNormalizeDirectory
+      StrCpy $INSTDIR $9
+      Pop $9
+      ${If} $MinCaveApprovedEmptyDirectory S== $INSTDIR
+      ${AndIf} $MinCaveApprovedEmptyDirectory != ""
+        ; Release the install directory as the current working directory.
+        SetOutPath $SYSDIR
+        !insertmacro MinCaveValidateDirectory "$INSTDIR" "repair-empty"
+      ${Else}
+        !insertmacro MinCaveValidateDirectory "$INSTDIR" "prepare"
+      ${EndIf}
       ${If} $0 != 0
         !insertmacro MinCaveDirectoryError
         SetErrorLevel 1

@@ -119,7 +119,7 @@ foreach($sddl in @('O:BAG:BAD:(A;;FA;;;BA)(A;;0x40;;;BU)','O:BAG:BAD:(A;;FA;;;BA
   try { Assert-InstallAcl 'D:\\Apps' $true } catch { $rejected=$true }
   if(-not $rejected){throw 'Unsafe parent accepted'}
 }
-foreach($value in @('\\\\server\\share\\MinCave','D:\\','D:\\Apps.\\MinCave','D:\\Apps\\..\\MinCave','D:\\Apps\\NUL')) {
+foreach($value in @('\\\\server\\share\\MinCave','D:\\','D:/','D:\\Apps.\\MinCave','D:\\Apps\\..\\MinCave','D:/Apps/../MinCave/','D:\\Apps\\NUL')) {
   $rejected=$false;try { Prepare-MinCaveDirectory $value } catch { $rejected=$true }
   if(-not $rejected){throw 'Unsafe path accepted'}
 }
@@ -127,7 +127,45 @@ $script:parentAcl='O:BAG:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)'
 function Test-Path { param($LiteralPath) $true }
 function Get-ChildItem { param($LiteralPath,[switch]$Force) }
 function Set-Acl { throw 'Directory page validation attempted to write permissions' }
-Prepare-MinCaveDirectory ($env:SystemDrive + '\\MinCaveDirectoryValidationFixture') -CheckOnly
+$script:target = $env:SystemDrive + '\\MinCaveDirectoryValidationFixture'
+Prepare-MinCaveDirectory $script:target -CheckOnly
+function Get-Item {
+  param($LiteralPath,[switch]$Force)
+  [pscustomobject]@{Attributes=$script:itemAttributes;PSIsContainer=($LiteralPath -eq $script:target)}
+}
+function Get-Acl {
+  param($LiteralPath)
+  $sid = if ($LiteralPath -eq $script:target -or $script:unsafeParent) { 'S-1-5-21-1-2-3-1000' } else { 'BA' }
+  $acl=[Security.AccessControl.DirectorySecurity]::new()
+  $acl.SetSecurityDescriptorSddlForm('O:' + $sid + 'G:BAD:P(A;;FA;;;BA)(A;;GRGX;;;BU)')
+  return $acl
+}
+function Get-ChildItem { param($LiteralPath,[switch]$Force) if ($script:nonEmpty) { 'hidden-file' } }
+function Replace-EmptyInstallDirectory {
+  param($Path,$Security)
+  if ($Path -ne $script:target -or $Security.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') { throw 'Invalid replacement' }
+  $script:replaced += 1
+}
+function Assert-Rejected([bool]$Preview, [bool]$Repair) {
+  $rejected=$false
+  try { Prepare-MinCaveDirectory $script:target -CheckOnly:$Preview -RepairEmpty:$Repair } catch { $rejected=$true }
+  if (-not $rejected) { throw 'Unsafe or unapproved repair accepted' }
+}
+$script:replaced=0
+foreach($inputPath in @($script:target, ($script:target + '\\'), ($script:target.Replace('\\','/') + '/'))) {
+  if ((Prepare-MinCaveDirectory $inputPath -CheckOnly) -ne 'repair-available' -or $script:replaced) { throw 'Expected a read-only repair offer' }
+}
+Assert-Rejected $false $false
+$script:nonEmpty=$true
+Assert-Rejected $false $true
+$script:nonEmpty=$false
+$script:unsafeParent=$true
+Assert-Rejected $true $false
+Assert-Rejected $false $true
+$script:unsafeParent=$false
+if ($script:replaced) { throw 'Rejected repair modified the directory' }
+Prepare-MinCaveDirectory $script:target -RepairEmpty
+if ($script:replaced -ne 1) { throw 'Confirmed empty directory was not replaced' }
 [Console]::Out.Write('directory-policy-ok')
 `;
   const source = script + '\n' + scenario;
