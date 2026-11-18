@@ -64,9 +64,14 @@ function Replace-EmptyInstallDirectory([string]$Path, [Security.AccessControl.Di
 }
 
 function Prepare-MinCaveDirectory([string]$Selected, [switch]$CheckOnly, [switch]$RepairEmpty) {
+    $Selected = $Selected.Replace('/', '\')
     if ($Selected -notmatch '^[A-Za-z]:\\' -or $Selected.Substring(2) -match '[:<>"|?*\x00-\x1f]') { throw 'Choose an absolute local installation directory.' }
+    $Selected = $Selected.TrimEnd([char]'\')
+    if ($Selected.Length -le 2) { throw 'Choose an application subdirectory, not a drive root.' }
     foreach ($part in $Selected.Substring(3).Split('\')) {
-        if (-not $part -or $part -match '[. ]$' -or $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'The installation directory contains an unsupported path component.' }
+        if (-not $part -or $part -match '[. ]$' -or $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') {
+            throw ('Unsupported path component [{0}] in [{1}].' -f $part, $Selected)
+        }
     }
     $target = [IO.Path]::GetFullPath($Selected)
     $volume = [IO.Path]::GetPathRoot($target)
