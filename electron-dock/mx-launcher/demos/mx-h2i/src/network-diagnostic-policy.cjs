@@ -1,6 +1,7 @@
 'use strict';
 
 const rows = (value) => Array.isArray(value) ? value : [];
+const LEGACY_LUOPAN_HDO_OWNER = 'MX HDO / QPJoy HDO hdo-client';
 const sameServers = (left, right) => {
   const a = [...new Set(rows(left))].sort();
   const b = [...new Set(rows(right))].sort();
@@ -25,6 +26,17 @@ function windowsNrptOwnershipConflictMessage(status) {
     return `${entry.namespace}（MX-H2I → ${rows(entry.expectedNameServers).join(', ')}；其他规则：${foreign}）`;
   }).join('；');
   return `Windows split DNS 存在同域规则冲突：${detail}。MX-H2I 不会自动删除其他产品的规则；请先协调这些域名的归属。重复“修复网络”不会消除其他产品的冲突规则。`;
+}
+
+function hasLegacyLuopanHdoConflict(status) {
+  return rows(status?.namespaces).some(entry =>
+    ['mxinfo-inc.cn', '.mxinfo-inc.cn'].includes(entry.namespace)
+    && entry.ownedRuleCount > 0
+    && sameServers(entry.installedNameServers, ['10.88.0.1'])
+    && rows(entry.conflictingRules).some(rule =>
+      rule.owner === LEGACY_LUOPAN_HDO_OWNER && sameServers(rule.nameServers, ['100.88.0.1'])
+    )
+  );
 }
 
 function networkDiagnosticsProblem({ phase, resolution, windowsNrpt }) {
@@ -54,4 +66,4 @@ function networkDiagnosticsProblem({ phase, resolution, windowsNrpt }) {
   return null;
 }
 
-module.exports = { networkDiagnosticsProblem, windowsNrptOwnershipConflictMessage };
+module.exports = { networkDiagnosticsProblem, windowsNrptOwnershipConflictMessage, hasLegacyLuopanHdoConflict };

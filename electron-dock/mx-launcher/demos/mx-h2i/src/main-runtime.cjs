@@ -15,7 +15,7 @@ const { execFile } = require('node:child_process');
 const { createHash, randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { inspectOrRepairWindowsOwnership } = require('./windows-ownership-recovery.cjs');
-const { networkDiagnosticsProblem, windowsNrptOwnershipConflictMessage } = require('./network-diagnostic-policy.cjs');
+const { networkDiagnosticsProblem, windowsNrptOwnershipConflictMessage, hasLegacyLuopanHdoConflict } = require('./network-diagnostic-policy.cjs');
 const {
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   darwinSupersedableOwnershipOwnerIds,
@@ -5573,7 +5573,8 @@ function windowsNrptResolutionHint(windowsNrpt) {
 }
 
 async function repairSystemNetworkForRuntime(reason = 'manual-repair', options = {}) {
-  if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(runtime.auth);
+  const repairAuth = runtime.auth;
+  if (MINCAVE_UI_ENABLED) await mincaveBridge.checkLogin(repairAuth, undefined, { requireCurrent: true });
   const foregroundOperation = options.foregroundOperation || null;
   const checkpoint = (stage) => {
     if (foregroundOperation) {
@@ -5594,6 +5595,34 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair', options =
   }
   const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
   if (process.platform === 'win32') {
+    if (MINCAVE_UI_ENABLED && reason === 'manual-repair' && foregroundOperation
+      && before.phase === 'connected' && runtime.connection?.wireGuard?.active === true
+      && hasLegacyLuopanHdoConflict(before.windowsNrpt)) {
+      checkpoint('legacy-hdo-confirmation');
+      const choice = await dialog.showMessageBox(mainWindow || undefined, {
+        type: 'warning',
+        title: '修复网络',
+        message: '罗盘旧 HDO 与 MinCave 使用了冲突的 DNS 规则',
+        detail: '继续后会暂时断开本机罗盘的旧 HDO 线路，再修复 MinCave 网络。',
+        buttons: ['取消', '断开旧 HDO 并修复'],
+        defaultId: 0,
+        cancelId: 0
+      });
+      checkpoint('legacy-hdo-confirmed');
+      if (choice.response !== 1 || runtime.auth?.accessToken !== repairAuth?.accessToken
+        || runtime.connection?.diagnostics?.applicationAccessDenied) {
+        return { before, skipped: true, reason: 'legacy-hdo-cleanup-canceled' };
+      }
+      try {
+        updateForegroundNetworkOperation(foregroundOperation, 'legacy-hdo-cleanup', { privilegedStarted: true });
+        const cleanup = await windowsNetworkServiceForRuntime().cleanLegacyHdo();
+        if (cleanup.status === 'cleaned') touchRuntime('legacy Luopan HDO DNS conflict cleaned');
+      } catch (error) {
+        checkpoint('legacy-hdo-cleanup-failed');
+        runtime.feedback = { tone: 'warning', message: error.mincaveServiceError ? errorMessage(error) : '旧 HDO 自动断开失败，请稍后重试。' };
+        return { before, skipped: true, reason: 'legacy-hdo-cleanup-failed' };
+      }
+    }
     checkpoint('ownership-repair');
     const ownershipRecovery = await windowsOwnershipRecoveryForRuntime(reason, true);
     if (ownershipRecovery.repaired || ownershipRecovery.candidateOwnerIds?.length) {
@@ -5869,6 +5898,7 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair', options =
     phase: networkDiagnosticPhase()
   });
   checkpoint('diagnostics-after');
+  const dnsConflict = windowsNrptOwnershipConflictMessage(after?.windowsNrpt);
   runtime.connection = {
     ...(runtime.connection || idleConnection()),
     diagnostics: {
@@ -5890,7 +5920,7 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair', options =
     }
   };
   runtime.feedback = {
-    tone: systemDomainProxy?.error
+    tone: dnsConflict || systemDomainProxy?.error
       || wireGuardSystemRepair?.ok === false
       || (endpointRouteRepair?.stale === true && endpointRouteRepair?.repaired !== true)
       || (process.platform === 'darwin' && !systemDomainProxyConnectionReady(systemDomainProxy))
@@ -5898,11 +5928,11 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair', options =
       : after?.resolution?.severity === 'error'
         ? 'warning'
         : 'success',
-    message: connected
+    message: dnsConflict || (connected
       ? `已重新确认 MX-H2I WireGuard 路由和 PAC/DNS：${after?.resolution?.message || 'network ready'}${windowsSystemDnsDegraded && windowsBrowserReady ? ' 浏览器路径 ready，非 PAC 程序的系统 DNS 仍为 degraded。' : ''}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
       : wireGuardProbe?.ready === true
         ? `WireGuard 与 Internal API 已保留，但 PAC/split DNS 系统路径仍未 ready：${systemDomainProxy?.systemResolution?.message || systemDomainProxy?.resolverError || systemDomainProxy?.error || after?.resolution?.message || 'system DNS proof failed'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
-      : `已执行系统网络修复，但 WireGuard 尚未恢复 ready：${after?.resolution?.message || wireGuardProbe?.message || 'stale state cleared'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
+      : `已执行系统网络修复，但 WireGuard 尚未恢复 ready：${after?.resolution?.message || wireGuardProbe?.message || 'stale state cleared'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`)
   };
   touchRuntime(`system network repaired: ${reason}`);
   return {

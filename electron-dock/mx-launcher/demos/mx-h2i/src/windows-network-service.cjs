@@ -7,7 +7,7 @@ const { execFile } = require('node:child_process');
 const PIPE = '\\\\.\\pipe\\MinCave.Network.v1';
 const PROTOCOL = 1;
 const MAX_FRAME = 2 * 1024 * 1024;
-const OPERATIONS = new Set(['capabilities', 'wireguard', 'mihomo.start', 'mihomo.stop', 'mihomo.status', 'mihomo.api', 'mihomo.reload']);
+const OPERATIONS = new Set(['capabilities', 'wireguard', 'legacy-hdo.cleanup', 'mihomo.start', 'mihomo.stop', 'mihomo.status', 'mihomo.api', 'mihomo.reload']);
 
 function serviceError(code, message) {
   return Object.assign(new Error(message), { code, mincaveServiceError: true });
@@ -101,11 +101,19 @@ function createWindowsNetworkService(options = {}) {
       });
     });
   }
+  async function ensureAvailable() {
+    const status = await request('capabilities');
+    if (status?.protocol !== PROTOCOL || !status?.capabilities?.includes('wireguard')) throw serviceError('incompatible_service', '网络服务版本不兼容，请升级完整安装包。');
+    return status;
+  }
   return Object.freeze({
-    ensureAvailable: async () => {
-      const status = await request('capabilities');
-      if (status?.protocol !== PROTOCOL || !status?.capabilities?.includes('wireguard')) throw serviceError('incompatible_service', '网络服务版本不兼容，请升级完整安装包。');
-      return status;
+    ensureAvailable,
+    cleanLegacyHdo: async () => {
+      const status = await ensureAvailable();
+      if (!status.capabilities.includes('legacy-hdo-cleanup')) {
+        throw serviceError('legacy_hdo_cleanup_unavailable', '请升级 MinCave Windows 完整安装包以使用旧 HDO 清理。');
+      }
+      return request('legacy-hdo.cleanup');
     },
     tunnel: (input) => request('wireguard', input),
     mihomo: Object.freeze({
