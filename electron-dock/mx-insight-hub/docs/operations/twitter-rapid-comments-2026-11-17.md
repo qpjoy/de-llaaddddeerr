@@ -1,6 +1,40 @@
 # Twitter 评论与回复默认 RapidAPI
 
-日期：2026-11-17。最新状态：用户确认 Public 部署成功，同一份 RapidAPI 真实首屏归档已通过 parser、projection、workflow 三层复验，均为 36 条且 JSON 安全。累计仍为 2 次供应商 HTTP 请求，thread-replies 未尝试；两个评论接口最后确认仍固定 TikHub、revision 3。回复、上游翻页和整体线上切换尚未验收。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+首次记录：2026-11-17；更新：2026-11-18。真实首屏归档的 36 条评论已通过三层复验；受限回复验证成功交付 4 条回复，公共合同、别名与引用校验均通过。用户已明确追加最多一次同帖原游标翻页验证，原三次调用额度不重置，累计上限为四次。新增调用尚未执行。两个评论接口最后确认仍固定 TikHub、revision 3，上次 globalPolicyWrites=0。真实上游翻页、外部 HTTP 入口和整体线上切换尚未验收。此次只修改 Hub，不修改 Launcher、MX-H2I、登录、SSO 或联网配置。
+
+## 2026-11-18 追加一次翻页授权
+
+用户明确选择“追加 1 次翻页验证”，范围为从原首屏归档读取同帖 Bottom 游标，最多新增一次可能计费的 RapidAPI 请求，不重买首屏、不切换生产路由。总预算由既有三次加本次专用一次构成；旧执行模式不获得新的采购权限，历史回执和幂等键保持原样。
+
+这次验证使用显式 Rapid 网关的 `params.cursor` 导入同帖供应商游标，启动新的 imported_continuation 遍历。原首屏为失败 usage，不能给它伪造成功 manifest 或签名 nextCursor。因此验收范围为真实供应商续页响应、标准字段与正常交付回执，不能据此宣称原首屏的 Hub 签名分页链、跨页去重或外部 HTTP 入口已验证。游标过期、拒绝或响应丢失都不会自动重买首屏或重试。
+
+新增专用 `--resume-next`，使用独立固定幂等键 `ops-twitter-rapid-comments-7e7cd2d0-v1-thread-next`。原 `--execute`、`--resume-thread`、`--resume-replies` 的执行上限仍为三次；新入口要求准确存在前三笔固定回执，再允许第四次。读取包含全部六个阶段的幂等键，发现第五笔调用即拒绝。任何已有 thread-next usage（包括预留、失败、未知、没有上游调用的记录）都会使重跑只读。
+
+预检会再次核对固定 UUID、owner、端点版本、归档长度和 SHA，并用容器已安装的 parser/projection/workflow 重验首屏 36 条与成功回复 4 条；回复离线投影还须与已交付 DTO 一致。实际 HTTP 发出前再次核对原来源和三笔回执，要求当前两个生产评论策略仍固定 TikHub，只允许原帖子路径、原归档游标及完整预期查询参数的一次 GET。正常权限、采购控制、价格、账本与归档流程继续生效。
+
+**仅同步更新后的 `server/ops/verify-twitter-rapid-comments.mjs` 到服务器 Hub 工作目录，不需要重建镜像。** 在该目录执行：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - --resume-next \
+  < server/ops/verify-twitter-rapid-comments.mjs
+```
+
+首次实际执行应为 `mode=resume_next`、`supplierCallsBefore=3`、`supplierHttpCallsMade=1`、`supplierCallsAfter=4`、`remainingSupplierCalls=0`。若前置条件不满足则零调用停止。成功交付要求 thread-next 为 saved_success/HTTP 200、publicContractValid=true，且 sourceUnchanged/originalFailureUnchanged/threadFailureUnchanged/replySuccessUnchanged 均为 true；报告还会返回 routesAfter 供核对。
+
+`cursorTransmissionVerified` 确认发送的是原游标，`upstreamContinuationVerified` 确认存在实际成功续页回执。`overlapCount` / `newCommentCount` 比较本页与原首屏，只有新评论大于零才标记 `continuationAdvanceObserved=true`；空页或全重复页不能作为正向推进证据。报告保持 `signedCursorChainVerified=false`、`crossPageDeduplicationVerified=false`、`httpIngressVerified=false`、`coverageComplete=false`，不要据此切换所有 Twitter 接口。验证结果待服务器执行后记录。
+
+本次本地回归 53 项通过、零失败、零跳过：28 项限额验证、8 项归档诊断、17 项 Rapid 评论合同测试。包含真实网关的精确游标传输、成功/空页/重复页/拒绝/过期/未知结果、并发互斥、重复执行只读、旧选项不获追加额度、历史证据漂移与真实 PGlite SQL 检查；`git diff --check` 通过。本机未发出真实供应商请求。
+
+## 回复正样本验证通过，原三次额度已用完
+
+用户返回 `resume_replies` 的 thread-replies 为 saved_success，usage `c352b401-4351-407e-9a1d-aaff849c6394` 为 committed/200；provider call `0b053805-603a-4bc8-b228-23e6d370d548` 为 succeeded/200/billed=null，原始响应 26,874 字节，SHA-256 `818bf762557a59853959fc63162562e4ef13e9b0876b5bf4dddb0e163b3bf47e`，长度及哈希已验证。billed=null 仍不能确认供应商实际计费金额。
+
+publicContractValid=true、positiveRowsObserved=true，resultCount/textCount/authorIdCount/publishedAtCount 均为 4，aliasesVerified/rawStringWrapperVerified/referencesVerified 均为 true。该回复页 hasMore=false、nextCursorPresent=false、paginationStatus=exhausted。因此有真实回复正样本证据，但不能把“回复已耗尽”当作原帖子非空游标的翻页验证。用户本次粘贴在 originalStages 中截断，未展示报告末尾的三项 unchanged 和 routesAfter；这里只记录已提供的成功阶段及 globalPolicyWrites=0，不补造缺失字段。
+
+此次 supplierCallsBefore=2，新增一个已成功回执，原三次授权已耗尽。旧模式保持 MAX_CALLS=3，不重置幂等键或删除回执。随后用户明确追加一次，专用入口及执行范围见本文顶部；不自动切换生产路由。
+
+若继续验证上游翻页，具体范围应为：只读核验同一首屏归档及已成功的回复回执，从首屏归档取原帖子的 Bottom 游标，最多请求原帖子下一页一次，不重买首屏、不采集其他帖子、不修改全局路由。当前 Twitter 合同允许通过 initialParams 导入供应商游标；这可验证真实上游续页及返回投影，但原首屏是失败 usage，没有成功交付的 Hub nextCursor，不能伪造其签名游标或把该测试称为原交付的完整游标恢复验证。新增付费执行入口及调用额度须在追加授权后启用。
 
 ## 真实首屏归档复验通过
 
@@ -8,7 +42,7 @@
 
 这确认当前部署代码能处理该真实首屏并投影到 Hub 的现有合同；不把原 committed/502 历史回执改写为成功，也不宣称外部 HTTP 入口、真实回复或下一页已经通过。非空游标只说明存在续页参数，尚无上游续页成功证据。原三次授权仍剩一次，下一步仅用于受限回复验证，生产路由先保持原状。
 
-## 剩余一次回复验证（当前执行）
+## 剩余一次回复验证（已执行，重跑只读）
 
 新增 `verify-twitter-rapid-comments.mjs --resume-replies`，只使用原来尚未执行的 `THREAD_KEYS[1]`。普通无参、`--execute` 和 `--resume-thread` 不会绕过现有回执重买首屏。无参预览的 installedContract 已改为检查当前 TweetDetail 合同，避免新版本因仍比对旧 recipe 而误报未安装。
 

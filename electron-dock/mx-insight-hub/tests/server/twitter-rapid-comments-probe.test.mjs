@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { previewRapidComments, runRapidCommentVerification, inspectRapidCommentError, inspectThreadResumeEvidence, assertThreadResumeEvidence,
   SOURCE_REQUEST_ID, KEYS, OPERATION, THREAD_KEYS, THREAD_OPERATION, RESUME_SOURCE, REPLY_SOURCE,
-  assertReplyResumeEvidence } from '../../server/ops/verify-twitter-rapid-comments.mjs'
+  assertReplyResumeEvidence, assertNextResumeEvidence, THREAD_NEXT_KEY, NEXT_SOURCE } from '../../server/ops/verify-twitter-rapid-comments.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { AppError } from '../../server/core/errors.mjs'
@@ -25,7 +25,9 @@ const page = (tweets, cursor = null) => ({ data: { threaded_conversation_with_in
   ...(cursor ? [{ content: { entryType: 'TimelineTimelineCursor', cursorType: 'Bottom', value: cursor } }] : [])] }] } } })
 
 async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Private supplier refusal' }, rejectedStatus = 403, rejectedHeaders = {},
-  empty = false, noReplies = false, fallback = true, legacyReceipt = true, threadReceipt = false, threadCount = 36, responseFactory = null } = {}) {
+  empty = false, noReplies = false, fallback = true, legacyReceipt = true, threadReceipt = false, threadCount = 36,
+  replyReceipt = false, firstCursor = 'private-first-cursor', responseFactory = null } = {}) {
+  threadReceipt ||= replyReceipt
   const store = new MemoryStore(), service = new HubService({ store, apiKeyPepper: pepper })
   const tenant = await service.createTenant({ name: 'Probe fixture' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Existing owner' })
@@ -68,7 +70,7 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
   const threadCall = { ...legacyCall, id: REPLY_SOURCE.callId, usage_request_id: threadRequest.id, operation: THREAD_OPERATION,
     endpoint_key: THREAD_OPERATION, endpoint_version: 'twitter-aio.tweet-thread.2026-11-17', outcome: 'succeeded_unusable', http_status: 200,
     billed: null, error_code: 'invalid_social_contract', completed_at: '2026-11-17T00:00:00.000Z' }
-  const threadBytes = Buffer.from(JSON.stringify(page(Array.from({ length: threadCount }, (_, i) => tweet(String(201 + i), '100', noReplies ? 0 : 3)), 'private-first-cursor')))
+  const threadBytes = Buffer.from(JSON.stringify(page(Array.from({ length: threadCount }, (_, i) => tweet(String(201 + i), '100', noReplies ? 0 : 3)), firstCursor)))
   const threadArchive = { body_size: threadBytes.length, body_sha256: createHash('sha256').update(threadBytes).digest('hex'),
     body_bytes: threadBytes, captured_at: '2026-11-17T00:00:00.000Z' }
   const replyEvidenceCheck = (saved, stages) => {
@@ -89,12 +91,15 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
     priceBook: { currency: 'USD', pricingAsOf: '2026-11-17T00:00:00Z', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000,
       unitCostMinorByEndpoint: { [THREAD_OPERATION]: 1 } } }, { runtime: { config, credentialConfigured: true } })
   const http = []
+  let buildingReplyReceipt = false
   const adapter = new RapidApiAdapter({ apiKey: secret, timeoutMs: 100, fetchImpl: async url => {
+    if (buildingReplyReceipt) return Response.json(page(Array.from({ length: 4 }, (_, i) => tweet(String(401 + i), '201'))))
     http.push(String(url))
     if (http.length === failAt) throw new Error(`Transport failed with ${secret}`)
     if (http.length === rejectAt) return Response.json(rejectedBody, { status: rejectedStatus, headers: rejectedHeaders })
     if (responseFactory) return responseFactory(url, http.length)
     if (empty) return Response.json(page([], 'opaque-private-cursor'))
+    if (replyReceipt) return Response.json(page([tweet('501', '100')], 'next-private-cursor'))
     if (threadReceipt) return Response.json(page([tweet('401', '201')], 'opaque-private-cursor'))
     return Response.json(http.length === 1 ? page([tweet('201', '100', noReplies ? 0 : 3)], 'opaque-private-cursor')
       : page([tweet('203', noReplies ? '200' : '201')]))
@@ -102,12 +107,35 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'twitter' })
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'rapidapi', apiKeyPepper: pepper,
     reservationLeaseMs: 150000, operationControlStore: controls, logger: { warn() {} } })
+  let replyRequest, replyCall, replyArchive
+  if (replyReceipt) {
+    buildingReplyReceipt = true
+    const body = { platform: 'twitter', replyRef: { platform: 'twitter', commentId: '201', contentId: '100' }, count: 100, includeRaw: false }
+    const result = await gateway.commentReplies(context, { body, platform: 'twitter', path: '/api/v1/data/social/comment-replies', idempotencyKey: 'offline-seed-reply' })
+    const call = [...platformStore.calls.values()].find(row => row.usageRequestId === result.requestId)
+    replyRequest = { ...legacyRequest, id: NEXT_SOURCE.requestId, idempotency_key: THREAD_KEYS[1], response_status: 200,
+      response_body: structuredClone(result.body), acquisition_request: { method: 'POST', path: '/api/v1/data/social/comment-replies', body } }
+    replyCall = { ...Object.fromEntries(Object.entries(dbRow(call)).filter(([key]) => ['tenant_id', 'consumer_id', 'api_key_id',
+      'provider_key', 'operation', 'endpoint_key', 'marketplace', 'contract_version', 'endpoint_version', 'outcome', 'http_status',
+      'billed', 'error_code', 'completed_at'].includes(key))), id: NEXT_SOURCE.callId, usage_request_id: NEXT_SOURCE.requestId }
+    replyArchive = dbRow(platformStore.restrictedResponseArchives.get(call.id))
+    buildingReplyReceipt = false
+  }
+  const replyFingerprint = replyArchive ? { sha256: replyArchive.body_sha256, bodySize: replyArchive.body_size } : null
+  const nextEvidenceCheck = (saved, stages) => {
+    const copies = structuredClone(stages), evidence = copies.find(row => row.stage === 'thread-replies')?.providerCalls?.[0]
+    if (evidence) {
+      assert.equal(evidence.sha256, replyFingerprint.sha256); assert.equal(evidence.bodySize, replyFingerprint.bodySize)
+      evidence.sha256 = NEXT_SOURCE.sha256; evidence.bodySize = NEXT_SOURCE.bodySize
+    }
+    assertNextResumeEvidence(saved, copies)
+  }
   let locked = false, lockAvailable = true, ownerLookups = 0, foreignCall = false
   const lookup = store.findApiKeyById.bind(store)
   store.findApiKeyById = async value => { ownerLookups++; return lookup(value) }
-  const requests = () => [...(legacyReceipt ? [legacyRequest] : []), ...(threadReceipt ? [threadRequest] : []), ...[...store.requests.values()]
-    .filter(row => [...KEYS, ...THREAD_KEYS].includes(row.idempotencyKey)).map(dbRow)]
-  const calls = () => [...(legacyReceipt ? [legacyCall] : []), ...(threadReceipt ? [threadCall] : []), ...[...platformStore.calls.values()]
+  const requests = () => [...(legacyReceipt ? [legacyRequest] : []), ...(threadReceipt ? [threadRequest] : []), ...(replyReceipt ? [replyRequest] : []), ...[...store.requests.values()]
+    .filter(row => [...KEYS, ...THREAD_KEYS, THREAD_NEXT_KEY].includes(row.idempotencyKey)).map(dbRow)]
+  const calls = () => [...(legacyReceipt ? [legacyCall] : []), ...(threadReceipt ? [threadCall] : []), ...(replyReceipt ? [replyCall] : []), ...[...platformStore.calls.values()]
     .filter(row => requests().some(request => request.id === row.usageRequestId)).map(dbRow)]
   const queries = [], routes = ['post-comments','comment-replies'].map(interface_key => ({
     interface_key, mode: 'fixed', primary_provider: 'tikhub', fallback_provider: null, revision: 3 }))
@@ -122,6 +150,7 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
       if (args[0] === sourceCall.id) return { rows: [sourceArchive] }
       if (args[0] === legacyCall.id) return { rows: [legacyArchive] }
       if (threadReceipt && args[0] === threadCall.id) return { rows: [threadArchive] }
+      if (replyReceipt && args[0] === replyCall.id) return { rows: [replyArchive] }
       const value = platformStore.restrictedResponseArchives.get(args[0])
       return { rows: value ? [dbRow(value)] : [] }
     }
@@ -137,6 +166,7 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
     postCommentProviderGateways: { twitter: { rapidapi: gateway } }, commentReplyGateways: { twitter: { rapidapi: gateway } } }
   return { runtime, store, gateway, platformStore, adapter, source, sourceArchive, sourceCall, owner, routes, queries, http, context,
     legacyRequest, legacyCall, legacyArchive, resumeEvidenceCheck, threadRequest, threadCall, threadArchive, replyEvidenceCheck,
+    replyRequest, replyCall, replyArchive, nextEvidenceCheck,
     run: options => runRapidCommentVerification({ runtime, AppError, resumeThread: true, resumeEvidenceCheck, ...options }),
     preview: options => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }), ...options }),
     resumePreview: options => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }),
@@ -144,6 +174,9 @@ async function harness({ failAt = 0, rejectAt = 0, rejectedBody = { message: 'Pr
     replyRun: options => runRapidCommentVerification({ runtime, AppError, resumeReplies: true, resumeEvidenceCheck, replyEvidenceCheck, ...options }),
     replyPreview: options => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }),
       resumeReplies: true, resumeEvidenceCheck, replyEvidenceCheck, ...options }),
+    nextRun: options => runRapidCommentVerification({ runtime, AppError, resumeNext: true, resumeEvidenceCheck, replyEvidenceCheck, nextEvidenceCheck, ...options }),
+    nextPreview: options => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }),
+      resumeNext: true, resumeEvidenceCheck, replyEvidenceCheck, nextEvidenceCheck, ...options }),
     ownerLookups: () => ownerLookups, noLock: () => { lockAvailable = false }, corruptCallOwner: () => { foreignCall = true } }
 }
 
@@ -615,6 +648,142 @@ test('two concurrent reply verifiers share the original advisory lock and buy at
   assert.equal((await h.replyRun()).mode, 'read_saved_only')
 })
 
+test('explicit next-page authorization alone buys the fourth call with the exact archived supplier cursor', async () => {
+  const h = await harness({ replyReceipt: true }), originals = structuredClone([h.legacyRequest, h.threadRequest, h.replyRequest, h.replyCall])
+  for (const read of [() => h.preview(), () => h.run(), () => h.run({ resumeThread: false }), () => h.replyRun()]) {
+    const report = await read()
+    assert.equal(report.mode, 'read_saved_only')
+    assert.equal(report.maxSupplierCalls, 3)
+    assert.equal(report.supplierHttpCallsMade, 0)
+  }
+  const preview = await h.nextPreview()
+  assert.equal(preview.errorCode, undefined, JSON.stringify(preview))
+  assert.equal(preview.mode, 'resume_next_preview')
+  assert.equal(preview.readyForExecute, true)
+  assert.equal(preview.remainingSupplierCalls, 1)
+  assert.equal(preview.replyArchiveRevalidated.archivedItemsMatchSavedDelivery, true)
+  assert.equal(h.http.length, 0)
+  const result = await h.nextRun()
+  assert.equal(result.errorCode, undefined, JSON.stringify(result))
+  assert.equal(result.supplierCallsBefore, 3)
+  assert.equal(result.supplierCallsAfter, 4)
+  assert.equal(result.supplierHttpCallsMade, 1)
+  assert.equal(result.remainingSupplierCalls, 0)
+  assert.equal(result.continuationKind, 'imported_supplier_cursor')
+  assert.equal(result.cursorTransmissionVerified, true)
+  assert.equal(result.upstreamContinuationVerified, true)
+  assert.equal(result.continuationAdvanceObserved, true)
+  assert.equal(result.overlapCount, 0)
+  assert.equal(result.newCommentCount, 1)
+  assert.equal(result.publicContractValid, true)
+  assert.equal(result.positiveRowsObserved, true)
+  for (const key of ['coverageComplete', 'signedCursorChainVerified', 'crossPageDeduplicationVerified', 'httpIngressVerified']) assert.equal(result[key], false)
+  for (const key of ['sourceUnchanged', 'originalFailureUnchanged', 'threadFailureUnchanged', 'replySuccessUnchanged']) assert.equal(result[key], true)
+  assert.equal(new URL(h.http[0]).pathname, '/tweet/100')
+  assert.equal(new URL(h.http[0]).searchParams.get('cursor'), 'private-first-cursor')
+  assert.deepEqual([h.legacyRequest, h.threadRequest, h.replyRequest, h.replyCall], originals)
+  for (const read of [() => h.nextRun(), () => h.nextPreview(), () => h.run(), () => h.replyRun(), () => h.preview()]) {
+    const report = await read()
+    assert.equal(report.mode, 'read_saved_only')
+    assert.equal(report.supplierHttpCallsMade, 0)
+    assert.equal(report.savedProviderCalls ?? report.supplierCallsAfter, 4)
+    assert.equal(report.remainingSupplierCalls, 0)
+  }
+  assert.equal(h.http.length, 1)
+  assert.doesNotMatch(JSON.stringify(result), /private-first-cursor|next-private-cursor|Private synthetic|Private author|\/tweet\/100|synthetic-probe-provider-credential/u)
+})
+
+test('next-page empty, repeated rows, refusal, expired cursor and unknown results are final after one request', async () => {
+  for (const options of [{ empty: true }, { responseFactory: () => Response.json(page([tweet('201')], 'private-first-cursor')) },
+    { rejectAt: 1 }, { rejectAt: 1, rejectedStatus: 400, rejectedBody: { message: 'Cursor expired' } }, { failAt: 1 }]) {
+    const h = await harness({ replyReceipt: true, ...options }), result = await h.nextRun()
+    assert.equal(result.supplierHttpCallsMade, 1, JSON.stringify(result))
+    assert.equal(result.supplierCallsAfter, 4)
+    assert.equal(result.coverageComplete, false)
+    if (options.empty || options.responseFactory) {
+      assert.equal(result.errorCode, undefined, JSON.stringify(result))
+      assert.equal(result.publicContractValid, true)
+      assert.equal(result.upstreamContinuationVerified, true)
+      assert.equal(result.newCommentCount, 0)
+      assert.equal(result.continuationAdvanceObserved, false)
+      assert.equal(result.positiveRowsObserved, !options.empty)
+      assert.equal(result.overlapCount, options.empty ? 0 : 1)
+    } else {
+      assert.equal(result.errorCode, options.failAt ? 'upstream_outcome_unknown' : 'external_platform_rejected')
+      assert.equal(result.upstreamContinuationVerified, false)
+    }
+    assert.equal((await h.nextRun()).mode, 'read_saved_only')
+    assert.equal((await h.nextPreview()).mode, 'read_saved_only')
+    assert.equal(h.http.length, 1)
+  }
+})
+
+test('next-page requires the exact successful reply receipt, archived delivery, owner and source cursor', async () => {
+  for (const mutate of [h => { h.replyCall.billed = true }, h => { h.replyCall.endpoint_version = 'wrong' },
+    h => { h.replyCall.id = '55555555-5555-5555-5555-555555555555' }, h => { h.replyRequest.status = 'unknown' },
+    h => { h.replyCall.api_key_id = '55555555-5555-5555-5555-555555555555' },
+    h => { h.replyArchive.body_sha256 = '0'.repeat(64) }, h => { h.threadArchive.body_sha256 = '0'.repeat(64) },
+    h => { h.replyRequest.acquisition_request.body.replyRef.commentId = '202' },
+    h => { h.replyRequest.response_body.data.items[0].author.name = 'forged name' },
+    h => { h.routes[0].primary_provider = 'rapidapi' }, h => { h.owner.comments_granted = false }, h => h.noLock()]) {
+    const h = await harness({ replyReceipt: true }); mutate(h)
+    assert.ok((await h.nextRun()).errorCode)
+    assert.equal(h.http.length, 0)
+  }
+  const missing = await harness({ replyReceipt: true, firstCursor: null })
+  assert.equal((await missing.nextRun()).errorCode, 'supplier_cursor_unavailable')
+  assert.equal(missing.http.length, 0)
+  const strict = await harness({ replyReceipt: true })
+  assert.equal((await strict.nextRun({ nextEvidenceCheck: assertNextResumeEvidence })).errorCode, 'next_source_unverified')
+  assert.equal(strict.http.length, 0, 'the CLI never supplies synthetic fingerprint adapters')
+})
+
+test('next-page path, cursor and query rewrites are stopped before any HTTP', async () => {
+  for (const change of [params => ({ ...params, tweetId: '999' }), params => ({ ...params, cursor: 'different-private-cursor' }),
+    params => ({ ...params, cursor: undefined }), params => ({ ...params, rankingMode: 'Recency' })]) {
+    const h = await harness({ replyReceipt: true }), original = h.adapter.forwardNative
+    h.adapter.forwardNative = function (key, body, options) {
+      return original.call(this, key, { ...body, params: change(body.params) }, options)
+    }
+    const result = await h.nextRun()
+    assert.ok(result.errorCode)
+    assert.equal(result.cursorTransmissionVerified, false)
+    assert.equal(h.http.length, 0)
+    assert.equal((await h.nextRun()).mode, 'read_saved_only')
+  }
+})
+
+test('next-page concurrency, adapter retries, source drift and every existing next intent cannot increase allowance', async () => {
+  const concurrent = await harness({ replyReceipt: true }), results = await Promise.all([concurrent.nextRun(), concurrent.nextRun()])
+  assert.equal(results.filter(row => row.errorCode === 'verification_in_progress').length, 1)
+  assert.equal(concurrent.http.length, 1)
+  const retry = await harness({ replyReceipt: true }), forward = retry.adapter.forwardNative
+  retry.adapter.forwardNative = async function (...args) { await forward.apply(this, args); return forward.apply(this, args) }
+  assert.ok((await retry.nextRun()).errorCode)
+  assert.equal(retry.http.length, 1)
+  assert.equal((await retry.nextRun()).mode, 'read_saved_only')
+  for (const mutate of [h => { h.sourceCall.billed = false }, h => { h.replyCall.billed = true }]) {
+    const changed = await harness({ replyReceipt: true }), authorize = changed.runtime.externalPlatformControlStore.authorizeDispatch
+    changed.runtime.externalPlatformControlStore.authorizeDispatch = async function (...args) {
+      const result = await authorize.apply(this, args); mutate(changed); return result
+    }
+    assert.ok((await changed.nextRun()).errorCode)
+    assert.equal(changed.http.length, 0)
+  }
+  for (const status of ['reserved', 'released', 'unknown', 'committed']) {
+    const h = await harness({ replyReceipt: true })
+    h.store.requests.set('next-intent', { id: '55555555-5555-5555-5555-555555555555', tenantId: h.source.tenant_id,
+      consumerId: h.source.consumer_id, apiKeyId: h.source.api_key_id, platform: 'twitter', idempotencyKey: THREAD_NEXT_KEY,
+      status, responseStatus: 503, acquisitionRequest: { method: 'POST', path: '/api/v1/data/social/post-comments',
+        body: { platform: 'twitter', postId: '100', count: 100, includeRaw: false, params: { cursor: 'private-first-cursor' } } } })
+    for (const read of [() => h.nextRun(), () => h.nextPreview(), () => h.replyRun(), () => h.run(), () => h.run({ resumeThread: false })]) {
+      assert.equal((await read()).mode, 'read_saved_only')
+    }
+    assert.equal(h.http.length, 0)
+    assert.equal(h.ownerLookups(), 0)
+  }
+})
+
 test('actual PostgreSQL preview SQL intersects consumer grants and Key snapshots and respects both page limits', {
   skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE,
 }, async t => {
@@ -731,4 +900,45 @@ test('actual PostgreSQL preview SQL intersects consumer grants and Key snapshots
     tenant_id,consumer_id,api_key_id,provider_key,operation,endpoint_key,marketplace,outcome,http_status,billed,contract_version,
     1,error_code,endpoint_version,completed_at FROM external_platform.provider_calls WHERE id=$1`, [REPLY_SOURCE.callId])
   assert.equal((await replyPreview()).errorCode, 'saved_call_budget_exceeded')
+  await db.query('DELETE FROM external_platform.provider_calls WHERE id=$1', ['55555555-5555-5555-5555-555555555555'])
+  const nextFixture = await harness({ replyReceipt: true }), reply = nextFixture.replyRequest, replyCall = nextFixture.replyCall
+  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL)',
+    [reply.id,source.tenant_id,source.consumer_id,source.api_key_id,reply.platform,reply.status,reply.response_status,
+      JSON.stringify(reply.acquisition_request),JSON.stringify(reply.response_body),reply.idempotency_key])
+  await db.query(`INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,'rapidapi',$6,$6,'twitter',
+    'succeeded',200,NULL,'mx-insight-hub.native-forwarding.v1',0,NULL,'twitter-aio.tweet-thread.2026-11-17',$7)`,
+  [NEXT_SOURCE.callId,NEXT_SOURCE.requestId,source.tenant_id,source.consumer_id,source.api_key_id,THREAD_OPERATION,replyCall.completed_at])
+  await db.query('INSERT INTO control.external_platform_restricted_raw_responses VALUES($1,$2,$3,$4,$5)',
+    [NEXT_SOURCE.callId,nextFixture.replyArchive.body_size,nextFixture.replyArchive.body_sha256,
+      nextFixture.replyArchive.body_bytes,nextFixture.replyArchive.captured_at])
+  const nextPreview = () => previewRapidComments({ pool, installed: true, readiness: async () => ({ ready: true }), resumeNext: true,
+    resumeEvidenceCheck: h.resumeEvidenceCheck, replyEvidenceCheck: h.replyEvidenceCheck, nextEvidenceCheck: nextFixture.nextEvidenceCheck })
+  const nextReady = await nextPreview()
+  assert.equal(nextReady.errorCode, undefined, JSON.stringify(nextReady))
+  assert.equal(nextReady.mode, 'resume_next_preview')
+  assert.equal(nextReady.readyForExecute, true)
+  assert.equal(nextReady.savedProviderCalls, 3)
+  assert.equal(nextReady.replyArchiveRevalidated.itemCount, 4)
+  assert.equal(nextReady.pageSize, 5, 'page grants remain effective for the fourth call')
+  assert.equal(nextReady.supplierHttpCallsMade, 0)
+  const nextId = '66666666-6666-6666-6666-666666666666', nextCallId = '77777777-7777-7777-7777-777777777777'
+  await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,\'twitter\',\'reserved\',NULL,$5,NULL,$6,NULL)',
+    [nextId,source.tenant_id,source.consumer_id,source.api_key_id,
+      JSON.stringify({ method: 'POST', path: '/api/v1/data/social/post-comments', body: { platform: 'twitter', postId: '100',
+        count: 5, includeRaw: false, params: { cursor: 'private-first-cursor' } } }),THREAD_NEXT_KEY])
+  assert.equal((await nextPreview()).mode, 'read_saved_only', 'a fourth intent without a call already blocks further procurement')
+  await db.query(`INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,'rapidapi',$6,$6,'twitter',
+    'unknown',NULL,NULL,'mx-insight-hub.native-forwarding.v1',0,NULL,'twitter-aio.tweet-thread.2026-11-17',NULL)`,
+  [nextCallId,nextId,source.tenant_id,source.consumer_id,source.api_key_id,THREAD_OPERATION])
+  for (const read of [nextPreview, replyPreview, resumePreview, preview]) {
+    const final = await read()
+    assert.equal(final.mode, 'read_saved_only')
+    assert.equal(final.savedProviderCalls, 4)
+    assert.equal(final.remainingSupplierCalls, 0)
+    assert.equal(final.supplierHttpCallsMade, 0)
+  }
+  await db.query(`INSERT INTO external_platform.provider_calls SELECT '88888888-8888-8888-8888-888888888888',usage_request_id,
+    tenant_id,consumer_id,api_key_id,provider_key,operation,endpoint_key,marketplace,outcome,http_status,billed,contract_version,
+    1,error_code,endpoint_version,completed_at FROM external_platform.provider_calls WHERE id=$1`, [nextCallId])
+  assert.equal((await nextPreview()).errorCode, 'saved_call_budget_exceeded', 'read-only accounting also detects a forbidden fifth call')
 })

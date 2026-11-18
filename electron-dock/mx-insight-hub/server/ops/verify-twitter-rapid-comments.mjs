@@ -1,6 +1,8 @@
 // Installed Public runtime only. Preview and old --execute read existing receipts.
 // --resume-thread covers the old failure; --resume-replies can spend only the
 // last call after revalidating the exact saved thread page with installed code.
+// --resume-next alone has the separately authorized fourth call, using the
+// archived supplier cursor. Earlier commands retain their original allowance.
 // normal Hub controls remain active and recovered TikHub routes are never changed.
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,19 +15,23 @@ export const OPERATION = 'native.r.twitter_aio_tweet_replies'
 export const KEYS = Object.freeze(['first', 'next', 'replies'].map(stage => `ops-twitter-rapid-comments-7e7cd2d0-v1-${stage}`))
 export const THREAD_OPERATION = 'native.r.twitter_aio_tweet_thread'
 export const THREAD_KEYS = Object.freeze(['first', 'replies'].map(stage => `ops-twitter-rapid-comments-7e7cd2d0-v1-thread-${stage}`))
+export const THREAD_NEXT_KEY = 'ops-twitter-rapid-comments-7e7cd2d0-v1-thread-next'
 export const RESUME_SOURCE = Object.freeze({ requestId: 'e813c900-44b2-45e8-bf84-6eb8786b1a5e',
   callId: 'dc07998d-21c6-44cd-8f48-5f99f7e7918c', bodySize: 77,
   sha256: 'a8f881027fc841cd737652640dbc864c94af4fe55f612ace64236059ed25a9a2' })
 export const REPLY_SOURCE = Object.freeze({ requestId: 'e531d032-0bfa-463e-9e0f-ff10e2457a5d',
   callId: '783683dc-0dde-45ac-9c9c-76753f9c8949', bodySize: 200594,
   sha256: '34747817708f7dd6e4ab1b8dd9f4b92f20f2fd5c8f96165e347532d3a35fa2a6' })
-const ALL_KEYS = [...KEYS, ...THREAD_KEYS]
+export const NEXT_SOURCE = Object.freeze({ requestId: 'c352b401-4351-407e-9a1d-aaff849c6394',
+  callId: '0b053805-603a-4bc8-b228-23e6d370d548', bodySize: 26874,
+  sha256: '818bf762557a59853959fc63162562e4ef13e9b0876b5bf4dddb0e163b3bf47e' })
+const ALL_KEYS = [...KEYS, ...THREAD_KEYS, THREAD_NEXT_KEY]
 const STAGES = [{ stage: 'first', kind: 'first', key: KEYS[0] }, { stage: 'next', kind: 'next', key: KEYS[1] },
   { stage: 'replies', kind: 'replies', key: KEYS[2] }, { stage: 'thread-first', kind: 'first', key: THREAD_KEYS[0] },
-  { stage: 'thread-replies', kind: 'replies', key: THREAD_KEYS[1] }]
+  { stage: 'thread-replies', kind: 'replies', key: THREAD_KEYS[1] }, { stage: 'thread-next', kind: 'next', key: THREAD_NEXT_KEY }]
 const OLD_OPERATION = 'native.t.api_3cd88a6621a01120'
 const COMMENTS = '/api/v1/data/social/post-comments', REPLIES = '/api/v1/data/social/comment-replies'
-const MAX_BYTES = 4 * 1024 * 1024, MAX_CALLS = 3, PAGE_SIZE = 100
+const MAX_BYTES = 4 * 1024 * 1024, MAX_CALLS = 3, NEXT_MAX_CALLS = 4, PAGE_SIZE = 100
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const id = value => typeof value === 'string' && /^\d{1,30}$/u.test(value)
 const uuid = value => typeof value === 'string' && /^[0-9a-f-]{36}$/iu.test(value)
@@ -45,7 +51,8 @@ const SAFE_ERRORS = new Set(['needs_deploy', 'invalid_arguments', 'public_postgr
   'external_platform_operation_paused', 'external_platform_operation_canary', 'external_platform_rate_limited',
   'external_platform_busy', 'invalid_social_contract', 'invalid_upstream_contract', 'page_size_exceeded',
   'platform_not_granted', 'capability_not_granted', 'comment_acquisition_paused', 'resume_source_unverified', 'recovered_routes_required',
-  'reply_source_unverified', 'first_archive_revalidation_failed', 'reply_candidate_unavailable'])
+  'reply_source_unverified', 'first_archive_revalidation_failed', 'reply_candidate_unavailable',
+  'next_source_unverified', 'supplier_cursor_unavailable'])
 const safeCode = error => SAFE_ERRORS.has(error?.code) ? error.code : 'verification_unavailable'
 const savedErrorCode = value => ({ code: SAFE_ERRORS.has(value) ? value : null, known: SAFE_ERRORS.has(value) })
 const savedFailurePhase = call => {
@@ -148,7 +155,7 @@ async function savedAttempts(executor, source) {
     idempotency_key,platform,status,response_status,error_code,
     CASE WHEN octet_length(response_body::text)<=$3 THEN response_body END AS response_body,
     CASE WHEN octet_length(acquisition_request::text)<=32768 THEN acquisition_request END AS acquisition_request
-    FROM public.usage_requests WHERE consumer_id=$1 AND idempotency_key=ANY($2::text[]) ORDER BY idempotency_key LIMIT 6`,
+    FROM public.usage_requests WHERE consumer_id=$1 AND idempotency_key=ANY($2::text[]) ORDER BY idempotency_key LIMIT 7`,
   [source.consumer_id, ALL_KEYS, MAX_BYTES])
   requireValue(rows.length <= ALL_KEYS.length && rows.every(row => owned(row, source) && ALL_KEYS.includes(row.idempotency_key))
     && new Set(rows.map(row => row.idempotency_key)).size === rows.length, 'receipt_owner_mismatch')
@@ -157,11 +164,11 @@ async function savedAttempts(executor, source) {
     call.marketplace,call.contract_version,call.endpoint_version,call.completed_at,
     request.tenant_id AS request_tenant_id,request.api_key_id AS request_api_key_id
     FROM external_platform.provider_calls call JOIN public.usage_requests request ON request.id=call.usage_request_id
-    WHERE request.consumer_id=$1 AND request.idempotency_key=ANY($2::text[]) LIMIT 4`, [source.consumer_id, ALL_KEYS])
-  requireValue(calls.length <= MAX_CALLS, 'saved_call_budget_exceeded')
+    WHERE request.consumer_id=$1 AND request.idempotency_key=ANY($2::text[]) LIMIT 5`, [source.consumer_id, ALL_KEYS])
+  requireValue(calls.length <= NEXT_MAX_CALLS, 'saved_call_budget_exceeded')
   requireValue(calls.every(call => {
     const request = rows.find(row => row.id === call.usage_request_id)
-    const operation = THREAD_KEYS.includes(request?.idempotency_key) ? THREAD_OPERATION : OPERATION
+    const operation = [...THREAD_KEYS, THREAD_NEXT_KEY].includes(request?.idempotency_key) ? THREAD_OPERATION : OPERATION
     return request && owned(call, source) && call.request_tenant_id === source.tenant_id
       && call.request_api_key_id === source.api_key_id && call.provider_key === 'rapidapi'
       && call.operation === operation && call.endpoint_key === operation
@@ -308,16 +315,40 @@ export function assertReplyResumeEvidence(saved, stages) {
   'reply_source_unverified')
 }
 
+export function assertNextResumeEvidence(saved, stages) {
+  const row = saved.rows.find(row => row.idempotency_key === THREAD_KEYS[1])
+  const call = saved.calls.find(call => call.usage_request_id === row?.id)
+  const summary = stages.find(stage => stage.stage === 'thread-replies'), evidence = summary?.providerCalls?.[0]
+  requireValue(saved.rows.length === 3 && saved.calls.length === 3
+    && row?.id === NEXT_SOURCE.requestId && row.status === 'committed' && row.response_status === 200
+    && call?.id === NEXT_SOURCE.callId && call.operation === THREAD_OPERATION && call.endpoint_key === THREAD_OPERATION
+    && call.marketplace === 'twitter' && call.contract_version === 'mx-insight-hub.native-forwarding.v1'
+    && call.endpoint_version === 'twitter-aio.tweet-thread.2026-11-17' && call.outcome === 'succeeded'
+    && call.http_status === 200 && call.billed === null && evidence?.callId === NEXT_SOURCE.callId
+    && evidence.hashVerified === true && evidence.bodySize === NEXT_SOURCE.bodySize && evidence.sha256 === NEXT_SOURCE.sha256
+    && summary.state === 'saved_success' && summary.resultCount === 4 && summary.publicContractValid === true
+    && summary.positiveRowsObserved === true && summary.aliasesVerified === true && summary.referencesVerified === true,
+  'next_source_unverified')
+}
+
+const firstTwoAttempts = saved => {
+  const rows = saved.rows.filter(row => row.idempotency_key !== THREAD_KEYS[1] && row.idempotency_key !== THREAD_NEXT_KEY)
+  return { rows, calls: saved.calls.filter(call => rows.some(row => row.id === call.usage_request_id)) }
+}
+
 async function installedReplayModules(root = process.argv[1] === '-'
   ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)) {
-  const [parser, projection, contract, safety, workflow] = await Promise.all([
+  const [parser, projection, contract, safety, workflow, replies] = await Promise.all([
     import(new URL('contracts/twitter-rapid-comment-page.mjs', root)), import(new URL('contracts/post-comment-projection.mjs', root)),
     import(new URL('contracts/post-comments.mjs', root)), import(new URL('core/postgres-json.mjs', root)),
     import(new URL('external-platforms/social-account-workflow.mjs', root)),
+    import(new URL('contracts/comment-replies.mjs', root)),
   ])
   return { parse: parser.parseRapidApiTwitterCommentPage, project: projection.projectPostCommentPage,
     normalize: contract.normalizePostCommentsRequest, dispatch: contract.buildPostCommentsDispatch,
-    isJsonSafe: safety.isPostgresSafeJsonValue, workflowProject: workflow.projectPage, traversal: contract.POST_COMMENTS_TRAVERSAL }
+    isJsonSafe: safety.isPostgresSafeJsonValue, workflowProject: workflow.projectPage, traversal: contract.POST_COMMENTS_TRAVERSAL,
+    replyNormalize: replies.normalizeCommentRepliesRequest, replyDispatch: replies.buildCommentRepliesDispatch,
+    replyTraversal: replies.COMMENT_REPLIES_TRAVERSAL }
 }
 
 async function revalidateThreadFirst(executor, saved, source, stages, replyEvidenceCheck) {
@@ -347,9 +378,46 @@ async function revalidateThreadFirst(executor, saved, source, stages, replyEvide
     && item.platform === 'twitter' && (item.conversationId ?? item.contentId) === source.postId)
   requireValue(candidate, 'reply_candidate_unavailable')
   return { replyRef: { platform: 'twitter', commentId: candidate.commentId, contentId: source.postId },
+    items: workflow.projected.acquiredItems, cursor: parsed.providerPage.nextParams?.cursor ?? null,
     summary: { hashVerified: true, commentCount: 36, itemCount: 36, recordCount: 36, jsonSafe: true,
       recordFieldsJsonSafe: true, workflowOk: true, replyCandidateAvailable: true,
       continuationPresent: Boolean(parsed.providerPage.nextParams), historicalReceiptStillFailed: true } }
+}
+
+async function revalidateNextSource(executor, saved, source, stages, replyEvidenceCheck, nextEvidenceCheck) {
+  replyEvidenceCheck(firstTwoAttempts(saved), stages); nextEvidenceCheck(saved, stages)
+  const first = await revalidateThreadFirst(executor, firstTwoAttempts(saved), source, stages, replyEvidenceCheck)
+  const row = saved.rows.find(row => row.idempotency_key === THREAD_KEYS[1])
+  const call = saved.calls.find(call => call.usage_request_id === row.id), raw = await archive(executor, call.id)
+  const currentStages = structuredClone(stages)
+  Object.assign(currentStages.find(stage => stage.stage === 'thread-replies').providerCalls[0], raw.summary)
+  nextEvidenceCheck(saved, currentStages)
+  const modules = await installedReplayModules(), body = row.acquisition_request.body
+  const request = modules.replyNormalize(body, { provider: 'rapidapi' }), step = modules.replyDispatch(request)
+  requireValue(isDeepStrictEqual(body.replyRef, first.replyRef) && !request.cursor && !request.includeRaw
+    && request.contentId === source.postId && step.operationKey === THREAD_OPERATION && step.endpointKey === THREAD_OPERATION
+    && step.endpointPath === '/tweet/{tweetId}', 'next_source_unverified')
+  const capturedAt = new Date(raw.capturedAt ?? call.completed_at).toISOString()
+  const parsed = modules.parse(raw.payload, request.commentId, step.commentReplies.continuation)
+  const projected = modules.replyTraversal.projectPage(raw.payload, step, { capturedAt })
+  const workflow = modules.workflowProject(raw.payload, step, 'comment-replies', capturedAt, modules.replyTraversal)
+  requireValue(modules.isJsonSafe(raw.payload) && modules.isJsonSafe(workflow.projected)
+    && parsed.comments.length === 4 && projected.records.length === 4 && workflow.records.length === 4
+    && isDeepStrictEqual(projected.projected.acquiredItems, row.response_body.data.items)
+    && isDeepStrictEqual(workflow.projected.acquiredItems, row.response_body.data.items), 'next_source_unverified')
+  requireValue(typeof first.cursor === 'string' && first.cursor.length > 0 && first.cursor.length <= 8192
+    && !first.cursor.includes('\0'), 'supplier_cursor_unavailable')
+  // Validate the imported cursor through the installed native contract, before
+  // reserving anything. No signed cursor or successful first-page DTO is made.
+  const next = modules.normalize({ platform: 'twitter', postId: source.postId, count: PAGE_SIZE,
+    includeRaw: false, params: { cursor: first.cursor } }, { provider: 'rapidapi' })
+  const nextStep = modules.dispatch(next)
+  requireValue(next.initialParams.cursor === first.cursor && nextStep.operationKey === THREAD_OPERATION
+    && nextStep.endpointPath === '/tweet/{tweetId}', 'supplier_cursor_unavailable')
+  return { ...first, nextQuery: Object.entries(nextStep.upstreamQuery).filter(([key]) => key !== 'tweetId')
+    .map(([key, value]) => [key, String(value)]).sort(([a], [b]) => a.localeCompare(b)),
+    replyArchiveRevalidated: { hashVerified: true, publicContractValid: true, itemCount: 4, recordCount: 4,
+    positiveRowsObserved: true, requestReferenceVerified: true, archivedItemsMatchSavedDelivery: true } }
 }
 
 async function readRoutes(executor) {
@@ -368,15 +436,21 @@ const threadAttemptDigest = (saved, stages) => sha(JSON.stringify([
   saved.rows.filter(row => row.idempotency_key === THREAD_KEYS[0]),
   saved.calls.filter(call => call.usage_request_id === REPLY_SOURCE.requestId), stages.find(row => row.stage === 'thread-first'),
 ]))
-const resumeIsReadOnly = (saved, resumeThread, resumeReplies) => resumeReplies
+const replyAttemptDigest = (saved, stages) => sha(JSON.stringify([
+  saved.rows.filter(row => row.idempotency_key === THREAD_KEYS[1]),
+  saved.calls.filter(call => call.usage_request_id === NEXT_SOURCE.requestId), stages.find(row => row.stage === 'thread-replies'),
+]))
+const resumeIsReadOnly = (saved, resumeThread, resumeReplies, resumeNext = false) => saved.rows.some(row => row.idempotency_key === THREAD_NEXT_KEY)
+  || (resumeNext ? false : resumeReplies
   ? saved.rows.some(row => row.idempotency_key === THREAD_KEYS[1])
-  : !resumeThread || saved.rows.some(row => THREAD_KEYS.includes(row.idempotency_key))
+  : !resumeThread || saved.rows.some(row => THREAD_KEYS.includes(row.idempotency_key)))
 
 export async function previewRapidComments({ pool, installed = true, readiness = async () => ({ ready: false }),
-  resumeThread = false, resumeReplies = false, resumeEvidenceCheck = assertThreadResumeEvidence,
-  replyEvidenceCheck = assertReplyResumeEvidence }) {
+  resumeThread = false, resumeReplies = false, resumeNext = false, resumeEvidenceCheck = assertThreadResumeEvidence,
+  replyEvidenceCheck = assertReplyResumeEvidence, nextEvidenceCheck = assertNextResumeEvidence }) {
+  const maxCalls = resumeNext ? NEXT_MAX_CALLS : MAX_CALLS
   const report = { diagnosticRevision: REVISION, mode: 'preview', installedContract: installed,
-    savedErrorInspectionVersion: 1, maxSupplierCalls: MAX_CALLS, supplierHttpCallsMade: 0 }
+    savedErrorInspectionVersion: 1, maxSupplierCalls: maxCalls, supplierHttpCallsMade: 0 }
   const client = await pool.connect()
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -385,15 +459,15 @@ export async function previewRapidComments({ pool, installed = true, readiness =
     const routes = await readRoutes(client); report.routes = safeRoutes(routes)
     const saved = await savedAttempts(client, source.source)
     report.savedProviderCalls = saved.calls.length
+    report.remainingSupplierCalls = Math.max(0, maxCalls - saved.calls.length)
     if (saved.rows.length || saved.calls.length) {
       report.mode = 'read_saved_only'; report.stages = await summarizeSaved(client, saved, source)
       report.resumeSourceInspection = inspectThreadResumeEvidence(saved, report.stages)
-      if (resumeIsReadOnly(saved, resumeThread, resumeReplies)) return report
+      if (resumeIsReadOnly(saved, resumeThread, resumeReplies, resumeNext)) return report
     }
-    if (resumeThread || resumeReplies) {
+    if (resumeThread || resumeReplies || resumeNext) {
       resumeEvidenceCheck(saved, report.stages || []); requireRecoveredRoutes(routes)
-      report.mode = resumeReplies ? 'resume_replies_preview' : 'resume_thread_preview'
-      report.remainingSupplierCalls = MAX_CALLS - saved.calls.length
+      report.mode = resumeNext ? 'resume_next_preview' : resumeReplies ? 'resume_replies_preview' : 'resume_thread_preview'
       report.upstreamContinuationVerified = false
     }
     report.pageSize = await readOwner(client, source.source); report.ownerVerified = true
@@ -401,6 +475,11 @@ export async function previewRapidComments({ pool, installed = true, readiness =
     if (resumeReplies) {
       replyEvidenceCheck(saved, report.stages || [])
       report.firstArchiveRevalidated = (await revalidateThreadFirst(client, saved, source, report.stages, replyEvidenceCheck)).summary
+    }
+    if (resumeNext) {
+      const revalidated = await revalidateNextSource(client, saved, source, report.stages || [], replyEvidenceCheck, nextEvidenceCheck)
+      report.firstArchiveRevalidated = revalidated.summary; report.replyArchiveRevalidated = revalidated.replyArchiveRevalidated
+      Object.assign(report, continuationLimits())
     }
     report.readiness = await readiness(client, source.source)
     requireValue(report.readiness.ready === true, 'operation_not_ready')
@@ -410,13 +489,20 @@ export async function previewRapidComments({ pool, installed = true, readiness =
   return report
 }
 
-export async function runRapidCommentVerification({ runtime, AppError, resumeThread = false, resumeReplies = false,
-  resumeEvidenceCheck = assertThreadResumeEvidence, replyEvidenceCheck = assertReplyResumeEvidence }) {
-  const threaded = resumeThread || resumeReplies, operation = threaded ? THREAD_OPERATION : OPERATION
-  const stageSpecs = resumeReplies ? STAGES.slice(4) : resumeThread ? STAGES.slice(3) : STAGES.slice(0, 3)
-  const report = { diagnosticRevision: REVISION, mode: resumeReplies ? 'resume_replies' : resumeThread ? 'resume_thread' : 'execute', maxSupplierCalls: MAX_CALLS,
+const continuationLimits = () => ({ continuationKind: 'imported_supplier_cursor', cursorTransmissionVerified: false,
+  continuationAdvanceObserved: false, upstreamContinuationVerified: false, signedCursorChainVerified: false,
+  crossPageDeduplicationVerified: false, httpIngressVerified: false, coverageComplete: false })
+
+export async function runRapidCommentVerification({ runtime, AppError, resumeThread = false, resumeReplies = false, resumeNext = false,
+  resumeEvidenceCheck = assertThreadResumeEvidence, replyEvidenceCheck = assertReplyResumeEvidence,
+  nextEvidenceCheck = assertNextResumeEvidence }) {
+  const threaded = resumeThread || resumeReplies || resumeNext, operation = threaded ? THREAD_OPERATION : OPERATION
+  const maxCalls = resumeNext ? NEXT_MAX_CALLS : MAX_CALLS
+  const stageSpecs = resumeNext ? STAGES.slice(5, 6) : resumeReplies ? STAGES.slice(4, 5) : resumeThread ? STAGES.slice(3, 5) : STAGES.slice(0, 3)
+  const report = { diagnosticRevision: REVISION, mode: resumeNext ? 'resume_next' : resumeReplies ? 'resume_replies' : resumeThread ? 'resume_thread' : 'execute', maxSupplierCalls: maxCalls,
     savedErrorInspectionVersion: 1, scope: 'installed_public_gateways_not_http_ingress', globalPolicyWrites: 0, stages: [] }
-  let lock, locked = false, source, currentStage = null, attempts = 0, originalFailureDigest, threadFailureDigest, revalidated
+  if (resumeNext) Object.assign(report, continuationLimits())
+  let lock, locked = false, source, currentStage = null, attempts = 0, originalFailureDigest, threadFailureDigest, replySuccessDigest, revalidated
   const restores = []
   try {
     lock = await runtime.pool.connect()
@@ -427,28 +513,34 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
     if (before.rows.length || before.calls.length) {
       const summaries = await summarizeSaved(lock, before, source)
       report.resumeSourceInspection = inspectThreadResumeEvidence(before, summaries)
-      if (resumeIsReadOnly(before, resumeThread, resumeReplies)) {
+      if (resumeIsReadOnly(before, resumeThread, resumeReplies, resumeNext)) {
         report.mode = 'read_saved_only'; report.stages = summaries; return report
       }
       report.originalStages = summaries.slice(0, 3)
-      if (resumeReplies) {
-        replyEvidenceCheck(before, summaries)
+      if (resumeReplies || resumeNext) {
+        replyEvidenceCheck(resumeNext ? firstTwoAttempts(before) : before, summaries)
         threadFailureDigest = threadAttemptDigest(before, summaries)
+        if (resumeNext) { nextEvidenceCheck(before, summaries); replySuccessDigest = replyAttemptDigest(before, summaries) }
       }
     }
     const routes = await readRoutes(lock); report.routes = safeRoutes(routes)
     if (threaded) {
       resumeEvidenceCheck(before, report.originalStages || []); requireRecoveredRoutes(routes)
       originalFailureDigest = originalAttemptDigest(before, report.originalStages)
-      report.remainingSupplierCalls = MAX_CALLS - before.calls.length
+      report.remainingSupplierCalls = Math.max(0, maxCalls - before.calls.length)
       report.upstreamContinuationVerified = false
-      report.continuationState = 'not_covered_original_budget_reserved_for_reply_contract'
+      report.continuationState = resumeNext ? 'single_imported_page_only' : 'not_covered_original_budget_reserved_for_reply_contract'
     }
     const pageSize = await readOwner(lock, source.source); report.pageSize = pageSize
     if (resumeReplies) {
       revalidated = await revalidateThreadFirst(lock, before, source,
         await summarizeSaved(lock, before, source), replyEvidenceCheck)
       report.firstArchiveRevalidated = revalidated.summary
+    }
+    if (resumeNext) {
+      revalidated = await revalidateNextSource(lock, before, source,
+        await summarizeSaved(lock, before, source), replyEvidenceCheck, nextEvidenceCheck)
+      report.firstArchiveRevalidated = revalidated.summary; report.replyArchiveRevalidated = revalidated.replyArchiveRevalidated
     }
     const context = await runtime.store.findApiKeyById(source.source.api_key_id)
     requireValue(context?.tenant?.id === source.source.tenant_id && context?.consumer?.id === source.source.consumer_id
@@ -463,7 +555,7 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
     controls.authorizeDispatch = async function (provider, operation, options) {
       requireValue(currentStage && provider === 'rapidapi' && operation === (threaded ? THREAD_OPERATION : OPERATION)
         && options?.consumerId === source.source.consumer_id, 'unexpected_diagnostic_operation')
-      if (currentStage.sent || (await savedAttempts(runtime.pool, source.source)).calls.length >= MAX_CALLS) {
+      if (currentStage.sent || (await savedAttempts(runtime.pool, source.source)).calls.length >= maxCalls) {
         throw new AppError(409, 'external_platform_operation_blocked', 'Diagnostic call budget exhausted')
       }
       return authorize.call(this, provider, operation, options)
@@ -475,17 +567,25 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
         const target = new URL(url)
         requireValue(currentStage && target.origin === 'https://twitter-aio.p.rapidapi.com'
           && target.pathname === `/tweet/${currentStage.subject}${threaded ? '' : '/replies'}` && options?.method === 'GET'
-          && (!resumeReplies || !target.searchParams.has('cursor')), 'unexpected_diagnostic_request')
+          && (!resumeReplies || !target.searchParams.has('cursor'))
+          && (!resumeNext || target.pathname === `/tweet/${source.postId}`
+            && !target.username && !target.password && !target.hash
+            && target.searchParams.getAll('cursor').length === 1 && target.searchParams.get('cursor') === revalidated.cursor
+            && isDeepStrictEqual([...target.searchParams.entries()].sort(([a], [b]) => a.localeCompare(b)), revalidated.nextQuery)),
+        'unexpected_diagnostic_request')
         if (threaded) requireRecoveredRoutes(await readRoutes(runtime.pool))
-        if (resumeReplies) {
+        if (resumeReplies || resumeNext) {
           const current = await savedAttempts(runtime.pool, source.source), summaries = await summarizeSaved(runtime.pool, current, source)
           requireValue(originalAttemptDigest(current, summaries) === originalFailureDigest
-            && threadAttemptDigest(current, summaries) === threadFailureDigest, 'reply_source_unverified')
+            && threadAttemptDigest(current, summaries) === threadFailureDigest
+            && (!resumeNext || replyAttemptDigest(current, summaries) === replySuccessDigest), 'reply_source_unverified')
+          if (resumeNext) requireValue((await sourceReceipt(runtime.pool)).digest === source.digest, 'source_changed')
         }
-        requireValue(!currentStage.sent && attempts < MAX_CALLS
-          && attempts < MAX_CALLS - before.calls.length
-          && (await savedAttempts(runtime.pool, source.source)).calls.length <= MAX_CALLS, 'stage_already_dispatched')
+        requireValue(!currentStage.sent && attempts < maxCalls
+          && attempts < maxCalls - before.calls.length
+          && (await savedAttempts(runtime.pool, source.source)).calls.length <= maxCalls, 'stage_already_dispatched')
         currentStage.sent = true; attempts++
+        if (resumeNext) report.cursorTransmissionVerified = true
         return original.call(this, url, options)
       }
       restores.push(() => { adapter.fetch = original })
@@ -495,9 +595,9 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
     for (const { stage, kind, key } of stageSpecs) {
       let body = firstBody
       if (kind === 'next') {
-        const cursor = first.body.data.page.nextCursor
+        const cursor = resumeNext ? revalidated.cursor : first.body.data.page.nextCursor
         if (!cursor) { report.stages.push({ stage, state: 'not_covered_no_cursor' }); continue }
-        body = { ...firstBody, cursor }
+        body = resumeNext ? { ...firstBody, params: { cursor } } : { ...firstBody, cursor }
       }
       if (kind === 'replies') {
         const candidate = first?.body.data.items.find(row => row.replyCount > 0 && id(row.replyRef?.commentId))
@@ -513,12 +613,21 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
       const saved = await savedAttempts(runtime.pool, source.source), summary = (await summarizeSaved(runtime.pool, saved, source)).find(row => row.stage === stage)
       requireValue(summary.state === 'saved_success' && summary.requestId === result.requestId, 'saved_receipt_unverified')
       report.stages.push(summary)
+      if (resumeNext) {
+        requireValue(summary.providerCalls.length === 1 && attempts === 1, 'saved_receipt_unverified')
+        const firstIds = new Set(revalidated.items.map(item => item.commentId))
+        report.overlapCount = result.body.data.items.filter(item => firstIds.has(item.commentId)).length
+        report.newCommentCount = result.body.data.items.length - report.overlapCount
+        report.continuationAdvanceObserved = report.newCommentCount > 0
+      }
       if (kind === 'first') first = result
     }
     report.publicContractValid = report.stages.filter(row => row.state === 'saved_success').every(row => row.publicContractValid)
-    report.upstreamContinuationVerified = !threaded && report.stages.find(row => row.stage === 'next')?.upstreamContinuationVerified === true
+    report.upstreamContinuationVerified = (resumeNext || !threaded)
+      && report.stages.find(row => row.stage === (resumeNext ? 'thread-next' : 'next'))?.upstreamContinuationVerified === true
+    report.positiveRowsObserved = report.stages.some(row => row.state === 'saved_success' && row.positiveRowsObserved)
     report.positiveSamplesComplete = report.stages.every(row => row.state === 'saved_success' && row.positiveRowsObserved)
-    report.coverageComplete = report.positiveSamplesComplete && report.upstreamContinuationVerified
+    report.coverageComplete = !resumeNext && report.positiveSamplesComplete && report.upstreamContinuationVerified
   } catch (error) { report.errorCode = safeCode(error) }
   finally {
     restores.reverse().forEach(restore => restore())
@@ -527,7 +636,7 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
       try {
         const saved = await savedAttempts(runtime.pool, source.source)
         report.supplierCallsAfter = saved.calls.length
-        report.remainingSupplierCalls = MAX_CALLS - saved.calls.length
+        report.remainingSupplierCalls = Math.max(0, maxCalls - saved.calls.length)
         report.savedStages = await summarizeSaved(runtime.pool, saved, source)
         if (originalFailureDigest) {
           report.originalFailureUnchanged = originalAttemptDigest(saved, report.savedStages) === originalFailureDigest
@@ -536,6 +645,10 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
         if (threadFailureDigest) {
           report.threadFailureUnchanged = threadAttemptDigest(saved, report.savedStages) === threadFailureDigest
           if (!report.threadFailureUnchanged) report.errorCode ||= 'reply_source_unverified'
+        }
+        if (replySuccessDigest) {
+          report.replySuccessUnchanged = replyAttemptDigest(saved, report.savedStages) === replySuccessDigest
+          if (!report.replySuccessUnchanged) report.errorCode ||= 'next_source_unverified'
         }
         report.sourceUnchanged = (await sourceReceipt(runtime.pool)).digest === source.digest
         if (!report.sourceUnchanged) report.errorCode ||= 'source_changed'
@@ -552,9 +665,9 @@ export async function runRapidCommentVerification({ runtime, AppError, resumeThr
 export async function main(args = process.argv.slice(2)) {
   let pool, runtime
   try {
-    requireValue(args.length === 0 || args.length === 1 && ['--execute', '--resume-thread', '--resume-replies'].includes(args[0]), 'invalid_arguments')
-    const resumeThread = args[0] === '--resume-thread', resumeReplies = args[0] === '--resume-replies'
-    const operation = resumeThread || resumeReplies ? THREAD_OPERATION : OPERATION
+    requireValue(args.length === 0 || args.length === 1 && ['--execute', '--resume-thread', '--resume-replies', '--resume-next'].includes(args[0]), 'invalid_arguments')
+    const resumeThread = args[0] === '--resume-thread', resumeReplies = args[0] === '--resume-replies', resumeNext = args[0] === '--resume-next'
+    const operation = resumeThread || resumeReplies || resumeNext ? THREAD_OPERATION : OPERATION
     const contractOperation = args.length === 0 ? THREAD_OPERATION : operation, nativeKey = contractOperation.slice(7)
     const root = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)
     const { loadConfig } = await import(new URL('config.mjs', root)), config = loadConfig()
@@ -585,12 +698,12 @@ export async function main(args = process.argv.slice(2)) {
         state: state?.effectiveState ?? 'not_registered', priceReady: state?.priceBook?.ready === true,
         blockers: (state?.blockers || []).map(row => row.code) }
     }
-    let report = await previewRapidComments({ pool, installed, readiness, resumeThread, resumeReplies })
+    let report = await previewRapidComments({ pool, installed, readiness, resumeThread, resumeReplies, resumeNext })
     await pool.end(); pool = null
     if (args.length && report.readyForExecute && !report.errorCode && report.mode !== 'read_saved_only') {
       const { createRuntime } = await import(new URL('index.mjs', root)), { AppError } = await import(new URL('core/errors.mjs', root))
       runtime = await createRuntime(config)
-      report = await runRapidCommentVerification({ runtime, AppError, resumeThread, resumeReplies })
+      report = await runRapidCommentVerification({ runtime, AppError, resumeThread, resumeReplies, resumeNext })
     }
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
     if (report.errorCode) process.exitCode = 1
