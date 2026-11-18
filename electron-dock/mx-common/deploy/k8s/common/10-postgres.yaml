@@ -133,13 +133,17 @@ spec:
             failureThreshold: 180
           readinessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U mx_common -d mx_common"]
+              command: ["sh", "-c", "pg_isready -U mx_common -d mx_common -t 3"]
             periodSeconds: 5
+            timeoutSeconds: 5
           livenessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U mx_common -d mx_common"]
+              command: ["sh", "-c", "pg_isready -U mx_common -d mx_common -t 3"]
             initialDelaySeconds: 30
             periodSeconds: 15
+            # Let pg_isready finish its 3-second check, including exec overhead.
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: 500m

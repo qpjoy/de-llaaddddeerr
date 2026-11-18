@@ -1,4 +1,5 @@
 ```bash
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-launcher
 
 

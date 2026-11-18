@@ -151,6 +151,64 @@ test('status is read-only and reports what apply would change', t => {
   assert.equal(f.summary().settings.status, 'changes-needed')
 })
 
+for (const action of ['status', 'apply']) {
+  test(`${action} refuses a memory resize requiring a container restart before any patch`, t => {
+    const initial = cluster()
+    const policy = [{ resourceName: 'memory', restartPolicy: 'RestartContainer' }]
+    initial.pods['mx-internal-postgres-0'].spec.containers[0].resizePolicy = policy
+    const f = fixture(t, initial, {})
+    const result = f.run(action, 'mx-launcher')
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.equal(f.summary().resources.status, 'restart-required')
+    assert.match(f.summary().resources.detail, /memory.*RestartContainer.*已跳过/)
+    const state = f.read()
+    assert.equal(state.calls.some(c => c.args.includes('patch')), false, 'even a server dry-run is skipped')
+    assert.equal(state.calls.some(mutating), false)
+    assert.deepEqual(state.pods['mx-internal-postgres-0'], initial.pods['mx-internal-postgres-0'])
+  })
+}
+
+test('an unchanged memory restart policy does not block a CPU-only resize', t => {
+  const initial = cluster({ templateMemory: '1024Mi' })
+  const policy = [{ resourceName: 'memory', restartPolicy: 'RestartContainer' }]
+  initial.pods['mx-internal-postgres-0'].spec.containers[0].resizePolicy = policy
+  const f = fixture(t, initial, {})
+  const result = f.run('apply', 'mx-launcher')
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.equal(f.summary().resources.status, 'resized')
+  const state = f.read()
+  const patches = state.calls.filter(c => c.args.includes('patch'))
+  assert.deepEqual(patches.map(c => c.args.includes('--dry-run=server')), [true, false])
+  for (const call of patches) assert.doesNotMatch(call.args[call.args.indexOf('-p') + 1], /resizePolicy/)
+  assert.deepEqual(state.pods['mx-internal-postgres-0'].spec.containers[0].resizePolicy, policy)
+  assert.equal(state.pods['mx-internal-postgres-0'].status.containerStatuses[0].restartCount, 3)
+})
+
+test('explicit NotRequired policies preserve in-place resource updates', t => {
+  const initial = cluster()
+  initial.pods['mx-internal-postgres-0'].spec.containers[0].resizePolicy = [
+    { resourceName: 'cpu', restartPolicy: 'NotRequired' },
+    { resourceName: 'memory', restartPolicy: 'NotRequired' },
+  ]
+  const f = fixture(t, initial, {})
+  assert.equal(f.run('apply', 'mx-launcher').status, 0)
+  assert.equal(f.summary().resources.status, 'resized')
+  assert.deepEqual(f.read().calls.filter(c => c.args.includes('patch'))
+    .map(c => c.args.includes('--dry-run=server')), [true, false])
+})
+
+test('equivalent CPU and memory units do not require a resize or restart', t => {
+  const initial = cluster({ templateCpu: '1', templateMemory: '1024Mi' })
+  initial.pods['mx-internal-postgres-0'].spec.containers[0].resizePolicy = [
+    { resourceName: 'cpu', restartPolicy: 'RestartContainer' },
+    { resourceName: 'memory', restartPolicy: 'RestartContainer' },
+  ]
+  const f = fixture(t, initial, {})
+  assert.equal(f.run('apply', 'mx-launcher').status, 0)
+  assert.equal(f.summary().resources.status, 'in-sync')
+  assert.equal(f.read().calls.some(c => c.args.includes('patch')), false)
+})
+
 test('a rejected resize is reported without retry or restart while settings still apply', t => {
   const f = fixture(t, { ...cluster(), rejectResize: true })
   const result = f.run('apply', 'mx-launcher')

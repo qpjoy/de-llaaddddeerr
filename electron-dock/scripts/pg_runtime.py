@@ -130,7 +130,8 @@ def container_status(pod, name):
 def reconcile_resources(target, sts, pod, apply):
     name = target["container"]
     desired = cpu_memory(container(sts["spec"]["template"]["spec"], name).get("resources"))
-    current = cpu_memory(container(pod["spec"], name).get("resources"))
+    live_container = container(pod["spec"], name)
+    current = cpu_memory(live_container.get("resources"))
     report = {"desired": desired, "before": current}
     if same_resources(desired, current):
         report["status"] = "in-sync"
@@ -138,6 +139,19 @@ def reconcile_resources(target, sts, pod, apply):
     if set(desired) - set(current) or set(current) - set(desired):
         # Adding or removing a request/limit is not an in-place resize.
         report.update(status="restart-required", detail="模板增删了 requests/limits 项，只能在计划重启时生效")
+        return report
+    changed_resources = set()
+    for key, value in desired.items():
+        resource = key.split(".")[1]
+        before, after = quantity(resource, current[key]), quantity(resource, value)
+        if before is None or after is None or before != after:
+            changed_resources.add(resource)
+    restart_resources = sorted({policy.get("resourceName") for policy in live_container.get("resizePolicy") or []
+                                if policy.get("resourceName") in changed_resources
+                                and policy.get("restartPolicy") == "RestartContainer"})
+    if restart_resources:
+        report.update(status="restart-required", detail="运行中容器的 {} resizePolicy 要求 RestartContainer；已跳过资源调整".format(
+            ", ".join(restart_resources)))
         return report
     if not apply:
         report["status"] = "resize-needed"

@@ -216,6 +216,8 @@ Hub 的 `deploy` 会自动调用它，不需要手动执行。
 
 若部署报 `the database system is shutting down`，而 Pod 随后又显示 Running，应检查容器最近一次退出信息、`kubectl logs --previous` 和 Pod events。当前 Ready 不能解释之前的重启原因；`pg_advisory_xact_lock` 的等待日志也不等同于死锁或重启原因。不要通过重建数据卷或轮换凭据处理暂态连接错误。
 
+PostgreSQL 的 readiness/liveness 探针显式使用 `pg_isready -t 3` 和 `timeoutSeconds: 5`，避免 Kubernetes 默认 1 秒超时先于数据库探测结束；liveness 仍为每 15 秒检查、连续 3 次失败才触发重启。既有 Pod 在 `OnDelete` 策略下保留原探针，模板修改需计划维护时替换 Pod 才生效，普通 Hub 部署不会为此重启数据库。`Completed / exitCode 0` 也可能来自探针触发的正常关闭，需结合收到 shutdown request 前后的 kubelet/容器运行时日志判断；events 为空不能排除历史事件，关闭检查点耗时不能直接当作重启原因。
+
 ### 本机开发连接 PostgreSQL
 
 在运行 PostgreSQL 的 Internal 节点，mx-common 的 `deploy` 会同时部署一个只监听

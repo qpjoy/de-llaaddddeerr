@@ -177,7 +177,7 @@ Launcher 总入口同时强制 `MX_INSIGHT_HUB_DEPLOY=0`，拒绝非零值，避
 
 数据库的声明式运行配置在 `scripts/postgres-runtime.json`，由 `scripts/pg_runtime.py` 应用。它**从不删除、重启或重建数据库 Pod，也不修改 StatefulSet**，只做两件事：
 
-1. **CPU／内存**：以各自 StatefulSet 模板为准。运行中的 Pod 与模板不同时，先 server dry-run，再用 Kubernetes Pod resize 原地调整（容器不重启）；随后确认 kubelet 已分配、重启次数未变。被拒绝或节点资源不足时只报告。
+1. **CPU／内存**：以各自 StatefulSet 模板为准。运行中的 Pod 与模板不同时，先检查现场容器的 `resizePolicy`；任一实际变更资源要求 `RestartContainer` 时报告 `restart-required` 并跳过整次资源调整。其余情况先 server dry-run，再用 Kubernetes Pod resize 原地调整；随后确认 kubelet 已分配、重启次数未变。被拒绝或节点资源不足时只报告。
 2. **参数**：只写可热加载的参数（`ALTER SYSTEM` + `pg_reload_conf()`），只在与上次写入值不同时才写；枚举参数可写成偏好列表（如 `["lz4","pglz"]`）。需要重启的参数、被启动参数固定的参数只报告，不应用。
 
 ```bash
