@@ -12,6 +12,10 @@ import (
 	"unsafe"
 )
 
+const protectedStateDACL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+
+var errUntrustedStateOwner = errors.New("untrusted owner of privileged network state")
+
 // The existing core coordinates endpoint routes with other elevated Launcher
 // clients in ProgramData/QPJoy/WireGuard. Preserve that shared ownership, while
 // refusing ordinary-user-writable state before SYSTEM reads it.
@@ -33,7 +37,7 @@ func trustedACL(path string, allowCreateChildren bool) (err error) {
 		return err
 	}
 	if !owner.IsWellKnown(windows.WinLocalSystemSid) && !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-		return errors.New("untrusted owner of privileged network state")
+		return errUntrustedStateOwner
 	}
 	acl, _, err := descriptor.DACL()
 	if err != nil {
@@ -64,6 +68,58 @@ func trustedACL(path string, allowCreateChildren bool) (err error) {
 	}
 	return nil
 }
+
+func (s *networkService) prepareServiceState(serviceRegistered bool) error {
+	if err := protectDirectory(filepath.Dir(s.stateDir)); err != nil {
+		return err
+	}
+	info, err := os.Lstat(s.stateDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return createServiceStateDirectory(s.stateDir)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("network service state path %q must be a directory", s.stateDir)
+	}
+	if err := trustedACL(s.stateDir, false); err != nil {
+		if serviceRegistered || !errors.Is(err, errUntrustedStateOwner) {
+			return err
+		}
+		// A failed first install can leave an empty directory. Remove it only
+		// if it is still empty, and never adopt its ACL or contents.
+		path, pathErr := windows.UTF16PtrFromString(s.stateDir)
+		if pathErr != nil {
+			return pathErr
+		}
+		if removeErr := windows.RemoveDirectory(path); removeErr != nil {
+			return fmt.Errorf("replace empty network service state directory %q: %w", s.stateDir, removeErr)
+		}
+		return createServiceStateDirectory(s.stateDir)
+	}
+	return verifyStateTree(s.stateDir)
+}
+
+func createServiceStateDirectory(path string) error {
+	// Give administrators ownership at creation, even when the elevated
+	// installer's default owner is its individual Windows account.
+	descriptor, err := windows.SecurityDescriptorFromString("O:BA" + protectedStateDACL)
+	if err != nil {
+		return err
+	}
+	attributes := windows.SecurityAttributes{SecurityDescriptor: descriptor}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	directory, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	if err := windows.CreateDirectory(directory, &attributes); err != nil {
+		return fmt.Errorf("create protected network service state directory %q: %w", path, err)
+	}
+	return trustedACL(path, false)
+}
+
 func (s *networkService) endpointRegistryRoot() string {
 	return filepath.Join(filepath.Dir(filepath.Dir(s.stateDir)), "QPJoy", "WireGuard")
 }
