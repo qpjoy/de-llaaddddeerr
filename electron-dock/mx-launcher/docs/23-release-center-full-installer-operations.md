@@ -371,3 +371,49 @@ pnpm --dir electron-dock/mx-launcher/server smoke:release-center http://10.88.88
   手填进计划，使用 Internal artifact download URL。
 - 历史出现 `release / UNKNOWN`：升级 Internal server 和客户端后，旧空行会在状态迁移时
   自动移除，客户端使用 `/internal/v1/releases/history` 的平台过滤结果。
+
+### 上传显示 `invalid JSON` / HTTP 413
+
+2026-11-19 对 `https://launcher.minsight-ai.com/admin-api/internal/v1/release-artifacts`
+做无凭据探针：仅声明 11 MiB 的 `Content-Length` 并发送 `Expect: 100-continue`，实际
+上传 0 字节，入口立即返回 Nginx `413 Request Entity Too Large`、`text/html`。同窗
+`/auth/admin/session` 返回 200 JSON、`accessMode: sso-only`。旧上传 UI 先解析 JSON，
+将这类网关 HTML 错误遮盖为 `Release artifact upload returned invalid JSON`。
+
+`OSS direct` 指 Internal 收到文件后写入 OSS，浏览器仍先上传到管理入口：
+
+```text
+浏览器 → Domestic HTTPS Nginx → Internal Nginx → Identity 管理代理 → Internal API → OSS
+```
+
+旧公网模板和 `scripts/identity-ingress.mjs` 生成的 Internal 配置均限制 10 MiB。修复在
+**两层 Launcher vhost** 增加精确 `location = /admin-api/internal/v1/release-artifacts`：
+`client_max_body_size 2g` 对齐服务端默认 2 GiB；该 location 的 `proxy_read_timeout` 和
+`proxy_send_timeout` 为 `15m`，保留 `proxy_request_buffering on`。所有身份验证头、Host、
+来源 ACL 和 BFF Cookie/CSRF 检查保留。普通登录和其他 API 继续使用原限制，不开放
+原始 `/internal/v1/`。Nginx 的精确 location 优先于前缀 location，body 限制可按 location
+覆盖；超时是相邻读写间隔限制，并非整个上传总时限。
+见 [Nginx location/body 说明](https://nginx.org/en/docs/http/ngx_http_core_module.html#location)
+和 [proxy timeout/buffering 说明](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout)。
+
+部署必须覆盖两层；仅更新前端提示或仅放大一层限制都不能恢复大包上传：
+
+1. Domestic：更新 `de-mingxi/compass/deploy/nginx/examples/71-launcher.conf.example` 对应的
+   实际生效 Launcher vhost，保留原证书、上游和公共代理头。检查后仅 reload Nginx。
+2. Internal：在 Launcher 根目录运行 `bash scripts/manage.sh ops identity ingress`，按
+   原身份档案重新生成 `/var/lib/mx-launcher/identity/public-ingress.conf`。将上传 location
+   合入实际生效的 `/etc/nginx/conf.d/mx-public-identity.conf`；若该文件还有 Hub 等手工合入
+   的路由，必须保留。检查后仅 reload Nginx。生成文件含私有网关凭据，保持 root 0600，
+   不把 `nginx -T` 全量输出或配置内容上传到日志。
+3. 更新 Internal/Identity 管理上传代理和管理 UI 的对应修复。管理上传代理必须给这一
+   精确 POST 路径足够的上游响应等待时间；OSS 写入发生在文件接收之后，原 30 秒等待会
+   造成另一类 502。不要以全局放宽登录超时或重建员工联网服务替代上传路径修复。
+4. 先核对 `/auth/admin/session` 和原登录/联网健康，再在管理台重新上传。未授权请求应
+   仍被拒绝；真正上传成功后检查返回的 artifact 大小、摘要与文件名，再确认 release plan。
+   两层 Nginx 保留请求缓冲，需要各自的临时目录具备本次上传所需的磁盘空间。若调整服务端
+   `MX_RELEASE_ARTIFACT_MAX_BYTES`，同时核对两层 body 上限。
+
+若放开 body 限制后仍报错，先从浏览器 Network 记录该 POST 的状态码、Content-Type、
+耗时和响应：413 检查两层大小限制；502/504 检查各层代理与 OSS 等待；401/403 检查现有
+管理会话和 CSRF；JSON 里的 OSS 错误再按存储配置处理。截图中的文件名与发布 Version
+也应核对，避免把 `3.0.0` 的安装包登记为 `3.0.1`，但版本文字不同不是这次 413 的原因。

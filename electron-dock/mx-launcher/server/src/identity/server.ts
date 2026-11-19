@@ -7,6 +7,13 @@ import type { IdentityRepository } from './repository.js';
 import { ReadinessGate } from '../lib/readiness-gate.js';
 import { createRegistrationClient } from '../registration/backchannel.js';
 
+export function adminProxyTimeout(method: string | undefined, pathname: string): number {
+  // Internal finishes the OSS PUT before returning artifact metadata. Keep
+  // login and every other admin request on their existing 30-second budget.
+  return method === 'POST' && (pathname === '/admin-api/internal/v1/release-artifacts'
+    || pathname === '/internal/v1/release-artifacts') ? 900_000 : 30_000;
+}
+
 export function createIdentityServer({ settings, repository, cert, key, upstream }: {
   settings: IdentitySettings; repository: IdentityRepository; cert: Buffer; key: Buffer; upstream: URL;
 }) {
@@ -57,7 +64,7 @@ export function createIdentityServer({ settings, repository, cert, key, upstream
         delete headers.authorization;
       }
       for (const header of ['connection', 'upgrade', 'transfer-encoding', 'x-mx-forwarded-by', 'forwarded']) delete headers[header as keyof typeof headers];
-      const proxy = request({ hostname: upstream.hostname, port: upstream.port, method: req.method, path: req.url, headers, timeout: 30000 }, response => {
+      const proxy = request({ hostname: upstream.hostname, port: upstream.port, method: req.method, path: req.url, headers, timeout: adminProxyTimeout(req.method, path) }, response => {
         res.writeHead(response.statusCode ?? 502, response.headers); response.pipe(res);
       });
       proxy.on('timeout', () => proxy.destroy());

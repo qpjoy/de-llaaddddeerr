@@ -9519,15 +9519,30 @@ async function uploadReleaseArtifactFile(input, file) {
     redirect: opsToken || usesPersonalSession ? 'error' : 'follow'
   });
   const text = await response.text();
+  const contentType = response.headers.get('content-type')?.split(';')[0] || 'unknown content-type';
+  const responseInfo = `HTTP ${response.status} (${contentType})`;
   let payload = null;
   try {
     payload = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error('Release artifact upload returned invalid JSON');
+    // Gateways may return HTML (413/504) or plain text (502). Keep the HTTP
+    // failure visible instead of replacing it with a JSON parsing error.
   }
   if (!response.ok) {
     if (usesPersonalSession) await adminSession.rejected(payload);
-    throw new Error(payload?.message || `Artifact upload failed HTTP ${response.status}`);
+    const serverMessage = typeof payload?.message === 'string' ? payload.message : '';
+    const hint = response.status === 413
+      ? '文件超过上传入口大小限制；请检查公网和 Internal 网关的 release-artifacts 限制。'
+      : [408, 502, 504].includes(response.status)
+        ? '上传链路超时或上游不可用；请检查上传专用代理超时及 Internal 到 OSS 的连接。'
+        : '';
+    throw Object.assign(new Error(`Release artifact upload failed ${responseInfo}${serverMessage || hint ? `: ${serverMessage || hint}` : ''}`), {
+      status: response.status,
+      code: payload?.code
+    });
+  }
+  if (!payload?.artifact || typeof payload.artifact !== 'object' || Array.isArray(payload.artifact)) {
+    throw new Error(`Release artifact upload returned ${responseInfo} without valid artifact JSON; check the upload API route.`);
   }
   return payload;
 }
