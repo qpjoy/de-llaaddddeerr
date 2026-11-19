@@ -1565,6 +1565,15 @@ select {
   min-width: 1160px;
 }
 
+.release-admin-table .app-table-actions {
+  flex-wrap: wrap;
+}
+
+.release-admin-table .app-table-actions button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .release-admin-table .app-table-row mark[data-kind="ready"] {
   border-color: color-mix(in srgb, var(--green) 50%, transparent);
   color: var(--green);
@@ -1583,6 +1592,16 @@ select {
 .release-admin-table .app-table-row mark[data-kind="failed"] {
   border-color: color-mix(in srgb, var(--red) 52%, transparent);
   color: var(--red);
+}
+
+.release-admin-table .app-table-row mark[data-kind="withdrawn"] {
+  border-color: color-mix(in srgb, var(--muted) 55%, transparent);
+  color: var(--muted);
+}
+
+.release-distribution-note {
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .release-drawer-summary,

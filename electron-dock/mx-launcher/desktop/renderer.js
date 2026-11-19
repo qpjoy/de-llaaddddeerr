@@ -8352,6 +8352,7 @@ function releasePlanArtifacts(plan) {
 }
 
 function releasePlanStatus(plan) {
+  if (releasePlanIsWithdrawn(plan)) return 'withdrawn';
   const gate = plan?.test?.gate?.verdict || 'blocked';
   if (gate === 'failed') return 'failed';
   if (gate === 'blocked') return 'blocked';
@@ -8360,8 +8361,13 @@ function releasePlanStatus(plan) {
   return 'idle';
 }
 
+function releasePlanIsWithdrawn(plan) {
+  return typeof plan?.withdrawnAt === 'string' && Boolean(plan.withdrawnAt.trim());
+}
+
 function releaseStatusLabel(status) {
   const labels = {
+    withdrawn: '已撤销',
     ready: 'ready',
     planned: 'planned',
     blocked: 'blocked',
@@ -8469,7 +8475,7 @@ function renderReleaseCenterPanel() {
             ${channels.map((channel) => `<option value="${escapeHtml(channel)}" ${filter.channel === channel ? 'selected' : ''}>${escapeHtml(channel)}</option>`).join('')}
           </select>
           <select data-release-filter="status" aria-label="Release status">
-            ${['all', 'ready', 'planned', 'blocked', 'failed', 'idle'].map((status) => `<option value="${escapeHtml(status)}" ${filter.status === status ? 'selected' : ''}>${escapeHtml(status === 'all' ? 'All status' : status)}</option>`).join('')}
+            ${['all', 'ready', 'withdrawn', 'planned', 'blocked', 'failed', 'idle'].map((status) => `<option value="${escapeHtml(status)}" ${filter.status === status ? 'selected' : ''}>${escapeHtml(status === 'all' ? 'All status' : releaseStatusLabel(status))}</option>`).join('')}
           </select>
           <select data-release-filter="artifactKind" aria-label="Artifact kind">
             <option value="all" ${filter.artifactKind === 'all' ? 'selected' : ''}>All artifacts</option>
@@ -8519,7 +8525,7 @@ function renderReleaseCenterPanel() {
               </span>
               <span>${renderChipList(artifacts.map(releaseArtifactSummary).slice(0, 3), 'info')}</span>
               <span>
-                <strong>${escapeHtml(`${rollout.strategy || 'gray'} ${rollout.percentage ?? 10}%`)}</strong>
+                <strong>${escapeHtml(releasePlanIsWithdrawn(plan) ? '已停止分发' : `${rollout.strategy || 'gray'} ${rollout.percentage ?? 10}%`)}</strong>
                 <small>${escapeHtml(rollout.segmentId || 'default segment')}</small>
               </span>
               <span>
@@ -8528,8 +8534,9 @@ function renderReleaseCenterPanel() {
               </span>
               <span>${renderReleaseStatusBadge(status)}</span>
               <span class="app-table-actions">
-                <button class="secondary-button" type="button" data-release-open="${escapeHtml(plan.planId)}">Open</button>
-                <button class="secondary-button" type="button" data-release-evaluate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Evaluate</button>
+                <button class="secondary-button" type="button" data-release-open="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>详情</button>
+                <button class="secondary-button" type="button" data-release-edit="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>编辑</button>
+                ${renderReleaseDistributionButton(plan)}
               </span>
             </article>
           `;
@@ -8583,6 +8590,7 @@ function bindReleaseCenterControls(root) {
       openReleaseCenterDrawer(row.dataset.releaseSelect);
     });
     row.addEventListener('keydown', (event) => {
+      if (event.target.closest('button')) return;
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
       openReleaseCenterDrawer(row.dataset.releaseSelect);
@@ -8591,6 +8599,10 @@ function bindReleaseCenterControls(root) {
   for (const button of root.querySelectorAll('[data-release-open]')) {
     button.addEventListener('click', () => openReleaseCenterDrawer(button.dataset.releaseOpen));
   }
+  for (const button of root.querySelectorAll('[data-release-edit]')) {
+    button.addEventListener('click', () => openReleaseMetadataEditor(button.dataset.releaseEdit));
+  }
+  bindReleaseDistributionButtons(root);
   for (const button of root.querySelectorAll('[data-release-evaluate]')) {
     button.addEventListener('click', () => void evaluateReleasePlanFromAdmin(button.dataset.releaseEvaluate));
   }
@@ -8658,10 +8670,84 @@ async function evaluateReleasePlanFromAdmin(planId) {
 }
 
 function openReleaseCenterDrawer(planId) {
-  if (!planId) return;
+  if (!planId || state.releaseCenter.busy) return;
   state.releaseCenter.drawer = { planId };
   state.releaseCenter.feedback = null;
   renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+function openReleaseMetadataEditor(planId) {
+  if (state.releaseCenter.busy) return;
+  openReleaseCenterDrawer(planId);
+  requestAnimationFrame(() => {
+    if (state.releaseCenter.drawer?.planId !== planId) return;
+    const form = userEditorDrawer?.querySelector('[data-release-edit-form]');
+    form?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    form?.elements.releaseNotes?.focus({ preventScroll: true });
+  });
+}
+
+function renderReleaseDistributionButton(plan) {
+  const withdrawn = releasePlanIsWithdrawn(plan);
+  return `<button class="secondary-button${withdrawn ? '' : ' danger-button'}" type="button" data-release-distribution="${escapeHtml(plan.planId)}" data-release-withdrawn="${withdrawn ? 'false' : 'true'}" ${state.releaseCenter.busy ? 'disabled' : ''}>${withdrawn ? '恢复分发' : '撤销分发'}</button>`;
+}
+
+function bindReleaseDistributionButtons(root) {
+  for (const button of root.querySelectorAll('[data-release-distribution]')) {
+    button.addEventListener('click', () => void setReleaseWithdrawalFromAdmin(
+      button.dataset.releaseDistribution,
+      button.dataset.releaseWithdrawn === 'true'
+    ));
+  }
+}
+
+function releaseWithdrawalConfirmation(plan, withdrawn) {
+  const versions = [...new Set(releaseDecisionList(plan).map((item) => item.targetVersion).filter(Boolean))].join(' / ');
+  const targets = plan.rollout?.audience || {};
+  const audience = [
+    asArray(targets.userIds).length ? `用户：${asArray(targets.userIds).join(', ')}` : '',
+    asArray(targets.installIds).length ? `安装：${asArray(targets.installIds).join(', ')}` : ''
+  ].filter(Boolean).join('；') || '全部用户按比例匹配';
+  return `${withdrawn ? '撤销' : '恢复'}分发 ${plan.releaseId || plan.planId}？\n\n应用：${plan.productId || '-'}\n版本：${versions || '-'}\n范围：${plan.channel} / ${plan.rollout?.strategy || 'all'} ${plan.rollout?.percentage ?? 100}%\n${audience}\nGate：${plan.test?.gate?.verdict || 'blocked'}\n\n${withdrawn
+    ? '撤销后，新的更新检查和版本列表不再提供此记录。已下载的安装包不会被删除；原发布信息和投放范围会保留。'
+    : '恢复后，将按以上保留的投放范围和 Gate 状态重新提供此版本。'}`;
+}
+
+async function setReleaseWithdrawalFromAdmin(planId, withdrawn) {
+  const plan = releasePlanById(planId);
+  if (!plan || state.releaseCenter.busy || typeof withdrawn !== 'boolean' || releasePlanIsWithdrawn(plan) === withdrawn) return;
+  if (!window.confirm(releaseWithdrawalConfirmation(plan, withdrawn))) return;
+  const serverBase = normalizedServerBase();
+  state.releaseCenter.busy = true;
+  state.releaseCenter.feedback = { kind: 'info', message: `${withdrawn ? '正在撤销' : '正在恢复'} ${plan.releaseId}` };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson(`/internal/v1/release-management/plans/${encodeURIComponent(planId)}`, {
+      method: 'PATCH',
+      body: {
+        withdrawn,
+        updatedBy: 'desktop-admin',
+        requestId: `desktop-release-${withdrawn ? 'withdraw' : 'restore'}-${Date.now()}`
+      }
+    });
+    if (normalizedServerBase() !== serverBase) return;
+    const updatedPlan = payload?.plan;
+    const confirmed = updatedPlan?.planId === planId && (withdrawn
+      ? releasePlanIsWithdrawn(updatedPlan)
+      : Object.prototype.hasOwnProperty.call(updatedPlan, 'withdrawnAt') && updatedPlan.withdrawnAt === null);
+    if (!confirmed) throw new Error('服务端未确认分发状态变更；请确认 Internal 已支持撤销功能，再刷新记录。');
+    state.dashboard = {
+      ...(state.dashboard || {}),
+      latestReleasePlans: releaseCenterPlans().map((item) => item.planId === planId ? updatedPlan : item)
+    };
+    state.releaseCenter.feedback = { kind: 'success', message: `${plan.releaseId} ${withdrawn ? '已撤销分发' : '已恢复分发'}` };
+  } catch (error) {
+    if (normalizedServerBase() === serverBase) state.releaseCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.releaseCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderInspector();
+  }
 }
 
 function openReleaseUploadDrawer(kind = 'installer') {
@@ -8790,6 +8876,7 @@ function renderReleaseCenterDrawer() {
   }
   const status = releasePlanStatus(plan);
   const artifacts = releasePlanArtifacts(plan);
+  const withdrawn = releasePlanIsWithdrawn(plan);
   userEditorBackdrop.hidden = false;
   userEditorDrawer.hidden = false;
   userEditorDrawer.innerHTML = `
@@ -8809,11 +8896,13 @@ function renderReleaseCenterDrawer() {
             <strong>Release state</strong>
           </div>
           <div class="release-drawer-summary">
-            ${renderReleaseDrawerMetric('Status', releaseStatusLabel(status), plan.decisions?.readyToPromote ? 'ready to promote' : 'waiting gate or approval')}
+            ${renderReleaseDrawerMetric('Status', releaseStatusLabel(status), withdrawn ? `${formatTime(plan.withdrawnAt)} · ${plan.withdrawnBy || '管理员'}` : plan.decisions?.readyToPromote ? 'ready to promote' : 'waiting gate or approval')}
             ${renderReleaseDrawerMetric('Source', plan.activation?.checkSource || 'internal-postgres', 'client checks Internal')}
             ${renderReleaseDrawerMetric('Created', formatTime(plan.createdAt), plan.createdBy || 'release-admin')}
             ${renderReleaseDrawerMetric('Policy', plan.activation?.majorUpdateRequiresInstaller ? 'installer' : 'hot update', plan.activation?.connectionSafeMode ? 'connection-safe' : 'standard')}
           </div>
+          ${withdrawn ? '<p class="release-distribution-note">此记录已撤销，新更新检查和版本列表不再提供它。编辑后仍保持撤销，需单独恢复分发；已下载的安装包不会被删除。</p>' : ''}
+          ${state.releaseCenter.feedback ? `<p class="profile-feedback" data-kind="${escapeHtml(state.releaseCenter.feedback.kind)}">${escapeHtml(state.releaseCenter.feedback.message)}</p>` : ''}
         </section>
         <section class="app-drawer-section">
           <div class="app-section-title">
@@ -8856,6 +8945,7 @@ function renderReleaseCenterDrawer() {
             <span>04</span>
             <strong>Edit release metadata</strong>
           </div>
+          <p class="release-distribution-note">可修改说明、通道和投放范围。安装包、摘要与目标版本固定；更换安装包请上传新版本并创建新发布。${withdrawn ? '保存这些修改不会恢复分发。' : ''}</p>
           <div class="release-upload-grid">
             <label>
               <span>Channel</span>
@@ -8865,9 +8955,10 @@ function renderReleaseCenterDrawer() {
             </label>
             <label>
               <span>Apply behavior</span>
-              <select name="deliveryMode" ${plan.activation?.majorUpdateRequiresInstaller ? 'disabled' : ''}>
-                <option value="prompt-download-restart" ${plan.deliveryMode !== 'silent-download-next-start' ? 'selected' : ''}>提示用户，立即下载/重启</option>
-                <option value="silent-download-next-start" ${plan.deliveryMode === 'silent-download-next-start' ? 'selected' : ''}>静默下载，下次启动生效</option>
+              <select name="deliveryMode">
+                <option value="prompt-download-restart" ${!plan.deliveryMode || plan.deliveryMode === 'prompt-download-restart' ? 'selected' : ''}>提示用户，立即下载/重启</option>
+                <option value="manual-download" ${plan.deliveryMode === 'manual-download' ? 'selected' : ''}>手动下载</option>
+                ${!plan.activation?.majorUpdateRequiresInstaller ? `<option value="silent-download-next-start" ${plan.deliveryMode === 'silent-download-next-start' ? 'selected' : ''}>静默下载，下次启动生效</option>` : ''}
               </select>
             </label>
             <label>
@@ -8926,6 +9017,7 @@ function renderReleaseCenterDrawer() {
       </div>
       <footer class="app-drawer-actions">
         ${plan.test?.gate?.verdict !== 'passed' ? `<button class="secondary-button" type="button" data-release-complete-gate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Complete gate</button>` : ''}
+        ${renderReleaseDistributionButton(plan)}
         <button class="secondary-button" type="submit" form="release-edit-form" ${state.releaseCenter.busy ? 'disabled' : ''}>Save release</button>
         <button class="secondary-button" type="button" data-release-evaluate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Evaluate policy</button>
         <button class="primary-button" type="button" data-release-drawer-close>Done</button>
@@ -9162,6 +9254,9 @@ function bindReleaseDrawerControls() {
   }
   const editForm = userEditorDrawer.querySelector('[data-release-edit-form]');
   if (editForm) {
+    if (state.releaseCenter.busy) {
+      for (const control of editForm.querySelectorAll('input, select, textarea')) control.disabled = true;
+    }
     editForm.addEventListener('submit', (event) => {
       event.preventDefault();
       void updateReleasePlanFromAdmin(editForm);
@@ -9173,16 +9268,16 @@ function bindReleaseDrawerControls() {
   for (const button of userEditorDrawer.querySelectorAll('[data-release-complete-gate]')) {
     button.addEventListener('click', () => void completeReleaseGateFromAdmin(button.dataset.releaseCompleteGate));
   }
+  bindReleaseDistributionButtons(userEditorDrawer);
 }
 
 async function updateReleasePlanFromAdmin(form) {
   const planId = form.dataset.releasePlanId;
   const plan = releasePlanById(planId);
   if (!plan || state.releaseCenter.busy) return;
+  const serverBase = normalizedServerBase();
   const percentage = Number(form.elements.rolloutPercentage?.value);
-  const deliveryMode = plan.activation?.majorUpdateRequiresInstaller
-    ? 'prompt-download-restart'
-    : form.elements.deliveryMode?.value || 'prompt-download-restart';
+  const deliveryMode = form.elements.deliveryMode?.value || plan.deliveryMode || 'prompt-download-restart';
   const body = {
     channel: form.elements.channel?.value || plan.channel,
     deliveryMode,
@@ -9205,13 +9300,16 @@ async function updateReleasePlanFromAdmin(form) {
       method: 'PATCH',
       body
     });
-    const updatedPlan = payload.plan;
+    if (normalizedServerBase() !== serverBase) return;
+    const updatedPlan = payload?.plan;
+    if (updatedPlan?.planId !== planId || releasePlanIsWithdrawn(updatedPlan) !== releasePlanIsWithdrawn(plan)) {
+      throw new Error('服务端返回的发布记录或撤销状态已变化；请刷新后再编辑。');
+    }
     const plans = [updatedPlan, ...releaseCenterPlans().filter((item) => item.planId !== updatedPlan.planId)];
     state.dashboard = { ...(state.dashboard || {}), latestReleasePlans: plans };
-    state.releaseCenter.drawer = { planId: updatedPlan.planId };
-    state.releaseCenter.feedback = { kind: 'success', message: `${updatedPlan.releaseId} saved` };
+    state.releaseCenter.feedback = { kind: 'success', message: `${updatedPlan.releaseId} saved${releasePlanIsWithdrawn(updatedPlan) ? ' · 仍为已撤销' : ''}` };
   } catch (error) {
-    state.releaseCenter.feedback = { kind: 'error', message: error.message };
+    if (normalizedServerBase() === serverBase) state.releaseCenter.feedback = { kind: 'error', message: error.message };
   } finally {
     state.releaseCenter.busy = false;
     renderFoundationGrid(state.dashboard?.overview || {});

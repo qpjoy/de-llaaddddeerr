@@ -3732,6 +3732,8 @@ export interface ReleaseManagementGateInput {
 }
 
 export interface ReleaseManagementPlanPatchInput {
+  /** Explicit lifecycle change; omitted by ordinary metadata edits. */
+  withdrawn?: boolean;
   channel?: string;
   releaseNotes?: string | null;
   deliveryMode?: ReleaseDeliveryMode | string | null;
@@ -3786,6 +3788,9 @@ export interface ReleaseManagementPlan {
   createdAt: string;
   updatedAt?: string;
   updatedBy?: string | null;
+  /** Missing/null on active and legacy plans. Retain the plan and artifacts for audit/recovery. */
+  withdrawnAt?: string | null;
+  withdrawnBy?: string | null;
 }
 
 export interface TestRunInput {

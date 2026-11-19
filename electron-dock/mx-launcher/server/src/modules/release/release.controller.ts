@@ -163,6 +163,7 @@ export class ReleaseController {
     const limit = Math.max(1, Math.min(50, Math.floor(nullableNumber(query.limit) ?? 8)));
     const plans = await this.store.listReleaseManagementPlans();
     const releases = plans
+      .filter((plan) => !plan.withdrawnAt)
       .filter((plan) => plan.channel === channel && plan.test?.gate?.verdict === 'passed')
       .filter((plan) => releasePlanIsGlobal(plan))
       .map((plan) => releaseHistoryRow(plan, componentId, platform, arch))
@@ -409,13 +410,19 @@ export class ReleaseController {
     @Body() rawBody: unknown
   ) {
     assertReleaseManagementAccess(req);
+    const input = toReleaseManagementPlanPatchInput(asRecord(rawBody));
+    const admin = internalAdminContext.getStore();
+    // The BFF has already checked the session/role/CSRF; the raw route has
+    // checked the Ops Token. Never attribute a lifecycle change to body text.
+    input.updatedBy = admin?.userId ?? (nullableString(process.env.MX_INTERNAL_OPS_TOKEN) ? 'internal-ops' : 'development');
+    input.requestId = admin?.requestId ?? input.requestId;
     if (!await this.store.getReleaseManagementPlan(planId)) {
       throw new NotFoundException('Release management plan not found');
     }
     return {
       plan: await this.store.updateReleaseManagementPlan(
         planId,
-        toReleaseManagementPlanPatchInput(asRecord(rawBody))
+        input
       )
     };
   }
@@ -910,7 +917,11 @@ function toReleaseManagementPlanPatchInput(
   body: Record<string, unknown>
 ): ReleaseManagementPlanPatchInput {
   const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
+  if (has('withdrawn') && typeof body.withdrawn !== 'boolean') {
+    throw new BadRequestException('withdrawn must be a boolean');
+  }
   return {
+    ...(has('withdrawn') ? { withdrawn: body.withdrawn as boolean } : {}),
     ...(has('channel') ? { channel: nullableString(body.channel) ?? '' } : {}),
     ...(has('releaseNotes') ? { releaseNotes: nullableString(body.releaseNotes) } : {}),
     ...(has('deliveryMode') ? { deliveryMode: nullableString(body.deliveryMode) } : {}),

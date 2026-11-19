@@ -3890,7 +3890,9 @@ export class MemoryStore implements PlatformStore {
     const updated = updateReleaseManagementPlanMetadata(plan, input);
     this.releaseManagementPlans.set(planId, updated);
     this.recordAudit({
-      eventType: 'release.management_plan.updated',
+      eventType: Boolean(plan.withdrawnAt) === Boolean(updated.withdrawnAt)
+        ? 'release.management_plan.updated'
+        : updated.withdrawnAt ? 'release.management_plan.withdrawn' : 'release.management_plan.restored',
       actorKind: 'release-center',
       requestId: input.requestId ?? null,
       installId: updated.installId,
@@ -3901,7 +3903,11 @@ export class MemoryStore implements PlatformStore {
         releaseId: updated.releaseId,
         channel: updated.channel,
         deliveryMode: updated.deliveryMode,
-        updatedBy: updated.updatedBy
+        updatedBy: updated.updatedBy,
+        previousWithdrawnAt: plan.withdrawnAt ?? null,
+        previousWithdrawnBy: plan.withdrawnBy ?? null,
+        withdrawnAt: updated.withdrawnAt ?? null,
+        withdrawnBy: updated.withdrawnBy ?? null
       }
     });
     return updated;

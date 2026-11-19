@@ -73,6 +73,7 @@ export function evaluateReleaseCheck(
     rollout: { matchedBy: null, bucket: null, percentage: null }
   };
   const candidates = [...plans]
+    .filter((plan) => !plan.withdrawnAt)
     .filter((plan) => plan.channel === input.channel)
     .filter((plan) => !input.productId || plan.productId === input.productId)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));

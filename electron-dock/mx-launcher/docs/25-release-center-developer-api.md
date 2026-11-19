@@ -632,6 +632,18 @@ FULL_PLAN_ID="$(jq -er '.plan.planId // .release.planId' <<<"$FULL_PLAN_JSON")"
 Admin 可用 `PATCH /internal/v1/release-management/plans/{planId}` 修正 release notes、
 提示/静默方式和灰度参数，但不能改 artifact、digest、平台、架构或目标版本。
 
+同一 Admin 接口支持显式撤销与恢复：`{"withdrawn":true}` 停止该计划后续分发，
+`{"withdrawn":false}` 恢复后重新按原 gate、通道和投放范围判断。`withdrawn` 必须为
+JSON boolean；普通 metadata 编辑省略它，避免意外恢复已撤销计划。服务端保存
+`withdrawnAt` / `withdrawnBy` 并记录审计，管理列表仍保留该计划；客户端
+`release/check` 与 `/internal/v1/releases/history` 排除已撤销计划。旧计划缺少这些
+字段时继续按未撤销处理，不需要数据库 schema migration。
+
+这里的撤销不删除 artifact，不让 SDK Publisher 获得新的管理权限，也不回收已下载的
+文件或已取得的下载链接。改错了安装包、版本、平台或架构时，撤销旧计划，再上传正确
+产物并创建新计划；不要直接改旧 artifact 的身份。管理 UI 与服务端须一起升级，确认
+PATCH 响应实际包含撤销状态后才算成功；旧服务端可能忽略新增字段。
+
 `release-center-publish.mjs` 是“上传本地文件并创建一个 plan”的 one-shot 包装，不提供
 `--artifact-id` 或 `--plan-id` 复用模式。CI 使用它时必须显式传稳定的
 `--release-id` 与 `--request-id`，否则默认随机 ID 不适合超时重试。canary → full

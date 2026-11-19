@@ -5488,6 +5488,10 @@ export function updateReleaseManagementPlanMetadata(
       });
   return {
     ...plan,
+    ...(input.withdrawn === undefined ? {} : input.withdrawn ? {
+      withdrawnAt: plan.withdrawnAt || updatedAt,
+      withdrawnBy: plan.withdrawnAt ? plan.withdrawnBy ?? null : input.updatedBy?.trim() || null
+    } : { withdrawnAt: null, withdrawnBy: null }),
     channel,
     releaseNotes: input.releaseNotes === undefined
       ? plan.releaseNotes

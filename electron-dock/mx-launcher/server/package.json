@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "test:mincave": "node --test --import tsx src/modules/mincave/*.test.ts",
     "test:admin-sso": "node --test --import tsx src/admin-sso/*.test.ts",
+    "test:release": "node --test --import tsx src/modules/release/*.test.ts src/store/release-withdrawal-postgres.test.ts",
     "test:identity": "node --test --import tsx src/identity/*.test.ts ../scripts/identity-deploy.test.mjs",
     "test:identity-console": "node --test ../scripts/identity-console.test.mjs ../scripts/identity-app.test.mjs ../scripts/identity-deploy.test.mjs ../scripts/identity-public.test.mjs ../scripts/identity-ingress.test.mjs",
     "test:registration": "node --test --import tsx src/registration/*.test.ts",

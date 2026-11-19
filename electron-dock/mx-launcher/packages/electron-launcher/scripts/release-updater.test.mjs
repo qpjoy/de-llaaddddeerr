@@ -179,6 +179,50 @@ test('release check uses the legacy flow for a 404 endpoint', async () => {
   assert.ok(requests.some((url) => url.endsWith('/internal/v1/release-management/plans')));
 });
 
+test('legacy release checks ignore withdrawn plans and retain older active releases', async () => {
+  const makePlan = (planId, version, withdrawnAt) => ({
+    planId,
+    releaseId: planId,
+    channel: 'stable',
+    withdrawnAt,
+    components: {
+      app: policyDecision({ componentId: 'mx-h2i', componentKind: 'app-installer', targetVersion: version })
+    },
+    artifacts: [{
+      ...artifactRef(`https://download.example.test/${version}.dmg`, null, null, 'mx-h2i'),
+      kind: 'app-installer',
+      version
+    }],
+    test: { gate: { verdict: 'passed' } }
+  });
+  const withdrawn = makePlan('withdrawn', '3.0.1', '2026-11-19T12:00:00.000Z');
+  for (const active of [makePlan('active', '3.0.0', null), makePlan('legacy', '2.9.0'), null]) {
+    const updater = createElectronLauncherReleaseUpdater({
+      baseUrl: 'http://release-center.internal',
+      fetchImpl: async (url, init = {}) => {
+        if (String(url).endsWith('/internal/v1/release/check')) return jsonResponse({}, 404);
+        if (String(url).endsWith('/internal/v1/release-management/plans')) {
+          return jsonResponse({ plans: [withdrawn, ...(active ? [active] : [])] });
+        }
+        if (String(url).endsWith('/internal/v1/releases/policy/evaluate')) {
+          const input = JSON.parse(init.body);
+          assert.equal(input.targetVersion, active?.components.app.targetVersion || '2.0.0');
+          return jsonResponse({ decision: policyDecision({ ...input, updateAvailable: Boolean(active) }) });
+        }
+        throw new Error(`unexpected request ${url}`);
+      }
+    });
+    const result = await updater.check({
+      componentId: 'mx-h2i', componentKind: 'app-installer', currentVersion: '2.0.0',
+      channel: 'stable', installId: 'install_h2i'
+    });
+    assert.equal(result.checkSource, 'plans-legacy');
+    assert.equal(result.plan?.planId || null, active?.planId || null);
+    assert.equal(result.status, active ? 'update-available' : 'up-to-date');
+    assert.equal(result.artifacts.length, active ? 1 : 0);
+  }
+});
+
 test('release check forwards AbortSignal and does not downgrade cancellation', async () => {
   const controller = new AbortController();
   const updater = createElectronLauncherReleaseUpdater({

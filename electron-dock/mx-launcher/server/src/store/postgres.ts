@@ -5048,26 +5048,44 @@ export class PostgresStore implements PlatformStore {
     planId: string,
     input: ReleaseManagementPlanPatchInput
   ): Promise<ReleaseManagementPlan> {
-    const plan = await this.getReleaseManagementPlan(planId);
-    if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
-    const updated = updateReleaseManagementPlanMetadata(plan, input);
-    await this.saveRecord('release-management-plan', planId, updated, this.config.siteId);
-    await this.recordAudit({
-      eventType: 'release.management_plan.updated',
-      actorKind: 'release-center',
-      requestId: input.requestId ?? null,
-      installId: updated.installId,
-      userId: updated.userId,
-      productId: updated.productId || updated.components.launcher.componentId,
-      metadata: {
-        planId: updated.planId,
-        releaseId: updated.releaseId,
-        channel: updated.channel,
-        deliveryMode: updated.deliveryMode,
-        updatedBy: updated.updatedBy
-      }
+    return this.dataSource.transaction(async (manager) => {
+      // Use the existing gate lock so a gate completion or another metadata
+      // editor cannot overwrite a withdrawal with a stale copy of the plan.
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`mx-launcher:${this.config.environment}:release-gate:${planId}`]
+      );
+      const records = manager.getRepository(PlatformRecordEntity);
+      const planRow = await records.findOne({
+        where: { kind: 'release-management-plan', id: planId, environment: this.config.environment }
+      });
+      if (!planRow) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
+      const plan = planRow.data as unknown as ReleaseManagementPlan;
+      const updated = updateReleaseManagementPlanMetadata(plan, input);
+      await this.saveRecordTo(records, 'release-management-plan', planId, updated, this.config.siteId);
+      await this.recordAuditTo(records, {
+        eventType: Boolean(plan.withdrawnAt) === Boolean(updated.withdrawnAt)
+          ? 'release.management_plan.updated'
+          : updated.withdrawnAt ? 'release.management_plan.withdrawn' : 'release.management_plan.restored',
+        actorKind: 'release-center',
+        requestId: input.requestId ?? null,
+        installId: updated.installId,
+        userId: updated.userId,
+        productId: updated.productId || updated.components.launcher.componentId,
+        metadata: {
+          planId: updated.planId,
+          releaseId: updated.releaseId,
+          channel: updated.channel,
+          deliveryMode: updated.deliveryMode,
+          updatedBy: updated.updatedBy,
+          previousWithdrawnAt: plan.withdrawnAt ?? null,
+          previousWithdrawnBy: plan.withdrawnBy ?? null,
+          withdrawnAt: updated.withdrawnAt ?? null,
+          withdrawnBy: updated.withdrawnBy ?? null
+        }
+      });
+      return updated;
     });
-    return updated;
   }
 
   async completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): Promise<ReleaseManagementPlan> {

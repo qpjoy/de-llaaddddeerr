@@ -1897,11 +1897,11 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
     '/internal/v1/release-management/plans/{planId}': {
       patch: operation({
         tag: 'Release Publisher',
-        summary: 'Admin 修改发布说明、应用方式与灰度参数',
-        description: 'Internal ops 管理接口；不允许修改 artifact 身份、digest、平台、架构或目标版本。可更新 releaseNotes、channel、deliveryMode、rollout strategy/percentage/rings、featureKeys 与目标 user/install。旧计划没有 deliveryMode 时按 prompt-download-restart；installer 计划可以 prompt 或 manual，但请求 silent 会强制为 prompt。',
+        summary: 'Admin 编辑、撤销或恢复发布记录',
+        description: '沿用 Internal ops 或已验证的管理会话权限；不允许修改 artifact 身份、digest、平台、架构或目标版本。可更新 releaseNotes、channel、deliveryMode、rollout strategy/percentage/rings、featureKeys 与目标 user/install。withdrawn 必须是 boolean：true 撤销、false 恢复，普通编辑省略此字段，不改变撤销状态。撤销记录保留在管理列表和审计中，后续 release/check 与客户端版本历史排除该记录；原投放范围和 gate 保留，恢复后重新按它们判断。withdrawnAt/withdrawnBy 由服务端记录，旧记录缺少这些字段时按未撤销处理。撤销不删除制品、不收回已下载文件或已取得的下载链接。旧计划没有 deliveryMode 时按 prompt-download-restart；installer 计划可以 prompt 或 manual，但请求 silent 会强制为 prompt。',
         operationId: 'updateReleaseManagementPlan',
         routeId: 'release.management_plan.update',
-        auth: 'internal',
+        auth: 'ops-token',
         pathParams: ['planId'],
         request: {
           releaseNotes: '修复 Windows PAC 并改善首次启动',
@@ -1912,8 +1912,27 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           featureKeys: ['luopan.release.app-asar'],
           targetUserIds: [],
           targetInstallIds: [],
-          updatedBy: 'desktop-admin',
+          withdrawn: true,
           requestId: 'release-edit-001'
+        },
+        responseSchema: {
+          type: 'object',
+          properties: {
+            plan: {
+              type: 'object',
+              properties: {
+                planId: { type: 'string' },
+                releaseId: { type: 'string' },
+                productId: { type: 'string' },
+                deliveryMode: { type: 'string' },
+                updatedAt: { type: 'string' },
+                updatedBy: { type: ['string', 'null'] },
+                withdrawnAt: { type: ['string', 'null'], description: '撤销时间；恢复后为 null，旧记录可能省略。' },
+                withdrawnBy: { type: ['string', 'null'], description: '已验证的管理操作人；恢复后为 null。' }
+              },
+              additionalProperties: true
+            }
+          }
         },
         response: {
           plan: {
@@ -1921,8 +1940,10 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             releaseId: 'luopan-asar-0.2.0',
             productId: 'luopan',
             deliveryMode: 'manual-download',
-            updatedBy: 'desktop-admin',
-            updatedAt: '2026-07-30T00:00:00.000Z'
+            withdrawnAt: '2026-11-19T12:00:00.000Z',
+            withdrawnBy: 'internal-ops',
+            updatedBy: 'internal-ops',
+            updatedAt: '2026-11-19T12:00:00.000Z'
           }
         }
       })

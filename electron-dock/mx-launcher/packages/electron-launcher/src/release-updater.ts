@@ -99,6 +99,8 @@ export interface ElectronLauncherReleasePlan {
     rollbackRequired?: boolean;
     nextActions?: string[];
   };
+  /** Withdrawn plans remain in the management registry but must not be offered to clients. */
+  withdrawnAt?: string | null;
   createdAt: string;
 }
 
@@ -635,6 +637,7 @@ function selectReleasePlan(
   input: ResolvedElectronLauncherUpdateCheckInput
 ): ElectronLauncherReleasePlan | null {
   return plans.find((plan) => {
+    if (plan.withdrawnAt) return false;
     if (plan.channel !== input.channel) return false;
     if (plan.installId && plan.installId !== input.installId) return false;
     if (plan.userId && plan.userId !== input.userId) return false;

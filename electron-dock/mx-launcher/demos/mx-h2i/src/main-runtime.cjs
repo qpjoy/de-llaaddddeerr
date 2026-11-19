@@ -12142,6 +12142,7 @@ async function fetchReleaseHistory(reason) {
 }
 
 function availableReleaseFromPlan(plan, decision = null, artifact = null, status = null) {
+  if (plan?.withdrawnAt) return null;
   if (!plan && !decision && !artifact) return null;
   const productId = launcherProductId();
   const selectedDecision = decision
