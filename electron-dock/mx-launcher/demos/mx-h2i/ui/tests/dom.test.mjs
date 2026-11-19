@@ -778,12 +778,16 @@ test('switching accounts clears previous device data and discards a late respons
   } finally { h.dom.window.close(); }
 });
 
-test('overview shows real counts; app edits and publishing update workbench without exposing plugin controls', async () => {
-  const h = await mount(runtimeFixture());
+test('overview counts the built-in overseas proxy; app publishing updates workbench without exposing plugin controls', async () => {
+  const runtime = runtimeFixture();
+  runtime.apps.h2o.installed = false;
+  const h = await mount(runtime);
   try {
     await h.click('管理控制台');
     const metrics = [...h.document.querySelectorAll('.mincave-admin-metrics article')].map(row => row.textContent);
-    assert.deepEqual(metrics, ['成员总数1', '已启用成员1', '已发布应用2', '启用策略0']);
+    assert.deepEqual(metrics, ['成员总数1', '已启用成员1', '已发布应用3', '启用策略0']);
+    const publications = h.document.querySelector('.mincave-admin-overview-panels .mincave-admin-summary-list');
+    assert.match(publications.textContent, /员工福利1 已发布/);
     assert.doesNotMatch(h.document.body.textContent, /今日流量|月度用量|平均延迟|在线设备/);
     await h.click('管理应用');
     assert.equal(h.document.querySelectorAll('tbody tr').length, 3);
@@ -796,6 +800,8 @@ test('overview shows real counts; app edits and publishing update workbench with
     assert.ok(h.calls.includes('admin:saveApplication'));
     await h.click('发布 Delta 测试');
     assert.equal(h.button('发布 Delta 测试').getAttribute('aria-checked'), 'false');
+    await h.click('总览');
+    assert.match(h.document.querySelector('.mincave-admin-metrics').textContent, /已发布应用2/);
     await h.click('员工工作台');
     assert.equal(h.document.querySelector('a[aria-label="打开 Delta 测试"]'), null);
     assert.equal(h.document.querySelector('a[aria-label="打开 Compass"]'), null);
