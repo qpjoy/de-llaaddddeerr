@@ -156,7 +156,7 @@ function Connection({ snapshot }: { snapshot: Snapshot }) {
           disabled={connectDisabled}
         >
           <Icon name="power" size={15} />
-          {snapshot.retainedEmployee || (hasRetainedConnection && !guest) ? '修复网络' : '连接'}
+          {snapshot.retainedEmployee || (hasRetainedConnection && !guest) ? '连接网络' : '连接'}
         </button>
         <button
           className="mincave-button outline"

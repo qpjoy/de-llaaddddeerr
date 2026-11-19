@@ -691,6 +691,7 @@ test('rendered retained employee can pause recovery without losing the workbench
     assert.ok(h.calls.includes('cancelNetworkOperation'));
     assert.match(h.document.body.textContent, /恢复已暂停/);
     assert.match(h.document.body.textContent, /欢迎，测试员工/);
+    assert.equal(h.button('连接网络').dataset.action, 'repairSystemNetwork');
   } finally {
     h.dom.window.close();
   }
