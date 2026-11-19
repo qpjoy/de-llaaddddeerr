@@ -9,6 +9,7 @@ import type {
 import { appCategories } from './admin';
 import Icon from './Icon';
 import Modal from './Modal';
+import { overseasProxyApp } from './workplaceApps';
 
 function Toggle({
   checked,
@@ -68,6 +69,7 @@ export default function AdminWorkspacePages({
       </section>
     );
   const { applications, policies, revision } = workspace;
+  const publishedApps = [...applications.filter((row) => row.published), overseasProxyApp];
   const query = search.trim().toLocaleLowerCase();
   const filteredApps = applications.filter((row) =>
     `${row.name} ${row.url} ${row.category}`.toLocaleLowerCase().includes(query),
@@ -127,7 +129,7 @@ export default function AdminWorkspacePages({
               },
               {
                 label: '已发布应用',
-                value: applications.filter((row) => row.published).length,
+                value: publishedApps.length,
                 icon: 'apps' as const,
               },
               {
@@ -158,10 +160,7 @@ export default function AdminWorkspacePages({
                   <div key={category}>
                     <span>{category}</span>
                     <strong>
-                      {
-                        applications.filter((row) => row.category === category && row.published)
-                          .length
-                      }
+                      {publishedApps.filter((row) => row.category === category).length}
                       <small> 已发布</small>
                     </strong>
                   </div>

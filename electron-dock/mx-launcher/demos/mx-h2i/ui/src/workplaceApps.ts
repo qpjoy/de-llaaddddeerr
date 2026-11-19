@@ -1,5 +1,7 @@
 import type { CatalogApp } from './bridge';
 
+export const overseasProxyApp = { id: 'h2o', name: '海外代理', category: '员工福利' } as const;
+
 // Real web entry points supplied for the employee workbench. These are links,
 // independent of the installed AppCenter/H2O plugin catalog.
 export const workplaceApps: CatalogApp[] = ([
