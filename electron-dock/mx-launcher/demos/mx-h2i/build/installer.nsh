@@ -3,25 +3,39 @@
 !ifndef BUILD_UNINSTALLER
   !include "${PROJECT_DIR}\out\windows-network-service\install-directory.nsh"
   !include "nsDialogs.nsh"
-  !include "StrFunc.nsh"
-  ${Using:StrFunc} StrRep
   Var MinCaveApprovedEmptyDirectory
 
   ; Only normalize separators. The PowerShell check still rejects relative
   ; components and special names before Windows can reinterpret them.
   !macro MinCaveNormalizeDirectory
+    Push $5
+    Push $6
+    Push $7
     Push $8
-    ${StrRep} $9 "$9" "/" "\"
+    StrCpy $5 ""
+    StrCpy $6 0
     StrLen $8 $9
+    ${While} $6 < $8
+      StrCpy $7 $9 1 $6
+      ${If} $7 == "/"
+        StrCpy $7 "\"
+      ${EndIf}
+      StrCpy $5 "$5$7"
+      IntOp $6 $6 + 1
+    ${EndWhile}
+    StrCpy $9 $5
     ${While} $8 > 3
-      StrCpy $8 $9 1 -1
-      ${If} $8 != "\"
+      StrCpy $7 $9 1 -1
+      ${If} $7 != "\"
         ${Break}
       ${EndIf}
       StrCpy $9 $9 -1
-      StrLen $8 $9
+      IntOp $8 $8 - 1
     ${EndWhile}
     Pop $8
+    Pop $7
+    Pop $6
+    Pop $5
   !macroend
 
   ; Use the standard directory page with our own leave callback. The
