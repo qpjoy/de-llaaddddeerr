@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { FeishuAlertNotifier, PROBE_INCIDENT_CODE, alertText, feishuWebhook, recoveryText, webhookHint } from '../../server/notifications-feishu.mjs'
+import { DAILY_SPEND_INCIDENT_CODE, FeishuAlertNotifier, PROBE_INCIDENT_CODE, alertText, feishuWebhook, recoveryText, webhookHint } from '../../server/notifications-feishu.mjs'
 import { SupplierBalanceMonitor } from '../../server/external-platforms/balance-monitor.mjs'
 
 const HOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/6093808e-6a97-4160-8f3c-af97b1f1d151'
@@ -51,6 +51,24 @@ test('an unreadable balance says so instead of being reported as a number', () =
   const never = alertText('tikhub', PROBE_INCIDENT_CODE, { currency: 'USD', lastSuccessAt: null }, at)
   assert.match(never, /最近成功：尚无成功查询/)
   assert.match(never, /失败原因：balance_query_failed/, 'a missing code still names something')
+})
+
+test('daily spending alert names the estimate, strict threshold, accounting window and missing coverage', () => {
+  const text = alertText('tikhub', DAILY_SPEND_INCIDENT_CODE, {
+    amount: '30.000000000001', currency: 'USD', threshold: '30.000000000000',
+    windowStart: '2026-11-18T16:00:00.000Z', windowEnd: '2026-11-19T16:00:00.000Z',
+    baselineAt: '2026-11-19T00:00:00.000Z', partial: true, dayStartHour: 0,
+  }, new Date('2026-11-19T02:30:00.000Z'), 30)
+  assert.match(text, /^【额度告警】TikHub 每日余额下降估算超限$/m)
+  assert.match(text, /已观测余额下降：30\.000000000001 美元（USD）/)
+  assert.match(text, /提醒阈值：超过 30 美元/)
+  assert.match(text, /统计时段：2026-11-19 00:00:00 至 2026-11-20 00:00:00（北京时间）/)
+  assert.match(text, /统计不完整，起始采样：2026-11-19 08:00:00/)
+  assert.match(text, /同一采样间隔内充值可能抵消消费/)
+  assert.match(text, /每 30 分钟提醒一次/)
+  assert.doesNotMatch(text, /当前余额|请及时充值/)
+  assert.equal(recoveryText('tikhub', DAILY_SPEND_INCIDENT_CODE, {}, new Date()), null,
+    'a daily reset never generates a balance recovery message')
 })
 
 test('recovery messages carry the keyword and match the incident they close', () => {
@@ -131,7 +149,8 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
     await db.exec('CREATE SCHEMA external_platform')
     for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql',
       '097_hourly_balance_check.sql', '098_feishu_balance_alerts.sql', '099_balance_feishu_webhook.sql',
-      '100_probe_failure_and_recovery_alerts.sql', '108_balance_schedule_and_reminders.sql', '109_monitor_cron_schedules.sql']) {
+      '100_probe_failure_and_recovery_alerts.sql', '108_balance_schedule_and_reminders.sql', '109_monitor_cron_schedules.sql',
+      '194_tikhub_daily_spend_alert.sql']) {
       await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
     }
     // 099 seeds the groups that were already receiving these alerts, so a first
@@ -356,5 +375,102 @@ test('durable Feishu delivery: cooldown, escalation, recovery, retry and provide
 
     const dump = JSON.stringify((await db.query('SELECT * FROM notifications.events')).rows)
     assert.doesNotMatch(dump, /open\.feishu\.cn|6093808e|1790e6fa/, 'webhooks never reach the incident timeline')
+  } finally { await db.close() }
+})
+
+test('daily-spend delivery honors its day, policy, failed probes and reminder cooldown',
+  { skip: !process.env.MX_NOTIFICATION_PGLITE_MODULE }, async () => {
+  const { PGlite } = await import(process.env.MX_NOTIFICATION_PGLITE_MODULE)
+  const db = new PGlite()
+  const pool = { query: (...args) => db.query(...args), connect: async () => ({ query: (...args) => db.query(...args), release() {} }) }
+  const sent = []
+  const notifier = new FeishuAlertNotifier({ pool, fetchImpl: async (_url, options) => {
+    sent.push(JSON.parse(options.body).content.text)
+    return accepted()
+  } })
+  const at = Date.now()
+  const iso = offset => new Date(at + offset).toISOString()
+  const hour = 60 * 60_000
+  const state = { amount: '31', windowStart: iso(-hour), windowEnd: iso(23 * hour),
+    baselineAt: iso(-hour), observedAt: iso(0), partial: false, dayStartHour: 0 }
+  const spendEvidence = value => ({ ...value, currency: 'USD', threshold: '30' })
+  const setState = async value => db.query(`UPDATE external_platform.balance_monitors
+    SET enabled=true,daily_spend_enabled=true,daily_spend_threshold=30,daily_spend_day_start_hour=0,
+      last_error_code=NULL,last_success_at=now(),credential_scope='credential:1',
+      next_check_at=now()+interval '30 minutes',daily_spend_state=$1::jsonb WHERE provider_key='tikhub'`, [JSON.stringify(value)])
+  const raise = async value => {
+    const { rows } = await db.query(`INSERT INTO notifications.incidents
+      (category,severity,source,source_scope,code,title,first_occurred_at,last_occurred_at)
+      VALUES ('supplier.cost','warning','tikhub','credential:1',$1,'每日余额下降估算超限',now(),now())
+      ON CONFLICT (source,source_scope,code) WHERE status <> 'closed'
+      DO UPDATE SET last_occurred_at=now() RETURNING id`, [DAILY_SPEND_INCIDENT_CODE])
+    const id = rows[0].id
+    await db.query(`INSERT INTO notifications.events(incident_id,kind,actor,evidence,occurred_at)
+      VALUES ($1,'daily_spend_observed','monitor:balance',$2::jsonb,now())`, [id, JSON.stringify(spendEvidence(value))])
+    return id
+  }
+  const due = id => db.query("UPDATE notifications.incidents SET next_reminder_at=now()-interval '1 second' WHERE id=$1", [id])
+  try {
+    await db.exec('CREATE SCHEMA external_platform')
+    for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql',
+      '097_hourly_balance_check.sql', '098_feishu_balance_alerts.sql', '099_balance_feishu_webhook.sql',
+      '100_probe_failure_and_recovery_alerts.sql', '108_balance_schedule_and_reminders.sql',
+      '109_monitor_cron_schedules.sql', '194_tikhub_daily_spend_alert.sql']) {
+      await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
+    }
+    await setState(state)
+    const id = await raise(state)
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1, 'first daily breach is immediate')
+    assert.match(sent[0], /每日余额下降估算超限/)
+    state.amount = '35'
+    await setState(state)
+    await raise(state)
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 1, 'a later spend observation cannot bypass the reminder cooldown')
+    await due(id)
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 2)
+    assert.match(sent.at(-1), /已观测余额下降：35 美元/)
+
+    await due(id)
+    for (const change of [
+      "daily_spend_enabled=false",
+      "last_error_code='balance_network_error'",
+      "last_success_at=now()-interval '25 hours'",
+      "credential_scope='credential:2'",
+      'daily_spend_threshold=40',
+      'daily_spend_day_start_hour=10',
+    ]) {
+      await setState(state)
+      await db.exec(`UPDATE external_platform.balance_monitors SET ${change} WHERE provider_key='tikhub'`)
+      assert.equal(await notifier.claim(id), false, change)
+    }
+    await setState({ ...state, amount: '30' })
+    assert.equal(await notifier.claim(id), false, 'exactly 30 is not a breach')
+    await setState({ ...state, windowStart: iso(hour) })
+    assert.equal(await notifier.claim(id), false, 'a different window invalidates old evidence')
+    await setState(state)
+    await db.query("UPDATE notifications.incidents SET status='closed',recovered_at=now() WHERE id=$1", [id])
+    assert.equal(await notifier.claim(id, true), false)
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 2, 'daily reset stays silent even if recovered_at was accidentally populated')
+
+    const previous = { ...state, windowStart: iso(-24 * hour - 60_000), windowEnd: iso(-60_000),
+      observedAt: iso(0), baselineAt: iso(-24 * hour - 60_000), amount: '30.01' }
+    await setState({ ...state, amount: '0', windowStart: previous.windowEnd, previousWindow: previous })
+    const finalId = await raise(previous)
+    await notifier.deliverBatch()
+    assert.equal(sent.length, 3, 'a boundary sample can announce the preceding day’s first breach')
+    assert.match(sent.at(-1), /该统计日已结束/)
+    await due(finalId)
+    assert.equal(await notifier.claim(finalId), false, 'the preceding day never sends a repeat reminder')
+    await db.query('UPDATE notifications.incidents SET notified_at=NULL WHERE id=$1', [finalId])
+    await setState({ ...state, amount: '0' })
+    assert.equal(await notifier.claim(finalId), false, 'the next successful sample removes the final-window permission')
+    const expired = { ...previous, windowEnd: iso(-31 * 60_000) }
+    await setState({ ...state, amount: '0', previousWindow: expired })
+    await raise(expired)
+    assert.equal(await notifier.claim(finalId), false, 'the final alert has only a 30-minute grace window')
   } finally { await db.close() }
 })

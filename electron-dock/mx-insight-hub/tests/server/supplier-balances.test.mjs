@@ -185,7 +185,8 @@ test('durable balance polling, alerts, recovery, leases, policy audit and creden
     await db.exec('CREATE SCHEMA external_platform')
     for (const file of ['085_admin_notifications.sql', '090_supplier_balance_monitor.sql',
       '097_hourly_balance_check.sql', '098_feishu_balance_alerts.sql', '099_balance_feishu_webhook.sql',
-      '100_probe_failure_and_recovery_alerts.sql', '108_balance_schedule_and_reminders.sql', '109_monitor_cron_schedules.sql']) {
+      '100_probe_failure_and_recovery_alerts.sql', '108_balance_schedule_and_reminders.sql', '109_monitor_cron_schedules.sql',
+      '194_tikhub_daily_spend_alert.sql']) {
       await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
     }
     // 097 lowers the JustOne seed to 5/3; this case exercises threshold

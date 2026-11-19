@@ -146,7 +146,7 @@ func protectStatePath(path string) error {
 	if err := rejectReparse(path); err != nil {
 		return err
 	}
-	descriptor, err := windows.SecurityDescriptorFromString("O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	descriptor, err := windows.SecurityDescriptorFromString("O:SYG:BA" + protectedStateDACL)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func verifyStateTree(root string) error {
 		}
 		// Reapply a protected ACL to every existing entry: explicit inherited/user
 		// write ACEs must not survive an installation repair.
-		aclSD, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+		aclSD, err := windows.SecurityDescriptorFromString(protectedStateDACL)
 		if err != nil {
 			return err
 		}
@@ -243,7 +243,8 @@ func (s *networkService) install(executable string) (err error) {
 	}
 	defer manager.Disconnect()
 	stage = "stop-existing-service"
-	if existing, openErr := manager.OpenService(serviceName); openErr == nil {
+	existing, openErr := manager.OpenService(serviceName)
+	if openErr == nil {
 		stopErr := stopService(existing)
 		existing.Close()
 		if stopErr != nil {
@@ -257,17 +258,7 @@ func (s *networkService) install(executable string) (err error) {
 		return err
 	}
 	stage = "prepare-service-state"
-	if err = protectDirectory(filepath.Dir(s.stateDir)); err != nil {
-		return err
-	}
-	if _, statErr := os.Stat(s.stateDir); statErr == nil {
-		if err = verifyStateTree(s.stateDir); err != nil {
-			return err
-		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return statErr
-	}
-	if err = protectDirectory(s.stateDir); err != nil {
+	if err = s.prepareServiceState(openErr == nil); err != nil {
 		return err
 	}
 	stage = "prepare-shared-endpoint-registry"

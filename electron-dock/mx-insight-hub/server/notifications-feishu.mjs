@@ -1,5 +1,5 @@
 import { AppError } from './core/errors.mjs'
-import { BALANCE_PROVIDERS } from './external-platforms/balance-adapters.mjs'
+import { BALANCE_PROVIDERS, decimalAmount } from './external-platforms/balance-adapters.mjs'
 import { describeMonitorSchedule, nextMonitorRun } from '../shared/monitor-schedule.mjs'
 import { MonitorCronTimer } from './monitor-cron-timer.mjs'
 
@@ -16,7 +16,9 @@ import { MonitorCronTimer } from './monitor-cron-timer.mjs'
 const FAILURE_AUDIT_INTERVAL_SECONDS = 60 * 60
 export const BALANCE_INCIDENT_CODE = 'supplier_balance_low'
 export const PROBE_INCIDENT_CODE = 'supplier_balance_unreadable'
-const ALERT_CODES = [BALANCE_INCIDENT_CODE, PROBE_INCIDENT_CODE]
+export const DAILY_SPEND_INCIDENT_CODE = 'supplier_daily_spend_high'
+const RECOVERY_CODES = [BALANCE_INCIDENT_CODE, PROBE_INCIDENT_CODE]
+const ALERT_CODES = [...RECOVERY_CODES, DAILY_SPEND_INCIDENT_CODE]
 const HOOK_PREFIX = '/open-apis/bot/v2/hook/'
 const REQUEST_TIMEOUT_MS = 30_000
 const MAX_RESPONSE_BYTES = 65_536
@@ -65,6 +67,20 @@ export function alertText(provider, code, evidence, observedAt, reminderMinutes 
   const reminder = typeof reminderMinutes === 'number' ? `每 ${reminderMinutes} 分钟提醒一次`
     : `按「${describeMonitorSchedule(reminderMinutes)}」重复提醒（北京时间）`
   const { balance, currency, level, warningThreshold, criticalThreshold, errorCode, lastSuccessAt } = evidence
+  if (code === DAILY_SPEND_INCIDENT_CODE) {
+    return [
+      `【额度告警】${nameOf(provider)} 每日余额下降估算超限`,
+      `已观测余额下降：${money(evidence.amount, currency)}`,
+      `提醒阈值：超过 ${money(evidence.threshold, currency)}`,
+      `统计时段：${beijing(new Date(evidence.windowStart))} 至 ${beijing(new Date(evidence.windowEnd))}（北京时间）`,
+      evidence.partial ? `统计不完整，起始采样：${beijing(new Date(evidence.baselineAt))}（北京时间）` : null,
+      `检查时间：${beijing(observedAt)}（北京时间）`,
+      '这是余额下降估算，不是精确账单；同一采样间隔内充值可能抵消消费。',
+      new Date(observedAt) >= new Date(evidence.windowEnd)
+        ? '该统计日已结束，本次为日界线采样确认的首次超限，不再重复提醒。'
+        : `请检查账户消耗。本统计日内持续超限时，${reminder}。`,
+    ].filter(Boolean).join('\n')
+  }
   if (code === PROBE_INCIDENT_CODE) {
     return [
       `【额度告警】${nameOf(provider)} 余额查询失败`,
@@ -88,6 +104,8 @@ export function alertText(provider, code, evidence, observedAt, reminderMinutes 
 // Sent only for an incident the group was actually told about, so a recovery
 // never arrives for a problem nobody heard of.
 export function recoveryText(provider, code, evidence, recoveredAt) {
+  // A new accounting day is not a refund or a recovered account balance.
+  if (code === DAILY_SPEND_INCIDENT_CODE) return null
   const { balance, currency, warningThreshold } = evidence || {}
   if (code === PROBE_INCIDENT_CODE) {
     return [
@@ -142,7 +160,7 @@ export class FeishuAlertNotifier {
 
   // Candidates: an open balance incident that has never been delivered, whose
   // reminder window has elapsed, or that has a newly observed low balance.
-  // Probe incidents retain their independent repeat/escalation policy.
+  // Probe and daily-spend incidents retain their scheduled reminder policy.
   async candidates() {
     const { rows } = await this.pool.query(`
       SELECT i.id, i.source, i.code, i.severity, i.last_occurred_at, i.notified_severity,
@@ -151,7 +169,7 @@ export class FeishuAlertNotifier {
       JOIN external_platform.balance_monitors m ON m.provider_key = i.source
       LEFT JOIN LATERAL (
         SELECT evidence FROM notifications.events
-        WHERE incident_id = i.id AND kind IN ('balance_observed','probe_failed') AND evidence IS NOT NULL
+        WHERE incident_id = i.id AND kind IN ('balance_observed','probe_failed','daily_spend_observed') AND evidence IS NOT NULL
         ORDER BY id DESC LIMIT 1
       ) e ON true
       WHERE i.code = ANY($1) AND i.status <> 'closed'
@@ -191,7 +209,7 @@ export class FeishuAlertNotifier {
         AND i.recovered_at IS NOT NULL AND i.notified_at IS NOT NULL
         AND i.recovery_notified_at IS NULL
         AND (i.notify_lease_until IS NULL OR i.notify_lease_until < now())
-      ORDER BY i.id LIMIT $2`, [ALERT_CODES, BATCH_SIZE, PROBE_INCIDENT_CODE, BALANCE_INCIDENT_CODE])
+      ORDER BY i.id LIMIT $2`, [RECOVERY_CODES, BATCH_SIZE, PROBE_INCIDENT_CODE, BALANCE_INCIDENT_CODE])
     return rows
   }
 
@@ -214,16 +232,38 @@ export class FeishuAlertNotifier {
         LEFT JOIN LATERAL (SELECT evidence FROM notifications.events WHERE incident_id=i.id
           AND kind=ANY($2) ORDER BY id DESC LIMIT 1) e ON true
         WHERE i.id=$1 AND (i.notify_lease_until IS NULL OR i.notify_lease_until < now())
-        FOR UPDATE OF i SKIP LOCKED`, [id, recovery ? ['balance_recovered', 'probe_recovered'] : ['balance_observed', 'probe_failed']])
+        FOR UPDATE OF i SKIP LOCKED`, [id, recovery ? ['balance_recovered', 'probe_recovered'] : ['balance_observed', 'probe_failed', 'daily_spend_observed']])
       const row = rows[0]
       if (!row) return false
       if (recovery) {
-        if (row.status !== 'closed' || !row.recovered_at || !row.notified_at || row.recovery_notified_at) return false
+        if (!RECOVERY_CODES.includes(row.code) || row.status !== 'closed'
+          || !row.recovered_at || !row.notified_at || row.recovery_notified_at) return false
       } else {
         if (row.status === 'closed') return false
         if (row.code === BALANCE_INCIDENT_CODE
           && (monitor.last_error_code || !monitor.last_success_at
             || monitor.credential_scope !== row.source_scope)) return false
+        if (row.code === DAILY_SPEND_INCIDENT_CODE) {
+          const state = monitor.daily_spend_state
+          const matchesWindow = value => value && value.windowStart === row.evidence?.windowStart
+            && value.windowEnd === row.evidence?.windowEnd
+          const now = new Date(row.server_now).getTime()
+          // The boundary sample can discover a first breach in the preceding
+          // day's final half-hour. Permit that one alert briefly, never a repeat.
+          const finalWindow = !row.notified_at && matchesWindow(state?.previousWindow)
+            && now >= Date.parse(state.previousWindow.windowEnd)
+            && now < Date.parse(state.previousWindow.windowEnd) + 30 * 60_000
+          const observed = finalWindow ? state.previousWindow : state
+          if (!monitor.daily_spend_enabled || monitor.last_error_code || !monitor.last_success_at
+            || monitor.credential_scope !== row.source_scope || !state || !row.evidence
+            || !matchesWindow(observed)
+            || !(Date.parse(observed.windowStart) <= now)
+            || (!finalWindow && !(Date.parse(observed.windowEnd) > now))
+            || now - new Date(monitor.last_success_at) > 24 * 60 * 60 * 1000
+            || monitor.daily_spend_day_start_hour !== row.evidence.dayStartHour
+            || decimalAmount(monitor.daily_spend_threshold).units !== decimalAmount(row.evidence.threshold).units
+            || decimalAmount(observed.amount).units <= decimalAmount(monitor.daily_spend_threshold).units) return false
+        }
         const escalated = row.notified_severity === 'warning' && row.severity === 'critical'
         const freshBalance = row.code === BALANCE_INCIDENT_CODE && row.fresh_observation
         if (row.notified_at && !escalated && !freshBalance) {

@@ -4,11 +4,11 @@ import { DropdownField, ErrorState, Field, LoadingState, Modal, PageHeading, use
 import './notifications.css'
 import { balanceMoney } from './supplier-balances.jsx'
 
-const categories = { 'supplier.cost': '费用告警 · 账户余额', 'upstream.balance': '供应商 · 余额耗尽错误', 'upstream.token_limit': '供应商 · Token 限额' }
+const categories = { 'supplier.cost': '费用告警 · 余额与日消费估算', 'upstream.balance': '供应商 · 余额耗尽错误', 'upstream.token_limit': '供应商 · Token 限额' }
 const statuses = { open: '待处理', acknowledged: '已确认', closed: '已关闭' }
 const timestamp = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Shanghai' })
 const date = (value) => value ? timestamp.format(new Date(value)) : '尚无记录'
-const sourceLabels = { observed: '上游失败', acknowledged: '管理员确认', closed: '管理员关闭', balance_observed: '余额低于阈值', balance_recovered: '余额恢复并自动关闭', notified: '飞书群已通知', notify_failed: '飞书通知失败', probe_failed: '余额查询失败', probe_recovered: '余额查询已恢复', notify_merged: '已并入余额恢复通知' }
+const sourceLabels = { observed: '上游失败', acknowledged: '管理员确认', closed: '管理员关闭', balance_observed: '余额低于阈值', balance_recovered: '余额恢复并自动关闭', notified: '飞书群已通知', notify_failed: '飞书通知失败', probe_failed: '余额查询失败', probe_recovered: '余额查询已恢复', notify_merged: '已并入余额恢复通知', daily_spend_observed: '日消费估算超限 · 最近采样', daily_spend_reset: '统计窗口或设置变更，结束本事件' }
 
 function NotificationDetail({ token, id, onClose, onChanged, onUnauthorized }) {
   const [before, setBefore] = useState(null)
@@ -39,7 +39,8 @@ function NotificationDetail({ token, id, onClose, onChanged, onUnauthorized }) {
       <div className="mih-notice-meta"><span>{categories[incident.category]}</span><strong>{statuses[incident.status]}</strong><span>累计 {incident.occurrence_count} 次</span></div>
       <p>首次发生：{date(incident.first_occurred_at)} · 最近发生：{date(incident.last_occurred_at)}</p>
       <p>供应商：{incident.source}{incident.category !== 'supplier.cost' ? ` · 凭证范围：${incident.source_scope}` : ''}</p>
-      <p>{incident.category === 'supplier.cost' ? '供应商账户余额低于已配置阈值；这与 Hub 客户钱包和接口单价独立。每次查询证据见下方时间线。'
+      <p>{incident.code === 'supplier_daily_spend_high' ? '本统计日累计余额下降超过阈值，这是估算而非精确账单。同一采样间隔内充值抵消的消费可能少计。换日结束事件不代表退款或余额恢复。'
+        : incident.category === 'supplier.cost' ? '供应商账户余额监控事件；这与 Hub 客户钱包和接口单价独立。查询证据见下方时间线。'
         : incident.category === 'upstream.balance' ? '上游报告账户共享余额不足（601），请核对供应商账户并充值。此错误不包含余额数值。' : '上游报告 Token 累计消费限额已达到（602），请核对该 Token 限额；这不等同于账户余额耗尽。'}</p>
       {incident.recovered_at ? <p role="status">余额已在 {date(incident.recovered_at)} 查询确认恢复，系统已自动关闭本事件。</p> : null}
       <a className="qp-button qp-button--outline" href={`#/external-platforms?provider=${encodeURIComponent(incident.source)}`} onClick={onClose}>查看供应商配置</a>
@@ -60,7 +61,8 @@ function NotificationDetail({ token, id, onClose, onChanged, onUnauthorized }) {
           <div className="mih-notice-meta"><strong>{sourceLabels[event.kind]}</strong><time>{date(event.occurred_at)}</time></div>
           <small>{event.actor}{event.marketplace ? ` · ${event.marketplace}` : ''}{event.credential_revision ? ` · 凭证版本 ${event.credential_revision}` : ''}</small>
           {event.note ? <p>{event.note}</p> : null}
-          {event.evidence ? <p>余额：<strong>{balanceMoney(event.evidence.balance, event.evidence.currency)}</strong> · 提醒阈值：{balanceMoney(event.evidence.warningThreshold, event.evidence.currency)} · 严重阈值：{balanceMoney(event.evidence.criticalThreshold, event.evidence.currency)}</p> : null}
+          {event.evidence?.amount != null ? <p>余额下降估算：<strong>{balanceMoney(event.evidence.amount, event.evidence.currency)}</strong> · 告警条件：超过 {balanceMoney(event.evidence.threshold, event.evidence.currency)}<br />统计时段：{date(event.evidence.windowStart)} — {date(event.evidence.windowEnd)}（北京时间）{event.evidence.partial ? ' · 统计不完整' : ''}</p>
+            : event.evidence?.balance != null ? <p>余额：<strong>{balanceMoney(event.evidence.balance, event.evidence.currency)}</strong> · 提醒阈值：{balanceMoney(event.evidence.warningThreshold, event.evidence.currency)} · 严重阈值：{balanceMoney(event.evidence.criticalThreshold, event.evidence.currency)}</p> : null}
           {event.balance_observation_id ? <p>余额采样 ID：<code>{event.balance_observation_id}</code></p> : null}
           {event.request_id ? <p>Request ID：<code>{event.request_id}</code></p> : null}
           {event.source_event_id ? <p>Provider Call ID：<code>{event.source_event_id}</code></p> : null}

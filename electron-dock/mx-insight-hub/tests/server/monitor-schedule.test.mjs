@@ -110,6 +110,7 @@ test('durable schedules hot-update, skip missed cron slots, preserve retries and
       assert.deepEqual(balance_schedule, cron('*/30 * * * *'))
       assert.deepEqual(feishu_schedule, { mode: 'interval', minutes: before[i].feishu_reminder_minutes })
     }
+    await db.exec(await readFile(new URL('../../migrations/194_tikhub_daily_spend_alert.sql', import.meta.url), 'utf8'))
     let saved = await monitor.update('tikhub', { ...policy, balanceSchedule: cron('0 9 * * *'), feishuSchedule: cron('0 9,18 * * *') })
     assert.equal(new Date(saved.nextCheckAt).getUTCHours(), 1)
     assert.deepEqual(saved.feishuSchedule, cron('0 9,18 * * *'))
