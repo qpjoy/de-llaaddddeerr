@@ -502,6 +502,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 ## MX Insight Hub product context
 
+- 2026-11-19 TikHub daily alert: user explicitly accepted balance-decrease estimation, labeled as such rather than precise billing. Reuse existing half-hour account reads; strictly > USD 30, Beijing 00:00 default / 10:00 optional, retain low-balance alerts. Preserve accumulated decreases across visible recharge, reset credential/day baselines, disclose missing coverage and same-interval recharge undercount. One bounded state plus 90-day monitoring retention; no provider-call scan, dispatch restriction, paid probe or MX-H2I login/network change. Migration194 and Hub-only rollout details: docs/operations/notification-center.md.
+
 - Treat `/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock/mx-launcher/demos/ui-design-neon-void` and `mx-launcher/ui-design` as the visual source of truth.
 - Hub defaults new browser profiles to the cool light Neon Void theme and keeps the existing dark theme as a persisted user-selectable mode. Theme changes are presentation-only and must not change authentication, routing, or API behavior.
 - Use the shared searchable `DropdownField` for every popup value selector in the Hub. Do not use native `<select>` for Hub product controls because its expanded menu cannot be themed consistently; region-picker dialogs and navigation accordions remain their own interaction patterns.

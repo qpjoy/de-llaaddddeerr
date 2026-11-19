@@ -10,6 +10,8 @@
 .mih-balance--warning .mih-balance-heading strong { color: var(--qp-warning); }
 .mih-balance--critical .mih-balance-heading strong { color: var(--qp-danger); }
 .mih-balance-link { font-size: 12px; font-weight: 600; color: var(--qp-text-1); text-decoration: underline; text-underline-offset: 3px; }
+.mih-daily-spend { display: grid; gap: 6px; margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--qp-line); min-width: 0; }
+.mih-daily-spend-amount { font-size: 22px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .mih-balance-panel { padding: 24px; display: grid; gap: 20px; }
 .mih-balance-panel h2 { font-size: 17px; margin: 0; }
 .mih-balance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }

@@ -344,3 +344,66 @@ and keeps a 3 CNY critical tier, matching TikHub's existing 5/3 USD shape.
 Future platforms add a reviewed adapter in `balance-adapters.mjs`, a credential
 resolver/egress binding and a seeded policy; the scheduler, persistence and
 notification lifecycle are shared. Never allow an arbitrary query URL from UI.
+
+## TikHub daily balance-decrease estimate (2026-11-19)
+
+User-approved accounting basis: accumulate positive decreases between successful
+cash-balance samples, not exact billed spending. Migration
+`194_tikhub_daily_spend_alert.sql` enables this additional TikHub alert at strictly
+**more than USD 30**, retaining the existing USD 5/3 low-balance alerts and saved
+monitor/reminder schedules. Default daily boundary is **00:00 Asia/Shanghai**;
+the existing Admin-only supplier settings also offer **10:00**, a positive
+threshold, and an independent daily-alert switch. Changes use the existing
+revision/CAS audit and never change customer billing, request admission, SSO,
+MX-H2I login or networking.
+
+The default half-hour balance query is reused: no extra supplier request,
+per-request write, or scan of the provider-call ledger. Each successful sample
+adds `max(previous balance - current balance, 0)` using exact decimal arithmetic.
+Observed recharge does not erase earlier consumption. This includes account
+changes outside Hub; simultaneous recharge/spending can hide consumption, and
+other cash adjustments may also appear as decreases. The UI, notification center
+and Feishu text label the result **余额下降估算**, never a precise invoice. TikHub's
+public daily-usage response has no verified amount/date/timezone schema, so it
+is not guessed or used here.
+
+First enablement, changed credentials, and a changed day boundary start a new
+baseline at the next scheduled successful sample. A baseline more than five
+minutes after the day boundary is marked incomplete. Failed reads preserve the
+estimate, mark it stale and suppress spend reminders; they do not mean zero or
+recovery. A timely boundary sample (within five minutes) assigns the final
+interval to the preceding day and starts the new day at zero. A first breach in
+that final interval can notify once within 30 minutes of the boundary. Previously
+notified days never repeat after their boundary. A missed boundary leaves the
+cross-day decrease unallocated and marks the new baseline incomplete rather
+than inventing its daily split. Only one 24-hour window is active (00:00 or 10:00,
+not both). Polling/supplier delays affect the detection time.
+
+Statistics occupy one mutable JSON state per monitor, with at most one preceding
+boundary snapshot. An active daily incident keeps one current observation event;
+successful Feishu deliveries retain their sent evidence. Initial breach alerts
+immediately after sampling, then uses the existing reminder schedule. Date,
+credential, enablement and threshold checks suppress obsolete delivery. Closing
+a day or changing policy closes its incident silently, without claiming a refund.
+
+Cleanup runs at most every 30 minutes per process under a shared database lock:
+indexed batches remove observations older than **90 days** (up to 500/pass),
+old automatic monitoring events (up to 500/pass; retain the latest event of each
+kind for active incidents), and closed daily incidents older than 90 days
+(up to 50/pass, including handling notes). Observation references become NULL;
+retained incident evidence still has amounts/timestamps. Existing policy audits,
+paid-call receipts, procurement and customer ledgers are untouched. Old backlogs
+are drained gradually, with PostgreSQL vacuum reclaiming space for reuse.
+
+Publish migration and complete Hub backend/frontend together through the usual
+Hub-only deployment; do not synchronize Launcher or run paid data probes:
+
+```bash
+# From electron-dock/mx-insight-hub on the deployment host, after source sync:
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+```
+
+After rollout, verify the TikHub card shows USD 30 / 00:00, the saved schedule and
+masked existing Feishu hook. Wait for the next normal sample to establish the
+baseline; page refresh never queries TikHub. Local tests and build are not proof
+of production activation.
