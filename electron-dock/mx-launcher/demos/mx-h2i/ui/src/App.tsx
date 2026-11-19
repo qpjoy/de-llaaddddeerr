@@ -5,7 +5,7 @@ import Devices from './Devices';
 import LegacyPanel from './LegacyPanel';
 import { categoryLabel, connectionLabel } from './model';
 import snake from './assets/snake.svg';
-import { workplaceApps } from './workplaceApps';
+import { overseasProxyApp, workplaceApps } from './workplaceApps';
 import Modal from './Modal';
 import AdminConsole from './AdminConsole';
 import { adminPages, type AdminPage } from './admin';
@@ -156,7 +156,7 @@ function Connection({ snapshot }: { snapshot: Snapshot }) {
           disabled={connectDisabled}
         >
           <Icon name="power" size={15} />
-          {snapshot.retainedEmployee || (hasRetainedConnection && !guest) ? '修复网络' : '连接'}
+          {snapshot.retainedEmployee || (hasRetainedConnection && !guest) ? '连接网络' : '连接'}
         </button>
         <button
           className="mincave-button outline"
@@ -234,12 +234,11 @@ function Catalog({ snapshot }: { snapshot: Snapshot }) {
   const catalog = [
     ...(snapshot.access.applications?.map(app => ({ ...app, installed: false, running: false, description: '', action: { action: '', label: '打开', disabled: false } })) ?? workplaceApps),
     ...snapshot.apps.map((app) =>
-      app.id === 'h2o'
+      app.id === overseasProxyApp.id
         ? {
             ...app,
-            name: '海外代理',
-            category: '员工福利',
-            action: { ...app.action, label: app.action.label.replaceAll('H2O', '海外代理') },
+            ...overseasProxyApp,
+            action: { ...app.action, label: app.action.label.replaceAll('H2O', overseasProxyApp.name) },
           }
         : app,
     ),
