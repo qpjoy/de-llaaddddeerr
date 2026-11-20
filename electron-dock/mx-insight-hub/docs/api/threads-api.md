@@ -1,6 +1,6 @@
 # Threads 接口手册
 
-更新于 2026-11-13
+更新于 2026-11-20
 
 策略搜索支持按关键词找帖子、按账号取发帖或资料、按标识取单帖，以及读取评论和回复。策略接口统一使用 `platform: "threads"`。持有该平台授权的 Key 可通过 `GET /api/v1/data/capabilities` 查询平台条目的 `search.ready`。同时拥有 `social.posts.resolve` 授权的 Key 还可读取 `postDetail.ready`。它表示当前 Hub 的搜索路由及操作就绪情况。供应商订阅和上游实时响应要按实际调用核对。
 
@@ -109,6 +109,8 @@ curl -sS -X POST "$HUB_URL/api/v1/data/search" \
 
 默认 Threads Scraper 接受用户名或公开主页链接，每个账号按用户名读取 `posts`。Hub 展开作者在同一会话中的多条帖子，核对作者并按帖子 ID 去重。请求含数字账号 ID、`replies` 或 `reposts` 时，管理员可配置支持这些条件的 Threads API 或 TikHub。固定 Scraper 时返回 400 `threads_account_input_unsupported`；配置优先与保底时按整批输入检查是否可在派发前改用保底。旧 Threads API 查单个数字 ID 的一种活动通常只需一次上游调用，用户名可能增加一次精确账号解析。`replies` 返回该账号自己发表的回复。
 
+标准账号接口对已确认的未找到账号响应统一返回 `404 social_account_not_found`。Threads Scraper 的 `users/posts` 返回 `status: "ok"`、`data.user: null` 且没有矛盾的帖子内容时，按此规则处理；合法的 `data.posts: []` 仍返回 200 空帖子页。404 只表示此次未取得目标账号，不证明账号永久不存在。缺少字段、格式错误、权限错误、超时及未知结果不能据此归为 404。批量请求遇到未找到账号即整体返回 404，尚未处理的账号不再派发，不新增逐项部分成功。
+
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
   -H "X-API-Key: $HUB_KEY" -H "Content-Type: application/json" \
@@ -147,7 +149,9 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
 
 字段同账号内容的账号字段。默认 Threads Scraper 接受用户名或主页链接。按数字 ID 查询须使用 Threads API 或 TikHub。
 
-Threads Scraper 返回 `status: "ok"` 且 `data.user` 为 `null` 表示未找到该账号。单账号查询成功返回空的 `data.items`，批量查询中该账号的 `results[].items` 为空，其他账号的资料照常返回。供应商返回 `status: "error"` 时，业务接口将此次调用记录为上游拒绝。
+Threads Scraper 返回 `status: "ok"` 且 `data.user` 为 `null` 时，新标准账号请求返回 `404 social_account_not_found`，不再返回成功空资料。`error.details` 包含 `{ "platform": "threads", "stage": "account_lookup", "outcome": "rejected", "retryable": false }`，响应保留 `requestId`。这里的 `outcome` 描述 Threads 此类新结果；统一公共错误码不要求其他平台重写原调用分类。批量查询遇到该结果即整体返回 404，尚未处理的账号不再派发。供应商返回 `status: "error"` 时，仍按上游拒绝处理，不改成账号未找到。
+
+该规则适用于新标准账号请求；已保存的 200 空资料或 502 仍按原幂等请求回放，原归档及账单保持不变。原生透传接口继续保留供应商原协议。此次错误码统一不需要数据库迁移；部署与业务恢复须另行验证，见[账号未找到响应统一记录](../operations/social-account-not-found-2026-11-20.md)。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \

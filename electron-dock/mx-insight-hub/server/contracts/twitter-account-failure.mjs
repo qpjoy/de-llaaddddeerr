@@ -24,7 +24,7 @@ export function twitterAccountFailure(payload) {
     protected: 'protected', notfound: 'not_found', not_found: 'not_found', unavailable: 'unavailable' }
   const key = typeof user.reason === 'string' ? user.reason.toLowerCase() : ''
   const reason = Object.hasOwn(reasons, key) ? reasons[key] : null
-  return { code: 'social_account_unavailable', reason: reason || 'unavailable' }
+  return { code: reason === 'not_found' ? 'social_account_not_found' : 'social_account_unavailable', reason: reason || 'unavailable' }
 }
 
 // The public message names the account state the supplier reported; a missing

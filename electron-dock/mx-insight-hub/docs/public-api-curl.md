@@ -1483,7 +1483,9 @@ crawl 页、自定义 cache/params 及其他不支持形状继续走 Night-All�
 
 Hub-native 子集会稳定返回 `400 invalid_user_profile_url`（非官方小红书 profile URL）、
 `400 cursor_page_mismatch`（显式 page 与 direct crawl cursor 冲突）或
-`404 user_not_found`（无法解析目标用户）。
+`404 social_account_not_found`（无法解析目标用户）。新错误的 `details` 包含
+`platform=xiaohongshu`、`stage=account_lookup`、原调用的 `outcome` 和 `retryable=false`。
+已保存的历史 `user_not_found` 保留原状态和正文进行幂等回放，不再次采购。
 
 历史执行路径的 cursor/compound/composite/page/offset continuation 统一由 Hub 加密包装为
 `mxnc1`，并绑定 consumer、operation、platform、稳定 query/account scope 和下一页。
@@ -1587,7 +1589,7 @@ Elasticsearch PIT 的 Hub search 操作，例如 `/data/search`、`/data/stored/
 | `400 invalid_cursor` | 裸 provider cursor/continuation params、被篡改或跨 consumer/operation/platform/query scope 的 `mxnc1`；删除 continuation，换新 Key，从 page 1 重启 |
 | `400 invalid_user_profile_url` | Hub-native 小红书 crawl/user-info 收到非官方 profile URL；修正 URL，不要原样重试 |
 | `400 cursor_page_mismatch` | 显式 page 与 Hub-native 小红书 crawl cursor 内绑定的页码冲突 |
-| `404 user_not_found` | Hub-native 小红书 crawl/user-info 无法解析目标用户 |
+| `404 social_account_not_found` | Hub-native 小红书 crawl/user-info 无法解析目标用户；历史 `user_not_found` 收据原样回放 |
 | `400/404/409/422/429 night_all_rejected` | Night-All 明确拒绝；Hub 保留这些可安全转发的上游 HTTP 状态 |
 | `502 night_all_rejected` | Night-All 的其他明确拒绝，且没有可用 exact snapshot |
 | `502 upstream_outcome_unknown` | dispatch 结果存在歧义且没有可用 exact snapshot；同一 key 不会重新 dispatch |

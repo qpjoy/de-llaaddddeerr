@@ -11,6 +11,7 @@ import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { assertThreadsScraperBusinessSuccess, RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { twitterAccountFailureMessage, twitterLookupFoundNoAccount } from '../contracts/twitter-account-failure.mjs'
+import { SocialAccountNotFoundError } from '../contracts/social-account-not-found.mjs'
 import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '../contracts/hub-social-compat.mjs'
 import { TWITTER_REPLIES_ENDPOINT_KEY } from '../contracts/hub-social.mjs'
 import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
@@ -347,21 +348,28 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             const payload = receipt?.bodyBytes ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(receipt.bodyBytes).replace(/^\uFEFF/u, '')) : null
             if (provider === 'rapidapi' && step.marketplace === 'threads-scraper') assertThreadsScraperBusinessSuccess(payload, result)
             try { ({ projected, records } = projectPage(publicPayload(payload, credential.credential), step, request.operation, receipt?.capturedAt, traversal)) }
-            catch {
-              const evidence = { outcome: 'succeeded_unusable', billed, httpStatus: 200, businessCode, errorCode: 'invalid_social_contract', affectsCircuit: false }
-              if (provider === 'rapidapi') throw new RapidApiUpstreamError(evidence, result)
-              throw new TikHubUpstreamError('Account response could not be normalized', evidence, result)
+            catch (error) {
+              const accountNotFound = workflowKind === 'social-account' && error instanceof SocialAccountNotFoundError
+              const evidence = { outcome: accountNotFound ? 'rejected' : 'succeeded_unusable', billed, httpStatus: 200, businessCode,
+                errorCode: accountNotFound ? 'social_account_not_found' : 'invalid_social_contract', affectsCircuit: false }
+              const saved = accountNotFound ? { ...result,
+                responseArchive: { ...result.responseArchive, contractState: 'rejected' },
+                restrictedResponseArchive: { ...result.restrictedResponseArchive, state: 'rejected' } } : result
+              if (provider === 'rapidapi') throw new RapidApiUpstreamError(evidence, saved)
+              throw new TikHubUpstreamError('Account response could not be normalized', evidence, saved)
             }
           } catch (error) {
             if (!(error instanceof TikHubUpstreamError || error instanceof RapidApiUpstreamError || error instanceof JustOneUpstreamError)) throw error
             const evidence = error.evidence
-            const accountFailure = error instanceof RapidApiUpstreamError && provider === 'rapidapi'
+            const twitterAccountFailure = error instanceof RapidApiUpstreamError && provider === 'rapidapi'
               && step.endpointKey === 'twitter-aio.user-info' && step.operation === 'user-info'
               && evidence.outcome === 'rejected' && ['social_account_not_found', 'social_account_unavailable'].includes(evidence.errorCode)
-            const accountNotFound = accountFailure && evidence.errorCode === 'social_account_not_found'
+            const accountNotFound = workflowKind === 'social-account' && evidence.outcome === 'rejected'
+              && evidence.errorCode === 'social_account_not_found'
+            const accountFailure = twitterAccountFailure || accountNotFound
             const status = accountFailure ? accountNotFound ? 404 : 422 : evidence.httpStatus === 429 ? 429 : 502
             const failureDetails = { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
-              ...(accountFailure ? { platform: 'twitter', stage: 'account_lookup',
+              ...(accountFailure ? { platform: request.platform, stage: 'account_lookup',
                 ...(accountNotFound ? {} : { reason: evidence.accountReason || 'unavailable' }) } : {}), outcome: evidence.outcome, retryable: false }
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
@@ -373,7 +381,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             // user_url_token, so a definite rejection of the profile step settles
             // that call and the content is acquired without the owner profile.
             if (workflowKind === 'social-account' && request.platform === 'zhihu' && request.operation === 'crawl'
-              && step.socialCompat.stage === 'resolve' && evidence.outcome === 'rejected' && !job.resolvedIdentity?.profileUnavailable) {
+              && step.socialCompat.stage === 'resolve' && evidence.outcome === 'rejected' && !accountFailure && !job.resolvedIdentity?.profileUnavailable) {
               await store.finishProviderStep({ ...currentEvidence, affectsCircuit: false })
               currentCall = null
               job.resolvedIdentity = { ...request.jobs[index].identity, lookupComplete: true, profileReady: true, profileUnavailable: true }
@@ -396,7 +404,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             }
             const code = accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
             const commentSubject = { 'post-comments': 'post comments', 'comment-replies': 'comment replies' }[workflowKind]
-            let message = accountFailure ? twitterAccountFailureMessage(evidence) : 'Account acquisition failed; inspect its saved outcome'
+            let message = twitterAccountFailure ? twitterAccountFailureMessage(evidence)
+              : accountNotFound ? 'The requested account was not found on the selected platform'
+                : 'Account acquisition failed; inspect its saved outcome'
             if (workflowKind === 'threads-search') message = 'Content-search acquisition failed; inspect its saved outcome'
             if (commentSubject) {
               message = commentFailureMessage(commentSubject, evidence.outcome)
@@ -424,7 +434,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             // Callers send bare digits for both IDs and handles. When the ID
             // lookup definitely finds no account, settle that call and try the
             // same digits once as a username; nothing else buys a second lookup.
-            if (accountFailure && step.userId && !job.resolvedIdentity && twitterLookupFoundNoAccount(evidence)) {
+            if (twitterAccountFailure && step.userId && !job.resolvedIdentity && twitterLookupFoundNoAccount(evidence)) {
               await store.finishProviderStep({ ...currentEvidence, affectsCircuit: false })
               currentCall = null
               idLookupFailure = { status, body: failureBody, latencyMs: currentEvidence.latencyMs,

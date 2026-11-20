@@ -96,7 +96,9 @@ function failureBody(error, requestId) {
 function publicFailure(error) {
   const evidence = error.evidence || {}
   if (evidence.errorCode === 'upstream_user_unavailable') {
-    return new AppError(404, 'user_not_found', 'The Xiaohongshu user could not be resolved')
+    return new AppError(404, 'social_account_not_found', 'The Xiaohongshu user could not be resolved', {
+      platform: 'xiaohongshu', stage: 'account_lookup', outcome: evidence.outcome, retryable: false,
+    })
   }
   if (evidence.httpStatus === 429 || evidence.errorCode === 'upstream_rate_limited') {
     return upstreamCapacityError(evidence)

@@ -557,7 +557,6 @@ export function projectHubSocialCompatResponse(payload, request, { capturedAt = 
     let candidates
     if (job.routeProvider === THREADS_SCRAPER_ROUTE) {
       const user = parseThreadsScraperProfile(payload, { username: job.identity.value })
-      if (user === null) return { acquiredItems: [], profiles: [], providerPage }
       candidates = [user]
     } else candidates = profileObjects(payload)
     if (kind === 'lookup' && job.platform === 'xiaohongshu') {

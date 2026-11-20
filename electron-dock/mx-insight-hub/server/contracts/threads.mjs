@@ -1,4 +1,5 @@
 import { threadsScraperPostUrlParts, threadsPostIdFromShortcode } from '../../shared/threads-post-identity.mjs'
+import { SocialAccountNotFoundError } from './social-account-not-found.mjs'
 
 // Threads supplier pages projected onto Hub's existing row shapes.
 //
@@ -155,6 +156,15 @@ function scraperData(payload) {
   return payload.data
 }
 
+function assertScraperAccountPresent(payload, data) {
+  if (data.user !== null) return
+  // The account endpoints share this explicit null-account envelope. Do not
+  // infer absence from missing fields or mix it with a returned content page.
+  if (Object.keys(data).length !== 1 || payload.error != null
+    || payload.errors != null && (!Array.isArray(payload.errors) || payload.errors.length)) fail('scraper_account')
+  throw new SocialAccountNotFoundError()
+}
+
 function scraperThreadItems(edge) {
   const node = edge?.node
   if (!object(node)) fail('scraper_edge')
@@ -202,8 +212,9 @@ function scraperUserId(user) {
 }
 
 export function parseThreadsScraperProfile(payload, { username }) {
-  const user = scraperData(payload).user
-  if (user === null) return null
+  const data = scraperData(payload)
+  assertScraperAccountPresent(payload, data)
+  const user = data.user
   if (!object(user) || !sameHandle(user.username, username)) fail('scraper_profile_identity')
   scraperUserId(user)
   return user
@@ -211,6 +222,7 @@ export function parseThreadsScraperProfile(payload, { username }) {
 
 export function parseThreadsScraperAccountPage(payload, { username, currentCursor = null, capturedAt }) {
   const data = scraperData(payload)
+  assertScraperAccountPresent(payload, data)
   if (!Array.isArray(data.posts)) fail('scraper_posts')
   const rowsById = new Map()
   let owner = null, ownerId = null

@@ -152,7 +152,7 @@ test('empty Twitter profile does not cool down a new request; original failure a
 })
 
 test('only an explicit no-account answer to an ID lookup permits a username lookup', () => {
-  assert.deepEqual(twitterAccountFailure(JSON.parse(NOT_FOUND_BY_ID)), { code: 'social_account_unavailable', reason: 'not_found' })
+  assert.deepEqual(twitterAccountFailure(JSON.parse(NOT_FOUND_BY_ID)), { code: 'social_account_not_found', reason: 'not_found' })
   for (const [evidence, expected] of [
     [{ outcome: 'rejected', errorCode: 'social_account_not_found' }, true],
     [{ outcome: 'rejected', errorCode: 'social_account_unavailable', accountReason: 'not_found' }, true],
@@ -168,6 +168,26 @@ test('only an explicit no-account answer to an ID lookup permits a username look
 })
 
 for (const operation of ['crawl', 'user-info']) {
+  test(`Twitter ${operation}: an explicit UserUnavailable NotFound handle returns a replayable 404`, async t => {
+    const h = await harness(t, () => fixedResponse(NOT_FOUND_BY_ID))
+    const body = { username: 'missing_handle' }, idempotencyKey = `not-found-handle-${operation}`
+    await assert.rejects(h.invoke(operation, body, idempotencyKey), { status: 404, code: 'social_account_not_found' })
+    assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/missing_handle'])
+    const [call] = h.providerCalls(), usage = h.store.requests.get(call.usageRequestId)
+    assert.deepEqual([call.outcome, call.httpStatus, call.billed, call.errorCode], ['rejected', 200, null, 'social_account_not_found'])
+    assert.equal(usage.responseStatus, 404)
+    assert.equal(usage.responseBody.error.details.platform, 'twitter')
+    assert.equal(usage.responseBody.error.details.stage, 'account_lookup')
+    assert.equal(usage.responseBody.error.details.retryable, false)
+    const saved = structuredClone({ call, usage, archive: h.platformStore.restrictedResponseArchives.get(call.id),
+      charge: h.store.customerCharges.get(usage.id) })
+    await assert.rejects(h.invoke(operation, body, idempotencyKey), { status: 404, code: 'social_account_not_found' })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.store.customerCharges.size, 1)
+    assert.deepEqual(structuredClone({ call: h.platformStore.calls.get(call.id), usage: h.store.requests.get(usage.id),
+      archive: h.platformStore.restrictedResponseArchives.get(call.id), charge: h.store.customerCharges.get(usage.id) }), saved)
+  })
+
   test(`Twitter ${operation}: bare digits with no account behind the ID are looked up once as a username`, async t => {
     for (const [label, idAnswer] of [['userExists:false', MISSING], ['UserUnavailable NotFound', NOT_FOUND_BY_ID]]) await t.test(label, async t => {
       const h = await harness(t, url => url.pathname === '/user/users/by/ids' ? fixedResponse(idAnswer)
@@ -190,7 +210,7 @@ for (const operation of ['crawl', 'user-info']) {
       // and is not a supplier fault.
       const [byId, byName] = h.providerCalls()
       assert.equal(byId.outcome, 'rejected')
-      assert.equal(byId.errorCode, idAnswer === MISSING ? 'social_account_not_found' : 'social_account_unavailable')
+      assert.equal(byId.errorCode, 'social_account_not_found')
       assert.equal(byId.endpointKey, 'twitter-aio.user-info')
       assert.equal(byId.billed, null)
       assert.equal(byId.costMinor, 2)
