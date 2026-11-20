@@ -8358,7 +8358,17 @@ function releasePlanStatus(plan) {
   if (gate === 'blocked') return 'blocked';
   if (plan?.decisions?.readyToPromote) return 'ready';
   if (releaseDecisionList(plan).some((decision) => decision.updateAvailable)) return 'planned';
+  if (releasePlanHasSameVersionArtifact(plan)) return 'registered';
   return 'idle';
+}
+
+function releasePlanHasSameVersionArtifact(plan) {
+  const decisions = releaseDecisionList(plan);
+  if (!decisions.length || !decisions.every((decision) => decision.updateAvailable === false
+    && decision.currentVersion && decision.currentVersion === decision.targetVersion)) return false;
+  return asArray(plan?.artifacts).some((artifact) => artifact.url?.trim() && artifact.digest?.trim()
+    && decisions.some((decision) => artifact.componentId === decision.componentId
+      && artifact.kind === decision.componentKind && artifact.version === decision.targetVersion));
 }
 
 function releasePlanIsWithdrawn(plan) {
@@ -8368,6 +8378,7 @@ function releasePlanIsWithdrawn(plan) {
 function releaseStatusLabel(status) {
   const labels = {
     withdrawn: '已撤销',
+    registered: '已登记',
     ready: 'ready',
     planned: 'planned',
     blocked: 'blocked',
@@ -8475,7 +8486,7 @@ function renderReleaseCenterPanel() {
             ${channels.map((channel) => `<option value="${escapeHtml(channel)}" ${filter.channel === channel ? 'selected' : ''}>${escapeHtml(channel)}</option>`).join('')}
           </select>
           <select data-release-filter="status" aria-label="Release status">
-            ${['all', 'ready', 'withdrawn', 'planned', 'blocked', 'failed', 'idle'].map((status) => `<option value="${escapeHtml(status)}" ${filter.status === status ? 'selected' : ''}>${escapeHtml(status === 'all' ? 'All status' : releaseStatusLabel(status))}</option>`).join('')}
+            ${['all', 'ready', 'withdrawn', 'registered', 'planned', 'blocked', 'failed', 'idle'].map((status) => `<option value="${escapeHtml(status)}" ${filter.status === status ? 'selected' : ''}>${escapeHtml(status === 'all' ? 'All status' : releaseStatusLabel(status))}</option>`).join('')}
           </select>
           <select data-release-filter="artifactKind" aria-label="Artifact kind">
             <option value="all" ${filter.artifactKind === 'all' ? 'selected' : ''}>All artifacts</option>
@@ -8896,12 +8907,13 @@ function renderReleaseCenterDrawer() {
             <strong>Release state</strong>
           </div>
           <div class="release-drawer-summary">
-            ${renderReleaseDrawerMetric('Status', releaseStatusLabel(status), withdrawn ? `${formatTime(plan.withdrawnAt)} · ${plan.withdrawnBy || '管理员'}` : plan.decisions?.readyToPromote ? 'ready to promote' : 'waiting gate or approval')}
+            ${renderReleaseDrawerMetric('Status', releaseStatusLabel(status), withdrawn ? `${formatTime(plan.withdrawnAt)} · ${plan.withdrawnBy || '管理员'}` : status === 'registered' ? '基准与目标版本相同，不触发自动更新' : plan.decisions?.readyToPromote ? 'ready to promote' : 'waiting gate or approval')}
             ${renderReleaseDrawerMetric('Source', plan.activation?.checkSource || 'internal-postgres', 'client checks Internal')}
             ${renderReleaseDrawerMetric('Created', formatTime(plan.createdAt), plan.createdBy || 'release-admin')}
             ${renderReleaseDrawerMetric('Policy', plan.activation?.majorUpdateRequiresInstaller ? 'installer' : 'hot update', plan.activation?.connectionSafeMode ? 'connection-safe' : 'standard')}
           </div>
           ${withdrawn ? '<p class="release-distribution-note">此记录已撤销，新更新检查和版本列表不再提供它。编辑后仍保持撤销，需单独恢复分发；已下载的安装包不会被删除。</p>' : ''}
+          ${releasePlanHasSameVersionArtifact(plan) ? '<p class="release-distribution-note">安装包已关联。发布基准与目标版本相同，此记录不触发自动更新；未撤销、门禁通过且面向全部用户时，可在版本列表中手动安装或重装。需要推送升级时，请创建目标版本高于发布基准的新发布。</p>' : ''}
           ${state.releaseCenter.feedback ? `<p class="profile-feedback" data-kind="${escapeHtml(state.releaseCenter.feedback.kind)}">${escapeHtml(state.releaseCenter.feedback.message)}</p>` : ''}
         </section>
         <section class="app-drawer-section">
@@ -9110,8 +9122,9 @@ function renderReleaseUploadDrawer() {
               <input name="version" value="${escapeHtml(draft.version || '2.0.3')}" autocomplete="off" required />
             </label>
             <label>
-              <span>Current</span>
+              <span>Current · 发布基准版本</span>
               <input name="currentVersion" value="${escapeHtml(draft.currentVersion || '2.0.1')}" autocomplete="off" required />
+              <small>用于创建发布策略，不代表每台客户端的当前版本。基准与目标相同可登记安装包，但此记录不触发自动更新。</small>
             </label>
             <label>
               <span>Channel</span>
@@ -9505,9 +9518,16 @@ async function uploadReleaseArtifactFromAdmin(form) {
       }
     };
     state.releaseCenter.drawer = { planId: plan.planId };
+    if (!releasePlanIncludesUploadedArtifact(plan, input, artifact)) {
+      state.releaseCenter.feedback = {
+        kind: 'error',
+        message: '文件已上传，但发布记录未关联制品，请更新 Internal 后重新创建。此记录已保留，可查看或撤销。'
+      };
+      return;
+    }
     state.releaseCenter.feedback = {
       kind: 'success',
-      message: `Uploaded ${artifact.storage || input.storage} artifact and created ${plan.releaseId}`
+      message: `Uploaded ${artifact.storage || input.storage} artifact and created ${plan.releaseId}${releasePlanHasSameVersionArtifact(plan) ? ' · 同版本已登记，不触发自动更新' : ''}`
     };
   } catch (error) {
     state.releaseCenter.feedback = { kind: 'error', message: error.message };
@@ -9516,6 +9536,16 @@ async function uploadReleaseArtifactFromAdmin(form) {
     renderFoundationGrid(state.dashboard?.overview || {});
     renderInspector();
   }
+}
+
+function releasePlanIncludesUploadedArtifact(plan, input, uploadedArtifact) {
+  const url = absoluteReleaseArtifactUrl(uploadedArtifact.url || uploadedArtifact.downloadPath);
+  const digest = uploadedArtifact.digest?.trim();
+  if (!url || !digest) return false;
+  return asArray(plan?.artifacts).some((artifact) => artifact.kind === input.artifactKind
+    && artifact.version === input.version
+    && artifact.digest?.trim() === digest
+    && absoluteReleaseArtifactUrl(artifact.url) === url);
 }
 
 function releaseUploadProductError(form, file) {

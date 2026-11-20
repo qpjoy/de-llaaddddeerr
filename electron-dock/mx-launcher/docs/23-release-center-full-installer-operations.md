@@ -294,6 +294,72 @@ Architecture  x64
 退出登录或断开网络。应用代码上线仍应按既有部署策略安排，不能把功能隔离理解为
 完整 Launcher deploy 保证零中断。
 
+### 同版本安装包显示空 artifacts（2026-11-20）
+
+旧实现把 `updateAvailable=false` 当成“不生成制品引用”，因此 `3.0.0 → 3.0.0`
+即使文件上传成功，计划也会保存为 `artifacts=[]`，并误显示 `manual review / idle`。
+修复后，明确上传的制品不再依赖升级判断：包地址、摘要、大小和平台架构会保留；
+同版本记录显示“已登记”，仍不触发自动更新（也不会借旧客户端版本重新激活该 no-op
+计划）。满足门禁、全量投放及未撤销条件时，可在历史列表手动下载或重装。
+
+需要更新 Internal API 和管理 UI。已经落库的空记录不会自动回填；不要降低发布基准
+版本来绕过这个问题，也不要只在表格里补一个虚构的 artifact。
+
+**复用已上传文件重建记录，无需重传 DMG：**
+
+1. 从旧记录详情复制完整 releaseId。读取 Internal 制品目录中的 `artifact.json`，按
+   releaseId、productId、componentId、kind、version、platform、arch 和 channel 核对，
+   必须唯一匹配；不能按“最新文件”或版本号猜测。OSS 模式也会在该目录保留元数据。
+   当前部署的只读查找示例（替换完整 releaseId）：
+
+   ```bash
+   export MX_RECOVER_RELEASE_ID='填入旧记录的完整 releaseId'
+   umask 077
+   kubectl -n mx-internal-shadow exec -i deploy/mx-launcher-internal -c internal-api \
+     -- env MX_RECOVER_RELEASE_ID="$MX_RECOVER_RELEASE_ID" node --input-type=module - \
+     > /tmp/mx-h2i-release-artifact.json <<'NODE'
+   import { readdir, readFile } from 'node:fs/promises';
+   import { resolve } from 'node:path';
+   const root = resolve(process.env.MX_RELEASE_ARTIFACT_STORE_DIR || 'artifacts/release-center');
+   const matches = [];
+   for (const entry of await readdir(root, { withFileTypes: true })) {
+     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+     const row = JSON.parse(await readFile(resolve(root, entry.name, 'artifact.json'), 'utf8'));
+     if (row.releaseId === process.env.MX_RECOVER_RELEASE_ID && row.productId === 'mx-h2i'
+       && row.componentId === 'mx-h2i' && row.kind === 'app-installer' && row.version === '3.0.0'
+       && row.platform === 'darwin' && row.arch === 'universal' && row.channel === 'stable') matches.push(row);
+   }
+   if (matches.length !== 1) throw new Error(`Expected exactly one artifact, found ${matches.length}`);
+   console.log(JSON.stringify(matches[0], null, 2));
+   NODE
+   ```
+
+2. 保留原 DMG，核对其 `shasum -a 256`、大小和文件名与 JSON 一致。在可访问 Internal
+   的运维机上，使用既有 Ops 凭据执行下面命令。`--artifact-url` 让 CLI 复用存储地址，
+   只读取本地文件计算摘要；必须清空 scoped publisher 凭据，否则该模式会重新上传。
+   `MX_RELEASE_BASE_URL` 为现有 Internal API 地址，`MX_RECOVER_DMG` 为原 DMG 绝对路径。
+
+   ```bash
+   : "${MX_INTERNAL_OPS_TOKEN:?请由现有密钥管理注入 Ops Token}"
+   : "${MX_RELEASE_BASE_URL:?设置现有 Internal API 地址}"
+   : "${MX_RECOVER_DMG:?设置原 DMG 的绝对路径}"
+   env -u MX_RELEASE_ACCESS_TOKEN -u MX_RELEASE_CLIENT_ID -u MX_RELEASE_CLIENT_SECRET \
+     node electron-dock/mx-launcher/server/scripts/release-center-publish.mjs \
+     --base-url "$MX_RELEASE_BASE_URL" --product mx-h2i --kind installer \
+     --artifact "$MX_RECOVER_DMG" \
+     --artifact-url "$(jq -er '.url' /tmp/mx-h2i-release-artifact.json)" \
+     --release-id "${MX_RECOVER_RELEASE_ID:?}-relinked" \
+     --current-version 3.0.0 --version 3.0.0 --channel stable \
+     --platform darwin --arch universal --approve false \
+     --e2e-result running --rollout-strategy manual-ring --rollout-percentage 0
+   ```
+
+3. 只执行一次并保存输出的新 planId，确认 `artifact.uploaded=false` 且新记录含真实
+   installer。新记录先保持未通过门禁、0% 投放；核对说明、目标用户/安装范围和包内容
+   后再决定是否完成门禁、恢复需要的投放设置，并撤销旧空记录。此流程不修改登录或
+   网络配置，不会原地覆盖已发布制品。已有 scoped 发布账号也可通过
+   `POST /internal/v1/sdk/releases` 复用 artifactId，新计划仍需单独完成门禁。
+
 ## 6. CLI 等价操作
 
 下面两个 MX-H2I 示例走平台 Admin 兼容路由，执行 shell 必须由 Secret Manager 注入
