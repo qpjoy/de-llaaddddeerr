@@ -64,7 +64,7 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
   ],
   401: ['api_key_required', 'invalid_api_key'],
   403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
-  404: ['not_found', 'user_not_found', 'night_all_rejected'],
+  404: ['not_found', 'social_account_not_found', 'user_not_found', 'night_all_rejected'],
   409: [
     'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
     'external_platform_response_unusable', 'search_page_unavailable', 'night_all_rejected', 'search_restart_required',
@@ -1614,9 +1614,11 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(xiaohongshuHtml, /social\.posts\.search/u)
     assert.match(xiaohongshuHtml, /social\.users\.resolve/u)
     assert.match(xiaohongshuHtml, /social\.users\.posts/u)
-    for (const code of ['invalid_user_profile_url', 'cursor_page_mismatch', 'user_not_found']) {
+    for (const code of ['invalid_user_profile_url', 'cursor_page_mismatch', 'social_account_not_found']) {
       assert.match(nightAllHtml, new RegExp(code), code)
     }
+    assert.match(nightAllHtml, /历史[\s\S]{0,50}user_not_found[\s\S]{0,50}回放/u)
+    assert.match(nightAllHtml, /platform=xiaohongshu[\s\S]{0,100}stage=account_lookup/u)
     assert.match(nightAllHtml, /不返回[\s\S]*410 search_cursor_expired/u)
     assert.match(html, /新 Key 默认是零权限 snapshot/u)
     assert.match(xiaohongshuHtml, /套餐与配额[\s\S]*?余额[\s\S]*?扣费/u)
@@ -2264,9 +2266,11 @@ test('external data platform public contract and internal operations guidance st
     assert.match(source, /external_platform_rate_limited/)
     assert.match(source, /note_id[\s\S]{0,300}(?:takes\s+precedence|优先)/i)
     assert.match(source, /user_id[\s\S]{0,300}(?:takes\s+precedence|为准|优先)/i)
-    for (const code of ['invalid_user_profile_url', 'cursor_page_mismatch', 'user_not_found']) {
+    for (const code of ['invalid_user_profile_url', 'cursor_page_mismatch', 'social_account_not_found']) {
       assert.match(source, new RegExp(code), code)
     }
+    assert.match(source, /(?:历史|Historical)[\s\S]{0,50}user_not_found[\s\S]{0,60}(?:回放|replay)/u)
+    assert.match(source, /platform=xiaohongshu[\s\S]{0,100}stage=account_lookup/u)
     for (const [endpoint, capability] of [
       ['get_image_note_detail', 'social.posts.resolve'],
       ['search_notes', 'social.posts.search'],

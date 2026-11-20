@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseThreadsScraperProfile, parseThreadsScraperAccountPage, parseThreadsScraperPostDetail } from '../../server/contracts/threads.mjs'
+import { SocialAccountNotFoundError } from '../../server/contracts/social-account-not-found.mjs'
 import { THREADS_SCRAPER_RAPIDAPI_ENDPOINTS } from '../../server/contracts/threads-rapidapi-endpoints.mjs'
 import { normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
 import { nativeForwardingPaths } from '../../server/contracts/native-forwarding-docs.mjs'
@@ -62,12 +63,31 @@ test('detail, media, resolver, batches and search reject invalid inputs before d
 
 test('profile detail requires the exact requested public account, including for legacy HTTP-200 failures', () => {
   assert.deepEqual(parseThreadsScraperProfile(ok({ user: author }), { username }), author)
-  assert.equal(parseThreadsScraperProfile(ok({ user: null }), { username }), null)
+  assert.throws(() => parseThreadsScraperProfile(ok({ user: null }), { username }), SocialAccountNotFoundError)
   for (const body of [{ status: 'error', data: { user: author } }, { status: 'error', data: { user: null } },
     { data: { user: null } }, { status: 'ok' }, ok({}), ok({ user: { username: 'another' } }),
     ok({ user: { ...author, pk: Number.MAX_SAFE_INTEGER + 1 } }), ok({ user: { ...author, id: '28' } })]) {
     assert.throws(() => parseThreadsScraperProfile(body, { username }), /invalid_threads_response/)
   }
+})
+
+test('the null-account marker is distinct from empty posts, malformed data and supplier errors', () => {
+  const options = { username, capturedAt }
+  for (const parse of [parseThreadsScraperProfile, parseThreadsScraperAccountPage]) {
+    assert.throws(() => parse(ok({ user: null }), options), SocialAccountNotFoundError)
+    for (const payload of [{ status: 'error', data: { user: null } },
+      { status: 'ok', error: 'private supplier error', data: { user: null } },
+      { status: 'ok', errors: ['private supplier error'], data: { user: null } },
+      { status: 'ok', errors: 'private supplier error', data: { user: null } },
+      { status: 'ok', errors: {}, data: { user: null } },
+      ok({ user: null, posts: [] }), ok({}), ok({ posts: null }), { status: 'ok', data: null }]) {
+      assert.throws(() => parse(payload, options), error => {
+        assert.ok(!(error instanceof SocialAccountNotFoundError))
+        return /invalid_threads_response/u.test(error.message)
+      })
+    }
+  }
+  assert.deepEqual(parseThreadsScraperAccountPage(ok({ posts: [], cursor: null }), options).rows, [])
 })
 
 test('feed pagination and ownership are tied to the requested account and source page', () => {

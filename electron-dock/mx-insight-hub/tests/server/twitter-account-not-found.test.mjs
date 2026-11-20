@@ -67,14 +67,14 @@ test('HTTP failures keep their existing transport classification despite a negat
 
 test('explicit UserUnavailable lookup envelopes produce bounded account reasons and retain exact receipts', async () => {
   for (const [reason, expected] of [['Suspended', 'suspended'], ['Deactivated', 'deactivated'], ['Deleted', 'deleted'],
-    ['Protected', 'protected'], ['NotFound', 'not_found'], ['NoReason', 'unavailable'], ['constructor', 'unavailable'],
+    ['Protected', 'protected'], ['NotFound', 'not_found'], ['not_found', 'not_found'], ['NOT_FOUND', 'not_found'], ['NoReason', 'unavailable'], ['constructor', 'unavailable'],
     ['private-account-or-key', 'unavailable'], [undefined, 'unavailable']]) {
     const user = { __typename: 'UserUnavailable', reason, message: 'private upstream text' }
     for (const data of [{ users: [user] }, { users: [{ result: user }] }, { user: { result: user } },
       { user_result_by_screen_name: { result: user } }, { result: user }]) {
       await assert.rejects(adapterFor({ data }).execute(lookup), error => {
-        assert.equal(error.evidence.errorCode, 'social_account_unavailable')
-        assert.equal(error.evidence.accountReason, expected)
+        assert.equal(error.evidence.errorCode, expected === 'not_found' ? 'social_account_not_found' : 'social_account_unavailable')
+        assert.equal(error.evidence.accountReason, expected === 'not_found' ? undefined : expected)
         assert.equal(error.evidence.outcome, 'rejected')
         assert.equal(error.evidence.affectsCircuit, false)
         assert.equal(error.evidence.billed, null)

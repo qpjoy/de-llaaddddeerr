@@ -609,6 +609,64 @@ function queuedUserRequest(suffix, userId = 'aaaaaaaaaaaaaaaaaaaaaaaa') {
     idempotencyKey: `xhs-user-queue-${suffix}`, path: '/api/v1/search/user-info' }
 }
 
+for (const [operation, method] of [['user-info', 'legacyUserInfo'], ['crawl', 'legacyCrawl']]) {
+  test(`XHS ${operation} uses the shared missing-account code without changing procurement or historical replay`, async () => {
+    let calls = 0
+    const payload = { code: 200, data: { data: { users: [{ id: USER_ID, name: 'another-account' }] } } }
+    const state = await gatewayFixture(async () => { calls++; return jsonResponse(payload) })
+    const request = { body: { platform: 'xiaohongshu', username: 'missing-account', count: 20 },
+      idempotencyKey: `xhs-${operation}-missing-account`, path: `/api/v1/search/${operation}` }
+    await assert.rejects(state.gateway[method](state.context, request), error => {
+      assert.equal(error.status, 404)
+      assert.equal(error.code, 'social_account_not_found')
+      const [usage] = state.usageStore.requests.values()
+      assert.deepEqual(error.details, {
+        platform: 'xiaohongshu', stage: 'account_lookup', outcome: 'succeeded_unusable', retryable: false,
+        requestId: usage.id,
+      })
+      return true
+    })
+    assert.equal(calls, 1, 'a failed resolver must not purchase the profile or posts')
+    const [call] = state.platformStore.calls.values()
+    assert.equal(call.errorCode, 'upstream_user_unavailable')
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(call.billed, true)
+    assert.equal(call.costMinor, 7)
+    assert.equal(state.platformStore.state.consecutiveFailures, 0)
+    assert.deepEqual(state.platformStore.restrictedResponseArchives.get(call.id).parsedPayload, payload)
+    const usage = state.usageStore.requests.get(call.usageRequestId)
+    assert.equal(usage.responseStatus, 404)
+    assert.equal(usage.responseBody.error.code, 'social_account_not_found')
+    assert.deepEqual(usage.responseBody.error.details, {
+      platform: 'xiaohongshu', stage: 'account_lookup', outcome: 'succeeded_unusable', retryable: false,
+      requestId: usage.id,
+    })
+    const saved = structuredClone(usage)
+    await assert.rejects(state.gateway[method](state.context, request),
+      { status: 404, code: 'social_account_not_found' })
+    assert.equal(calls, 1)
+    assert.deepEqual(usage, saved)
+
+    // A response stored before the vocabulary change keeps its original code.
+    usage.responseBody.error.code = 'user_not_found'
+    usage.responseBody.error.details = { requestId: usage.id }
+    const historical = structuredClone(usage)
+    await assert.rejects(state.gateway[method](state.context, request),
+      { status: 404, code: 'user_not_found', details: { requestId: usage.id } })
+    assert.equal(calls, 1)
+    assert.deepEqual(usage, historical)
+  })
+}
+
+test('XHS missing-account vocabulary does not turn an unrecognized empty response into 404', async () => {
+  const state = await gatewayFixture(async () => jsonResponse({ code: 200, data: {} }))
+  await assert.rejects(state.gateway.legacyUserInfo(state.context, {
+    body: { platform: 'xiaohongshu', username: 'missing-account' },
+    idempotencyKey: 'xhs-malformed-not-missing', path: '/api/v1/search/user-info',
+  }), { status: 502, code: 'external_platform_response_unusable' })
+  assert.equal([...state.platformStore.calls.values()][0].errorCode, 'invalid_upstream_contract')
+})
+
 test('saved admission below an atomic XHS profile workflow rejects locally without a TypeError or paid call', async () => {
   const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
   let calls = 0

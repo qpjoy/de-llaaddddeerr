@@ -1087,7 +1087,10 @@ Hub-native connector when the first-page gate is later closed.
 On this Hub-native slice, a non-official Xiaohongshu profile URL returns `400
 invalid_user_profile_url`, a page conflicting with its direct crawl cursor
 returns `400 cursor_page_mismatch`, and a user that cannot be resolved returns
-`404 user_not_found`.
+`404 social_account_not_found`. New errors include `platform=xiaohongshu`,
+`stage=account_lookup`, the original call's `outcome`, and `retryable=false`
+in `error.details`. Historical `user_not_found` receipts replay their original
+status and body without another purchase.
 
 Direct routing does not remove Xiaohongshu from `data.legacySearch`. For a key
 granted both Xiaohongshu and Twitter, every `raw`, `crawl`, and `user-info`
