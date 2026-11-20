@@ -661,6 +661,9 @@ function selectPlanDecision(
   const decisions = [plan.components?.launcher, plan.components?.app].filter(Boolean);
   return decisions.find((decision) => {
     if (!decision) return false;
+    // Explicit no-op plans may retain uploaded bytes for manual download.
+    // Their artifacts must not turn them into updates through the legacy API.
+    if (decision.updateAvailable === false) return false;
     if (decision.componentId !== input.componentId) return false;
     if (input.componentKind && !releasePolicyKindsMatch(decision.componentKind, input.componentKind)) return false;
     if (decision.currentVersion && decision.currentVersion !== input.currentVersion) return true;

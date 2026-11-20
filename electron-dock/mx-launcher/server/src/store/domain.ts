@@ -5204,7 +5204,10 @@ function buildReleaseArtifactRef(
   role: 'launcher' | 'app',
   releaseId: string
 ): ReleaseArtifactRef | null {
-  if (!decision.updateAvailable) return null;
+  // Register explicitly uploaded bytes even when this plan has no version
+  // change. Update eligibility remains a separate decision for each client.
+  const hasExplicitArtifact = role === 'launcher' && Boolean(input.artifactKind?.trim() && input.artifactUrl?.trim());
+  if (!decision.updateAvailable && !hasExplicitArtifact) return null;
   const requestedKind = role === 'launcher' && input.artifactKind
     ? normalizeReleaseArtifactKind(input.artifactKind)
     : null;
@@ -5233,7 +5236,7 @@ function buildReleaseArtifactRef(
     arch: role === 'launcher' ? input.artifactArch?.trim() || null : null,
     fileName: role === 'launcher' ? input.artifactFileName?.trim() || null : null,
     activation,
-    autoApply: decision.updateMode === 'automatic' && activation !== 'installer-manual',
+    autoApply: decision.updateAvailable && decision.updateMode === 'automatic' && activation !== 'installer-manual',
     restartRequired: releaseActivationNeedsRestart(activation),
     requiredAppRestart: activation === 'restart-auto' || activation === 'restart-manual' || activation === 'installer-manual',
     notes: [

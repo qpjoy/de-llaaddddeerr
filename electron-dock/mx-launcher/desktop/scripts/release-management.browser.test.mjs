@@ -164,11 +164,27 @@ test('Release Center binds edit, withdraw and restore actions to the authenticat
       }), 1, 'each action label must remain on one line at a narrower viewport');
     }
     await screenshot('release-actions-narrow.png');
+    // A same-version upload is still a real installer, while its release
+    // decision intentionally remains a no-op.
+    plan = { ...plan,
+      components: { launcher: { ...plan.components.launcher, currentVersion: '3.0.1', updateAvailable: false } },
+      decisions: { ...plan.decisions, readyToPromote: false }
+    };
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.getByRole('button', { name: 'Refresh plans', exact: true }).click();
+    await row.locator('mark[data-kind="registered"]').waitFor();
+    assert.match(await row.innerText(), /app-installer/);
+    await row.getByRole('button', { name: '详情', exact: true }).click();
+    assert.match(await drawer.innerText(), /安装包已关联/);
+    assert.match(await drawer.innerText(), /不触发自动更新/);
+    assert.match(await drawer.locator('.release-artifact-grid').innerText(), /MinCave-3\.0\.1-mac-universal\.dmg/);
+    await screenshot('release-same-version-registered.png');
+    await drawer.getByRole('button', { name: 'Done', exact: true }).click();
     assert.deepEqual(serverErrors, []);
     assert.deepEqual(pageErrors, []);
     assert.deepEqual(externalRequests, [], 'the browser must never request a production or external origin');
     console.log(JSON.stringify({ origin, csrfProtectedPatches: calls.length,
-      checks: ['details', 'keyboard edit scroll and focus', 'keyboard withdraw cancellation', 'withdraw', 'edit preserves withdrawal', 'restore', 'narrow action labels'],
+      checks: ['details', 'keyboard edit scroll and focus', 'keyboard withdraw cancellation', 'withdraw', 'edit preserves withdrawal', 'restore', 'narrow action labels', 'same-version artifact registration'],
       externalRequests: 0, realReleasesChanged: 0 }));
   } catch (error) {
     await screenshot('release-failure.png');

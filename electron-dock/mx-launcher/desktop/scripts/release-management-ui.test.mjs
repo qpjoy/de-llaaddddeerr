@@ -25,7 +25,7 @@ function plan(overrides = {}) {
 
 const functions = [
   'releaseCenterFilters', 'releaseCenterPlans', 'releasePlanById', 'releaseDecisionList',
-  'releasePlanArtifacts', 'releasePlanStatus', 'releasePlanIsWithdrawn', 'releaseStatusLabel',
+  'releasePlanArtifacts', 'releasePlanStatus', 'releasePlanHasSameVersionArtifact', 'releasePlanIsWithdrawn', 'releaseStatusLabel',
   'releaseArtifactKinds', 'releaseComponentSummary', 'filteredReleaseCenterPlans',
   'releaseWithdrawalConfirmation', 'setReleaseWithdrawalFromAdmin', 'updateReleasePlanFromAdmin',
   'commaList', 'openReleaseCenterDrawer', 'openReleaseMetadataEditor', 'renderReleaseDistributionButton',
@@ -95,6 +95,30 @@ test('withdrawal has its own persistent status; zero-percent drafts and legacy r
   assert.equal(f.api.releaseStatusLabel('withdrawn'), '已撤销');
   f.api.releaseCenterFilters().status = 'withdrawn';
   assert.deepEqual(f.api.filteredReleaseCenterPlans().map(item => item.planId), ['withdrawn']);
+});
+
+test('same-version registration requires a real matching artifact and stays registered after metadata edits', async () => {
+  const original = plan({
+    components: { launcher: { componentId: 'mx-h2i', componentKind: 'app-installer', currentVersion: '3.0.0', targetVersion: '3.0.0', updateAvailable: false } },
+    artifacts: [{ artifactId: 'dmg', componentId: 'mx-h2i', kind: 'app-installer', version: '3.0.0', digest: 'sha256:original', url: '/artifact.dmg', fileName: 'MinCave-3.0.0.dmg' }],
+    decisions: { readyToPromote: false }
+  });
+  const f = fixture({ plans: [original], respond: request => ({ plan: { ...original, releaseNotes: request.body.releaseNotes } }) });
+  assert.equal(f.api.releasePlanStatus(original), 'registered');
+  assert.equal(f.api.releaseStatusLabel('registered'), '已登记');
+  assert.deepEqual(f.api.releasePlanArtifacts(original), original.artifacts);
+  f.api.releaseCenterFilters().status = 'registered';
+  assert.deepEqual(f.api.filteredReleaseCenterPlans(), [original]);
+  for (const artifacts of [[], [{ ...original.artifacts[0], url: null }], [{ ...original.artifacts[0], digest: null }], [{ ...original.artifacts[0], version: '3.0.1' }], [{ ...original.artifacts[0], componentId: 'other' }]]) {
+    assert.equal(f.api.releasePlanStatus({ ...original, artifacts }), 'idle');
+  }
+  assert.equal(f.api.releasePlanStatus({ ...original, withdrawnAt: '2026-11-20T00:00:00Z' }), 'withdrawn');
+  assert.equal(f.api.releasePlanStatus({ ...original, test: { gate: { verdict: 'blocked' } } }), 'blocked');
+  await f.api.updateReleasePlanFromAdmin(editForm());
+  assert.equal(f.state.releaseCenter.feedback.kind, 'success');
+  assert.deepEqual(f.state.dashboard.latestReleasePlans[0].artifacts, original.artifacts);
+  assert.deepEqual(f.state.dashboard.latestReleasePlans[0].components, original.components);
+  assert.equal(f.api.releasePlanStatus(f.state.dashboard.latestReleasePlans[0]), 'registered');
 });
 
 test('withdrawal confirms exact release/version/audience and sends only lifecycle fields with ops protection', async () => {
