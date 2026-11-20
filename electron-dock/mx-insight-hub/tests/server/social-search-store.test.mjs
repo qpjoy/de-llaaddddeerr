@@ -15,6 +15,17 @@ const digest = value => createHash('sha256').update(value).digest('hex')
 const clone = value => structuredClone(value)
 const scopeHash = 'a'.repeat(64), fingerprint = 'b'.repeat(64)
 
+function noDataDelivery(f) {
+  const saved = clone(f.saved)
+  Object.assign(saved, { responseStatus: 404, usageUnitsActual: 0,
+    responseBody: { error: { code: 'social_account_not_found', message: 'No deliverable account data',
+      details: { reason: 'social_data_not_found' } }, requestId: f.target.id } })
+  saved.sources = saved.sources.filter(source => source.own)
+  saved.manifest.previousDeliveryId = null
+  saved.manifest.deliveredIds = [[]]
+  return saved
+}
+
 async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/social/crawl', workflowKind = 'social-account') {
   const platform = workflowKind === 'youtube-comments' ? 'youtube' : provider === 'rapidapi' ? 'twitter' : provider === 'justone' ? 'facebook' : 'weibo'
   const recipe = { operation: 'native.account.posts', endpointKey: 'native.account.posts', endpointVersion: 'v1' }
@@ -48,7 +59,7 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
   const columns = { tenantId: 'tenant_id', consumerId: 'consumer_id', apiKeyId: 'api_key_id', responseStatus: 'response_status', responseBody: 'response_body',
     acquisitionRequest: 'acquisition_request', reservedAt: 'reserved_at', usageRequestId: 'usage_request_id', providerKey: 'provider_key', operation: 'operation',
     endpointKey: 'endpoint_key', endpointVersion: 'endpoint_version', contractVersion: 'contract_version', httpStatus: 'http_status', businessCode: 'business_code', completedAt: 'completed_at',
-    bodyBytes: 'body_bytes', bodySize: 'body_size', bodySha256: 'body_sha256', capturedAt: 'captured_at' }
+    bodyBytes: 'body_bytes', bodySize: 'body_size', bodySha256: 'body_sha256', capturedAt: 'captured_at', unitsActual: 'units_actual' }
   const sqlValue = value => value && typeof value === 'object' && !(value instanceof Uint8Array) ? JSON.stringify(value) : value
   const insert = async (table, values) => {
     const entries = Object.entries(values)
@@ -72,7 +83,7 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
       CREATE TABLE control.external_platform_restricted_raw_responses (provider_call_id uuid REFERENCES external_platform.provider_calls,
         body_bytes bytea,body_size int,body_sha256 text,captured_at timestamptz);
       CREATE TABLE external_platform.gateway_requests (id uuid,provider_key text,tenant_id uuid,consumer_id uuid,usage_request_id uuid REFERENCES usage_requests,
-        request_fingerprint char(64),source_mode text,succeeded boolean,response_status int,provider_call_id uuid REFERENCES external_platform.provider_calls);
+        request_fingerprint char(64),source_mode text,succeeded boolean,response_status int,provider_call_id uuid REFERENCES external_platform.provider_calls,error_code text);
       CREATE TABLE external_platform.dispatch_leases (consumer_id uuid,operation text,request_fingerprint char(64),owner_request_id uuid,
         expires_at timestamptz,created_at timestamptz DEFAULT now(),UNIQUE(consumer_id,operation,request_fingerprint));
       CREATE TABLE billing.customer_charges (id uuid,usage_request_id uuid,tenant_id uuid,account_id uuid,status text,
@@ -119,6 +130,11 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
   }
   return { ...identity, identity, expected, store, providerStore, providerStores, usageStore, db, pool, source, target, call, callId, ownCallId, archive, payload, saved, manifest,
     setUsage, getUsage,
+    getGateway: async () => postgres ? (await db.query('SELECT succeeded,response_status AS "responseStatus",error_code AS "errorCode" FROM external_platform.gateway_requests')).rows[0]
+      : providerStore.requests[0] && (({ succeeded, responseStatus, errorCode }) => ({ succeeded, responseStatus, errorCode }))(providerStore.requests[0]),
+    getProviderEvidence: async () => postgres ? { calls: (await db.query('SELECT * FROM external_platform.provider_calls ORDER BY id')).rows,
+      archives: (await db.query('SELECT * FROM control.external_platform_restricted_raw_responses ORDER BY provider_call_id')).rows }
+      : { calls: clone([...providerStore.calls]), archives: clone([...providerStore.restrictedResponseArchives]) },
     setCall: changes => postgres ? update('external_platform.provider_calls', 'id', callId, changes) : Object.assign(providerStore.calls.get(callId), clone(changes)),
     setArchive: changes => postgres ? update('control.external_platform_restricted_raw_responses', 'provider_call_id', callId, changes) : Object.assign(providerStore.restrictedResponseArchives.get(callId), clone(changes)),
     setArchiveFor: (id, changes) => postgres ? update('control.external_platform_restricted_raw_responses', 'provider_call_id', id, changes) : Object.assign(providerStore.restrictedResponseArchives.get(id), clone(changes)),
@@ -135,6 +151,65 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
 for (const postgres of [false, true]) {
   const name = postgres ? 'PGlite' : 'Memory'
   const options = { skip: postgres && !modulePath ? 'Set MX_INSIGHT_TEST_PGLITE_MODULE to the local PGlite module' : false }
+  test(`${name} fresh exhausted account delivery commits 404 without rewriting supplier evidence or billing policy`, options, async t => {
+    const f = await fixture(t, postgres), saved = noDataDelivery(f)
+    // Threads may exhaust a valid empty page without proving pagination.
+    saved.manifest.state.jobs[0].paginationUnproven = true
+    saved.manifest.state.jobs[0].manualContinuation = true
+    const bytes = Buffer.from(JSON.stringify({ code: 200, data: { items: [] } }))
+    await f.setArchiveFor(f.ownCallId, { bodyBytes: bytes, bodySize: bytes.length, bodySha256: digest(bytes) })
+    Object.assign(saved.sources[0], { bodySize: bytes.length, bodySha256: digest(bytes) })
+    const evidence = await f.getProviderEvidence(), original = await f.getUsage(f.source.id)
+    await f.store.commitDelivery(saved)
+    const usage = await f.getUsage(f.target.id)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 404)
+    assert.equal(usage.unitsActual, 0)
+    assert.deepEqual(usage.responseBody, saved.responseBody)
+    assert.deepEqual(usage.acquisitionRequest.socialSearch.sources, saved.sources)
+    assert.deepEqual(await f.getGateway(), { succeeded: false, responseStatus: 404, errorCode: 'social_account_not_found' })
+    assert.deepEqual(await f.getProviderEvidence(), evidence)
+    assert.deepEqual(await f.getUsage(f.source.id), original)
+    assert.deepEqual(await f.counts(), { gateways: 1, calls: 2, captures: 1, representative: f.ownCallId, charge: 'captured' })
+    await assert.rejects(f.store.commitDelivery(saved), { code: 'search_page_unavailable' })
+    await assert.rejects(f.store.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 }), { code: 'search_page_unavailable' })
+    assert.equal((await f.counts()).captures, 1)
+  })
+  test(`${name} no-data 404 rejects continuation, partial, foreign and unfinished account delivery`, options, async t => {
+    const f = await fixture(t, postgres), saved = noDataDelivery(f)
+    const variants = [
+      value => { value.responseStatus = 500 },
+      value => { value.responseBody.error.code = 'other' },
+      value => { value.responseBody.error.details.reason = 'other' },
+      value => { value.usageUnitsActual = 1 },
+      value => { value.manifest.previousDeliveryId = f.source.id },
+      value => { value.manifest.deliveredIds = [['already-delivered']] },
+      value => { value.manifest.state.jobs[0].done = false },
+      value => { value.manifest.state.jobs[0].buffer = { callId: f.ownCallId, offset: 0, hash: 'd'.repeat(64),
+        projectionHash: 'e'.repeat(64), expected: clone(f.expected), providerPage: 1, providerCursor: null } },
+      value => { value.sources[0].own = false },
+      value => { value.sources[0].callId = f.callId }, // An own flag cannot relabel a previous request's receipt.
+    ]
+    for (const change of variants) {
+      const input = clone(saved); change(input)
+      await assert.rejects(f.store.commitDelivery(input), { code: 'search_page_unavailable' })
+      assert.equal((await f.getUsage(f.target.id)).status, 'reserved')
+      assert.deepEqual(await f.counts(), { gateways: 0, calls: 2, captures: 0, representative: undefined, charge: 'reserved' })
+    }
+    const comments = await fixture(t, postgres, 'justone', POST_COMMENTS_PATH, 'post-comments')
+    await assert.rejects(comments.store.commitDelivery(noDataDelivery(comments)), { code: 'search_page_unavailable' })
+  })
+  test(`${name} existing 200 empty continuation retains its minimum unit and success semantics`, options, async t => {
+    const f = await fixture(t, postgres), saved = clone(f.saved)
+    saved.usageUnitsActual = 0
+    saved.manifest.deliveredIds = [[]]
+    saved.responseBody = { data: { items: [] } }
+    await f.store.commitDelivery(saved)
+    const usage = await f.getUsage(f.target.id)
+    assert.equal(usage.responseStatus, 200)
+    assert.equal(usage.unitsActual, 1)
+    assert.deepEqual(await f.getGateway(), { succeeded: true, responseStatus: 200, errorCode: null })
+  })
   test(`${name} single-post comment manifests retain paid overflow and settle once in their own scope`, options, async t => {
     const f = await fixture(t, postgres, 'justone', POST_COMMENTS_PATH, 'post-comments')
     const before = await f.getUsage(f.source.id), saved = clone(f.saved)

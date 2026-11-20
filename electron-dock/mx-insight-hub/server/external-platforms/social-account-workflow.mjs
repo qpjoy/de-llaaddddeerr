@@ -112,6 +112,12 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     providerPage: 1, upstreamPages: 0, started: false, done: false, buffer: null, resolvedIdentity: null, profiles: [], dispatchedTokens: [] })) }
   if (state.jobs.some((job, index) => job.query !== request.jobs[index].id)) throw unavailable()
   const rowsByJob = request.jobs.map(() => []), seen = history.seenIds, sources = [], warnings = [], started = performance.now()
+  // This is a public delivery policy, not evidence that the supplier proved
+  // an account absent. Continuations and already acquired rows keep their
+  // existing semantics, including a normal empty terminal page.
+  const initialDelivery = workflowKind === 'social-account' && !history.state && !history.previousDeliveryId
+    && !state.jobs.some(job => job.buffer) && history.seenIds.every(ids => !ids.size)
+  const noInitialData = () => initialDelivery && rowsByJob.every(rows => !rows.length)
   const parentLease = { consumerId: context.consumer.id, fingerprint: delivery.fingerprint,
     ownerRequestId: delivery.usageRequestId, expiresAt: new Date(deadlineAt).toISOString() }
   let calls = 0, bytes = 0, capturedAt = null, ownsParent = false, entered = false
@@ -366,11 +372,15 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
               && evidence.outcome === 'rejected' && ['social_account_not_found', 'social_account_unavailable'].includes(evidence.errorCode)
             const accountNotFound = workflowKind === 'social-account' && evidence.outcome === 'rejected'
               && evidence.errorCode === 'social_account_not_found'
+            const dataNotFound = noInitialData() && evidence.httpStatus === 200
+              && evidence.outcome === 'succeeded_unusable' && evidence.errorCode === 'invalid_social_contract'
             const accountFailure = twitterAccountFailure || accountNotFound
-            const status = accountFailure ? accountNotFound ? 404 : 422 : evidence.httpStatus === 429 ? 429 : 502
+            const status = dataNotFound ? 404 : accountFailure ? accountNotFound ? 404 : 422 : evidence.httpStatus === 429 ? 429 : 502
             const failureDetails = { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
               ...(accountFailure ? { platform: request.platform, stage: 'account_lookup',
-                ...(accountNotFound ? {} : { reason: evidence.accountReason || 'unavailable' }) } : {}), outcome: evidence.outcome, retryable: false }
+                ...(accountNotFound ? {} : { reason: evidence.accountReason || 'unavailable' }) } : {}),
+              ...(dataNotFound ? { platform: request.platform, stage: request.operation === 'user-info' || step.socialCompat.stage === 'resolve' ? 'account_lookup' : 'data_acquisition',
+                reason: 'social_data_not_found' } : {}), outcome: evidence.outcome, retryable: false }
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id, listingMarketplace) }
@@ -402,10 +412,11 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
               stopped = true
               break
             }
-            const code = accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
+            const code = dataNotFound ? 'social_account_not_found' : accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
             const commentSubject = { 'post-comments': 'post comments', 'comment-replies': 'comment replies' }[workflowKind]
             let message = twitterAccountFailure ? twitterAccountFailureMessage(evidence)
               : accountNotFound ? 'The requested account was not found on the selected platform'
+                : dataNotFound ? 'No deliverable data was found for the requested account'
                 : 'Account acquisition failed; inspect its saved outcome'
             if (workflowKind === 'threads-search') message = 'Content-search acquisition failed; inspect its saved outcome'
             if (commentSubject) {
@@ -487,14 +498,24 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
       if (stopped) break
     }
     if (!sources.length) throw new AppError(503, 'social_data_unavailable', 'No account page could be acquired within this request')
-    const responseBody = buildResponse({ rowsByJob, state, calls, warnings })
+    const dataNotFound = noInitialData() && !stopped && state.jobs.every(job => job.done && !job.buffer)
+    const responseStatus = dataNotFound ? 404 : 200
+    const responseBody = dataNotFound ? { error: { code: 'social_account_not_found',
+      message: 'No deliverable data was found for the requested account',
+      details: { platform: request.platform, stage: request.operation === 'user-info' ? 'account_lookup' : 'data_acquisition',
+        reason: 'social_data_not_found', outcome: 'succeeded', retryable: false } },
+    requestId: delivery.usageRequestId } : buildResponse({ rowsByJob, state, calls, warnings })
     const sourceMode = calls ? 'live' : clock() - Date.parse(capturedAt) <= gateway.config.freshTtlMs ? 'fresh_cache' : 'stored_fallback'
     try {
-      await stateStore.commitDelivery({ ...identity, delivery, responseBody, sources, capturedAt, sourceMode,
-        usageUnitsActual: traversal?.usageUnits?.(rowsByJob) ?? 1, latencyMs: Math.round(performance.now() - started), manifest: { version: traversal?.version ?? VERSION,
+      await stateStore.commitDelivery({ ...identity, delivery, responseStatus, responseBody, sources, capturedAt, sourceMode,
+        usageUnitsActual: dataNotFound ? 0 : traversal?.usageUnits?.(rowsByJob) ?? 1, latencyMs: Math.round(performance.now() - started), manifest: { version: traversal?.version ?? VERSION,
           scopeHash: request.scopeHash, previousDeliveryId: history.previousDeliveryId, state,
           deliveredIds: rowsByJob.map(rows => rows.map(row => rowId(row, request.operation))) } })
     } catch { await markUnknown(); throw uncertain() }
+    if (dataNotFound) {
+      settledFailure = true
+      throw new AppError(responseStatus, responseBody.error.code, responseBody.error.message, responseBody.error.details)
+    }
     return { status: 200, body: responseBody, requestId: delivery.usageRequestId, replay: false, sourceMode, capturedAt }
   } catch (error) {
     if (calls && !settledFailure) { await markUnknown(); if (!error.preserveReservation) throw uncertain() }

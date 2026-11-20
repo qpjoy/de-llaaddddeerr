@@ -5,6 +5,8 @@ import { isDeepStrictEqual } from 'node:util'
 import { pathToFileURL } from 'node:url'
 
 // Incident-only operator tool. No direct supplier HTTP, grant changes or historical writes.
+export const REVISION = 'instagram-account-54156c46.v2'
+export const LEGACY_RUN_DIR = '/tmp/mx-ig-account-54156c46', PRODUCTION_RUN_DIR = '/dev/shm/mx-ig-account-54156c46'
 export const INCIDENT = Object.freeze({ requestId: '54156c46-247b-4783-ba5a-24a070be6b88',
   callId: '5f00a6f4-7575-4b02-a805-e285bc2883fb', upstreamRequestId: '7c36b8fe-c8ab-4c3c-9b3d-ccd701c4b9af',
   bodySha256: '212216a9cdac8e6381af466530a9af130624008ffb1b81c9bb598af4ba3df18d', bodySize: 1336 })
@@ -37,8 +39,15 @@ const SAFE_ERRORS = new Set(['source_unverified', 'source_snapshot_invalid', 'so
   'public_origin_invalid', 'admin_credential_unavailable', 'demo_unavailable', 'demo_identity_mismatch',
   'capabilities_unavailable', 'slot_not_granted_or_ready', 'prior_identity_mismatch', 'prior_order_invalid',
   'saved_receipt_unavailable', 'saved_call_unverified', 'saved_outcome_unknown', 'saved_archive_unverified',
-  'supplier_access_or_capacity_rejected', 'http_outcome_unknown', 'invalid_arguments', 'database_url_required'])
+  'supplier_access_or_capacity_rejected', 'http_outcome_unknown', 'invalid_arguments', 'database_url_required',
+  'recovery_claim_required', 'recovery_receipt_exists', 'recovery_marker_exists', 'recovery_marker_check_failed', 'marker_check_failed',
+  'marker_mount_unavailable', 'marker_mount_readonly', 'marker_mount_not_tmpfs', 'marker_mount_invalid'])
 const errorCode = error => SAFE_ERRORS.has(error?.message) ? error.message : 'probe_failed'
+const PHASES = new Set(['initialize','connect','acquire_lock','read_source','normalize_source','inspect_archive','read_priors','verify_recovery',
+  'verify_marker_mount','prepare_marker_directory','prepare_slot','check_marker','mint_demo','read_capabilities','write_marker','dispatch_native','read_saved_calls','read_saved_archive'])
+const ERRNOS = new Set(['EACCES','EPERM','EROFS','ENOENT','ENOTDIR','EEXIST','ENOSPC','EDQUOT','EIO','EMFILE','ENFILE','ETIMEDOUT','ECONNREFUSED','ECONNRESET','ENOTFOUND'])
+const SQLSTATES = new Set(['57014','55P03','42501','42P01','42703','42601','22P02','25006','25P02','08000','08001','08003','08006','57P01','53300'])
+const failure = (error, phase) => ({ phase: PHASES.has(phase) ? phase : 'initialize', errno: ERRNOS.has(error?.code) ? error.code : null, sqlState: SQLSTATES.has(error?.code) ? error.code : null })
 function envelopeShape(value, depth = 0) {
   if (!object(value)) return { type: kind(value) }
   const keys = Object.keys(value).sort(), safe = keys.filter(key => /^[A-Za-z][A-Za-z0-9_]{0,39}$/u.test(key)
@@ -110,11 +119,11 @@ async function saveMarker(handle, value) {
   await handle.truncate(bytes.length); await handle.sync()
 }
 export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = process.env, execute = false,
-  loadContracts = loadDeployedContracts, clock = () => Date.now(), incident = INCIDENT }) {
-  const report = { revision: 'instagram-account-54156c46.v1', originalRequestId: incident.requestId,
-    mode: execute ? 'execute' : 'inspect', maxPaidCalls: 3, upstreamCallsAttempted: 0, slots: [],
+  resumeUnstarted = false, loadContracts = loadDeployedContracts, clock = () => Date.now(), incident = INCIDENT }) {
+  const report = { revision: REVISION, originalRequestId: incident.requestId,
+    mode: resumeUnstarted ? 'resume-unstarted' : execute ? 'execute' : 'inspect', maxPaidCalls: 3, upstreamCallsAttempted: 0, slots: [],
     markerBoundary: 'Keep the same host run marker and directory. Never remove markers or change directories to repeat this campaign.' }
-  let client, locked = false, currentMarker
+  let client, locked = false, currentMarker, phase = 'initialize'
   const read = async fn => {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
     try { await client.query("SET LOCAL statement_timeout='5s'"); await client.query("SET LOCAL lock_timeout='1s'")
@@ -122,10 +131,14 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
     finally { await client.query('ROLLBACK') }
   }
   try {
-    requireValue(typeof execute === 'boolean', 'invalid_arguments')
+    requireValue(typeof execute === 'boolean' && typeof resumeUnstarted === 'boolean' && (!resumeUnstarted || execute), 'invalid_arguments')
+    if (resumeUnstarted) requireValue(env.MX_IG_PROBE_RECOVERY_CLAIM === INCIDENT.requestId, 'recovery_claim_required')
+    phase = 'connect'
     client = await pool.connect()
+    phase = 'acquire_lock'
     const { rows: [lock] } = await read(db => db.query('SELECT pg_try_advisory_lock(hashtext($1),hashtext($2)) AS locked', ['instagram-account-probe', incident.requestId]))
     requireValue(lock?.locked === true, 'probe_locked'); locked = true
+    phase = 'read_source'
     const { original, source } = await read(async db => {
       const { rows: [original] } = await db.query(`SELECT /* ig-account-probe:original */ id,tenant_id,consumer_id,api_key_id,platform,status,response_status,
         CASE WHEN octet_length(acquisition_request::text)<=16384 THEN acquisition_request END AS acquisition_request
@@ -144,7 +157,7 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
     requireValue(snapshot?.method === 'POST' && ['/api/v1/data/social/crawl','/api/v1/search/crawl','/api/v1/night-all/search/crawl'].includes(snapshot.path)
       && !snapshot.bodyOmitted && object(body) && Buffer.byteLength(JSON.stringify(snapshot)) <= 16384
       && !JSON.stringify(body).includes('[redacted]'), 'source_snapshot_invalid')
-    let contracts
+    phase = 'normalize_source'; let contracts
     try { contracts = await loadContracts() } catch { throw new Error('parser_unavailable') }
     requireValue(['normalizeHubSocialCompatRequest','buildHubSocialCompatDispatch','normalizeNativeForwardingRequest','projectPage']
       .every(name => typeof contracts[name] === 'function'), 'parser_unavailable')
@@ -162,6 +175,7 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
       && source.http_status === 200 && source.business_code === 200 && source.error_code === 'invalid_social_contract'
       && source.upstream_request_id === incident.upstreamRequestId && Number(source.body_size) === incident.bodySize
       && source.body_sha256 === incident.bodySha256, 'source_unverified')
+    phase = 'inspect_archive'
     report.original = { callId: source.id, billed: typeof source.billed === 'boolean' ? source.billed : null,
       costMinor: Number.isSafeInteger(Number(source.cost_minor)) && source.cost_minor != null ? Number(source.cost_minor) : null,
       costKind: ['estimated','provider_reported','unknown'].includes(source.cost_kind) ? source.cost_kind : null,
@@ -179,6 +193,7 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
     if (sameAsControl) report.controlSkipped = 'same_as_original_target'
     const plans = allPlans.filter(plan => !sameAsControl || plan.name !== 'control-v2')
     const priors = async () => {
+      phase = 'read_priors'
       const { rows } = await read(db => db.query(`SELECT /* ig-account-probe:priors */ id,tenant_id,consumer_id,api_key_id,platform,status,response_status,idempotency_key,
         CASE WHEN octet_length(acquisition_request::text)<=16384 THEN acquisition_request END AS acquisition_request
         FROM public.usage_requests WHERE consumer_id=$1::uuid AND idempotency_key=ANY($2::text[]) ORDER BY reserved_at LIMIT 4`,
@@ -191,58 +206,99 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
       return rows
     }
     let saved = await priors()
+    if (resumeUnstarted) requireValue(saved.length === 0, 'recovery_receipt_exists')
     if (canPurchase) requireValue(!saved.filter(row => plans.some(plan => plan.idempotencyKey === row.idempotency_key))
       .some(row => plans.slice(0, plans.findIndex(plan => plan.idempotencyKey === row.idempotency_key))
       .some(plan => !saved.some(prior => prior.idempotency_key === plan.idempotencyKey))), 'prior_order_invalid')
     const directory = env.MX_IG_PROBE_RUN_DIR
+    const markerStates = async name => {
+      const states = { current: 'not_checked', legacy: 'not_checked' }
+      for (const [label, base] of [['current',directory],['legacy',LEGACY_RUN_DIR]]) if (typeof base === 'string' && isAbsolute(base)) {
+        try { await fsImpl.lstat(join(base, `${name}.json`)); states[label] = 'present' }
+        catch (error) { states[label] = error.code === 'ENOENT' ? 'absent' : 'unavailable' }
+      }
+      return states
+    }
+    const requireAbsentMarkers = async (slots, recovery = false) => {
+      phase = recovery ? 'verify_recovery' : 'check_marker'
+      for (const slot of slots) for (const base of new Set([directory,LEGACY_RUN_DIR])) {
+        let exists = false
+        try { await fsImpl.lstat(join(base, `${slot.name}.json`)); exists = true }
+        catch (error) { if (error.code !== 'ENOENT') throw Object.assign(new Error(recovery ? 'recovery_marker_check_failed' : 'marker_check_failed'), { code: error.code }) }
+        requireValue(!exists, recovery ? 'recovery_marker_exists' : 'marker_exists')
+      }
+    }
+    if (resumeUnstarted) { requireValue(typeof directory === 'string' && isAbsolute(directory), 'probe_directory_required'); await requireAbsentMarkers(SLOTS, true) }
     if (canPurchase) {
+      phase = 'prepare_marker_directory'
       requireValue(typeof directory === 'string' && isAbsolute(directory), 'probe_directory_required')
+      if (directory === PRODUCTION_RUN_DIR || directory.startsWith('/dev/shm/')) {
+        requireValue(directory === PRODUCTION_RUN_DIR, 'probe_directory_invalid')
+        phase = 'verify_marker_mount'; let mountInfo
+        try { mountInfo = await fsImpl.readFile('/proc/self/mountinfo', 'utf8') }
+        catch (error) { throw Object.assign(new Error('marker_mount_unavailable'), { code: error.code }) }
+        const mounts = mountInfo.split('\n').map(line => line.split(' ')).filter(fields => fields[4] === '/dev/shm')
+        requireValue(mounts.length === 1, 'marker_mount_unavailable')
+        const fields = mounts[0], separator = fields.indexOf('-'), options = fields[5]?.split(',') || [], superOptions = fields[separator + 3]?.split(',') || []
+        requireValue(separator >= 6 && fields[separator + 1] === 'tmpfs', 'marker_mount_not_tmpfs')
+        requireValue(options.includes('rw') && !options.includes('ro') && superOptions.includes('rw') && !superOptions.includes('ro'), 'marker_mount_readonly')
+        let mount
+        try { mount = await fsImpl.lstat('/dev/shm') } catch (error) { throw Object.assign(new Error('marker_mount_unavailable'), { code: error.code }) }
+        requireValue(mount.isDirectory() && !mount.isSymbolicLink(), 'marker_mount_invalid')
+      }
+      phase = 'prepare_marker_directory'
       await fsImpl.mkdir(directory, { recursive: true, mode: 0o700 })
       requireValue((await fsImpl.lstat(directory)).isDirectory() && !(await fsImpl.lstat(directory)).isSymbolicLink(), 'probe_directory_invalid')
+      const parent = await fsImpl.open(directory, 'r'); try { await parent.sync() } finally { await parent.close() }
     }
     let origin, demo, capabilities
     const prepareHttp = async () => {
       if (demo) return
-      try { origin = new URL(env.MX_INSIGHT_PUBLIC_URL) } catch { throw new Error('public_origin_invalid') }
-      requireValue(origin.protocol === 'https:' && !origin.username && !origin.password && origin.pathname === '/' && !origin.search && !origin.hash, 'public_origin_invalid')
+      const publicUrl = env.MX_INSIGHT_PUBLIC_URL
+      requireValue(typeof publicUrl === 'string' && publicUrl.length <= 2048 && !/[\u0000-\u001f\u007f]/u.test(publicUrl), 'public_origin_invalid')
+      try { origin = new URL(publicUrl.trim()) } catch { throw new Error('public_origin_invalid') }
+      requireValue(['http:','https:'].includes(origin.protocol) && !origin.username && !origin.password && origin.pathname === '/' && !origin.search && !origin.hash, 'public_origin_invalid')
       requireValue(typeof env.MX_INSIGHT_ADMIN_TOKEN === 'string' && env.MX_INSIGHT_ADMIN_TOKEN.length >= 32, 'admin_credential_unavailable')
+      phase = 'mint_demo'
       const response = await fetchImpl('http://127.0.0.1:18151/internal/v1/admin/demo-credentials', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
         headers: { 'x-mx-insight-admin-token': env.MX_INSIGHT_ADMIN_TOKEN, 'content-type': 'application/json' }, body: JSON.stringify({ keyId: original.api_key_id }) })
       requireValue(response.ok, 'demo_unavailable'); demo = (await responseJson(response)).data
       requireValue(demo?.keyId === original.api_key_id && demo.consumerId === original.consumer_id && typeof demo.secret === 'string'
         && /^mih_demo_[A-Za-z0-9_.-]+$/u.test(demo.secret) && demo.secret.length <= 4096, 'demo_identity_mismatch')
+      phase = 'read_capabilities'
       const preflight = await fetchImpl(`${origin.origin}/api/v1/data/capabilities`, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(15000), headers: { authorization: `Bearer ${demo.secret}` } })
       requireValue(preflight.ok, 'capabilities_unavailable'); capabilities = (await responseJson(preflight)).data?.capabilities
       requireValue(Array.isArray(capabilities), 'capabilities_unavailable')
     }
     for (const plan of plans) {
+      phase = 'prepare_slot'
       if (plan.name === 'target-v3' && !params.username) { report.stoppedReason = 'v3_requires_original_username'; break }
       const native = contracts.normalizeNativeForwardingRequest(plan.key, plan.body)
       requireValue(native.endpointKey === `native.${plan.key}` && native.marketplace === 'instagram', 'source_step_mismatch')
       const marker = canPurchase ? join(directory, `${plan.name}.json`) : null, entry = { slot: plan.name, idempotencyKey: plan.idempotencyKey, endpoint: native.endpointKey,
         requestBodySha256: sha(JSON.stringify(plan.body)), v2ProjectionOnV3: plan.name === 'target-v3' }
       report.slots.push(entry)
+      if (!canPurchase) { entry.markerStates = await markerStates(plan.name); entry.markerState = entry.markerStates.current }
       let prior = saved.find(row => row.idempotency_key === plan.idempotencyKey)
       if (!prior && !canPurchase) {
-        entry.state = 'no_saved_receipt'; entry.markerState = 'not_checked'
+        entry.state = 'no_saved_receipt'
         entry.dispatchState = 'not_proven_by_absent_receipt'
-        if (typeof directory === 'string' && isAbsolute(directory)) {
-          try { await fsImpl.lstat(join(directory, `${plan.name}.json`)); entry.markerState = 'present' }
-          catch (error) { entry.markerState = error.code === 'ENOENT' ? 'absent' : 'unavailable' }
-        }
         continue
       }
       if (!prior) {
-        try { await fsImpl.lstat(marker); throw new Error('marker_exists') } catch (error) { if (error.code !== 'ENOENT') throw error }
+        await requireAbsentMarkers([plan])
         await prepareHttp()
         requireValue(capabilities.some(row => row?.capability === native.endpointKey && row.ready === true), 'slot_not_granted_or_ready')
         saved = await priors(); prior = saved.find(row => row.idempotency_key === plan.idempotencyKey)
+        if (resumeUnstarted && report.upstreamCallsAttempted === 0) requireValue(saved.length === 0, 'recovery_receipt_exists')
       }
       if (!prior) {
+        await requireAbsentMarkers([plan]); phase = 'write_marker'
         try { currentMarker = await fsImpl.open(marker, 'wx', 0o600) } catch (error) { if (error.code === 'EEXIST') throw new Error('marker_exists'); throw error }
         await saveMarker(currentMarker, { ...entry, state: 'dispatch_started', attemptedAt: new Date(clock()).toISOString() })
         const parent = await fsImpl.open(directory, 'r'); try { await parent.sync() } finally { await parent.close() }
         report.upstreamCallsAttempted++
+        phase = 'dispatch_native'
         try {
           const response = await fetchImpl(`${origin.origin}${plan.path}`, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(120000),
             headers: { authorization: `Bearer ${demo.secret}`, 'content-type': 'application/json', 'idempotency-key': plan.idempotencyKey }, body: JSON.stringify(plan.body) })
@@ -259,6 +315,7 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
       requireValue(prior && (!entry.httpRequestId || entry.httpRequestId === prior.id), 'saved_receipt_unavailable')
       entry.requestId = prior.id; entry.savedStatus = ['committed','released','reserved','unknown'].includes(prior.status) ? prior.status : 'other'
       entry.savedHttpStatus = prior.response_status
+      phase = 'read_saved_calls'
       const { rows: calls } = await read(db => db.query(`SELECT /* ig-account-probe:calls */ p.* FROM external_platform.provider_calls p
         JOIN public.usage_requests u ON u.id=p.usage_request_id AND p.tenant_id=u.tenant_id AND p.consumer_id=u.consumer_id AND p.api_key_id=u.api_key_id
         WHERE u.id=$1::uuid AND u.api_key_id=$2::uuid AND u.consumer_id=$3::uuid AND u.tenant_id=$4::uuid ORDER BY p.started_at,p.id LIMIT 2`,
@@ -277,6 +334,7 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
         costKind: ['estimated','provider_reported','unknown'].includes(call.cost_kind) ? call.cost_kind : null,
         currency: ['CNY','USD'].includes(call.currency) ? call.currency : null }
       requireValue(![401,402,403,429].includes(call.http_status) && !['upstream_auth_or_balance_unavailable','upstream_rate_limited'].includes(call.error_code), 'supplier_access_or_capacity_rejected')
+      phase = 'read_saved_archive'
       const { rows: [archive] } = await read(db => db.query(`SELECT /* ig-account-probe:archive */ a.body_size,a.body_sha256,a.captured_at,
         CASE WHEN a.body_size<=8388608 AND octet_length(a.body_bytes)<=8388608 THEN a.body_bytes END AS body_bytes
         FROM control.external_platform_restricted_raw_responses a JOIN external_platform.provider_calls p ON p.id=a.provider_call_id
@@ -285,18 +343,18 @@ export async function runProbe({ pool, fetchImpl = fetch, fsImpl = fs, env = pro
       [call.id, prior.id, original.api_key_id, original.consumer_id, original.tenant_id]))
       const projectionStep = plan.target ? step : contracts.buildHubSocialCompatDispatch(
         contracts.normalizeHubSocialCompatRequest('crawl', { platform: 'instagram', username: 'instagram', count: 20 }).jobs[0], { pageSize: 20 })
-      entry.archive = inspectArchive(archive, { step: projectionStep, projectPage: contracts.projectPage,
+      phase = 'inspect_archive'; entry.archive = inspectArchive(archive, { step: projectionStep, projectPage: contracts.projectPage,
         projectionLabel: plan.name === 'target-v3' ? 'deployed_v2_profile_projection_on_v3_response_not_route_change' : 'deployed_v2_profile' })
       requireValue(entry.archive.state === 'verified', 'saved_archive_unverified')
       if (plan.target && (entry.archive.usable || entry.archive.accountNotFoundSignal)) {
         report.stoppedReason = entry.archive.usable ? 'target_profile_usable' : 'target_account_not_found_signal'
         if (canPurchase) break
       }
-      } catch (error) { entry.inspectionError = errorCode(error); if (canPurchase) throw error }
+      } catch (error) { entry.inspectionError = errorCode(error); entry.failure = failure(error, phase); if (canPurchase) throw error }
     }
     report.stoppedReason ||= canPurchase ? 'three_slot_budget_complete' : 'inspection_complete'
     return report
-  } catch (error) { report.stoppedReason = errorCode(error); return report }
+  } catch (error) { report.stoppedReason = errorCode(error); report.failure = failure(error, phase); return report }
   finally {
     await currentMarker?.close().catch(() => {})
     if (client) { let releaseError
@@ -310,12 +368,12 @@ if (process.argv[1] === '-' || process.argv[1] && import.meta.url === pathToFile
   let pool
   try {
     const args = process.argv.slice(2)
-    requireValue(args.length <= 1 && (!args.length || ['--inspect','--execute'].includes(args[0])), 'invalid_arguments')
+    requireValue(args.length <= 1 && (!args.length || ['--inspect','--execute','--resume-unstarted'].includes(args[0])), 'invalid_arguments')
     requireValue(process.env.DATABASE_URL, 'database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000, query_timeout: 6000,
       options: '-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000' })
-    console.log(JSON.stringify(await runProbe({ pool, execute: args[0] === '--execute' }), null, 2))
-  } catch (error) { console.error(JSON.stringify({ error: errorCode(error) })); process.exitCode = 1 }
+    console.log(JSON.stringify(await runProbe({ pool, execute: ['--execute','--resume-unstarted'].includes(args[0]), resumeUnstarted: args[0] === '--resume-unstarted' }), null, 2))
+  } catch (error) { console.error(JSON.stringify({ error: errorCode(error), failure: failure(error, 'initialize') })); process.exitCode = 1 }
   finally { await pool?.end() }
 }

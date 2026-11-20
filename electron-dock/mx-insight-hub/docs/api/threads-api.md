@@ -109,7 +109,7 @@ curl -sS -X POST "$HUB_URL/api/v1/data/search" \
 
 默认 Threads Scraper 接受用户名或公开主页链接，每个账号按用户名读取 `posts`。Hub 展开作者在同一会话中的多条帖子，核对作者并按帖子 ID 去重。请求含数字账号 ID、`replies` 或 `reposts` 时，管理员可配置支持这些条件的 Threads API 或 TikHub。固定 Scraper 时返回 400 `threads_account_input_unsupported`；配置优先与保底时按整批输入检查是否可在派发前改用保底。旧 Threads API 查单个数字 ID 的一种活动通常只需一次上游调用，用户名可能增加一次精确账号解析。`replies` 返回该账号自己发表的回复。
 
-标准账号接口对已确认的未找到账号响应统一返回 `404 social_account_not_found`。Threads Scraper 的 `users/posts` 返回 `status: "ok"`、`data.user: null` 且没有矛盾的帖子内容时，按此规则处理；合法的 `data.posts: []` 仍返回 200 空帖子页。404 只表示此次未取得目标账号，不证明账号永久不存在。缺少字段、格式错误、权限错误、超时及未知结果不能据此归为 404。批量请求遇到未找到账号即整体返回 404，尚未处理的账号不再派发，不新增逐项部分成功。
+标准账号接口对已确认的未找到账号响应统一返回 `404 social_account_not_found`。Threads Scraper 的 `users/posts` 返回 `status: "ok"`、`data.user: null` 且没有矛盾的帖子内容时，按此规则处理。按 2026-11-20 后续公共约定，首次请求上游 HTTP 200 但没有可交付数据也返回该公共码，附 `error.details.reason: "social_data_not_found"`；包括首次请求已完成且无后续页的合法 `data.posts: []` 和未形成可交付结果的投影失败。404 不证明账号永久不存在。空页仍有可继续游标时保留 200；续页、分页耗尽及已有内容的部分成功保留原行为。权限错误、超时、未知结果等仍按原分类处理。明确未找到账号的批量请求仍按既有规则整体失败，不新增逐项部分成功。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
@@ -152,6 +152,8 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
 Threads Scraper 返回 `status: "ok"` 且 `data.user` 为 `null` 时，新标准账号请求返回 `404 social_account_not_found`，不再返回成功空资料。`error.details` 包含 `{ "platform": "threads", "stage": "account_lookup", "outcome": "rejected", "retryable": false }`，响应保留 `requestId`。这里的 `outcome` 描述 Threads 此类新结果；统一公共错误码不要求其他平台重写原调用分类。批量查询遇到该结果即整体返回 404，尚未处理的账号不再派发。供应商返回 `status: "error"` 时，仍按上游拒绝处理，不改成账号未找到。
 
 该规则适用于新标准账号请求；已保存的 200 空资料或 502 仍按原幂等请求回放，原归档及账单保持不变。原生透传接口继续保留供应商原协议。此次错误码统一不需要数据库迁移；部署与业务恢复须另行验证，见[账号未找到响应统一记录](../operations/social-account-not-found-2026-11-20.md)。
+
+首次资料请求上游 HTTP 200、但没有可交付资料时，也按 `404 social_account_not_found`、`details.reason: "social_data_not_found"` 返回；它是公共交付结果，不将未知或畸形资料重新解释为供应商明确认定账号不存在。供应商原始 `outcome`、错误码与费用证据保留。该后续约定的范围和发布边界见 [TikTok 账号请求记录](../operations/tiktok-account-802f613f-2026-11-20.md)。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \

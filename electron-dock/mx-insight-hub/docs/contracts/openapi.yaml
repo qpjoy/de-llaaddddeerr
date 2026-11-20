@@ -9642,7 +9642,7 @@ paths:
       x-mx-category: 账号数据
       x-mx-meter-key: social.content.crawl
       x-mx-doc-path: /docs/strategy-search
-      description: Hub 执行账号解析、字段投影及分页，保留已声明的历史账号参数和 raw_info/raw_data JSON 字符串，新增统一 items、page/pageInfo。旧转发入口继续保留；下游切换新接口须从第一页开始。授权要求同一 Key 同时具备目标平台和本操作 capability，不自动开通权限。逻辑页优先消费已取得余量并去重，再在允许范围内继续获取；最多 15 个公开页，游标保留 24 小时，页大小不是保证返回条数。短页或空页应读取 hasMore/nextCursor，不能按条数判定结束。未提供指标为 null，真实零值为 0。失败或未知不会伪装为成功空列表，也不会自动新建请求重试。
+      description: Hub 执行账号解析、字段投影及分页，保留已声明的历史账号参数和 raw_info/raw_data JSON 字符串，新增统一 items、page/pageInfo。旧转发入口继续保留；下游切换新接口须从第一页开始。授权要求同一 Key 同时具备目标平台和本操作 capability，不自动开通权限。逻辑页优先消费已取得余量并去重，再在允许范围内继续获取；最多 15 个公开页，游标保留 24 小时，页大小不是保证返回条数。短页或空页应读取 hasMore/nextCursor，不能按条数判定结束。首次请求上游 HTTP 200 但没有所需可交付资料或内容时返回 404 social_account_not_found，details.reason=social_data_not_found；包括全部任务已完成且无后续页的合法空结果，以及未形成可交付结果的 invalid_social_contract 投影失败。仅取得账号资料不算 crawl 已交付作品；空页仍有可继续游标、续页及已有内容的部分成功沿用原行为。404 不证明账号永久不存在，供应商原始结果与费用证据保留。未提供指标为 null，真实零值为 0。权限、超时、结果未知及非 200 上游拒绝保留原错误，不自动重试；旧幂等响应不改写。
       parameters:
       - name: Idempotency-Key
         in: header
@@ -10100,7 +10100,7 @@ paths:
         '401': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
         '402': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
         '403': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
-        '404': {description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。}
+        '404': {description: social_account_not_found：明确未找到账号，或首次请求上游 HTTP 200 但没有可交付数据；不证明账号永久不存在。后一种情况包括 invalid_social_contract 投影失败，及没有历史页、缓冲或任何子任务已取得的行、全部任务完成且未中途停止的合法空结果。error.details 包含实际 platform、stage（account_lookup 或 data_acquisition）、reason=social_data_not_found、原 outcome（投影失败为 succeeded_unusable，合法空结果为 succeeded）、retryable=false。明确未找到账号的原分类保留，不要求其 reason 相同：Threads/Twitter 为 rejected，旧小红书专用接口保持 succeeded_unusable。空页仍有可继续游标、续页及已有内容的部分成功不套用此无数据规则，不新增逐项部分成功协议。供应商原错误码、归档和费用证据保留，不自动重试。Twitter 1–19 位裸纯数字的 ID 查找明确未找到账号时，仍按既有规则在同一请求内按同名用户名再查一次；用户名查找未能派发时返回 ID 查找结果。保留 requestId，旧 200/502 仍按原幂等请求回放，不改写历史或再次采购。}
         '409': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
         '422': {description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。}
         '429': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
@@ -10116,7 +10116,7 @@ paths:
       x-mx-category: 账号数据
       x-mx-meter-key: social.profile.get
       x-mx-doc-path: /docs/strategy-search
-      description: Hub 执行账号解析、字段投影及分页，保留已声明的历史账号参数和 raw_info/raw_data JSON 字符串，新增统一 items、page/pageInfo。旧转发入口继续保留；下游切换新接口须从第一页开始。授权要求同一 Key 同时具备目标平台和本操作 capability，不自动开通权限。逻辑页优先消费已取得余量并去重，再在允许范围内继续获取；最多 15 个公开页，游标保留 24 小时，页大小不是保证返回条数。短页或空页应读取 hasMore/nextCursor，不能按条数判定结束。未提供指标为 null，真实零值为 0。失败或未知不会伪装为成功空列表，也不会自动新建请求重试。
+      description: Hub 执行账号解析、字段投影及分页，保留已声明的历史账号参数和 raw_info/raw_data JSON 字符串，新增统一 items、page/pageInfo。旧转发入口继续保留；下游切换新接口须从第一页开始。授权要求同一 Key 同时具备目标平台和本操作 capability，不自动开通权限。逻辑页优先消费已取得余量并去重，再在允许范围内继续获取；最多 15 个公开页，游标保留 24 小时，页大小不是保证返回条数。短页或空页应读取 hasMore/nextCursor，不能按条数判定结束。首次请求上游 HTTP 200 但没有所需可交付资料或内容时返回 404 social_account_not_found，details.reason=social_data_not_found；包括全部任务已完成且无后续页的合法空结果，以及未形成可交付结果的 invalid_social_contract 投影失败。仅取得账号资料不算 crawl 已交付作品；空页仍有可继续游标、续页及已有内容的部分成功沿用原行为。404 不证明账号永久不存在，供应商原始结果与费用证据保留。未提供指标为 null，真实零值为 0。权限、超时、结果未知及非 200 上游拒绝保留原错误，不自动重试；旧幂等响应不改写。
       parameters:
       - name: Idempotency-Key
         in: header
@@ -10431,7 +10431,7 @@ paths:
         '401': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
         '402': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
         '403': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
-        '404': {description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。}
+        '404': {description: social_account_not_found：明确未找到账号，或首次请求上游 HTTP 200 但没有可交付数据；不证明账号永久不存在。后一种情况包括 invalid_social_contract 投影失败，及没有历史页、缓冲或任何子任务已取得的行、全部任务完成且未中途停止的合法空结果。error.details 包含实际 platform、stage（account_lookup 或 data_acquisition）、reason=social_data_not_found、原 outcome（投影失败为 succeeded_unusable，合法空结果为 succeeded）、retryable=false。明确未找到账号的原分类保留，不要求其 reason 相同：Threads/Twitter 为 rejected，旧小红书专用接口保持 succeeded_unusable。空页仍有可继续游标、续页及已有内容的部分成功不套用此无数据规则，不新增逐项部分成功协议。供应商原错误码、归档和费用证据保留，不自动重试。Twitter 1–19 位裸纯数字的 ID 查找明确未找到账号时，仍按既有规则在同一请求内按同名用户名再查一次；用户名查找未能派发时返回 ID 查找结果。保留 requestId，旧 200/502 仍按原幂等请求回放，不改写历史或再次采购。}
         '409': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}
         '422': {description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。}
         '429': {description: 稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。}

@@ -13,8 +13,11 @@ The restricted archive is 1,336 bytes, with verified SHA256
 `212216a9cdac8e6381af466530a9af130624008ffb1b81c9bb598af4ba3df18d`.
 Its outer envelope contains `code`, `message`, and an object `data`. The first
 shape export exposed only `data.status` as a boolean and counted two other
-fields. Their names and values, including the boolean value, were not exported.
-Offline production projection failed with `profile_identity_missing`.
+fields. A subsequent v1 execution report identified the data as
+`status: false`, `errorMessage` (128 characters, containing `not exist`) and
+`attempts` (a one-character string; its value was not exported). This establishes
+a business failure but does not establish the subject of `not exist` or an
+attempt count. Offline production projection failed with `profile_identity_missing`.
 
 The deployed `hub-social-compat.mjs` SHA256 is
 `9dfac24a1dadbb6b657caf9da22721f532c62b06f292b693fde789f344d06b7d`, equal to the
@@ -28,6 +31,22 @@ The user authorized a few paid verification requests on 2026-11-20. This batch
 is capped at **three supplier attempts**, including attempts whose billing or
 transport result is unknown. No paid request has been made from the local
 Windows workspace. The operator chose execution on the production kubectl host.
+The first operator execution of v1 stopped with `probe_failed` after examining
+the original archive, before creating any slot or issuing HTTP (`slots: []`,
+`upstreamCallsAttempted: 0`). No verification attempt was consumed in that run.
+
+The v1 wrapper incorrectly used `/tmp` for Pod markers: the Admin deployment has
+a read-only root filesystem, no writable `/tmp` mount, and only read-only
+declared volumes. Its generic error report suppressed filesystem/SQL error codes,
+so the operator output alone cannot distinguish `mkdir EROFS` from an earlier
+history-query failure. Both failure paths have been reproduced offline. v2
+reports a fixed phase and allowlisted error code, and uses `/dev/shm` only after
+checking the actual Pod mount is writable tmpfs. It does not alter the deployment
+security context, mounts or network configuration.
+v2 also follows the existing configured HTTP(S) origin contract: Internal's
+deployment default is `http://10.88.88.88:18150`, so the v1 HTTPS-only check was
+another compatibility error. It still rejects credentials, paths, queries and
+fragments in the configured origin and never invents a replacement destination.
 
 | Slot | Account | Hub native POST route |
 | --- | --- | --- |
@@ -52,17 +71,30 @@ against its archived data rather than treated as proof of usable profile data.
 
 ## Operator command
 
-Sync both new files into the server checkout:
+Sync both v2 files into the server checkout:
 
 - `server/ops/probe-instagram-account-54156c46.sh`
 - `server/ops/probe-instagram-account-54156c46.mjs`
 
 No image rollout or migration is needed. From `electron-dock/mx-insight-hub` on
-the production kubectl host, execute the authorized batch once:
+the production kubectl host, a new batch can be started once:
 
 ```bash
 bash server/ops/probe-instagram-account-54156c46.sh --execute
 ```
+
+For this incident's reported v1 **zero-dispatch failure**, preserve the original
+host claim and run the guarded recovery once on the same host/state directory:
+
+```bash
+bash server/ops/probe-instagram-account-54156c46.sh --resume-unstarted
+```
+
+Recovery requires the original host claim and creates a separate immutable
+recovery claim. Inside the original database lock, it refuses to proceed if any
+of the three fixed request receipts or any old/new per-slot marker exists, or if
+either check fails. It retains the original idempotency keys and three-attempt
+budget. Do not use recovery after a timeout or an uncertain dispatch.
 
 For read-only inspection, including after an interrupted run:
 
@@ -89,4 +121,10 @@ Coverage includes the three-call ceiling, caller identity, readiness, early
 stopping, unknown outcomes, old/expired receipts, persistent markers, read-only
 inspection, archive integrity and sanitized output. The Bash wrapper was tested
 with stub commands for inspection, invalid input, repeat execution and failures.
+v2 additionally covers read-only filesystems, denied writes, database errors,
+mount checks and recovery refusal when any receipt/marker already exists. The
+earlier writable-directory mocks did not cover the production `/tmp` restriction.
+The final local run passed 30 tests across the new probe and existing Instagram
+incident verifier, plus seven isolated Bash wrapper scenarios. Filesystem and
+mount failures were injected; a real production container was not tested locally.
 These checks do not establish production readiness or consume the paid budget.

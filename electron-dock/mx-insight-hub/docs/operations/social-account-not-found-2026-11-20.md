@@ -2,6 +2,8 @@
 
 日期：2026-11-20。状态：本地修复与契约更新，未取得部署或线上恢复回执。
 
+后续公共政策更新：同日用户进一步要求首次标准账号请求在上游 HTTP 200、但没有可交付数据时统一返回 `404 social_account_not_found`，以 `details.reason: "social_data_not_found"` 区分交付结果。包括首次请求已完成且无后续页的合法空集合与未形成可交付结果的投影失败；空页仍有可继续游标、续页、分页耗尽及已有内容的部分成功保留原行为。以下“空页 200 / 未知格式保持原错误”与测试结果记录的是较早规则，首次请求的公共行为以 [TikTok 账号请求记录](tiktok-account-802f613f-2026-11-20.md) 为准。供应商分类、历史收据和账单仍保持。
+
 ## 原请求证据
 
 Hub 请求 `50fc80de-7cc1-4b1b-8426-8ca84bf88afc` 为 `committed`，公开响应 502，记录错误为 `invalid_social_contract`。唯一供应商调用 `f4c7cab4-5124-426f-b2f6-7268a5cbc534` 使用 RapidAPI 的 `native.r.threads_scraper_user_posts`，对应账号帖子读取 `GET /api/v1/users/posts`，不是关键词帖子搜索。
