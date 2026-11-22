@@ -48,7 +48,15 @@ export function addCalendarMonths(value, months) {
 }
 
 export class CommerceService {
-  constructor(store = {}, recharge) { this.store = store; this.pool = store.pool; this.recharge = recharge; this.messages = new CustomerMessages(this.pool) }
+  constructor(store = {}, recharge, {
+    interfacePrepaymentEnabled = process.env.MX_DATAPORT_XHS_PREPAID_ENABLED === 'true',
+  } = {}) {
+    this.store = store
+    this.pool = store.pool
+    this.recharge = recharge
+    this.messages = new CustomerMessages(this.pool)
+    this.interfacePrepaymentEnabled = interfacePrepaymentEnabled
+  }
   atomic(work) { requirePayment(this.pool, 'commerce_storage_required', '购买需要持久化数据库', 503); return withPgTransaction(this.pool, work, { outcomeUnknownCode: 'commerce_outcome_unknown' }) }
   async publicCatalog() {
     if (!this.pool) return {items:[]}
@@ -276,6 +284,7 @@ export class CommerceService {
     return new Set(rows.map(({tenant_id}) => tenant_id))
   }
   async interfaceOffers() {
+    if (!this.interfacePrepaymentEnabled) return {items:[], alipayAvailable:false}
     const route = await this.recharge?.route('live')
     return {items:[INTERFACE_OFFER], alipayAvailable: Boolean(route?.source_id)}
   }
@@ -301,6 +310,8 @@ export class CommerceService {
           'commerce_idempotency_conflict', '请求已用于其他购买。', 409)
         return prior
       }
+      requirePayment(this.interfacePrepaymentEnabled,
+        'interface_offer_unavailable', '小红书数据 API 暂未开放订阅。', 409)
       const offer = INTERFACE_OFFER
       requirePayment(body.sku === offer.sku && body.revision === offer.revision,
         'interface_offer_changed', '接口价格或订阅状态已变化，请重新确认。', 409)
