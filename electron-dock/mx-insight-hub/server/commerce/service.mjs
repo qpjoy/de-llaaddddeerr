@@ -263,6 +263,18 @@ export class CommerceService {
     try { await this.recharge.network(() => this.prepare(row)) } catch { return { ...view(row), recoveryRequired: true } }
     return view(await this.row(row.id,tenantId))
   }
+  async paidInterfaceTenants(tenantIds) {
+    if (!this.pool || !tenantIds.length) return new Set()
+    const {rows} = await this.pool.query(`
+      SELECT tenant_id FROM unnest($1::uuid[]) AS scoped(tenant_id)
+      WHERE EXISTS (
+        SELECT 1 FROM hub_commerce.orders
+        WHERE tenant_id=scoped.tenant_id AND environment='live'
+          AND intent->>'purpose'='interface_prepaid' AND intent->>'paymentMethod'='alipay'
+          AND payment->>'status'='paid' AND delivered_at IS NOT NULL AND receipt IS NOT NULL
+      )`, [tenantIds])
+    return new Set(rows.map(({tenant_id}) => tenant_id))
+  }
   async interfaceOffers() {
     const route = await this.recharge?.route('live')
     return {items:[INTERFACE_OFFER], alipayAvailable: Boolean(route?.source_id)}

@@ -166,8 +166,8 @@ function OrderSummary({
 }
 
 export function InterfacePayment({
-  tenant, session, csrf, navigate,
-}: { tenant: string; session: any; csrf: string; navigate: (page: string) => void }) {
+  tenant, session, csrf, navigate, reloadSession,
+}: { tenant: string; session: any; csrf: string; navigate: (page: string) => void; reloadSession: () => void }) {
   const [step, setStep] = useState<Step>("select");
   const [offers, setOffers] = useState<Offers | null>(null);
   const [selected, setSelected] = useState<Offer | null>(null);
@@ -187,7 +187,7 @@ export function InterfacePayment({
   const inFlight = useRef(false);
   const live = useRef(false);
   const canReadBilling = hasPermission(session, tenant, "billing.read");
-  const subscriptionHome = hasPermission(session, tenant, "subscriptions.read") ? "services" : "interfaces";
+  const subscriptionHome = hasPermission(session, tenant, "subscriptions.read") ? "services" : "account";
 
   useEffect(() => {
     live.current = true;
@@ -265,6 +265,7 @@ export function InterfacePayment({
       const { data } = await post(`orders/${order.id}/${action}`, {});
       if (!live.current) return;
       setReceipt(data);
+      if (data.status === "credited") reloadSession();
       if (action === "checkout")
         setPaymentLink(checkoutLocation(data.paymentUrl ?? "", order.environment, new URL("/payment/return", location.origin).href));
       else if (!canCheckoutOrder(data)) setPaymentLink("");
@@ -293,6 +294,7 @@ export function InterfacePayment({
       setReceipt(data);
       setStep("receipt");
       sessionStorage.removeItem(intent.name);
+      if (data.status === "credited") reloadSession();
       if (data.paymentMethod === "alipay" && canCheckoutOrder(data)) await orderAction(data, "checkout");
     });
   }

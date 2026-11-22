@@ -237,8 +237,6 @@
 .configTitle h1 {
   font-size: clamp(22px, 3cqi, 29px);
   font-weight: 700;
-}
-.configTitle h1 {
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -256,7 +254,7 @@
 }
 .configPanel h2,
 .configPanel h3,
-.endpointHeader h2 {
+.endpointHeading {
   font-size: 17px;
   font-weight: 650;
 }
@@ -292,11 +290,22 @@
 }
 .endpointTabs [data-slot="tabs-trigger"] {
   min-height: 36px;
+  flex: 0 1 auto;
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
 }
-.endpointColumns {
+.endpointHeading {
+  padding: 12px 0 16px;
+  overflow-wrap: anywhere;
+}
+.endpointExamples {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+}
+.endpointExamples .configPanel {
+  margin-bottom: 0;
 }
 .configPanel pre {
   margin-top: 10px;
@@ -313,7 +322,6 @@
 }
 @container (max-width: 900px) {
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .endpointColumns { grid-template-columns: 1fr; gap: 0; }
 }
 @container (max-width: 600px) {
   .search { width: 100%; }

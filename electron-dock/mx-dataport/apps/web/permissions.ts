@@ -30,7 +30,10 @@ export const isInterfacePage = (page: string) =>
   page === "interfaces" || page.startsWith("interfaces/");
 
 export function canOpenPage(session: any, tenant: string, page: string) {
-  if (isInterfacePage(page)) return hasPermission(session, tenant, "docs.read");
+  if (isInterfacePage(page)) {
+    const rights = membershipFor(session, tenant)?.dataport;
+    return rights?.interfaceSubscriptionActive === true && rights.permissions?.includes("docs.read") === true;
+  }
   if (page === "lookup" || page === "intelligence")
     return (
       hasPermission(session, tenant, "query.execute") ||

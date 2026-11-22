@@ -266,17 +266,21 @@ function RemotePanel({
   tenant: string;
   messages: ReturnType<typeof useMessageInbox>;
 }) {
-  if (!canOpenPage(session, tenant, page))
+  if (!canOpenPage(session, tenant, page)) {
+    const needsInterfaceSubscription = isInterfacePage(page) && hasPermission(session, tenant, "docs.read");
     return (
       <Card>
         <CardHeader>
           <CardTitle>无权访问此页面</CardTitle>
           <CardDescription>
-            当前角色没有页面所需权限，请联系企业超管。
+            {needsInterfaceSubscription
+              ? "当前企业尚未开通数据接口，请在「我的订阅」中购买或联系企业超管。"
+              : "当前角色没有页面所需权限，请联系企业超管。"}
           </CardDescription>
         </CardHeader>
       </Card>
     );
+  }
   if (page === "team")
     return (
       <EnterpriseMembers
@@ -303,7 +307,7 @@ function RemotePanel({
     page={page} go={go} canSubscribe={hasPermission(session, tenant, "subscriptions.buy")}
   />;
   if (page === "interface-subscriptions")
-    return <InterfacePayment tenant={tenant} session={session} csrf={csrf} navigate={go} />;
+    return <InterfacePayment tenant={tenant} session={session} csrf={csrf} navigate={go} reloadSession={reloadSession} />;
   if (page === "account") return <AccountSecurity />;
   if (page === "messages")
     return (

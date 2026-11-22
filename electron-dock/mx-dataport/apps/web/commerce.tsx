@@ -281,6 +281,7 @@ export function Commerce({
           ),
         }));
       await refresh();
+      if (result.data.status === "credited") reloadSession();
     });
   }
   const heading =
