@@ -3,6 +3,9 @@ export function orderStatusLabel(order: { status?: string }) {
   return (
     ({
       active: "已开通",
+      credited: "已到账",
+      crediting: "待入账",
+      pending_config: "待收款配置",
       delivering: "正在开通",
       pending: "待付款",
       test_delivered: "测试订单",
@@ -15,9 +18,17 @@ export function canCheckoutOrder(order: {
   paymentStatus?: string;
   status?: string;
   checkoutAvailable?: boolean;
+  paymentMethod?: string;
 }) {
-  return !order.deliveredAt && order.paymentStatus !== "paid" &&
+  return order.paymentMethod !== "bank" && order.status !== "pending_config" &&
+    !order.deliveredAt && order.paymentStatus !== "paid" &&
     order.status !== "payment_timeout" && order.checkoutAvailable !== false;
+}
+export function orderPaymentLabel(order: { paymentStatus?: string; paymentMethod?: string; environment?: string }) {
+  if (order.paymentStatus === "not_required") return "无需付款";
+  if (order.paymentMethod === "alipay") return "支付宝";
+  if (order.paymentMethod === "bank") return "对公转账";
+  return order.environment === "test" ? "测试支付" : "尚未确认";
 }
 export function commerceErrorMessage(error: { code?: string; message?: string }) {
   return error.code === "payment_checkout_expired"
