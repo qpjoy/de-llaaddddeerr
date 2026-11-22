@@ -18,7 +18,6 @@ import {
   Headphones,
   KeyRound,
   BookOpen,
-  Code2,
   Wallet,
 } from "lucide-react";
 import {
@@ -56,10 +55,8 @@ import {
 } from "./enterprise";
 import { ApiKeys } from "./keys";
 import { LegalDocument, LegalFooter } from "./legal";
-import { canOpenPage, hasPermission, isInterfacePage } from "./permissions";
-import { DataInterfaces, DirectQueryBackLink, DirectQueryDirectory } from "./data-directory";
+import { canOpenPage } from "./permissions";
 import { AccountSecurity } from "./account-security";
-import { InterfacePayment } from "./interface-payment";
 import { Commerce } from "./commerce";
 import { IpQuery } from "./ip-query";
 import { paymentReturnTrade } from "./commerce-state";
@@ -70,8 +67,7 @@ import "./dataport.css";
 import "./alignment.css";
 import "./prototype-parity.css";
 const pages = [
-  ["lookup", "数据直查", SquarePen],
-  ["interfaces", "数据接口", Code2],
+  ["intelligence", "新建查询", SquarePen],
   ["overview", "用量概览", LayoutDashboard],
   ["keys", "API Keys", KeyRound],
   ["services", "我的订阅", Layers3],
@@ -99,31 +95,29 @@ function Navigation({
           ([id]) =>
             session === undefined || canOpenPage(session, tenant || "", id),
         )
-        .map(([id, title, Icon]) => {
-          const active = page === id
-            || (id === "lookup" && page === "intelligence")
-            || (id === "interfaces" && isInterfacePage(page))
-            || (id === "services" && ["market", "interface-subscriptions"].includes(page));
-          return (
-            <SidebarMenuItem
-              key={id}
-              className={id === "services" ? "nav-divider" : ""}
+        .map(([id, title, Icon]) => (
+          <SidebarMenuItem
+            key={id}
+            className={id === "services" ? "nav-divider" : ""}
+          >
+            <SidebarMenuButton
+              className="nav-button"
+              isActive={page === id || (id === "services" && page === "market")}
+              aria-current={
+                page === id || (id === "services" && page === "market")
+                  ? "page"
+                  : undefined
+              }
+              onClick={() => {
+                go(id);
+                if (sidebar.isMobile) sidebar.setOpenMobile(false);
+              }}
             >
-              <SidebarMenuButton
-                className="nav-button"
-                isActive={active}
-                aria-current={active ? "page" : undefined}
-                onClick={() => {
-                  go(id);
-                  if (sidebar.isMobile) sidebar.setOpenMobile(false);
-                }}
-              >
-                <Icon size={18} />
-                <span>{title}</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          );
-        })}
+              <Icon size={18} />
+              <span>{title}</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        ))}
     </SidebarMenu>
   );
 }
@@ -132,7 +126,7 @@ function ConsoleBrand({ go }: { go: (page: string) => void }) {
   return (
     <a
       className="brand"
-      href="/#/lookup"
+      href="/#/intelligence"
       onClick={(event) => {
         if (
           event.button !== 0 ||
@@ -143,7 +137,7 @@ function ConsoleBrand({ go }: { go: (page: string) => void }) {
         )
           return;
         event.preventDefault();
-        go("lookup");
+        go("intelligence");
         if (sidebar.isMobile) sidebar.setOpenMobile(false);
       }}
     >
@@ -266,21 +260,17 @@ function RemotePanel({
   tenant: string;
   messages: ReturnType<typeof useMessageInbox>;
 }) {
-  if (!canOpenPage(session, tenant, page)) {
-    const needsInterfaceSubscription = isInterfacePage(page) && hasPermission(session, tenant, "docs.read");
+  if (!canOpenPage(session, tenant, page))
     return (
       <Card>
         <CardHeader>
           <CardTitle>无权访问此页面</CardTitle>
           <CardDescription>
-            {needsInterfaceSubscription
-              ? "当前企业尚未开通数据接口，请在「我的订阅」中购买或联系企业超管。"
-              : "当前角色没有页面所需权限，请联系企业超管。"}
+            当前角色没有页面所需权限，请联系企业超管。
           </CardDescription>
         </CardHeader>
       </Card>
     );
-  }
   if (page === "team")
     return (
       <EnterpriseMembers
@@ -302,12 +292,6 @@ function RemotePanel({
     return <UsageOverview tenant={tenant} session={session} go={go} />;
   if (page === "docs-ip")
     return <Documentation tenant={tenant} session={session} />;
-  if (page === "lookup") return <DirectQueryDirectory go={go} />;
-  if (isInterfacePage(page)) return <DataInterfaces
-    page={page} go={go} canSubscribe={hasPermission(session, tenant, "subscriptions.buy")}
-  />;
-  if (page === "interface-subscriptions")
-    return <InterfacePayment tenant={tenant} session={session} csrf={csrf} navigate={go} reloadSession={reloadSession} />;
   if (page === "account") return <AccountSecurity />;
   if (page === "messages")
     return (
@@ -322,16 +306,13 @@ function RemotePanel({
     );
   if (page === "intelligence")
     return (
-      <>
-        <DirectQueryBackLink />
-        <IpQuery
-          tenant={tenant}
-          session={session}
-          csrf={csrf}
-          go={go}
-          initialIp={initialIp}
-        />
-      </>
+      <IpQuery
+        tenant={tenant}
+        session={session}
+        csrf={csrf}
+        go={go}
+        initialIp={initialIp}
+      />
     );
   if (["market", "services", "orders"].includes(page))
     return (
@@ -373,12 +354,9 @@ function App() {
     [checking, setChecking] = useState(true),
     [retry, setRetry] = useState(0),
     [tenant, setTenant] = useState(""),
-    [explicitPage, setPage] = useState(location.hash.slice(2)),
+    [page, setPage] = useState(location.hash.slice(2) || "intelligence"),
     [bootError, setBootError] = useState("");
   const { active: signedIn, customer: session, csrf, issue } = boot;
-  const page = explicitPage
-    || pages.find(([id]) => canOpenPage(session, tenant, id))?.[0]
-    || "lookup";
   const messages = useMessageInbox(
     tenant,
     signedIn === true && !!tenant && canOpenPage(session, tenant, "messages"),
@@ -395,7 +373,7 @@ function App() {
       /^[A-Za-z0-9_-]{43}$/.test(joinToken || "")
     )
       sessionStorage.setItem("dataport:join-token", joinToken!);
-    const listener = () => setPage(location.hash.slice(2));
+    const listener = () => setPage(location.hash.slice(2) || "intelligence");
     addEventListener("hashchange", listener);
     if (new URLSearchParams(location.search).get("signedOut") === "1") {
       history.replaceState(null, "", "/");
@@ -444,9 +422,6 @@ function App() {
             destination &&
             [
               "intelligence",
-              "lookup",
-              "interfaces",
-              "interface-subscriptions",
               "overview",
               "keys",
               "services",
@@ -608,7 +583,7 @@ function App() {
           session={session}
           tenant={tenant}
           go={(destination) => {
-            if (destination === "intelligence" && ["lookup", "intelligence"].includes(page)) {
+            if (destination === "intelligence" && page === "intelligence") {
               setQueryIp("");
               sessionStorage.removeItem("harbor:query-ip");
               setQueryRevision((value) => value + 1);
@@ -660,7 +635,7 @@ function App() {
               onJoined={(target) => {
                 sessionStorage.removeItem("dataport:join-token");
                 setTenant(target);
-                go("lookup");
+                go("intelligence");
                 retrySession();
               }}
             />
@@ -668,7 +643,7 @@ function App() {
             <AccountSecurity />
           ) : session ? (
             <RemotePanel
-              key={`${isInterfacePage(page) ? "interfaces" : page}:${tenant}:${queryRevision}`}
+              key={`${page}:${tenant}:${queryRevision}`}
               page={page}
               session={session}
               tenant={tenant}
@@ -762,7 +737,7 @@ function App() {
           setAuth(false);
           setBoot(emptySession);
           setTenant("");
-          setPage(location.hash.slice(2));
+          setPage(location.hash.slice(2) || "intelligence");
           setChecking(true);
           retrySession();
         }}

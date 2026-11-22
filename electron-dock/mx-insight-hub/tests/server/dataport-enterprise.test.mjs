@@ -1411,20 +1411,6 @@ test("verified MX Portal owner receives usable permissions without a code; retir
   const owner = (await session.json()).data;
   assert.equal(owner.memberships[0].dataport.ownerChallengeRequired,false);
   assert.ok(owner.memberships[0].dataport.permissions.includes("members.read"));
-  assert.equal(owner.memberships[0].dataport.interfaceSubscriptionActive,false);
-  const readInterfaceAccess = async () => (
-    await (await fetch(hub+"/internal/v1/portal/session", {headers})).json()
-  ).data.memberships[0].dataport.interfaceSubscriptionActive;
-  const insertDeliveredOrder = (tenant, purpose) => f.pool.query(
-    `INSERT INTO hub_commerce.orders(id,tenant_id,intent,payment,receipt,delivered_at)
-     VALUES($1,$2,$3,'{"status":"paid"}','"fixture receipt"',now())`,
-    [randomUUID(),tenant,{purpose,paymentMethod:"alipay"}],
-  );
-  await insertDeliveredOrder(f.other,"interface_prepaid");
-  await insertDeliveredOrder(f.tenant,"purchase");
-  assert.equal(await readInterfaceAccess(),false);
-  await insertDeliveredOrder(f.tenant,"interface_prepaid");
-  assert.equal(await readInterfaceAccess(),true);
   for (const resource of ["members","roles","history"]) {
     assert.equal((await fetch(hub+`/internal/v1/portal/enterprises/${f.tenant}/${resource}`, {headers})).status,200);
   }
