@@ -249,12 +249,11 @@ function InterfaceConfiguration({
             <TabsTrigger key={index} value={String(index)}>{title}</TabsTrigger>
           ))}
         </TabsList>
-        {platform.operations.map(({ title, path, status, requestExample }, index) => (
+        {platform.operations.map(({ title, path, requestExample }, index) => (
           <TabsContent key={index} value={String(index)}>
             <section className={styles.configPanel}>
               <h2>{title}</h2>
               <dl className={styles.overviewFields}>
-                <div><dt>支持状态</dt><dd>{statusLabels[status]}</dd></div>
                 <div><dt>请求地址</dt><dd>{path ? <code>{path}</code> : "待公布"}</dd></div>
               </dl>
             </section>
