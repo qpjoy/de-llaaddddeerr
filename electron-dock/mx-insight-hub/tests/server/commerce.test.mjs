@@ -70,7 +70,7 @@ test('checkout return comes only from the verified Portal principal, never custo
  await assert.rejects(invoke({...principal,memberships:[]}),{status:403})
  assert.deepEqual(calls,[])
 })
-async function fixture(t,{space=false,offers=false}={}){
+async function fixture(t,{space=false,offers=false,interfacePrepaymentEnabled=false}={}){
   const admin=new pg.Pool({connectionString,max:1}),name=`commerce_${randomUUID().replaceAll('-','')}`
   await admin.query(`CREATE DATABASE ${name}`)
   const url=new URL(connectionString);url.pathname=`/${name}`
@@ -99,7 +99,7 @@ async function fixture(t,{space=false,offers=false}={}){
     async order(id){return payments.get(id)},async checkout(){return {payUrl:'https://openapi.alipay.com/gateway.do?fixture=true'}},
   }}
   const recharge={route:async env=>({source_id:sourceId,app_id:'hub',channel_id:env==='test'?'mock':'alipay-live'}),remote:async env=>{source.environment=env;return source},network:fn=>fn()}
-  const service=new CommerceService(new PostgresStore(pool),recharge)
+  const service=new CommerceService(new PostgresStore(pool),recharge,{interfacePrepaymentEnabled})
   const create=(environment='live',idempotencyKey=randomUUID())=>service.create(tenant,{sku:INITIAL_PRODUCT.sku,revision:space?2:1,...(space?{}:{consumerId:consumer}),environment},idempotencyKey,'fixture-owner')
   async function eventFor(order){const row=await service.row(order.id,tenant),payment=payments.get(row.payment_id);payment.status='paid';payment.revision=1;payment.settlement={amountMinor:payment.amountMinor}
     const event={id:randomUUID(),type:'payment.paid',version:1,paymentId:payment.id,appId:'hub',environment:row.environment,businessOrderId:payment.businessOrderId,customerRef:tenant,amountMinor:payment.amountMinor,currency:'CNY'}
@@ -826,13 +826,19 @@ test('DataPort annual repricing rolls back terms and restores the immutable-orde
 });
 
 test('DataPort interface Alipay order uses authoritative cents and credits the existing wallet exactly once',database,async t=>{
-  const f=await fixture(t,{space:true,offers:true});
+  const f=await fixture(t,{space:true,offers:true,interfacePrepaymentEnabled:true});
   await f.upgradePricing();
   await f.upgradeInterfaceOrders();
   const { items:[offer],alipayAvailable }=await f.service.interfaceOffers();
   assert.equal(alipayAvailable,true);
   const body={sku:offer.sku,revision:offer.revision,callCount:1000,method:'alipay',agreed:true};
   const key=randomUUID();
+  const closed=new CommerceService(f.service.store,f.service.recharge,{interfacePrepaymentEnabled:false});
+  assert.deepEqual(await closed.interfaceOffers(),{items:[],alipayAvailable:false});
+  await assert.rejects(closed.createInterfaceOrder(f.tenant,body,key,'buyer'),{code:'interface_offer_unavailable'});
+  await assert.rejects(closed.createInterfaceOrder(f.tenant,{...body,method:'bank',company:'示例企业'},key,'buyer'),{code:'interface_offer_unavailable'});
+  assert.equal((await f.pool.query('SELECT COUNT(*)::int AS count FROM hub_commerce.orders')).rows[0].count,0);
+  assert.equal(f.payments.size,0);
   await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,amountMinor:1},randomUUID(),'buyer'));
   await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,callCount:99},randomUUID(),'buyer'),{code:'interface_call_count_invalid'});
   await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,revision:offer.revision+1},randomUUID(),'buyer'),{code:'interface_offer_changed'});
@@ -847,6 +853,7 @@ test('DataPort interface Alipay order uses authoritative cents and credits the e
   await assert.rejects(f.service.createInterfaceOrder(f.tenant,body,key,'other',{purchaseActorOnly:true}),{code:'commerce_order_not_permitted'});
   await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,callCount:2000},key,'buyer'),{code:'commerce_idempotency_conflict'});
   assert.equal((await f.service.createInterfaceOrder(f.tenant,body,key,'buyer')).id,order.id);
+  assert.equal((await closed.createInterfaceOrder(f.tenant,body,key,'buyer')).id,order.id);
   assert.equal(f.payments.size,1);
   f.source.identity.features=['checkoutReturnUrl'];
   const returnUrl='https://dataport.example.test/payment/return';
@@ -854,11 +861,11 @@ test('DataPort interface Alipay order uses authoritative cents and credits the e
     assert.equal(id,order.paymentId);assert.deepEqual(options,{returnUrl});
     return {payUrl:'https://openapi.alipay.com/gateway.do?fixture=true'};
   };
-  assert.match((await f.service.action(f.tenant,order.id,'checkout',{returnUrl})).paymentUrl,/openapi\.alipay\.com/);
+  assert.match((await closed.action(f.tenant,order.id,'checkout',{returnUrl})).paymentUrl,/openapi\.alipay\.com/);
   assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM billing.credit_ledger_entries')).rows[0].n,0);
   const { source,event,payment }=await f.eventFor(order);
   await assert.rejects(f.service.commit(source,{...event,amountMinor:1},payment),{code:'commerce_event_mismatch'});
-  const receipt=await f.service.commit(source,event,payment);
+  const receipt=await closed.commit(source,event,payment);
   assert.equal(await f.service.commit(source,event,payment),receipt);
   assert.equal(commerceOrderView(await f.service.row(order.id,f.tenant)).status,'credited');
   assert.deepEqual(await f.service.paidInterfaceTenants([f.tenant,randomUUID()]),new Set([f.tenant]));
@@ -875,7 +882,7 @@ test('DataPort interface Alipay order uses authoritative cents and credits the e
 test('DataPort bank application persists company and price with no Pay request or credit',database,async t=>{
   const f=await fixture(t,{space:true,offers:true});
   await f.upgradeInterfaceOrders();
-  const service=new CommerceService(new PostgresStore(f.pool));
+  const service=new CommerceService(new PostgresStore(f.pool),undefined,{interfacePrepaymentEnabled:true});
   const {items:[offer],alipayAvailable}=await service.interfaceOffers();
   assert.equal(alipayAvailable,false);
   const body={sku:offer.sku,revision:offer.revision,callCount:100,method:'bank',company:' 示例企业 ',agreed:true};
