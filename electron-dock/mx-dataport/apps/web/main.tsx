@@ -56,9 +56,10 @@ import {
 } from "./enterprise";
 import { ApiKeys } from "./keys";
 import { LegalDocument, LegalFooter } from "./legal";
-import { canOpenPage, isInterfacePage } from "./permissions";
+import { canOpenPage, hasPermission, isInterfacePage } from "./permissions";
 import { DataInterfaces, DirectQueryBackLink, DirectQueryDirectory } from "./data-directory";
 import { AccountSecurity } from "./account-security";
+import { InterfacePayment } from "./interface-payment";
 import { Commerce } from "./commerce";
 import { IpQuery } from "./ip-query";
 import { paymentReturnTrade } from "./commerce-state";
@@ -102,7 +103,7 @@ function Navigation({
           const active = page === id
             || (id === "lookup" && page === "intelligence")
             || (id === "interfaces" && isInterfacePage(page))
-            || (id === "services" && page === "market");
+            || (id === "services" && ["market", "interface-subscriptions"].includes(page));
           return (
             <SidebarMenuItem
               key={id}
@@ -298,7 +299,11 @@ function RemotePanel({
   if (page === "docs-ip")
     return <Documentation tenant={tenant} session={session} />;
   if (page === "lookup") return <DirectQueryDirectory go={go} />;
-  if (isInterfacePage(page)) return <DataInterfaces page={page} go={go} />;
+  if (isInterfacePage(page)) return <DataInterfaces
+    page={page} go={go} canSubscribe={hasPermission(session, tenant, "subscriptions.buy")}
+  />;
+  if (page === "interface-subscriptions")
+    return <InterfacePayment tenant={tenant} session={session} csrf={csrf} navigate={go} />;
   if (page === "account") return <AccountSecurity />;
   if (page === "messages")
     return (
@@ -437,6 +442,7 @@ function App() {
               "intelligence",
               "lookup",
               "interfaces",
+              "interface-subscriptions",
               "overview",
               "keys",
               "services",

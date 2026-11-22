@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ChevronRight, Globe, Search, ShieldCheck, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, Globe, Search, ShieldCheck, ShoppingCart, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   interfacePlatforms,
@@ -27,7 +28,7 @@ const logos: Record<string, [string, string]> = {
   "wechat-channels": ["wechat", "#07b75b"],
 };
 
-function PlatformLogo({ slug }: { slug: string }) {
+export function PlatformLogo({ slug }: { slug: string }) {
   const logo = Object.hasOwn(logos, slug) ? logos[slug] : undefined;
   return (
     <span className={styles.logo} aria-hidden="true">
@@ -100,7 +101,9 @@ const filters = [
 
 const platformPath = (slug: string) => `interfaces/${encodeURIComponent(slug)}`;
 
-export function DataInterfaces({ page, go }: { page: string; go: (page: string) => void }) {
+export function DataInterfaces({
+  page, go, canSubscribe,
+}: { page: string; go: (page: string) => void; canSubscribe?: boolean }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<(typeof filters)[number]["id"]>("all");
   const searchInput = useRef<HTMLInputElement>(null);
@@ -135,7 +138,7 @@ export function DataInterfaces({ page, go }: { page: string; go: (page: string) 
   });
 
   return (
-    <section ref={root} className={styles.directory} aria-labelledby="interfaces-title">
+    <section ref={root} data-interface-directory className={styles.directory} aria-labelledby="interfaces-title">
       {detail ? (
         <>
           <a className={styles.backLink} href="#/interfaces">
@@ -149,9 +152,16 @@ export function DataInterfaces({ page, go }: { page: string; go: (page: string) 
         </>
       ) : (
         <>
-          <div className="page-heading">
-            <h1 ref={heading} id="interfaces-title" tabIndex={-1}>数据接口</h1>
-            <p className={styles.directoryIntro}>浏览平台数据服务，查看接口配置与接入状态。</p>
+          <div className="page-heading harbor-heading-actions">
+            <div>
+              <h1 ref={heading} id="interfaces-title" tabIndex={-1}>数据接口</h1>
+              <p className={styles.directoryIntro}>浏览平台数据服务，查看接口配置与接入状态。</p>
+            </div>
+            {canSubscribe && (
+              <Button variant="outline" onClick={() => go("interface-subscriptions")}>
+                <ShoppingCart data-icon="inline-start" /> 接口订阅
+              </Button>
+            )}
           </div>
           <div className={styles.toolbar}>
             <div className={styles.filters} role="group" aria-label="接口状态筛选">

@@ -19,6 +19,7 @@ export const pagePermission: Record<string, string> = {
   keys: "keys.read",
   services: "subscriptions.read",
   market: "subscriptions.buy",
+  "interface-subscriptions": "subscriptions.buy",
   orders: "billing.read",
   "docs-ip": "docs.read",
   team: "members.read",

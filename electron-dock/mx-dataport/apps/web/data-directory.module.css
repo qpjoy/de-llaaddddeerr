@@ -7,7 +7,8 @@
   --directory-soft: #eeedff;
   container-type: inline-size;
 }
-.directoryIntro {
+.directory[data-interface-directory] .directoryIntro {
+  display: block;
   color: #465575;
   font-size: 14px;
 }
