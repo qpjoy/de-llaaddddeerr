@@ -4,6 +4,7 @@ import { createApp } from '../../server/app.mjs'
 import { capabilitiesForRole } from '../../server/identity/index.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { commerceRoute } from '../../server/commerce/routes.mjs'
+import { dataportRoute } from '../../server/portal/dataport-routes.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {randomUUID} from 'node:crypto'
@@ -13,7 +14,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {fingerprint} from '@qpjoy/mx-pay'
 import {runMigrations} from '../../server/migrate.mjs'
-import {CommerceService,INITIAL_PRODUCT,addCalendarMonths,IP_V2_METER,IP_PRODUCT_METER,IP_PRODUCT_CAPABILITY} from '../../server/commerce/service.mjs'
+import {CommerceService,commerceOrderView,INITIAL_PRODUCT,addCalendarMonths,IP_V2_METER,IP_PRODUCT_METER,IP_PRODUCT_CAPABILITY} from '../../server/commerce/service.mjs'
 import { CustomerMessages } from '../../server/commerce/messages.mjs'
 import {IpRiskGateway} from '../../server/external-platforms/ip-risk-gateway.mjs'
 import {IpRiskChannels} from '../../server/external-platforms/ip-risk-channels.mjs'
@@ -110,6 +111,7 @@ async function fixture(t,{space=false,offers=false}={}){
     async upgradeSpace(){await writeFile(join(migrationDir,'130_commerce_space_subscriptions.sql'),await readFile(new URL('130_commerce_space_subscriptions.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
     async upgradeOffers(){await writeFile(join(migrationDir,'146_dataport_offers_and_trial.sql'),await readFile(new URL('146_dataport_offers_and_trial.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
     async upgradePricing(){await writeFile(join(migrationDir,'179_dataport_annual_pricing.sql'),await readFile(new URL('179_dataport_annual_pricing.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
+    async upgradeInterfaceOrders(){await writeFile(join(migrationDir,'195_dataport_interface_orders.sql'),await readFile(new URL('195_dataport_interface_orders.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
@@ -821,4 +823,102 @@ test('DataPort annual repricing rolls back terms and restores the immutable-orde
   assert.equal((await f.pool.query("SELECT tgenabled FROM pg_trigger WHERE tgrelid='hub_commerce.orders'::regclass AND tgname='commerce_order_immutable'")).rows[0].tgenabled,'O');
   assert.equal((await f.pool.query("SELECT 1 FROM information_schema.columns WHERE table_schema='hub_commerce' AND table_name='subscriptions' AND column_name='repricing_usage_ceiling'")).rowCount,0);
   assert.equal((await f.pool.query("SELECT 1 FROM schema_migrations WHERE filename='179_dataport_annual_pricing.sql'")).rowCount,0);
+});
+
+test('DataPort interface Alipay order uses authoritative cents and credits the existing wallet exactly once',database,async t=>{
+  const f=await fixture(t,{space:true,offers:true});
+  await f.upgradePricing();
+  await f.upgradeInterfaceOrders();
+  const { items:[offer],alipayAvailable }=await f.service.interfaceOffers();
+  assert.equal(alipayAvailable,true);
+  const body={sku:offer.sku,revision:offer.revision,callCount:1000,method:'alipay',agreed:true};
+  const key=randomUUID();
+  await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,amountMinor:1},randomUUID(),'buyer'));
+  await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,callCount:99},randomUUID(),'buyer'),{code:'interface_call_count_invalid'});
+  await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,revision:offer.revision+1},randomUUID(),'buyer'),{code:'interface_offer_changed'});
+  await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,method:'bank'},randomUUID(),'buyer'),{code:'interface_company_invalid'});
+  const order=await f.service.createInterfaceOrder(f.tenant,body,key,'buyer',{purchaseActorOnly:true});
+  assert.equal(order.product.amountMinor,10000);
+  assert.equal(order.product.callCount,1000);
+  assert.equal(order.product.unitPriceMinor,10);
+  assert.equal(order.paymentMethod,'alipay');
+  assert.equal(order.status,'pending');
+  await assert.rejects(f.service.createInterfaceOrder(f.tenant,body,key,'other',{purchaseActorOnly:true}),{code:'commerce_order_not_permitted'});
+  await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,callCount:2000},key,'buyer'),{code:'commerce_idempotency_conflict'});
+  assert.equal((await f.service.createInterfaceOrder(f.tenant,body,key,'buyer')).id,order.id);
+  assert.equal(f.payments.size,1);
+  f.source.identity.features=['checkoutReturnUrl'];
+  const returnUrl='https://dataport.example.test/payment/return';
+  f.source.client.checkout=async (id,options)=>{
+    assert.equal(id,order.paymentId);assert.deepEqual(options,{returnUrl});
+    return {payUrl:'https://openapi.alipay.com/gateway.do?fixture=true'};
+  };
+  assert.match((await f.service.action(f.tenant,order.id,'checkout',{returnUrl})).paymentUrl,/openapi\.alipay\.com/);
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM billing.credit_ledger_entries')).rows[0].n,0);
+  const { source,event,payment }=await f.eventFor(order);
+  await assert.rejects(f.service.commit(source,{...event,amountMinor:1},payment),{code:'commerce_event_mismatch'});
+  const receipt=await f.service.commit(source,event,payment);
+  assert.equal(await f.service.commit(source,event,payment),receipt);
+  assert.equal(commerceOrderView(await f.service.row(order.id,f.tenant)).status,'credited');
+  assert.deepEqual((await f.service.list(f.tenant)).orders,[],'interface orders stay out of the original Hub IP storefront');
+  const ledger=(await f.pool.query('SELECT kind,amount_minor::int AS amount FROM billing.credit_ledger_entries WHERE tenant_id=$1',[f.tenant])).rows;
+  assert.deepEqual(ledger,[{kind:'topup',amount:10000}]);
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM hub_commerce.subscriptions')).rows[0].n,0);
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM capability_grants')).rows[0].n,0);
+  assert.deepEqual((await f.service.publicCatalog()).items.map(item=>item.sku).sort(),[
+    'ip-risk-baidu-annual-100k','ip-risk-basic-annual','ip-risk-enterprise-annual','ip-risk-pro-annual','ip-risk-trial-10',
+  ]);
+});
+
+test('DataPort bank application persists company and price with no Pay request or credit',database,async t=>{
+  const f=await fixture(t,{space:true,offers:true});
+  await f.upgradeInterfaceOrders();
+  const service=new CommerceService(new PostgresStore(f.pool));
+  const {items:[offer],alipayAvailable}=await service.interfaceOffers();
+  assert.equal(alipayAvailable,false);
+  const body={sku:offer.sku,revision:offer.revision,callCount:100,method:'bank',company:' 示例企业 ',agreed:true};
+  const key=randomUUID();
+  const [first,second]=await Promise.all([
+    service.createInterfaceOrder(f.tenant,body,key,'buyer'),
+    service.createInterfaceOrder(f.tenant,body,key,'buyer'),
+  ]);
+  assert.deepEqual(first,second);
+  assert.equal(first.status,'pending_config');
+  assert.equal(first.paymentMethod,'bank');
+  assert.equal(first.company,'示例企业');
+  assert.equal(first.checkoutAvailable,false);
+  assert.equal(first.product.amountMinor,1000);
+  assert.equal(first.paymentId,null);
+  await assert.rejects(service.action(f.tenant,first.id,'checkout'),{code:'commerce_bank_no_checkout'});
+  assert.deepEqual(await service.action(f.tenant,first.id,'refresh'),first);
+  const stored=await service.row(first.id,f.tenant);
+  assert.equal(stored.source_id,null);assert.equal(stored.app_id,null);
+  assert.equal(stored.payment,null);assert.equal(stored.delivered_at,null);
+  await assert.rejects(f.pool.query("UPDATE hub_commerce.orders SET delivered_at=now() WHERE id=$1",[first.id]),/commerce_order_source/);
+  assert.equal(f.payments.size,0);
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM billing.credit_ledger_entries')).rows[0].n,0);
+
+  const memberId=randomUUID();
+  async function invoke(path, {method='GET',query='',permissions=['billing.read'],tenant=f.tenant}={}) {
+    let result;
+    await dataportRoute({
+      request:{method,headers:{'idempotency-key':randomUUID()}},response:{},
+      path:`/enterprises/${tenant}/${path}`,searchParams:new URLSearchParams(query),
+      principal:{memberId,memberships:[{tenantId:f.tenant,status:'active',dataport:{permissions}}]},
+      dataport:{pool:f.pool,available(){}},commerce:service,readJson:async()=>body,
+      sendJson:(_response,status,value)=>{result={status,...value}},
+    });
+    return result;
+  }
+  assert.equal((await invoke('billing')).data.pagination.orders.total,0,'old clients keep the original IP-only view');
+  assert.equal((await invoke('billing',{query:'includeInterface=1&status=pending'})).data.pagination.orders.total,0);
+  const billing=await invoke('billing',{query:'includeInterface=1&status=pending_config'});
+  assert.equal(billing.data.pagination.orders.total,1);
+  assert.equal(billing.data.orders[0].id,first.id);
+  assert.equal(billing.data.orders[0].company,'示例企业');
+  await assert.rejects(invoke('interface-offers'),{code:'insufficient_permission'});
+  await assert.rejects(invoke('interface-orders',{method:'POST'}),{code:'insufficient_permission'});
+  await assert.rejects(invoke('interface-offers',{tenant:randomUUID(),permissions:['subscriptions.buy']}),{code:'tenant_not_permitted'});
+  assert.equal((await invoke('interface-offers',{permissions:['subscriptions.buy']})).status,200);
+  assert.equal((await invoke('interface-orders',{method:'POST',permissions:['subscriptions.buy']})).status,201);
 });

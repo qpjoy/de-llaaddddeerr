@@ -5,7 +5,7 @@ import { downloadExcel } from "./download";
 import { Input } from "@/components/ui/input";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Database, Info } from "lucide-react";
+import { ArrowRight, Code2, Database, Info, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -30,6 +30,7 @@ import {
   canCheckoutOrder,
   commerceErrorMessage,
   orderStatusLabel,
+  orderPaymentLabel,
   dateTime,
   money,
   purchaseIntent,
@@ -119,8 +120,8 @@ export function Commerce({
   const listUrl = enterpriseUrl(
     tenant,
     page === "orders"
-      ? `billing?page=${ordersPage}&pageSize=20&q=${encodeURIComponent(billQ)}&status=${billStatus}&from=${billFrom}&to=${billTo}`
-      : `subscriptions?page=${subscriptionsPage}&pageSize=6`,
+      ? `billing?includeInterface=1&page=${ordersPage}&pageSize=20&q=${encodeURIComponent(billQ)}&status=${billStatus}&from=${billFrom}&to=${billTo}`
+      : `subscriptions?includeInterface=1&page=${subscriptionsPage}&pageSize=6`,
   );
   const lock = useRef(false);
   const canRead = hasPermission(
@@ -297,7 +298,7 @@ export function Commerce({
     purchases.orders.some((order) => order.product.kind === "trial");
   const paymentActions = (order: any) => (
     <div className="harbor-actions">
-      {!order.deliveredAt && canPay && (
+      {!order.deliveredAt && canPay && order.paymentMethod !== "bank" && (
         <>
           {canCheckoutOrder(order) &&
             (links[order.id] ? (
@@ -323,7 +324,7 @@ export function Commerce({
           </Button>
         </>
       )}
-      {order.deliveredAt && order.environment === "live" && (
+      {order.deliveredAt && order.environment === "live" && order.product.kind !== "interface_prepaid" && (
         <Button
           onClick={() => {
             setOrderDetail(null);
@@ -351,6 +352,28 @@ export function Commerce({
           </p>
         </div>
       </div>
+      {page === "services" && canBuy && (
+        <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><ShieldCheck size={18} /> IP 风险画像套餐</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="mb-3">选择数据直查的试用或年度套餐。</p>
+              <Button variant="outline" onClick={() => go("market")}>选择套餐 <ArrowRight /></Button>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><Code2 size={18} /> 数据接口付费</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="mb-3">按预计调用次数配置接口预存金额。</p>
+              <Button variant="outline" onClick={() => go("interface-subscriptions")}>选择接口 <ArrowRight /></Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
       {page === "orders" && (
         <Tabs
           value={invoiceTab}
@@ -728,9 +751,10 @@ export function Commerce({
                   <TabsList variant="line">
                     <TabsTrigger value="">全部订单</TabsTrigger>
                     <TabsTrigger value="pending">待付款</TabsTrigger>
+                    <TabsTrigger value="pending_config">待收款配置</TabsTrigger>
                     <TabsTrigger value="payment_timeout">支付超时</TabsTrigger>
                     <TabsTrigger value="paid">已支付</TabsTrigger>
-                    <TabsTrigger value="delivered">已开通</TabsTrigger>
+                    <TabsTrigger value="delivered">已开通 / 到账</TabsTrigger>
                   </TabsList>
                 </Tabs>
                 <div className="dp-toolbar">
@@ -842,24 +866,19 @@ export function Commerce({
                                 {money(order.product.amountMinor)}
                               </strong>
                               <small>
-                                {productTerm(order.product)} ·{" "}
-                                {order.product.quota.toLocaleString()} 次调用
+                                {order.product.kind === "interface_prepaid"
+                                  ? `预计 ${order.product.callCount.toLocaleString()} 次调用`
+                                  : `${productTerm(order.product)} · ${order.product.quota.toLocaleString()} 次调用`}
                               </small>
                             </TableCell>
                             <TableCell>
-                              {order.paymentStatus === "not_required"
-                                ? "无需付款"
-                                : order.paymentMethod === "alipay"
-                                  ? "支付宝"
-                                  : order.environment === "test"
-                                    ? "测试支付"
-                                    : "尚未确认"}
+                              {orderPaymentLabel(order)}
                             </TableCell>
                             <TableCell>
                               <span
                                 className="harbor-result-state"
                                 data-state={
-                                  order.status === "active"
+                                  ["active", "credited"].includes(order.status)
                                     ? "success"
                                     : order.status === "payment_timeout"
                                       ? "error"
@@ -933,30 +952,26 @@ export function Commerce({
           {detailOrder && (
             <>
               <dl className="harbor-order-facts">
-                <div>
-                  <dt>产品</dt>
-                  <dd>IP 风险画像</dd>
-                </div>
-                <div>
-                  <dt>套餐</dt>
-                  <dd>{detailOrder.product.name}</dd>
-                </div>
-                <div>
-                  <dt>订阅额度</dt>
-                  <dd>{detailOrder.product.quota.toLocaleString()} 次</dd>
-                </div>
-                <div>
-                  <dt>每日额度</dt>
-                  <dd>
-                    {detailOrder.product.dailyLimit == null
-                      ? "不另设每日上限"
-                      : `${detailOrder.product.dailyLimit.toLocaleString()} 次`}
-                  </dd>
-                </div>
-                <div>
-                  <dt>有效期</dt>
-                  <dd>{productTerm(detailOrder.product)}</dd>
-                </div>
+                {detailOrder.product.kind === "interface_prepaid" ? (
+                  <>
+                    <div><dt>数据接口</dt><dd>{detailOrder.product.name}</dd></div>
+                    <div><dt>预存参考单价</dt><dd>{money(detailOrder.product.unitPriceMinor)} / 次</dd></div>
+                    <div><dt>预计调用次数</dt><dd>{detailOrder.product.callCount.toLocaleString()} 次</dd></div>
+                    {detailOrder.company && <div><dt>付款单位</dt><dd>{detailOrder.company}</dd></div>}
+                  </>
+                ) : (
+                  <>
+                    <div><dt>产品</dt><dd>IP 风险画像</dd></div>
+                    <div><dt>套餐</dt><dd>{detailOrder.product.name}</dd></div>
+                    <div><dt>订阅额度</dt><dd>{detailOrder.product.quota.toLocaleString()} 次</dd></div>
+                    <div>
+                      <dt>每日额度</dt>
+                      <dd>{detailOrder.product.dailyLimit == null
+                        ? "不另设每日上限" : `${detailOrder.product.dailyLimit.toLocaleString()} 次`}</dd>
+                    </div>
+                    <div><dt>有效期</dt><dd>{productTerm(detailOrder.product)}</dd></div>
+                  </>
+                )}
                 <div>
                   <dt>申请时间</dt>
                   <dd>{dateTime(detailOrder.createdAt)}</dd>
@@ -968,13 +983,7 @@ export function Commerce({
                 <div>
                   <dt>支付方式</dt>
                   <dd>
-                    {detailOrder.paymentStatus === "not_required"
-                      ? "无需付款"
-                      : detailOrder.paymentMethod === "alipay"
-                        ? "支付宝"
-                        : detailOrder.environment === "test"
-                          ? "测试支付"
-                          : "尚未确认"}
+                    {orderPaymentLabel(detailOrder)}
                   </dd>
                 </div>
                 <div>
@@ -987,7 +996,11 @@ export function Commerce({
               )}
               {detailOrder.paymentStatus === "paid" &&
                 !detailOrder.deliveredAt && (
-                  <p role="status">付款已确认，正在为你的空间开通服务。</p>
+                  <p role="status">
+                    {detailOrder.product.kind === "interface_prepaid"
+                      ? "付款已确认，正在将预存金额记入企业余额。"
+                      : "付款已确认，正在为你的空间开通服务。"}
+                  </p>
                 )}
               {error && (
                 <p className="harbor-error" role="alert">

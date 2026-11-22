@@ -14,16 +14,27 @@ export { IP_PRODUCT_CAPABILITY, IP_PRODUCT_METER }
 export const IP_V2_CAPABILITY = 'ip.risk.query.v2'
 export const IP_V2_METER = 'ip.risk.subscription.v2'
 export const INITIAL_PRODUCT = Object.freeze({ sku: 'ip-risk-baidu-annual-100k', name: 'IP 风险画像 · 年度版', description: '识别可疑 IP，了解访问来源，让业务风控更有依据。', product: 'ip_risk', channel: 'product', entitlementScope: 'tenant', status: 'published', amountMinor: 3399900, currency: 'CNY', months: 12, quota: 100000 })
+// The prototype offers an estimated call count for a wallet prepayment.
+const INTERFACE_OFFER = Object.freeze({
+  sku: 'xiaohongshu-api-prepaid', platform: 'xiaohongshu',
+  name: '小红书数据 API', unitPriceMinor: 10, revision: 1,
+  minCalls: 100, maxCalls: 1000000,
+})
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 const product = row => ({ ...row.document, revision: row.revision })
 const view = row => {
   if (!row) return row
   const timedOut = paymentTimedOut(row), expires = paymentExpiry(row.payment)
+  const interfaceOrder = row.intent.purpose === 'interface_prepaid'
+  const bank = interfaceOrder && row.intent.paymentMethod === 'bank'
   return ({ id: row.id, tenantId: row.tenant_id, consumerId: row.consumer_id, environment: row.environment, product: row.intent.product,
-  createdAt: row.created_at, deliveredAt: row.delivered_at, paymentId: row.payment_id, status: row.delivered_at ? (row.environment === 'test' ? 'test_delivered' : 'active') : row.payment?.status === 'paid' ? 'delivering' : timedOut ? 'payment_timeout' : 'pending',
+  createdAt: row.created_at, deliveredAt: row.delivered_at, paymentId: row.payment_id, status: bank ? 'pending_config' : row.delivered_at
+    ? (row.environment === 'test' ? 'test_delivered' : interfaceOrder ? 'credited' : 'active')
+    : row.payment?.status === 'paid' ? (interfaceOrder ? 'crediting' : 'delivering') : timedOut ? 'payment_timeout' : 'pending',
   paymentExpiresAt: expires === null ? null : new Date(expires).toISOString(),
-  checkoutAvailable: !row.delivered_at && row.payment?.status !== 'paid' && !timedOut,
-  paymentMethod: row.payment?.provider === 'alipay' ? 'alipay' : null,
+  checkoutAvailable: !bank && !row.delivered_at && row.payment?.status !== 'paid' && !timedOut,
+  paymentMethod: interfaceOrder ? row.intent.paymentMethod : row.payment?.provider === 'alipay' ? 'alipay' : null,
+  ...(bank ? {company:row.intent.company} : {}),
   paymentStatus: row.intent.purpose === 'trial' ? 'not_required' : row.payment?.status || 'pending', receipt: row.receipt })
 }
 export { view as commerceOrderView }
@@ -123,12 +134,14 @@ export class CommerceService {
     requirePayment([ordersPage, subscriptionsPage].every(value => Number.isSafeInteger(value) && value >= 1 && value <= 1000000)
       && Number.isInteger(pageSize) && pageSize >= 1 && pageSize <= 100, 'commerce_invalid_query', '分页参数不正确')
     if (!this.pool) return { orders: [], subscriptions: [] }
-    // Summaries cover the whole tenant, never just the currently displayed page.
+    // The existing IP storefront consumes this listing. DataPort's enterprise
+    // billing endpoint projects both IP subscriptions and interface prepayments.
+    const ipOrder = "intent->>'purpose' IS DISTINCT FROM 'interface_prepaid'"
     const summary = (await this.pool.query(`SELECT
-      (SELECT count(*)::int FROM hub_commerce.orders WHERE tenant_id=$1) AS "orderCount",
+      (SELECT count(*)::int FROM hub_commerce.orders WHERE tenant_id=$1 AND ${ipOrder}) AS "orderCount",
       EXISTS(SELECT 1 FROM hub_commerce.orders WHERE tenant_id=$1 AND intent->>'purpose'='trial') AS "trialClaimed",
       (SELECT coalesce(jsonb_agg(DISTINCT intent->'product'->>'sku'),'[]'::jsonb) FROM hub_commerce.orders
-        WHERE tenant_id=$1 AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid' AND NOT coalesce(${paymentTimedOutSql},false)) AS "pendingSkus",
+        WHERE tenant_id=$1 AND ${ipOrder} AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid' AND NOT coalesce(${paymentTimedOutSql},false)) AS "pendingSkus",
       count(*)::int AS "subscriptionCount",
       count(*) FILTER(WHERE starts_at<=now() AND ends_at>now())::int AS "activeSubscriptionCount",
       count(*) FILTER(WHERE channel='product' AND starts_at<=now() AND ends_at>now())::int AS "currentCount",
@@ -140,7 +153,7 @@ export class CommerceService {
       subscriptions: { page: Math.min(subscriptionsPage, Math.max(1, Math.ceil(summary.subscriptionCount / pageSize))), pageSize, total: summary.subscriptionCount },
     }
     const [orders, subscriptions] = await Promise.all([
-      this.pool.query('SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 ORDER BY created_at DESC,id LIMIT $2 OFFSET $3',
+      this.pool.query(`SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 AND ${ipOrder} ORDER BY created_at DESC,id LIMIT $2 OFFSET $3`,
         [tenantId, pageSize, (pagination.orders.page - 1) * pageSize]),
       this.pool.query(`WITH scopes AS (
           SELECT DISTINCT consumer_id,channel FROM hub_commerce.subscriptions WHERE tenant_id=$1
@@ -250,6 +263,65 @@ export class CommerceService {
     try { await this.recharge.network(() => this.prepare(row)) } catch { return { ...view(row), recoveryRequired: true } }
     return view(await this.row(row.id,tenantId))
   }
+  async interfaceOffers() {
+    const route = await this.recharge?.route('live')
+    return {items:[INTERFACE_OFFER], alipayAvailable: Boolean(route?.source_id)}
+  }
+  async createInterfaceOrder(tenantId, body, key, actor, { purchaseActorOnly = false } = {}) {
+    fields(body, ['sku','revision','callCount','method','company','agreed'])
+    requestKey(key)
+    requirePayment(uuid(tenantId) && body.agreed === true
+      && Number.isSafeInteger(body.callCount) && ['alipay','bank'].includes(body.method),
+      'interface_order_invalid', '请核对调用次数、付款方式和订单金额。')
+    const company = typeof body.company === 'string' ? body.company.trim() : ''
+    requirePayment(body.method === 'bank'
+      ? company.length >= 2 && company.length <= 100 && !/[\u0000-\u001f\u007f]/.test(company)
+      : body.company === undefined,
+      'interface_company_invalid', '请填写 2 至 100 个字符的付款单位全称。')
+    const hash = fingerprint(['interface_prepaid',body.sku,body.revision,body.callCount,body.method,company])
+    const row = await this.atomic(async client => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`commerce-order:${tenantId}:${key}`])
+      const prior = (await client.query("SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 AND environment='live' AND request_key=$2", [tenantId,key])).rows[0]
+      if (prior) {
+        requirePayment(!purchaseActorOnly || prior.intent.createdBy === actor,
+          'commerce_order_not_permitted', '此操作编号属于另一位成员的购买。', 403)
+        requirePayment(prior.fingerprint === hash && prior.intent.purpose === 'interface_prepaid',
+          'commerce_idempotency_conflict', '请求已用于其他购买。', 409)
+        return prior
+      }
+      const offer = INTERFACE_OFFER
+      requirePayment(body.sku === offer.sku && body.revision === offer.revision,
+        'interface_offer_changed', '接口价格或订阅状态已变化，请重新确认。', 409)
+      requirePayment(body.callCount >= offer.minCalls && body.callCount <= offer.maxCalls,
+        'interface_call_count_invalid', '调用次数超出可选范围。')
+      const tenant = (await client.query('SELECT status FROM tenants WHERE id=$1 FOR SHARE', [tenantId])).rows[0]
+      requirePayment(tenant?.status === 'active', 'commerce_beneficiary_unavailable', '受益空间不可用。', 409)
+      let route = null
+      if (body.method === 'alipay') {
+        route = await this.recharge?.route('live',client,'FOR SHARE')
+        requirePayment(route?.source_id, 'commerce_payment_unavailable', '支付宝暂不可用。', 409)
+        const wallet = (await client.query('SELECT currency,status FROM billing.credit_accounts WHERE tenant_id=$1', [tenantId])).rows[0]
+        requirePayment(!wallet || wallet.currency === 'CNY' && wallet.status === 'active',
+          'payment_wallet_unavailable', '企业钱包当前不可充值。', 409)
+      }
+      const intent = {
+        purpose:'interface_prepaid', createdBy:actor, paymentMethod:body.method,
+        ...(route ? {channelId:route.channel_id} : {company}),
+        product: {
+          sku:offer.sku,name:offer.name,kind:'interface_prepaid',platform:offer.platform,
+          revision:offer.revision,currency:'CNY',callCount:body.callCount,unitPriceMinor:offer.unitPriceMinor,
+          amountMinor:body.callCount*offer.unitPriceMinor,
+        },
+      }
+      return (await client.query(`INSERT INTO hub_commerce.orders(id,tenant_id,environment,request_key,fingerprint,source_id,app_id,intent)
+        VALUES($1,$2,'live',$3,$4,$5,$6,$7) RETURNING *`,
+        [randomUUID(),tenantId,key,hash,route?.source_id ?? null,route?.app_id ?? null,intent])).rows[0]
+    })
+    if (row.intent.paymentMethod === 'bank' || row.delivered_at) return view(row)
+    try { await this.recharge.network(() => this.prepare(row)) }
+    catch { return {...view(row),recoveryRequired:true} }
+    return view(await this.row(row.id,tenantId))
+  }
   input(row) { return { businessOrderId:`hub-purchase:${row.id}`,customerRef:row.tenant_id,amountMinor:row.intent.product.amountMinor,
     initiatorRef:row.intent.createdBy,...(row.intent.channelId === 'mock' ? {} : { channelId:row.intent.channelId,subject:row.intent.product.name }) } }
   validate(row, payment) {
@@ -278,6 +350,11 @@ export class CommerceService {
       requirePayment(action !== 'checkout', 'commerce_trial_no_checkout', '免费试用无需付款', 409)
       return view(row)
     }
+    if (row.intent.paymentMethod === 'bank') {
+      requirePayment(action !== 'checkout', 'commerce_bank_no_checkout', '对公转账待收款配置。', 409)
+      return view(row)
+    }
+    requirePayment(this.recharge, 'commerce_payment_unavailable', '支付接入尚未就绪。', 503)
     return this.recharge.network(async () => {
       const {source,payment} = await this.prepare(row)
       if (action === 'checkout') {
@@ -340,6 +417,20 @@ export class CommerceService {
     }
     return subscriptionId
   }
+  async deliverInterfaceCredit(client,row,event,payment) {
+    requirePayment(row.intent.paymentMethod === 'alipay' && row.environment === 'live',
+      'commerce_event_mismatch', '接口预存付款类型不匹配。', 409)
+    const tenant = (await client.query('SELECT status FROM tenants WHERE id=$1 FOR SHARE', [row.tenant_id])).rows[0]
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`billing:tenant:${row.tenant_id}`])
+    const wallet = (await client.query('SELECT currency,status FROM billing.credit_accounts WHERE tenant_id=$1 FOR UPDATE', [row.tenant_id])).rows[0]
+    requirePayment(tenant?.status === 'active' && (!wallet || wallet.currency === 'CNY' && wallet.status === 'active'),
+      'recharge_beneficiary_unavailable', '付款已确认，企业钱包暂不可入账。', 409)
+    return this.store.addTenantCredit({
+      tenantId:row.tenant_id,amountMinor:row.intent.product.amountMinor,currency:'CNY',
+      reason:'数港接口用量预存到账', externalReference:`mx-pay:${payment.id}`, idempotencyKey:`mx-pay:${payment.id}`,
+      actor:`payment-event:${event.id}`, transactionClient:client,
+    })
+  }
   async commit(source,event,payment) {
     requirePayment(event?.type === 'payment.paid' && event.version === 1 && uuid(event.id) && uuid(event.paymentId)
       && event.appId === source.appId && event.environment === source.environment && /^hub-purchase:[0-9a-f-]{36}$/.test(event.businessOrderId || ''), 'commerce_event_mismatch','购买付款事件不匹配',409)
@@ -353,11 +444,14 @@ export class CommerceService {
       const previous = (await client.query('SELECT * FROM hub_commerce.inbox WHERE source_id=$1 AND event_id=$2',[row.source_id,event.id])).rows[0]
       if (previous) { requirePayment(previous.fingerprint === hash && previous.order_id === id,'commerce_event_conflict','付款事件冲突',409); return previous.receipt }
       requirePayment(!row.delivered_at,'commerce_event_conflict','该订单已由其他事件交付',409)
-      const subscriptionId = await this.deliverSubscription(client,row,`payment-event:${event.id}`,'空间购买 IP 风险画像')
-      const receipt = `hub-purchase:${id}:${subscriptionId || 'test'}`
+      const credit = row.intent.purpose === 'interface_prepaid'
+        ? await this.deliverInterfaceCredit(client,row,event,payment) : null
+      const subscriptionId = credit ? null
+        : await this.deliverSubscription(client,row,`payment-event:${event.id}`,'空间购买 IP 风险画像')
+      const receipt = `hub-purchase:${id}:${credit?.id || subscriptionId || 'test'}`
       await client.query('UPDATE hub_commerce.orders SET payment_id=$2,payment=$3,delivered_at=now(),receipt=$4 WHERE id=$1',[id,payment.id,payment,receipt])
       await client.query('INSERT INTO hub_commerce.inbox(source_id,event_id,order_id,fingerprint,document,receipt) VALUES($1,$2,$3,$4,$5,$6)',[row.source_id,event.id,id,hash,event,receipt])
-      await client.query('INSERT INTO hub_commerce.audit(actor,action,document) VALUES($1,$2,$3)',[`payment-event:${event.id}`,'purchase.delivered',{orderId:id,tenantId:row.tenant_id,consumerId:row.consumer_id,subscriptionId,environment:row.environment,receipt}])
+      await client.query('INSERT INTO hub_commerce.audit(actor,action,document) VALUES($1,$2,$3)',[`payment-event:${event.id}`,'purchase.delivered',{orderId:id,tenantId:row.tenant_id,consumerId:row.consumer_id,subscriptionId,...(credit ? {ledgerId:credit.id} : {}),environment:row.environment,receipt}])
       return receipt
     })
   }
