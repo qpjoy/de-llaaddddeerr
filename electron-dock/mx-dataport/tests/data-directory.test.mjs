@@ -57,13 +57,17 @@ test("one card represents a workbook platform and its detail lists the platform'
   assert.match(detail, /获取某条内容下面的评论（笔记专用）/);
   assert.match(detail, /商品关键词搜索/);
   assert.match(detail, /<dt>请求地址<\/dt><dd><code>\/api\/v1\/data\/search<\/code><\/dd>/);
+  assert.match(detail, /<dt>鉴权方式<\/dt><dd><code>Authorization: Bearer YOUR_API_KEY<\/code><\/dd>/);
+  assert.ok(detail.indexOf("接入概况") < detail.indexOf('role="tablist"'));
+  assert.match(detail, /请求体示例/);
   assert.match(detail, /当前暂无响应示例/);
 });
 
 test("encode and reopen a non-ASCII platform from the directory", () => {
   const detail = render(DataInterfaces, { page: `interfaces/${encodeURIComponent("信用中国")}` });
   assert.match(detail, /信用中国接口配置/);
-  assert.match(detail, /待公布/);
+  assert.match(detail, /<dt>请求地址<\/dt><dd>待公布<\/dd>/);
+  assert.match(detail, /<dt>鉴权方式<\/dt><dd>待公布<\/dd>/);
   assert.match(detail, /当前暂无响应示例/);
   assert.match(render(DataInterfaces, { page: "interfaces/unknown" }), /未找到该接口/);
 });
@@ -72,14 +76,24 @@ test("data directory and deep links keep existing direct-query and documentation
   const session = { memberships: [
     { tenantId: "lookup-only", dataport: { permissions: ["history.read"] } },
     { tenantId: "docs-only", dataport: { permissions: ["docs.read"] } },
+    { tenantId: "paid", dataport: { permissions: ["docs.read"], interfaceSubscriptionActive: true } },
+    { tenantId: "paid-without-docs", dataport: { permissions: [], interfaceSubscriptionActive: true } },
+    { tenantId: "buyer", dataport: { permissions: ["subscriptions.read", "subscriptions.buy"] } },
   ] };
   for (const page of ["lookup", "intelligence"]) {
     assert.equal(canOpenPage(session, "lookup-only", page), true);
     assert.equal(canOpenPage(session, "docs-only", page), false);
   }
-  for (const page of ["interfaces", "interfaces/xiaohongshu", "docs-ip"]) {
-    assert.equal(canOpenPage(session, "docs-only", page), true);
+  for (const page of ["interfaces", "interfaces/xiaohongshu"]) {
+    assert.equal(canOpenPage(session, "paid", page), true);
+    assert.equal(canOpenPage(session, "docs-only", page), false);
+    assert.equal(canOpenPage(session, "paid-without-docs", page), false);
+    assert.equal(canOpenPage(session, "buyer", page), false);
     assert.equal(canOpenPage(session, "lookup-only", page), false);
     assert.equal(canOpenPage(session, "unrelated", page), false);
   }
+  assert.equal(canOpenPage(session, "docs-only", "docs-ip"), true);
+  assert.equal(canOpenPage(session, "lookup-only", "docs-ip"), false);
+  assert.equal(canOpenPage(session, "buyer", "services"), true);
+  assert.equal(canOpenPage(session, "buyer", "interface-subscriptions"), true);
 });

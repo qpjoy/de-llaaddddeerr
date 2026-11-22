@@ -843,6 +843,7 @@ test('DataPort interface Alipay order uses authoritative cents and credits the e
   assert.equal(order.product.unitPriceMinor,10);
   assert.equal(order.paymentMethod,'alipay');
   assert.equal(order.status,'pending');
+  assert.deepEqual(await f.service.paidInterfaceTenants([f.tenant]),new Set());
   await assert.rejects(f.service.createInterfaceOrder(f.tenant,body,key,'other',{purchaseActorOnly:true}),{code:'commerce_order_not_permitted'});
   await assert.rejects(f.service.createInterfaceOrder(f.tenant,{...body,callCount:2000},key,'buyer'),{code:'commerce_idempotency_conflict'});
   assert.equal((await f.service.createInterfaceOrder(f.tenant,body,key,'buyer')).id,order.id);
@@ -860,6 +861,7 @@ test('DataPort interface Alipay order uses authoritative cents and credits the e
   const receipt=await f.service.commit(source,event,payment);
   assert.equal(await f.service.commit(source,event,payment),receipt);
   assert.equal(commerceOrderView(await f.service.row(order.id,f.tenant)).status,'credited');
+  assert.deepEqual(await f.service.paidInterfaceTenants([f.tenant,randomUUID()]),new Set([f.tenant]));
   assert.deepEqual((await f.service.list(f.tenant)).orders,[],'interface orders stay out of the original Hub IP storefront');
   const ledger=(await f.pool.query('SELECT kind,amount_minor::int AS amount FROM billing.credit_ledger_entries WHERE tenant_id=$1',[f.tenant])).rows;
   assert.deepEqual(ledger,[{kind:'topup',amount:10000}]);
@@ -885,6 +887,7 @@ test('DataPort bank application persists company and price with no Pay request o
   assert.deepEqual(first,second);
   assert.equal(first.status,'pending_config');
   assert.equal(first.paymentMethod,'bank');
+  assert.deepEqual(await service.paidInterfaceTenants([f.tenant]),new Set());
   assert.equal(first.company,'示例企业');
   assert.equal(first.checkoutAvailable,false);
   assert.equal(first.product.amountMinor,1000);

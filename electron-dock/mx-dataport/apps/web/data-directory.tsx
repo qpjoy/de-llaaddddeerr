@@ -233,6 +233,9 @@ function InterfaceConfiguration({
   platform: InterfacePlatform;
   heading: React.RefObject<HTMLHeadingElement | null>;
 }) {
+  const [selectedTab, setSelectedTab] = useState("0");
+  const requestPath = platform.operations[Number(selectedTab)]?.path;
+
   return (
     <>
       <header className={styles.configHeader}>
@@ -243,23 +246,28 @@ function InterfaceConfiguration({
         </div>
         <p>当前企业可调用的接口以 API Key 权限为准。</p>
       </header>
-      <Tabs defaultValue="0" className={styles.configTabs}>
+      <section className={styles.configPanel} aria-labelledby="interface-overview-title">
+        <h2 id="interface-overview-title">接入概况</h2>
+        <dl className={styles.overviewFields}>
+          <div><dt>请求地址</dt><dd>{requestPath ? <code>{requestPath}</code> : "待公布"}</dd></div>
+          <div>
+            <dt>鉴权方式</dt>
+            <dd>{requestPath ? <code>Authorization: Bearer YOUR_API_KEY</code> : "待公布"}</dd>
+          </div>
+        </dl>
+      </section>
+      <Tabs value={selectedTab} onValueChange={setSelectedTab} className={styles.configTabs}>
         <TabsList aria-label={`${platform.name}接口`} variant="line" className={styles.endpointTabs}>
           {platform.operations.map(({ title }, index) => (
             <TabsTrigger key={index} value={String(index)}>{title}</TabsTrigger>
           ))}
         </TabsList>
-        {platform.operations.map(({ title, path, requestExample }, index) => (
+        {platform.operations.map(({ title, requestExample }, index) => (
           <TabsContent key={index} value={String(index)}>
-            <section className={styles.configPanel}>
-              <h2>{title}</h2>
-              <dl className={styles.overviewFields}>
-                <div><dt>请求地址</dt><dd>{path ? <code>{path}</code> : "待公布"}</dd></div>
-              </dl>
-            </section>
-            <div className={styles.endpointColumns}>
+            <h2 className={styles.endpointHeading}>{title}</h2>
+            <div className={styles.endpointExamples}>
               <section className={styles.configPanel}>
-                <h3>请求示例</h3>
+                <h3>请求体示例</h3>
                 {requestExample ? <pre>{requestExample}</pre> : <p>当前暂无请求示例</p>}
               </section>
               <section className={styles.configPanel}>
