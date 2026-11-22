@@ -18,6 +18,7 @@ import {
   Headphones,
   KeyRound,
   BookOpen,
+  Code2,
   Wallet,
 } from "lucide-react";
 import {
@@ -55,7 +56,8 @@ import {
 } from "./enterprise";
 import { ApiKeys } from "./keys";
 import { LegalDocument, LegalFooter } from "./legal";
-import { canOpenPage } from "./permissions";
+import { canOpenPage, isInterfacePage } from "./permissions";
+import { DataInterfaces, DirectQueryBackLink, DirectQueryDirectory } from "./data-directory";
 import { AccountSecurity } from "./account-security";
 import { Commerce } from "./commerce";
 import { IpQuery } from "./ip-query";
@@ -67,7 +69,8 @@ import "./dataport.css";
 import "./alignment.css";
 import "./prototype-parity.css";
 const pages = [
-  ["intelligence", "新建查询", SquarePen],
+  ["lookup", "数据直查", SquarePen],
+  ["interfaces", "数据接口", Code2],
   ["overview", "用量概览", LayoutDashboard],
   ["keys", "API Keys", KeyRound],
   ["services", "我的订阅", Layers3],
@@ -95,29 +98,31 @@ function Navigation({
           ([id]) =>
             session === undefined || canOpenPage(session, tenant || "", id),
         )
-        .map(([id, title, Icon]) => (
-          <SidebarMenuItem
-            key={id}
-            className={id === "services" ? "nav-divider" : ""}
-          >
-            <SidebarMenuButton
-              className="nav-button"
-              isActive={page === id || (id === "services" && page === "market")}
-              aria-current={
-                page === id || (id === "services" && page === "market")
-                  ? "page"
-                  : undefined
-              }
-              onClick={() => {
-                go(id);
-                if (sidebar.isMobile) sidebar.setOpenMobile(false);
-              }}
+        .map(([id, title, Icon]) => {
+          const active = page === id
+            || (id === "lookup" && page === "intelligence")
+            || (id === "interfaces" && isInterfacePage(page))
+            || (id === "services" && page === "market");
+          return (
+            <SidebarMenuItem
+              key={id}
+              className={id === "services" ? "nav-divider" : ""}
             >
-              <Icon size={18} />
-              <span>{title}</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        ))}
+              <SidebarMenuButton
+                className="nav-button"
+                isActive={active}
+                aria-current={active ? "page" : undefined}
+                onClick={() => {
+                  go(id);
+                  if (sidebar.isMobile) sidebar.setOpenMobile(false);
+                }}
+              >
+                <Icon size={18} />
+                <span>{title}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          );
+        })}
     </SidebarMenu>
   );
 }
@@ -126,7 +131,7 @@ function ConsoleBrand({ go }: { go: (page: string) => void }) {
   return (
     <a
       className="brand"
-      href="/#/intelligence"
+      href="/#/lookup"
       onClick={(event) => {
         if (
           event.button !== 0 ||
@@ -137,7 +142,7 @@ function ConsoleBrand({ go }: { go: (page: string) => void }) {
         )
           return;
         event.preventDefault();
-        go("intelligence");
+        go("lookup");
         if (sidebar.isMobile) sidebar.setOpenMobile(false);
       }}
     >
@@ -292,6 +297,8 @@ function RemotePanel({
     return <UsageOverview tenant={tenant} session={session} go={go} />;
   if (page === "docs-ip")
     return <Documentation tenant={tenant} session={session} />;
+  if (page === "lookup") return <DirectQueryDirectory go={go} />;
+  if (isInterfacePage(page)) return <DataInterfaces page={page} go={go} />;
   if (page === "account") return <AccountSecurity />;
   if (page === "messages")
     return (
@@ -306,13 +313,16 @@ function RemotePanel({
     );
   if (page === "intelligence")
     return (
-      <IpQuery
-        tenant={tenant}
-        session={session}
-        csrf={csrf}
-        go={go}
-        initialIp={initialIp}
-      />
+      <>
+        <DirectQueryBackLink />
+        <IpQuery
+          tenant={tenant}
+          session={session}
+          csrf={csrf}
+          go={go}
+          initialIp={initialIp}
+        />
+      </>
     );
   if (["market", "services", "orders"].includes(page))
     return (
@@ -354,9 +364,12 @@ function App() {
     [checking, setChecking] = useState(true),
     [retry, setRetry] = useState(0),
     [tenant, setTenant] = useState(""),
-    [page, setPage] = useState(location.hash.slice(2) || "intelligence"),
+    [explicitPage, setPage] = useState(location.hash.slice(2)),
     [bootError, setBootError] = useState("");
   const { active: signedIn, customer: session, csrf, issue } = boot;
+  const page = explicitPage
+    || pages.find(([id]) => canOpenPage(session, tenant, id))?.[0]
+    || "lookup";
   const messages = useMessageInbox(
     tenant,
     signedIn === true && !!tenant && canOpenPage(session, tenant, "messages"),
@@ -373,7 +386,7 @@ function App() {
       /^[A-Za-z0-9_-]{43}$/.test(joinToken || "")
     )
       sessionStorage.setItem("dataport:join-token", joinToken!);
-    const listener = () => setPage(location.hash.slice(2) || "intelligence");
+    const listener = () => setPage(location.hash.slice(2));
     addEventListener("hashchange", listener);
     if (new URLSearchParams(location.search).get("signedOut") === "1") {
       history.replaceState(null, "", "/");
@@ -422,6 +435,8 @@ function App() {
             destination &&
             [
               "intelligence",
+              "lookup",
+              "interfaces",
               "overview",
               "keys",
               "services",
@@ -583,7 +598,7 @@ function App() {
           session={session}
           tenant={tenant}
           go={(destination) => {
-            if (destination === "intelligence" && page === "intelligence") {
+            if (destination === "intelligence" && ["lookup", "intelligence"].includes(page)) {
               setQueryIp("");
               sessionStorage.removeItem("harbor:query-ip");
               setQueryRevision((value) => value + 1);
@@ -635,7 +650,7 @@ function App() {
               onJoined={(target) => {
                 sessionStorage.removeItem("dataport:join-token");
                 setTenant(target);
-                go("intelligence");
+                go("lookup");
                 retrySession();
               }}
             />
@@ -643,7 +658,7 @@ function App() {
             <AccountSecurity />
           ) : session ? (
             <RemotePanel
-              key={`${page}:${tenant}:${queryRevision}`}
+              key={`${isInterfacePage(page) ? "interfaces" : page}:${tenant}:${queryRevision}`}
               page={page}
               session={session}
               tenant={tenant}
@@ -737,7 +752,7 @@ function App() {
           setAuth(false);
           setBoot(emptySession);
           setTenant("");
-          setPage(location.hash.slice(2) || "intelligence");
+          setPage(location.hash.slice(2));
           setChecking(true);
           retrySession();
         }}

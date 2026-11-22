@@ -25,8 +25,12 @@ export const pagePermission: Record<string, string> = {
   audit: "audit.read",
   support: "support.read.self",
 };
+export const isInterfacePage = (page: string) =>
+  page === "interfaces" || page.startsWith("interfaces/");
+
 export function canOpenPage(session: any, tenant: string, page: string) {
-  if (page === "intelligence")
+  if (isInterfacePage(page)) return hasPermission(session, tenant, "docs.read");
+  if (page === "lookup" || page === "intelligence")
     return (
       hasPermission(session, tenant, "query.execute") ||
       hasPermission(session, tenant, "history.read")
