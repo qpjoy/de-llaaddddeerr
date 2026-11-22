@@ -45,9 +45,13 @@ test("one card represents a workbook platform and its detail lists the platform'
   assert.equal((html.match(/查看小红书接口配置/g) ?? []).length, 1);
   assert.match(html, /查看Telegram接口配置/);
   assert.doesNotMatch(html, /查看IP 风险画像接口配置/);
+  assert.match(html, /已收录<span>/);
+  assert.match(html, /data-supported="true">已收录<\/span>/);
+  assert.doesNotMatch(html, /Hub 已支持/);
   assert.equal((html.match(/data-platform-page=/g) ?? []).length, interfacePlatforms.length);
   const detail = render(DataInterfaces, { page: "interfaces/xiaohongshu" });
   assert.match(detail, /返回数据接口/);
+  assert.match(detail, /<dt>支持状态<\/dt><dd>已收录<\/dd>/);
   assert.match(detail, /内容关键词搜索/);
   assert.match(detail, /获取某条内容下面的评论（笔记专用）/);
   assert.match(detail, /商品关键词搜索/);

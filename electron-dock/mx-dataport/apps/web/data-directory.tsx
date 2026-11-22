@@ -43,7 +43,7 @@ export function PlatformLogo({ slug }: { slug: string }) {
 }
 
 const statusLabels: Record<InterfaceStatus, string> = {
-  supported: "Hub 已支持",
+  supported: "已收录",
   planned: "筹备中",
   unknown: "待确认",
 };
@@ -95,7 +95,7 @@ export function DirectQueryBackLink() {
 
 const filters = [
   { id: "all", label: "全部接口", count: interfacePlatforms.length },
-  { id: "supported", label: "Hub 已支持", count: interfacePlatforms.filter((p) => platformStatus(p) === "supported").length },
+  { id: "supported", label: statusLabels.supported, count: interfacePlatforms.filter((p) => platformStatus(p) === "supported").length },
   { id: "pending", label: "筹备中 / 待确认", count: interfacePlatforms.filter((p) => platformStatus(p) !== "supported").length },
 ] as const;
 
