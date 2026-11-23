@@ -836,6 +836,7 @@ export function createApp({
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
   threadsNativeGateway = null,
+  ecommerceRapidNativeGateway = null,
   threadsPostDetail = null,
   youtubeCommentsGateway = null,
   commentRepliesGateway = null,
@@ -6393,7 +6394,7 @@ export function createApp({
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'native data forwarding')
         const gateway = nativeEndpoint.provider === 'tikhub' ? socialAccountTikHubGateway
-          : nativeEndpoint.provider === 'rapidapi' ? threadsNativeGateway
+          : nativeEndpoint.provider === 'rapidapi' ? (nativeEndpoint.authorizationPlatform === 'ecommerce' ? ecommerceRapidNativeGateway : threadsNativeGateway)
           : nativeEndpoint.authorizationPlatform === 'ecommerce' ? externalPlatformGateway : socialAccountGateway
         if (!gateway) throw new AppError(503, 'external_platform_unavailable', 'Native data endpoint is unavailable')
         const result = await withAdmissionSignal(response, async signal => gateway.forwardNative(context, {

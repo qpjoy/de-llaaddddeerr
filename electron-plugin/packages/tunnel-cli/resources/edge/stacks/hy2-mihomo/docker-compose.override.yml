@@ -1,0 +1,19 @@
+# Written by the hy2-mihomo edge stack next to docker/hysteria2-mihomo-stack's
+# docker-compose.yml. Compose reads docker-compose.override.yml on its own when
+# no -f is given, which is how manage.sh calls it, so hand-run manage.sh
+# commands keep these versions too. The repository's compose file still says
+# :latest / :2-alpine and is not changed.
+#
+# Pinned 2026-11-21 to what :latest and :2-alpine were that day
+# (multi-arch index digests, for checking: docker buildx imagetools inspect <ref>):
+#   tobyxdd/hysteria:v2.14.0  sha256:b15cedc3de200ae7a4f177908a83ef23ed3de2935458b22b7d46a7a8697038a9
+#   caddy:2.11.9-alpine       sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+# Tags, not digests: an image shipped with `edge push --image` and docker load
+# carries its tag but not always its registry digest, and compose would then
+# try to pull. Change the versions here and in stack.env STACK_IMAGES together
+# (a test checks they match).
+services:
+  hysteria:
+    image: tobyxdd/hysteria:v2.14.0
+  subscriptions:
+    image: caddy:2.11.9-alpine

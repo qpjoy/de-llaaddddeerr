@@ -6,6 +6,7 @@ const node_fs_1 = require("node:fs");
 const promises_1 = require("node:fs/promises");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
+const edge_1 = require("./edge");
 const hdo_1 = require("./hdo");
 const h2i_1 = require("./h2i");
 const open_1 = require("./open");
@@ -106,6 +107,15 @@ Usage:
   qp-tunnel-cli wg install --host 203.0.113.10 --subnet 100.127.50.0/24
   qp-tunnel-cli wg create internal-01 --ip 100.127.50.10
   qp-tunnel-cli wg enroll --file internal-01.conf
+  qp-tunnel-cli edge add domestic-1 --host 203.0.113.10 --key ~/.ssh/id_ed25519 --role domestic
+  qp-tunnel-cli edge check domestic-1
+  qp-tunnel-cli edge stacks
+  qp-tunnel-cli edge setup                    step by step, with defaults
+  qp-tunnel-cli edge link init domestic-1 --subnet 100.127.201.0/24 --ip 100.127.201.89
+  qp-tunnel-cli edge push domestic-1 --stack wg-nginx
+  qp-tunnel-cli edge link up domestic-1
+  qp-tunnel-cli edge status
+  qp-tunnel-cli edge relations
   qp-tunnel-cli <mihomo-client command> [options]
   qp-tunnel-cli -- <command> [args...]
   qp-tunnel-cli <command-path> [args...]
@@ -199,6 +209,24 @@ OpenVPN's 100.127.0.0/24:
   sudo qp-tunnel-cli wg enroll --file internal-01.conf
   sudo qp-tunnel-cli wg rotate-port
 Run 'qp-tunnel-cli wg help' for the full command set.
+
+Edge hosts (Domestic relays, jump hosts, bastions) are reached and deployed from
+an Internal machine over plain SSH, without Kubernetes on the edge. Saved hosts
+hold key paths only; push unpacks a stack (wg-nginx, open-nginx, hy2-mihomo) or
+your own bundle as /opt/mx/releases/<component>/<rev>, switches
+/opt/mx/current/<component> and runs its deploy.sh/health.sh. Debian/Ubuntu and
+CentOS/Rocky hosts are told apart before anything is switched. Any Internal
+machine can push (each is an origin); a host refuses a push from an origin that
+does not manage the component unless --take-over. status lists what runs here
+and on every saved host; relations lists which origin manages what:
+  qp-tunnel-cli edge origin set internal02
+  qp-tunnel-cli edge import --launcher-url http://10.88.88.88:18090
+  qp-tunnel-cli edge ssh
+  qp-tunnel-cli edge status
+  qp-tunnel-cli edge relations
+  qp-tunnel-cli edge link check domestic-1
+  qp-tunnel-cli edge rollback domestic-1 --component wg-nginx
+Run 'qp-tunnel-cli edge help' for the full command set.
 `);
 }
 function clientHelp() {
@@ -722,6 +750,10 @@ async function main() {
     }
     if (command === 'wg' || command === 'wireguard') {
         await (0, wg_1.runWgCli)(args.slice(1), { isRoot, sudoSelf });
+        return;
+    }
+    if (command === 'edge') {
+        await (0, edge_1.runEdgeCli)(args.slice(1));
         return;
     }
     const passthroughCommand = command === '--verbose' ? args[1] : command;

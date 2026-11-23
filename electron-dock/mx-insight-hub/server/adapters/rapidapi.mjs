@@ -5,9 +5,12 @@ import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-js
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
 import { AppError } from '../core/errors.mjs'
 import { FACEBOOK_HOST, FACEBOOK_ENDPOINT, projectFacebookSearch } from '../contracts/facebook-search.mjs'
+import { FACEBOOK_MARKETPLACE_RAPIDAPI_ENDPOINT, isFacebookMarketplaceSearchPage } from '../contracts/facebook-marketplace-rapidapi-endpoint.mjs'
 import { rapidQuotaObservation } from '../external-platforms/platform-search-policy.mjs'
 import { twitterAccountFailure } from '../contracts/twitter-account-failure.mjs'
 import { nativeForwardingEndpoint, nativeForwardingPayload, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
+import { SHEIN_RAPIDAPI_SEARCH_ENDPOINT, isSheinProductSearchPage } from '../contracts/shein-rapidapi-endpoint.mjs'
+import { PINDUODUO_RAPIDAPI_SEARCH_ENDPOINT, isPinduoduoProductSearchPage } from '../contracts/pinduoduo-rapidapi-endpoint.mjs'
 
 export const TWITTER_AIO_HOST = 'twitter-aio.p.rapidapi.com'
 const TWITTER_ENDPOINTS = new Set([...Object.values(HUB_SOCIAL_ENDPOINTS).map(endpoint => endpoint.endpointKey), TWITTER_REPLIES_ENDPOINT_KEY])
@@ -170,6 +173,13 @@ export class RapidApiAdapter {
           affectsCircuit: response.status >= 500 }, persistence('rejected'))
       }
       if (!parsed || !isPostgresSafeJsonValue(raw)) throw new Error('invalid_response_json')
+      if (key === FACEBOOK_MARKETPLACE_RAPIDAPI_ENDPOINT.key && !isFacebookMarketplaceSearchPage(raw)) {
+        throw new Error('invalid_facebook_marketplace_search_response')
+      }
+      if (key === SHEIN_RAPIDAPI_SEARCH_ENDPOINT.key && !isSheinProductSearchPage(raw)) throw new Error('invalid_shein_search_response')
+      if (key === PINDUODUO_RAPIDAPI_SEARCH_ENDPOINT.key && !isPinduoduoProductSearchPage(raw, request.upstreamQuery.page)) {
+        throw new Error('invalid_pinduoduo_search_response')
+      }
       const safe = value => typeof value === 'string' ? scrub(value) : Array.isArray(value) ? value.map(safe)
         : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([name, item]) => [scrub(name), safe(item)])) : value
       const result = { publicBody: nativeForwardingPayload(safe(raw), request, capturedAt), items: [], records: [], archiveObjects: [], ...persistence('accepted') }

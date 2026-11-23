@@ -79,6 +79,7 @@ export const SMOKE_CASES = Object.freeze([
   { capability: 'collect.audio.episodes', input: { platform: 'librivox', limit: 1, episodesPerShow: 3 } },
   { capability: 'collect.intel.dns.lookup', input: { name: 'iana.org', types: ['A', 'MX'] } },
   { capability: 'collect.intel.rdap.domain', input: { domain: 'iana.org' } },
+  { capability: 'collect.ecommerce.shopify.search', input: { domain: 'hydrogen-preview.myshopify.com', keyword: 'snowboard', maxItems: 2 } },
   { capability: 'collect.intel.ct.issuances', input: { domain: 'iana.org', maxItems: 5 } },
   { capability: 'collect.intel.subdomains', input: { domain: 'iana.org', maxIssuances: 50 } },
   // Paid: Shodan query credits, Apify compute and per-result charges.

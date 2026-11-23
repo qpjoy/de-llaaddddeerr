@@ -20,7 +20,9 @@ test('routing catalog separates native contracts from current compatible search 
   assert.equal(kuaishou.switchable, false)
   assert.equal(kuaishou.endpoints.length, 2)
   assert.ok(kuaishou.endpoints.every(row => row.provider === 'tikhub'))
-  assert.equal(items.find(row => row.marketplace === 'pinduoduo').endpoints.length, 0)
+  const pinduoduo = items.find(row => row.marketplace === 'pinduoduo')
+  assert.equal(pinduoduo.defaultRoute, null)
+  assert.deepEqual(pinduoduo.endpoints.map(row => row.key), ['r.pinduoduo_search_products'])
   assert.ok(items.find(row => row.marketplace === 'taobao').endpoints.some(row => row.upstreamPath.endsWith('/v2')))
 })
 

@@ -161,6 +161,20 @@ function pinnedLookup(expectedHostname, answers) {
   }
 }
 
+function agentForPublicAnswers({ hostname, answers }) {
+  return new Agent({ connect: { lookup: pinnedLookup(hostname, answers) } })
+}
+
+// For HTTPS integrations with caller-selected domains. Callers must disable
+// automatic redirects and dispose of the dispatcher after reading the body.
+export async function pinnedPublicHttpsAgent(url, { lookup = dnsLookup, signal }) {
+  if (url.protocol !== 'https:' || url.username || url.password || url.port) throw new Error('Expected a public HTTPS origin')
+  signal.throwIfAborted()
+  const answers = await resolvePublicTarget(url, lookup, signal, () => signal.reason)
+  signal.throwIfAborted()
+  return agentForPublicAnswers({ hostname: url.hostname, answers })
+}
+
 function normalizedContentType(value) {
   return String(value || '').split(';', 1)[0].trim().toLowerCase()
 }
@@ -339,9 +353,7 @@ export function createExternalImageLoader({
   maxCacheBytes = DEFAULT_CACHE_BYTES,
   maxCacheEntries = DEFAULT_CACHE_ENTRIES,
   cacheTtlMs = DEFAULT_CACHE_TTL_MS,
-  agentFactory = ({ hostname, answers }) => new Agent({
-    connect: { lookup: pinnedLookup(hostname, answers) },
-  }),
+  agentFactory = agentForPublicAnswers,
 } = {}) {
   const concurrencyLimit = Math.max(1, Math.floor(Number(maxConcurrency) || DEFAULT_MAX_CONCURRENCY))
   const byteLimit = Math.max(1, Math.floor(Number(maxBytes) || MAX_IMAGE_BYTES))

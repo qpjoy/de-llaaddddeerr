@@ -1024,6 +1024,9 @@
     "native.r.threads_scraper_profiles_batch"
   ],
   "ecommerce": [
+    "native.r.facebook_marketplace_search",
+    "native.r.pinduoduo_search_products",
+    "native.r.shein_search_products",
     "native.j.xianyu_search_v1",
     "native.t.kuaishou_ecommerce_shopping_top_list",
     "native.t.kuaishou_ecommerce_brand_top_list",

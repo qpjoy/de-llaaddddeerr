@@ -156,6 +156,9 @@ qp-tunnel-cli docker-build-proxy off
 # git pull
 git -c http.proxy=http://127.0.0.1:7788 -c https.proxy=http://127.0.0.1:7788 pull
 
+# git -c http.proxy=http://127.0.0.1:7788 -c https.proxy=http://127.0.0.1:7788 pull --ff-only origin pro
+git grep -nF '/internal/v1/mincave/workspace' -- server/src/modules/admin/admin.controller.ts
+
 # docker拿到代理
 systemctl show docker --property=Environment | tr ' ' '\n' | grep -i proxy
 

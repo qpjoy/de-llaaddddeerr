@@ -18,6 +18,7 @@ import { PUBLIC_OPINION_DATASET_ID } from './public-opinion.mjs'
 import { XIAOHONGSHU_CAPABILITIES } from '../../shared/product-catalog.mjs'
 import { CRAWLER_SOURCES, crawlerSourceSpecForKey } from '../ingest/crawler/source-contract.mjs'
 import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
+import { COLLECT, collectCapability } from '../../shared/collect-engines.mjs'
 
 // Read-only implementation inventory, not a dispatch registry or a grant.
 // Stable catalog keys survive operator renames; hints never create a route.
@@ -29,6 +30,11 @@ const SOCIAL_CATALOG = {
 }
 const catalogKey = platform => SOCIAL_CATALOG[platform] ? `source-catalog-${SOCIAL_CATALOG[platform]}` : null
 const CANONICAL_PATH = '/api/v1/data/canonical/search'
+const NATIVE_KEYWORD_SEARCH = new Set([
+  'wechat.search.search', 'wechat.search.search-videos', 'wechat.channels.search-channel-videos',
+  'j.api_d7013954da63d1ea', 'j.api_9458e09bf844496e', 'j.api_bff4a8168dc76c37', // Amazon, AliExpress, Shopee
+  'r.pinduoduo_search_products', 'r.shein_search_products', 'r.facebook_marketplace_search',
+])
 const PROVIDER_LABELS = { rapidapi: 'RapidAPI', tikhub: 'T 平台', justone: 'JustOne', 'night-all': 'Night-All', 'night-all-a': 'Night-All-A', qixin: '启信慧眼（启信宝）', ipsearch: 'ipsearch' }
 
 function route(id, fields) {
@@ -64,11 +70,24 @@ export function implementedRoutes(sources = []) {
   for (const endpoint of NATIVE_FORWARDING_ENDPOINTS) rows.push(route(`native-${endpoint.key}`, {
     platform: endpoint.platform, catalogKeys: providerCatalogKeys(endpoint.platform),
     provider: endpoint.provider, product: endpoint.key.startsWith('wechat.') ? (endpoint.platform === 'wechat_mp' ? '微信公众号' : endpoint.platformLabel) : endpoint.authorizationPlatform === 'ecommerce' ? '电商数据' : '社媒与内容数据', operation: endpoint.operation, path: endpoint.hubPath,
-    keywordSearch: ['wechat.search.search', 'wechat.search.search-videos', 'wechat.channels.search-channel-videos'].includes(endpoint.key),
+    keywordSearch: NATIVE_KEYWORD_SEARCH.has(endpoint.key),
     defaultRule: endpoint.key === 'j.facebook_post_search_v1' ? 'JustOne 原生 Facebook 搜索合同；按已有授权、审核价格和启停执行。Facebook raw/data 搜索另由 Hub 平台策略选路，旧游标须重新开始。'
       : endpoint.key.startsWith('wechat.') ? 'Hub 微信直连合同；逐接口审核价格、授权与启用；旧微信搜索不再转发，旧游标不可复用，无自动补查或重试。' : '固定单接口转发；默认禁用，逐接口审核价格、授权与启用。旧搜索接口和游标不切换，无自动补查或重试。',
     evidence: 'server/contracts/native-forwarding.mjs',
   }))
+  for (const [platform, catalogId, operation] of [
+    ['facebook_marketplace', '0124', 'collect.ecommerce.fbmarketplace.search'],
+    ['craigslist', '0127', 'collect.classifieds.craigslist.search'],
+    ['shopify', '0129', 'collect.ecommerce.shopify.search'],
+  ]) {
+    const capability = collectCapability(operation)
+    rows.push(route(operation, {
+      platform, catalogKeys: [`source-catalog-${catalogId}`], operation, product: '电商数据',
+      provider: capability.sync ? 'shopify' : 'apify', label: capability.sync ? 'Shopify Storefront' : 'Apify',
+      path: `${COLLECT.apiPrefix}/${capability.sync ? 'query' : 'jobs'}`, keywordSearch: true, procurementOperation: false,
+      defaultRule: capability.description, evidence: 'server/collect/catalog.mjs',
+    }))
+  }
   for (const endpoint of Object.values(XHS_DISCOVERY_ENDPOINTS)) rows.push(route(endpoint.key, {
     platform: 'xiaohongshu', catalogKeys: [catalogKey('xiaohongshu')], provider: endpoint.provider,
     product: endpoint.label, operation: endpoint.operation, path: endpoint.path, keywordSearch: endpoint.id === 'hot_notes',

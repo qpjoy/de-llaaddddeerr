@@ -35,6 +35,17 @@ test('inventory separates content, account, commerce and multi-source stored rou
   assert.equal(facebook.length, 4)
   assert.deepEqual([...new Set(facebook.map(row => row.sourceProviderLabel))].sort(), ['JustOne', 'RapidAPI'])
   assert.ok(facebook.every(row => row.catalogKeys.includes('source-catalog-0088')))
+  for (const [catalogId, operation, path] of [
+    ['0124', 'native.r.facebook_marketplace_search', 'native/r.facebook_marketplace_search'],
+    ['0124', 'collect.ecommerce.fbmarketplace.search', 'collect/jobs'],
+    ['0127', 'collect.classifieds.craigslist.search', 'collect/jobs'],
+    ['0129', 'collect.ecommerce.shopify.search', 'collect/query'],
+  ]) {
+    const row = snapshot.routes.find(item => item.operation === operation)
+    assert.deepEqual(row.catalogKeys, ['source-catalog-' + catalogId])
+    assert.equal(row.path, '/api/v1/data/' + path)
+    assert.equal(row.keywordSearch, true)
+  }
 })
 
 test('runtime inputs include new saved-record categories but never connection credentials or invented health', () => {

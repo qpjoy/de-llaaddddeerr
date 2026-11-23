@@ -275,14 +275,14 @@ export const COLLECT_CAPABILITIES = Object.freeze([
   }),
   Object.freeze({
     key: 'collect.ecommerce.fbmarketplace.search',
-    label: 'Facebook Marketplace · 城市商品列表',
-    description: '按指定城市的 Marketplace 搜索或分类链接采集公开商品列表，不含详情（交付包 124，Apify apify/facebook-marketplace-scraper）。',
+    label: 'Facebook Marketplace · 城市商品搜索',
+    description: '用关键词和 Marketplace 城市标识（如 sanfrancisco）搜索当地公开商品，也接受已有的 Marketplace 搜索或分类链接。',
     platform: 'ecommerce', kinds: Object.freeze(['apify']), stage: 'candidate',
   }),
   Object.freeze({
     key: 'collect.classifieds.craigslist.search',
     label: 'Craigslist · 分类信息搜索',
-    description: '按地区子站的搜索链接采集分类信息帖子，可按发布天数过滤（交付包 127，Apify ivanvs/craigslist-scraper-pay-per-result）。',
+    description: '按地区子站代码和关键词搜索在售商品（如 seattle 与 keyboard），或提供地区子站搜索链接采集分类信息。支持限制发布天数和结果条数。',
     platform: 'classifieds', kinds: Object.freeze(['apify']), stage: 'candidate',
   }),
   Object.freeze({
@@ -290,6 +290,12 @@ export const COLLECT_CAPABILITIES = Object.freeze([
     label: 'Shopify 独立站 · 公开商品目录',
     description: '按店铺域名采集 Shopify 独立站的公开商品目录，不含库存明细（交付包 129，Apify trovevault/shopify-products-scraper）。',
     platform: 'ecommerce', kinds: Object.freeze(['apify']), stage: 'candidate',
+  }),
+  Object.freeze({
+    key: 'collect.ecommerce.shopify.search',
+    label: 'Shopify 独立站 · 店内商品关键词搜索',
+    description: '通过 Shopify Storefront API 在指定公开店铺内按关键词搜索商品。支持自定义店铺域名、myshopify.com 域名和游标翻页。',
+    platform: 'ecommerce', kinds: Object.freeze(['native']), stage: 'candidate', sync: true,
   }),
   Object.freeze({
     key: 'collect.web.builtwith.technologies',

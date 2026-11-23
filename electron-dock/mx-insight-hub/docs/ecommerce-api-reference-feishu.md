@@ -2,7 +2,7 @@
 
 本文面向 MX-H2I、Luopan、DataPort 及其他业务应用，说明 MX Insight Hub 当前电商数据接口的调用方式、参数、返回结构和平台覆盖范围。调用方只需要 Hub Public API Key；供应商地址、供应商密钥、代理和路由策略由 Hub 管理。
 
-当前统一商品搜索支持淘宝、天猫、京东、闲鱼、小红书电商和抖音电商。快手电商、TikTok Shop、Amazon、AliExpress、Shopee 等平台提供平台原生接口或候选异步采集，但不能把原生接口当成统一商品结构。拼多多和饿了么目前没有在 Hub 电商目录中登记可用的商品接口。
+当前统一商品搜索支持淘宝、天猫、京东、闲鱼、小红书电商和抖音电商。其余平台按各自接口调用。第 9 节列出 21 个平台的入口、请求和验证结果，包括按城市搜索 Facebook Marketplace、按地区搜索 Craigslist 和按店铺搜索 Shopify。
 
 > 当前文档对应 Hub 工作树中的最新接口注册表。通用 Apify 采集能力目前是 candidate、未部署或未自动授权的异步能力；是否可调用仍以线上 Hub 的能力检查、Key 授权、路由配置和凭据状态为准。
 
@@ -74,6 +74,7 @@ curl -sS "$HUB_URL/docs/openapi.json" \
 | 平台原生转发 | `POST /api/v1/data/native/{endpointKey}` | 同步、`live_only` | 见第 4 节完整目录 |
 | 异步采集能力 | `GET /api/v1/data/collect/capabilities` | 同步 GET | candidate 能力和引擎 readiness |
 | 提交异步任务 | `POST /api/v1/data/collect/jobs` | `202` + 轮询 | Apify/runner 能力 |
+| Shopify 店内商品搜索 | `POST /api/v1/data/collect/query` | 同步完成返回 `200`，排队返回 `202` | 支持免令牌 Storefront 搜索的公开店铺 |
 | 批量异步任务 | `POST /api/v1/data/collect/batches` | `202` + 轮询 | 最多 100 个 item |
 | Night-All 历史兼容 | `POST /api/v1/night-all/search/{operation}` | 保留旧合同 | 逐步迁移中的历史接口 |
 
@@ -102,7 +103,7 @@ Idempotency-Key: <8–128 字符>
 | `marketplace` | string | 是 | `taobao`、`tmall`、`jd`、`xiaohongshu_ec`、`xianyu`、`douyin_ec`。 |
 | `query` | string | 是 | trim 后 1–200 字符。 |
 | `deliveryMode` | string | 否 | `cache_only`、`cache_first`、`refresh`、`live_only`；默认 `cache_first`。 |
-| `page` | integer | 否 | `1..1000`，不能和 `cursor` 同时使用。 |
+| `page` | integer | 否 | `1..1000`，与 `cursor` 互斥。小红书电商从第二页起使用游标。抖音电商仅交付精选联盟首页。 |
 | `cursor` | string | 否 | 上一页返回的 opaque `data.page.nextCursor`。不能解码或修改。 |
 | `sort` | string | 否 | 淘宝/天猫：`relevance`、`sales_desc`、`price_asc`、`price_desc`；闲鱼：`relevance`、`recent`、`seller_credit`、`price_asc`、`price_desc`、`price_drop`、`newest`。京东、小红书电商、抖音电商不接受该字段。 |
 | `price` | object | 否 | 只适用于淘宝/天猫；字段为 `min`、`max`，必须是 decimal string。 |
@@ -299,7 +300,7 @@ Hub 内部再按固定注册表转发到供应商的 method/path。调用方只�
 ~~~json
 {
   "contractVersion": "mx-insight-hub.native-forwarding.v1",
-  "endpoint": "native.t.xxxxx",
+  "endpoint": "t.xxxxx",
   "data": "保留该原生接口业务结构",
   "meta": {
     "capturedAt": "2026-11-09T00:00:00.000Z"
@@ -415,7 +416,9 @@ curl -sS -X POST \
 | 亚马逊 | 商品热门评论 | `j.api_b1529e459fa5c40a` | `/api/v1/data/native/j.api_b1529e459fa5c40a` | GET `/api/amazon/get-product-top-reviews/v1` | asin（必填）<br>country，默认 "US" | 原生商品或榜单列表，字段随上游合同返回 |
 | 亚马逊 | 热销商品 | `j.api_41bde27821df8f7f` | `/api/v1/data/native/j.api_41bde27821df8f7f` | GET `/api/amazon/get-best-sellers/v1` | category（必填）<br>country，默认 "US"<br>page，默认 1 | 原生商品或榜单列表，字段随上游合同返回 |
 | 亚马逊 | 按类别获取商品 | `j.api_95a329c79c736288` | `/api/v1/data/native/j.api_95a329c79c736288` | GET `/api/amazon/get-category-products/v1` | categoryId（必填）<br>country，默认 "US"<br>sortBy，默认 "RELEVANCE"<br>page，默认 1 | 原生商品或榜单列表，字段随上游合同返回 |
-
+| 拼多多 | 商品关键词搜索 | `r.pinduoduo_search_products` | `/api/v1/data/native/r.pinduoduo_search_products` | GET `/pinduoduo/search` | keyword（必填），page（默认 1） | `data.data.items[]`，含 goods_id、goods_name |
+| SHEIN 美国站 | 商品关键词搜索（待开通订阅） | `r.shein_search_products` | `/api/v1/data/native/r.shein_search_products` | GET `/search/products` | query（必填），country（US），page，limit | 发布者示例的商品位于 `data.data.products[]`，成功载荷待实测 |
+| Facebook Marketplace | 按中心坐标搜索（初始暂停） | `r.facebook_marketplace_search` | `/api/v1/data/native/r.facebook_marketplace_search` | GET `/marketplace/search` | query、lat、lng 必填，cursor 可选 | `data.results[]`。两次实测均为空页并带有字符串游标。 |
 
 ### 4.3 原生接口 curl 示例
 
@@ -524,7 +527,8 @@ curl -sS "$HUB_URL/api/v1/data/collect/capabilities" \
 | `collect.ecommerce.shein.listing` | Shein | `url`、`maxItems` | 只接受 `www.shein.com` 分类或精选页 URL；`maxItems` 1–200，默认 20。 |
 | `collect.ecommerce.flipkart.search` | Flipkart | `keyword` 或 `url`、`sort`、`maxItems` | keyword 和 url 二选一；`sort` 为 `relevance`、`popularity`、`price_asc`、`price_desc`、`newest`；`maxItems` 1–200，默认 20。 |
 | `collect.ecommerce.mercadolibre.search` | Mercado Libre | `country`、`keyword`、`maxItems` | `country` 必填；支持 9 个国家；`maxItems` 1–200，默认 50。 |
-| `collect.ecommerce.fbmarketplace.search` | Facebook Marketplace | `urls`、`maxItems` | 只接受 `facebook.com/marketplace/` URL，1–5 个；`maxItems` 1–200，默认 20。 |
+| `collect.ecommerce.fbmarketplace.search` | Facebook Marketplace | `city` + `keyword`，或 `urls`；可传 `maxItems` | `city` 填 Marketplace 城市标识，例如 `sanfrancisco`，也支持数字位置 ID。链接模式接受 1–5 个 Marketplace URL。`maxItems` 1–200，默认 20。 |
+| `collect.classifieds.craigslist.search` | Craigslist | `region` + `keyword`，或 `urls`；可传 `maxAgeDays`、`maxItems` | `region` 填地区站子域名，例如 `seattle`。关键词模式搜索该站的出售商品（`sss`）。链接模式接受 1–5 个地区站搜索 URL。`maxAgeDays` 1–30，默认 7。`maxItems` 1–200，默认 50。 |
 | `collect.ecommerce.shopify.catalog` | Shopify 独立站 | `domains`、`maxItems` | 1–5 个域名；`maxItems` 1–500，默认 50；不含库存明细。 |
 
 ### 5.3 `POST /api/v1/data/collect/jobs`
@@ -566,7 +570,8 @@ JOB_ID=$(echo "$JOB_RESPONSE" | jq -r '.data.jobId')
 | `status` | `queued`、`running`、`succeeded`、`failed`、`unknown`、`cancelled` 或 `expired`。 |
 | `links.self` | 任务状态 URL。 |
 | `links.result` | 任务结果 URL。 |
-| `retryAfterSeconds` | 建议下一次轮询等待秒数。 |
+
+建议轮询间隔取 HTTP 响应头 `Retry-After`。返回 `202` 时可保存 `data.jobId`，在任务成功后按 `data.links.result` 取商品结果。
 
 ### 5.4 查询、取结果和取消
 
@@ -584,28 +589,19 @@ curl -sS "$HUB_URL/api/v1/data/collect/jobs/$JOB_ID/result" \
   -H "Authorization: Bearer $HUB_KEY" | jq
 ~~~
 
-任务完成后的结果结构：
+`GET /api/v1/data/collect/jobs/{jobId}/result` 的成功响应节选如下。
 
 ~~~json
 {
   "data": {
-    "job": {
-      "jobId": "任务 UUID",
-      "capability": "collect.ecommerce.temu.search",
-      "status": "succeeded",
-      "dataStatus": "success"
-    },
-    "result": {
-      "dataStatus": "success",
-      "evidence": {
-        "bytes": 12345,
-        "sha256": "结果哈希",
-        "itemCount": 10
-      },
-      "payload": {
-        "status": "success",
-        "items": ["采集器原始商品记录"]
-      }
+    "jobId": "任务 UUID",
+    "capability": "collect.ecommerce.temu.search",
+    "status": "succeeded",
+    "dataStatus": "success",
+    "evidence": { "itemCount": 10 },
+    "payload": {
+      "provider": "apify",
+      "items": ["采集器原始商品记录"]
     }
   },
   "requestId": "Hub 请求 UUID"
@@ -765,11 +761,35 @@ GET  /internal/v1/admin/collect/jobs/{id}
 5. 不在调用方保存或转发供应商密钥，不通过 MX-H2I Internal 路径代理 Hub 公共数据接口。
 6. Hub 电商接口位于数据平面；MX-H2I 的登录、Internal AppCenter、WireGuard、DNS/PAC 和用户联网链路保持独立。
 
-## 9. 当前实现状态
+## 9. 商品关键词搜索核对（2026-11-23）
 
-- 统一搜索：淘宝、天猫、京东、闲鱼、小红书电商、抖音电商。
-- 原生转发：快手电商、TikTok Shop、淘宝/天猫、京东、闲鱼、小红书电商、抖音电商、1688、AliExpress、Shopee、Amazon 等固定注册接口。
-- 异步采集：Temu、Amazon、eBay、AliExpress、Etsy、Shopee、Shein、Flipkart、Mercado Libre、Facebook Marketplace、Shopify 等 candidate 能力。
-- 拼多多和饿了么：当前 Hub 电商目录中没有对应商品适配器。
-- Apify/通用采集：当前代码和文档显示为本地未提交、未部署或未自动授权状态；线上环境必须重新检查。
-- 本接口文档不会改变 MX-H2I 用户登录和联网功能，也不要求 Launcher 改动认证或网络路径。
+| 平台 | Hub 入口与请求 | 验证结果 |
+| --- | --- | --- |
+| 淘宝、天猫、京东、小红书电商、闲鱼、抖音电商 | 统一搜索见第 3 节。分别传 `taobao`、`tmall`、`jd`、`xiaohongshu_ec`、`xianyu`、`douyin_ec` | 已有统一商品合同。抖音仅精选联盟首页。 |
+| 拼多多 | `POST /api/v1/data/native/r.pinduoduo_search_products`，`{"params":{"keyword":"茶杯","page":1}}` | 新增。RapidAPI 返回 HTTP 200、业务码 0，9 件商品均有 ID、标题和商品链接。取 `data.data.items[]`。首页页容量为 10，响应没有总数或末页标记。价格保留上游数值，单位待核。 |
+| Amazon | `POST /api/v1/data/native/j.api_d7013954da63d1ea`，`{"params":{"keyword":"wireless earbuds","country":"US","page":1}}` | JustOne 实返 16 件。首件 ASIN 为 `B0FQFB8FMG`，标题为 Apple AirPods Pro 3 无线耳机，标价 USD 149.00。取 `data.products[]`。 |
+| AliExpress | `POST /api/v1/data/native/j.api_9458e09bf844496e`，`{"params":{"q":"wireless earbuds","page":"1","region":"US","currency":"USD","locale":"en_US"}}` | JustOne 实返 20 件，首件为无线睡眠耳塞。取 `data.result.resultList[].item`。此接口的 `page` 是字符串。 |
+| Shopee | `POST /api/v1/data/native/j.api_bff4a8168dc76c37`，`{"params":{"site":"TW","keyword":"coffee"}}` | 已登记；官方 SDK 台湾站成功样本在 `data.cards[]` 中有 20 条。见[发布者样本](https://github.com/justoneapi-official/justoneapi-python/blob/main/docs/api-examples/getApiShopeeSearchItemListV1.json)。 |
+| SHEIN | `POST /api/v1/data/native/r.shein_search_products`，`{"params":{"query":"summer dress","country":"US","limit":1}}` | 本地实现已校验发布者示例。RapidAPI 网关返回 403、提示当前 Key 未订阅。迁移初始暂停，启用前需开通对应订阅并核对一页商品。见[接口文档](https://rapidapi.com/belchiorarkad-FqvHs2EDOtP/api/shein-data-api/playground/apiendpoint_a11fb5ba-a228-438c-b58a-8f976638bd4c)。 |
+| eBay、Temu、Etsy、Mercado Libre、Flipkart | `POST /api/v1/data/collect/jobs`，各自的 `capability` 和 `input` 见第 5 节 | 已有 Apify 异步候选。调用前以当前 Key 的 `granted` 和引擎 `ready` 为准。Temu 现有 JustOne 同步 V1 已标记废弃。见[供应商目录](https://docs.justoneapi.com/en/api/temu/keyword-product-search-v1)。 |
+| 快手小店 | 无已接入的商品关键词接口 | TikHub 的两个现有电商入口分别返回购物榜和品牌榜，仅支持子分类参数。另有西瓜猪联盟商品搜索，需接入独立签名凭据。见[联盟接口](https://s.apifox.cn/ccf0c9d4-09ac-4792-95a5-ab53ad908804/461771773e0)。 |
+| 饿了么 | 无已接入的商品关键词接口 | 官方混合搜索要求位置和关键词，接入还需合作应用签名凭据。见[饿了么接口文档](https://openapi-doc.faas.ele.me/v2/api/search.html)。 |
+
+前 18 个平台的核验有 4 次请求到达上游。Amazon、AliExpress、拼多多返回商品，SHEIN 在订阅检查时被拒。测试使用供应商凭据，未取得生产 Hub 的调用回执或账单。两条新增路由随 Hub 迁移 195 发布，使用 `ecommerce` 数据域及各自的 `native.r.*` 操作授权。首次上线日期以生产发布记录为准。
+
+### 9.1 第 19–21 行的请求和响应示例
+
+下表的请求体可直接用于对应的 POST 路径。请求头使用 Hub Key、`Content-Type: application/json` 和 `Idempotency-Key`。同一页重试时复用原幂等键，翻页使用新键。响应为 JSON 字段节选。
+
+| 平台和方式 | API 接口 | API 请求示例 | 响应示例 |
+| --- | --- | --- | --- |
+| Facebook Marketplace · 经纬度 | `/api/v1/data/native/r.facebook_marketplace_search` | `{"params":{"query":"guitar","lat":40.7128,"lng":-74.006}}` | `{"data":{"results":[]}}`。两次实测空页均带 `data.cursor`，此处省略游标。 |
+| Facebook Marketplace · 城市 | `/api/v1/data/collect/jobs` | `{"capability":"collect.ecommerce.fbmarketplace.search","input":{"city":"sanfrancisco","keyword":"guitar","maxItems":1}}` | 提交返回 `202` 和 `data.links.result`。取结果后为 `{"data":{"status":"succeeded","payload":{"items":[{"id":"1189200412268517","marketplace_listing_title":"Ashthorpe Full-Size Dreadnought Acoustic-Electric Guitar","listing_price":{"formatted_amount":"$65"}}]}}}`。发布者样本在本地 Hub 回放。 |
+| Craigslist · 地区站在售商品 | `/api/v1/data/collect/jobs` | `{"capability":"collect.classifieds.craigslist.search","input":{"region":"newyork","keyword":"bicycle","maxItems":1}}` | 提交返回 `202` 和 `data.links.result`。取结果后为 `{"data":{"status":"succeeded","payload":{"items":[{"id":"7528462760","title":"21 Speed CANNONDALE QUICK 6 Road Bicycle 18 inch frame","price":"$300"}]}}}`。发布者历史样本在本地 Hub 回放。 |
+| Shopify 独立站 · 店内搜索 | `/api/v1/data/collect/query` | `{"capability":"collect.ecommerce.shopify.search","input":{"domain":"www.deathwishcoffee.com","keyword":"coffee","maxItems":1}}` | `{"data":{"job":{"status":"succeeded"},"result":{"dataStatus":"success","payload":{"items":[{"title":"Dark Roast Coffee","priceRange":{"minVariantPrice":{"amount":"19.99","currencyCode":"USD"}}}],"pageInfo":{"hasNextPage":true}}}}}`。真实店铺经本地 Hub 返回 HTTP 200。 |
+
+Facebook Marketplace 同步入口需要 `ecommerce` 和 `native.r.facebook_marketplace_search` 授权。纽约坐标的 `guitar`、`iphone` 两次请求都返回 HTTP 200 和空列表。迁移 197 将操作登记为暂停，待获得有商品的实测页后再启用。[实测记录](operations/evidence/facebook-marketplace-search-2026-11-23.json)
+
+两条城市或地区异步入口分别需要对应 `collect.*` 授权、已启用的引擎路由和 Apify 凭据。保存提交响应的 `data.links.self` 查询进度，成功后 GET `data.links.result`，读取 `data.payload.items[]`。本次用发布者样本验证了本地 HTTP 提交、幂等重放和取结果，未运行线上 Actor。Craigslist 的 RapidAPI 备选返回 HTTP 403，当前账号未订阅。[Facebook Marketplace 样本](https://apify.com/apify/facebook-marketplace-scraper) · [Craigslist 在售商品样本](https://apify.com/ivanvs/craigslist-scraper-pay-per-result#data-output-example---for-sale)
+
+Shopify 每次只搜索一个店铺，`domain` 填完整主机名，`maxItems` 为 1–50，默认 20。下一页保持店铺和关键词，将 `data.result.payload.pageInfo.endCursor` 原样传入 `input.after`。公开店铺验证中，第二页返回 Medium Roast Coffee，无匹配查询返回 `dataStatus: "no_data"`。若返回 HTTP 202，按异步结果路径取回商品。迁移 196 为既有标准原生引擎补充路由，调用方需获 `collect.ecommerce.shopify.search` 授权。[本地 Hub 实测三页响应](operations/evidence/shopify-storefront-search-2026-11-23.json) · [Shopify Storefront 搜索](https://shopify.dev/docs/api/storefront/latest/queries/search)

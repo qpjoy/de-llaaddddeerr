@@ -40,13 +40,18 @@ export const nativeForwardingPaths = Object.fromEntries(NATIVE_FORWARDING_ENDPOI
 // Observed business paths are examples for each fixed interface, not a
 // promise that native payloads share the unified product-search schema.
 const ECOMMERCE_SAMPLE_GUIDES = {
+  'r.pinduoduo_search_products': '<p>商品在 <code>data.data.items[]</code>，ID 和标题字段为 <code>goods_id</code> 和 <code>goods_name</code>。2026-11-23 搜索「茶杯」首页返回 9 件，<code>pagination.page_size</code> 为 10。总数、末页状态和价格单位均未得到确认。</p>',
+  'r.shein_search_products': '<p>美国站原生关键词搜索，使用 <code>params.query</code>。发布者示例的商品在 <code>data.data.products[]</code>。2026-11-23 验证时上游返回未订阅，操作初始暂停。</p>',
+  'r.facebook_marketplace_search': '<p>提交商品关键词 <code>query</code> 和搜索中心经纬度 <code>lat</code>、<code>lng</code>。2026-11-23 在纽约分别搜索 guitar 和 iphone，上游均返回 HTTP 200，<code>data.results</code> 为空数组，<code>data.cursor</code> 有值。商品字段及续页内容待实测。按需用 <code>params.cursor</code> 提交续页。</p>',
+  'j.api_d7013954da63d1ea': '<p>关键词填入 <code>params.keyword</code>。美国站实测页在 <code>data.products[]</code> 返回 ASIN、标题、标价和币种。</p>',
+  'j.api_9458e09bf844496e': '<p>关键词填入 <code>params.q</code>，页码用字符串。实测页的商品在 <code>data.result.resultList[].item</code>，使用 <code>itemId</code> 识别商品。</p>',
   't.kuaishou_ecommerce_shopping_top_list': '<p>快手购物榜单，保留原生榜单业务对象，不映射为统一商品搜索。subTabId/subTabName 选择榜单子分类，不是页码或游标；官方合同没有 page/count/pcursor。一次只读取所选榜单，不根据条数猜测下一页或总商品数。</p>',
   't.kuaishou_ecommerce_brand_top_list': '<p>快手品牌榜单，保留原生品牌及榜单字段，不把品牌条目当成商品。subTabId/subTabName 选择榜单子分类，不是页码或游标；官方合同没有 page/count/pcursor，不自动翻页。</p>',
   't.xiaohongshu_ec_search_products': '<p>小红书电商商品关键词搜索（独立于统一商品搜索的另一供应商合同）。第一页只传 keyword；后续页将 page 加一并沿用首页返回的 search_id。保留原生 data，不映射为统一 items/page，未做付费样本校准前不要依赖字段路径。</p>',
   't.tiktok_shop_search_products': '<p>TikTok Shop 商品搜索。翻页使用上一页返回的 offset/page_token，region 选择站点；保留原生 data，不映射为统一商品列表。</p>',
   't.tiktok_shop_search_products_v2': '<p>TikTok Shop 商品搜索 V2（移动端，仅美国站）。翻页使用上一页返回的 offset/page_token；保留原生 data。</p>',
   'j.api_94b5e5c2efa737db': '<p>2026-10-12 校准形态：列表为 <code>data.itemsArray</code>，含非商品推荐卡片。商品链接为 <code>auctionURL</code>，部分以 <code>//</code> 开头，网页使用时补 <code>https:</code>。本版本只接受 keyword/page，不提供统一搜索中的排序、价格或天猫筛选参数。</p>',
-  'j.api_f6ea6dfd00969e8f': '<p>2026-10-12 校准形态：列表为 <code>data.promotions</code>；商品 ID 为 <code>product_id</code>，标题与网页链接为 <code>base_info.title/detail_url</code>，不要使用 promotion_id 替代商品 ID。ID 按字符串处理。样本价格为 null。后续页将 <code>data.extra.search_id</code> 传入 params.searchId，按 has_more 停止。</p>',
+  'j.api_f6ea6dfd00969e8f': '<p>精选联盟商品在 <code>data.promotions</code>，保留字符串 <code>product_id</code>。标题和链接取自 <code>base_info.title/detail_url</code>。商品与推广 ID 同时匹配时，<code>data.summary_promotions</code> 可提供到手价、店铺及月销。2026-11-06 实测第 2 页为计费空页，统一商品搜索仅交付首页。</p>',
   'j.api_615b215c08c1d291': '<p>2026-10-12 校准形态：商品卡为 <code>data.data.module.data</code> 中的 cosmos_search_goods_card，商品字段位于 content，content.link 可能仅为 xhsdiscover App 链接。网页链接缺失不表示采集失败。第一页省略 searchId；后续页沿用首页 <code>data.search_id</code>，页码放入 params.page。统一字段及不透明游标请使用统一商品搜索。</p>',
 }
 

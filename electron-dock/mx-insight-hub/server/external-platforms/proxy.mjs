@@ -6,6 +6,8 @@ import { resolveProviderProxyRoute } from '../agent/control-store.mjs'
 import { relayRequestUrl } from './egress-relay.mjs'
 import { RAPIDAPI_PRODUCT_SEARCH_HOSTS } from '../contracts/justone.mjs'
 import { THREADS_RAPIDAPI_HOST, THREADS_SCRAPER_RAPIDAPI_HOST } from '../contracts/threads-rapidapi-endpoints.mjs'
+import { SHEIN_RAPIDAPI_SEARCH_ENDPOINT } from '../contracts/shein-rapidapi-endpoint.mjs'
+import { PINDUODUO_RAPIDAPI_SEARCH_ENDPOINT } from '../contracts/pinduoduo-rapidapi-endpoint.mjs'
 
 // Probe policy defaults. A probe only has to prove that the egress reaches the
 // target origin, so its deadline must accommodate a healthy but high-latency
@@ -32,6 +34,8 @@ const RAPIDAPI_LISTING_ORIGINS = Object.freeze([...new Set([
   'https://facebook-scraper3.p.rapidapi.com',
   `https://${THREADS_RAPIDAPI_HOST}`,
   `https://${THREADS_SCRAPER_RAPIDAPI_HOST}`,
+  `https://${SHEIN_RAPIDAPI_SEARCH_ENDPOINT.host}`,
+  `https://${PINDUODUO_RAPIDAPI_SEARCH_ENDPOINT.host}`,
   ...Object.values(RAPIDAPI_PRODUCT_SEARCH_HOSTS).map(host => `https://${host}`),
 ])])
 

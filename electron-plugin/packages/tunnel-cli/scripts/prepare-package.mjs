@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -58,4 +58,31 @@ for (const resource of resources) {
   chmodSync(resource.target, resource.mode ?? 0o755);
 
   console.log(`Copied ${resource.source} -> ${resource.target}`);
+}
+
+// Edge stacks run some repository files unchanged (STACK_VENDOR in each
+// resources/edge/stacks/<name>/stack.env). The npm package carries copies under
+// resources/edge/vendor/<repository path>; a source checkout reads the
+// repository directly. The copies are not committed (.gitignore).
+const stacksDir = resolve(packageRoot, 'resources/edge/stacks');
+for (const stack of existsSync(stacksDir) ? readdirSync(stacksDir) : []) {
+  const manifest = resolve(stacksDir, stack, 'stack.env');
+  if (!existsSync(manifest)) continue;
+  const line = readFileSync(manifest, 'utf8').split('\n').find((entry) => entry.startsWith('STACK_VENDOR='));
+  const files = line ? line.slice('STACK_VENDOR='.length).replace(/^"|"$/g, '').split(/\s+/).filter(Boolean) : [];
+  for (const file of files) {
+    const source = resolve(repoRoot, file);
+    const target = resolve(packageRoot, 'resources/edge/vendor', file);
+    if (!existsSync(source)) {
+      if (existsSync(target)) {
+        console.log(`Using existing vendored ${file} for stack ${stack}`);
+        continue;
+      }
+      throw new Error(`Cannot package @qpjoy/tunnel-cli; stack ${stack} needs ${source}`);
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(source, target);
+    chmodSync(target, statSync(source).mode & 0o777);
+    console.log(`Vendored ${file} for stack ${stack}`);
+  }
 }

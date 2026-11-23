@@ -1,0 +1,41 @@
+{
+  "observedAt": "2026-11-23T14:48:29.196Z",
+  "provider": "rapidapi",
+  "sourceUrl": "https://rapidapi.com/krasnoludkolo/api/facebook-scraper3/playground/apiendpoint_7c4176f7-5b4f-4a1e-8961-b018316fb986",
+  "supplierRequest": {
+    "method": "GET",
+    "host": "facebook-scraper3.p.rapidapi.com",
+    "path": "/marketplace/search",
+    "query": { "query": "guitar", "lat": 40.7128, "lng": -74.006 },
+    "dispatches": 1,
+    "retries": 0
+  },
+  "response": {
+    "httpStatus": 200,
+    "bodySha256": "4e8798046382adfd97f7ebe52dd9152b3dd0c22a5810df469e7d9ee241d198ee",
+    "keys": ["results", "cursor"],
+    "results": [],
+    "cursorType": "string",
+    "cursorLength": 1404
+  },
+  "additionalKeywordCheck": {
+    "observedAt": "2026-11-23T14:50:19.908Z",
+    "query": { "query": "iphone", "lat": 40.7128, "lng": -74.006 },
+    "dispatches": 1,
+    "retries": 0,
+    "httpStatus": 200,
+    "bodySha256": "3467e5cb219b6c1b7fe742f549b38abd63249d3c289c357360a128ce42a8dc2b",
+    "keys": ["results", "cursor"],
+    "results": [],
+    "cursorType": "string",
+    "cursorLength": 1348
+  },
+  "offlineAdapterReplay": {
+    "responsesCompared": 2,
+    "matchingNativePayloads": 2
+  },
+  "limits": [
+    "两次查询均返回空页，商品字段、搜索相关性与后续页待核实。",
+    "两个关键词各查一次上游，生产 Hub 服务状态与实际账单扣费待核实。"
+  ]
+}

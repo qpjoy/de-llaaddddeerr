@@ -209,6 +209,258 @@ updated profile and run `wg enroll --force`. See
 [wireguard.setup.md](wireguard.setup.md) for the full command sequence and
 multi-instance example.
 
+## Edge Hosts: Reach and Deploy over SSH (`edge`)
+
+`qp-tunnel-cli edge` runs on an Internal machine and reaches edge hosts
+(Domestic relays, jump hosts, bastions) over plain SSH. Edge hosts have a public
+address, so Internal pushes to them directly and they never need Kubernetes.
+The deploy model is the v1 Launcher site-slot push cut down to its core.
+
+Saved hosts live in `~/.config/qp-tunnel/edge-hosts.json` (mode 0600,
+`QP_EDGE_HOSTS_FILE` overrides it). Entries hold key paths, never passwords.
+A host behind a bastion names it with `--jump`; the bastion can have its own key
+and its own jump host.
+
+```bash
+qp-tunnel-cli edge add bastion --host 198.51.100.5 --user jump --key ~/.ssh/bastion
+qp-tunnel-cli edge add domestic-1 --host 203.0.113.10 --key ~/.ssh/domestic --jump bastion --role domestic
+qp-tunnel-cli edge import --launcher-url http://10.88.88.88:18090   # copy the Launcher's site-slot SSH profiles (one GET)
+qp-tunnel-cli edge hosts
+qp-tunnel-cli edge ssh                     # no name in a terminal: pick from the saved list
+qp-tunnel-cli edge ssh domestic-1 -- 'wg show && docker ps'
+qp-tunnel-cli edge check --role domestic   # read-only: cpu split, top processes, Mbps, listeners, wireguard, docker, releases
+```
+
+`import` records the Launcher's key path as `launcherIdentityFile` only; the key
+itself stays in the Launcher's volume. Point the entry at a key this machine can
+read with `edge add <name> --key ...`.
+
+A new host that only takes a password: `qp-tunnel-cli edge key install <name>`
+logs in once with it, the way the v1 Launcher's Bootstrap Key does. You type the
+password into ssh's own prompt, so the CLI never sees or keeps it. That login
+appends this origin's public key (`<edge home>/ssh/id_ed25519`, made on first use
+with `ssh-keygen`) to `~/.ssh/authorized_keys` there, removes group/other write
+from the remote home directory when set (sshd refuses keys otherwise), saves the
+key for the host and checks a key login. `qp-tunnel-cli edge key` shows the key
+and which hosts use it. If the host refuses password logins for that user (cloud
+images often set `PermitRootLogin prohibit-password`), the CLI prints the public
+key to add through the cloud console.
+
+### Stacks
+
+A stack is a ready-made bundle for one technology, under
+`resources/edge/stacks/<name>` (see `resources/edge/README.md` for the contract):
+
+| Stack | Back-haul to Internal | Public side | Pick it when |
+|---|---|---|---|
+| `wg-nginx` | WireGuard relay made by `edge link init` | nginx 80/443 (optional: tunnel first) | throughput and low CPU matter; not on CentOS/RHEL 7 (no WireGuard module) |
+| `open-nginx` | OpenVPN server instance (`open`) | nginx 80/443 | TCP or TLS-wrapped transport, kernels without WireGuard |
+| `hy2-mihomo` | none, it is the proxy | Hysteria2 UDP + subscription site | serving subscriptions; runs `docker/hysteria2-mihomo-stack` unchanged |
+
+Secrets, certificates and real domain names never travel inside a bundle. They
+live in a per-host state directory on the pushing machine and land in
+`/opt/mx/state/<component>/` (files 0600). By default that directory is
+`<edge home>/state/<host>/<component>` (see below); `--state-dir <dir>` points
+anywhere else. Keep state out of Git; the CLI warns when a state directory is
+inside an unignored work tree.
+
+```bash
+qp-tunnel-cli edge stacks
+qp-tunnel-cli edge link init domestic-2   # wg-nginx: tunnel keys and both configs (asks; default 100.127.202.0/24)
+qp-tunnel-cli edge state init domestic-2 --stack wg-nginx   # writes edge.env and an example site to fill in
+qp-tunnel-cli edge push domestic-2 --stack wg-nginx --dry-run
+qp-tunnel-cli edge push domestic-2 --stack wg-nginx --yes
+qp-tunnel-cli edge push oversea-1 --stack hy2-mihomo \
+  --image tobyxdd/hysteria:v2.14.0 --image caddy:2.11.9-alpine --yes   # ship images to hosts that cannot pull
+qp-tunnel-cli edge stacks wg-nginx --init ./elsewhere          # or keep a state directory anywhere, then --state-dir
+```
+
+`hy2-mihomo` pins its images (`tobyxdd/hysteria:v2.14.0`, `caddy:2.11.9-alpine`)
+with a `docker-compose.override.yml` it writes next to the stack's compose file;
+compose reads it on its own, so hand-run `manage.sh` commands keep the same
+versions. The repository's compose file is not changed.
+
+### Tunnel from Internal to an edge host (`edge link`)
+
+`wg-nginx` reaches Internal over a WireGuard link with the same shape as the
+Launcher's Domestic relay and service peer (`mx-domestic` 10.88.0.1/16 on
+Domestic, `mx-internal-svc` 10.88.88.88/32 on Internal): the edge host has the
+public address and listens; the Internal machine dials out with
+`PersistentKeepalive = 25`, so it needs no public ingress. Both sides use
+`Table = off` with explicit routes for the link subnet only (plus a /32 for the
+relay address, so a mihomo/Clash TUN cannot shadow it) and no `DNS` line: the
+Internal machine's default route and resolver are untouched. Do not use
+`qp-tunnel-cli wg enroll` for this; that is a full-tunnel VPN client.
+
+The whole way, one question at a time, with a default for each answer
+(origin name, host, SSH user and key, stack, subnet, addresses, port,
+interface names):
+
+```bash
+qp-tunnel-cli edge setup
+```
+
+For a new host it asks how you log in now: with the password (once, as
+`edge key install` above) or with a key file; and when a saved host refuses the
+key, it offers the password login before going on. It checks the tools this machine needs and installs missing ones after asking
+(`ssh`, `tar`; for the tunnel `wg`/`wg-quick`, `ip`, `ping`: `wireguard-tools`,
+`iproute2`, `iputils-ping` with apt-get, the same with dnf/yum, plus
+`epel-release` first on EL), creates the edge home with sudo when needed, looks
+at the host read-only and stops if another tool deployed components there,
+then makes the link, pushes, brings this side up and checks both ends. Ctrl-C
+stops it; a second run reuses the saved host and link. The same steps one by
+one:
+
+```bash
+# on the Internal machine (here internal02, an origin)
+qp-tunnel-cli edge link init domestic02                       # asks; or --subnet 100.127.202.0/24 --ip 100.127.202.89
+qp-tunnel-cli edge push domestic02 --stack wg-nginx --yes     # relay side; nginx sites optional
+qp-tunnel-cli edge link up domestic02                         # installs wireguard-tools if missing (asks; --yes), sudo
+qp-tunnel-cli edge link check domestic02                      # both ends: unit, handshake, routes, ping
+qp-tunnel-cli edge link                                       # list links; edge link down <host> stops this side
+```
+
+`init` makes both key pairs locally (node:crypto X25519) and never overwrites
+an existing link. The relay side (`wg/relay.conf`, `wg/relay.env`, with the
+relay's private key) goes into `<edge home>/state/<host>/wg-nginx/` and travels
+with the push; this side's config stays in `<edge home>/links/<host>/`.
+
+Two address plans, numbered the same way (an edge host ending in `N`, an
+Internal machine / origin ending in `M`):
+
+| Plan | Edge host | Internal machine | For |
+|---|---|---|---|
+| `launcher` (default) | `10.88.0.N` (domestic02: `10.88.0.2`) | `10.88.88.(87+M)` (s2 `.89`; s1 `.87`) | the Launcher's own numbering. `10.88.0.1` and `10.88.88.88` are the Launcher's role addresses (the current Domestic relay and the current Internal service peer); they move with the role, so no edge link takes them and internal01 gets `.87`. `10.88.100.0/24` is the Launcher's service VIPs |
+| `isolated` | `100.127.200.N` | `100.127.200.(87+M)` | other clusters: overlaps nothing the Launcher uses (qp-tunnel-cli's own `100.127` range, next to OpenVPN `100.127.0.0/24` and WireGuard `100.127.50.0/24`) |
+
+`edge link init <host> --plan launcher|isolated` (the wizard asks). Only `/32`s
+are routed on both ends: the edge host's interface `qpjoy-relay` (udp 51820, not
+the Launcher's 51280) holds its own `/32` and routes each Internal machine's
+`/32`; on the Internal machine each edge host gets its own interface
+`qpjoy-<host>` (shortened to `qpjoy-` + first letter + trailing number past 15
+characters: `qpjoy-d02`) that routes only that host's `/32`. So the Launcher's
+`10.88.0.0/16` routes on the same machine stay as they are (a `/32` is more
+specific), and edge hosts never reach each other. An address that another
+interface already routes as a `/32` or holds is refused. Spread load and fail
+over between Internal machines in each edge host's nginx, and between edge hosts
+in DNS. The endpoint is the saved host address (`--endpoint` when the host is
+reached through a jump host).
+
+`edge link check` (and `link up`) explains a missing handshake from what both
+ends saw: bytes sent here, bytes received and sent there, the edge host's
+firewalld/ufw/iptables state and, when tcpdump is installed there, a 7-second
+capture on the udp port (it sees packets before the host firewall). It then names
+the cloud security group, the host firewall (with the command to open it), a
+relay key that does not match, or replies that do not come back.
+`edge link init <host> --replace` makes a new link after every check passes,
+moving the current files to `<edge home>/replaced/<time>-<host>/` first.
+
+Refused outside the launcher plan: `10.0.0.0/8` (Launcher applications: relay
+`10.88`, products `10.(90+n)`, other apps), `100.88.0.0/14` (HDO V1),
+`100.127.0.0/24` (OpenVPN mesh), `192.168.224.0/19` (Kubernetes pods
+`192.168.224.0/20` and services `192.168.240.0/20`); always: another link's
+address or interface name; `link up` and deploy.sh check routes again.
+`link up` refuses to replace an `/etc/wireguard/<interface>.conf` it did not
+write; a changed one of its own is backed up first.
+
+### Several pushing machines (origins)
+
+Any Internal machine can push. Each one is an origin with a name and an edge
+home that holds what must survive reinstalls:
+
+```text
+<edge home>/origin                       this origin's name (default: the short hostname)
+<edge home>/state/<host>/<component>/    state directories, 0700/0600
+<edge home>/ledger.jsonl                 every push and rollback from here, append-only
+```
+
+The edge home is `/var/lib/qp-tunnel/edge` on Linux (outside home directories,
+Git checkouts, the npm install and /tmp; created on first push, or once with
+`sudo install -d -m 700 -o "$(id -un)" /var/lib/qp-tunnel/edge`),
+`~/Library/Application Support/qp-tunnel/edge` on macOS, or `QP_EDGE_HOME`.
+
+The host records which origin manages each component
+(`state/<component>/.edge-origin`, and a column in `.edge-history`). A push or
+rollback from another origin is refused, with nothing written, until it passes
+`--take-over`. A host where something other than the edge tool deployed a
+component (the v1 Launcher uses the same layout) is refused as a whole, even for
+new components, unless `--shared-host`.
+
+```bash
+qp-tunnel-cli edge origin set internal02
+qp-tunnel-cli edge origin                       # name, edge home, state directories, ledger
+qp-tunnel-cli edge relations                    # origin -> host -> component, checked against the ledger
+qp-tunnel-cli edge relations --offline --json   # the ledger only
+qp-tunnel-cli edge state                        # this origin's state directories
+qp-tunnel-cli edge state pull domestic-1 --component wg-nginx   # copy pushed state back; never overwrites
+qp-tunnel-cli edge push domestic-1 --stack wg-nginx --take-over --yes   # take a component over from another origin
+```
+
+`relations` asks only the hosts saved on this machine; run `edge import` on
+every origin to see the same picture. `state pull` brings back the files pushes
+carried, with their current content on the host, not what the stack wrote there
+itself; it is how a second origin gets the state when it takes over.
+
+### Operating systems
+
+`resources/edge/lib/edge-os.sh` maps `/etc/os-release` to a family: `debian`
+(Ubuntu, Debian; apt) or `rhel` (CentOS, Rocky, AlmaLinux, RHEL, Fedora; dnf,
+else yum). Each stack lists the families it handles in `stack.env`. Before
+anything is written or switched, the host is checked for the family, systemd and
+the state files the stack needs; a host that fails is left exactly as it was
+(`--force-os` overrides the family check only). Deploy scripts report ufw or
+firewalld per port and print the command to open it; they never open ports.
+
+### Bundles and the layout on the host
+
+A bundle is a directory (a stack, or your own with `--bundle <dir>`). `push`
+uploads it and activates it on each host in turn, stopping at the first failure:
+
+```text
+/opt/mx/releases/<component>/<revision>/   the bundle, never overwritten; .edge-state keeps the state files pushed with it
+/opt/mx/state/<component>/                 kept across releases; linked as <release>/state
+/opt/mx/current/<component>                symlink to the live release
+```
+
+If the bundle ships `deploy.sh` and `health.sh`, they run as root in that order
+from the release directory with `MX_COMPONENT`, `MX_REVISION`, `MX_RELEASE_DIR`,
+`MX_STATE_DIR` and `MX_PREVIOUS_RELEASE` set. Every bundle also gets
+`lib/edge-os.sh` and `lib/edge-nginx.sh` unless it ships its own.
+
+```bash
+qp-tunnel-cli edge push domestic-1,domestic-2 --bundle ./site --dry-run
+qp-tunnel-cli edge push domestic-1,domestic-2 --bundle ./site --revision 2026-11-21a --yes
+qp-tunnel-cli edge releases domestic-1
+qp-tunnel-cli edge rollback domestic-1 --component site --yes
+```
+
+Nothing on the host is deleted. State files a push replaces are copied to
+`state/<component>/.edge-replaced/<revision>/` first. Rollback copies the target
+release's pushed state back, switches `current` (by default to the previous
+release) and reruns that release's hooks. A `current/<component>` that the edge
+tool did not create, such as one pushed by the v1 Launcher, is refused unless you
+pass `--take-over`, and so is a component another origin manages. Non-root SSH
+users need passwordless sudo for `push`, `rollback` and `state pull`.
+
+### What runs where
+
+```bash
+qp-tunnel-cli edge status                      # this machine plus every saved host
+qp-tunnel-cli edge status domestic-2 --health  # also run each release's health.sh (root on the host)
+qp-tunnel-cli edge status --local --all --json
+```
+
+One table lists pushed releases (`pushed-by=<origin>`, or `other` when the edge
+tool did not push it), the WireGuard,
+OpenVPN and mihomo-client instances tunnel-cli created, other WireGuard
+interfaces, running containers (stopped and Kubernetes pod containers are
+summarised unless `--all`), and nginx, caddy, docker, containerd and kubelet. A
+host that cannot be reached shows UNKNOWN and the command exits non-zero.
+
+Every remote step is `resources/edge/lib/edge-os.sh` followed by
+`resources/edge/remote.sh`, streamed over SSH, so `resources/edge` can also be
+copied to a host and `remote.sh` run by hand.
+
 ## MX H2I V2 Enrollment on Ubuntu
 
 `qp-tunnel-cli h2i` is the native V2 path. It uses the same

@@ -5894,12 +5894,14 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     <tr><td>跨平台使用同一商品结构（推荐）</td><td><code>POST /api/v1/data/ecommerce/products/search</code></td><td>一次选择一个 marketplace；返回统一 items、url、pricing、shop 和 Hub cursor。实时采集或精确查询快照，见 sourceMode。</td></tr>
     <tr><td>平台特有详情、SKU、评论或指定搜索版本</td><td><code>POST /api/v1/data/native/{endpoint}</code>（下方平台专用目录）</td><td>Hub 托管的固定接口；data 保留该接口业务结构，不能按统一 items 解析。每项独立授权与启用。</td></tr>
     <tr><td>读取本调用身份已经查询到的商品</td><td><code>GET /api/v1/data/ecommerce/products/items</code></td><td>已存成功观察，不触发采集；all 仅用于这种历史查询。</td></tr>
+    <tr><td>Facebook Marketplace 城市商品、Craigslist 地区站在售商品</td><td><code>POST /api/v1/data/collect/jobs</code></td><td>分别传 <code>collect.ecommerce.fbmarketplace.search</code>（city、keyword）或 <code>collect.classifieds.craigslist.search</code>（region、keyword）。返回 202，成功后从结果链接读取 <code>data.payload.items</code>。</td></tr>
+    <tr><td>Shopify 指定店铺的商品关键词搜索</td><td><code>POST /api/v1/data/collect/query</code></td><td>传 <code>collect.ecommerce.shopify.search</code> 和 input（domain、keyword）。同步商品在 <code>data.result.payload.items</code>，下一页传 input.after。排队时返回 202 和查询链接。</td></tr>
     </tbody></table>
-    <p>统一搜索现支持淘宝、天猫、京东、闲鱼、小红书电商、抖音电商；拼多多和快手商品搜索尚未接入。快手已提供购物榜单和品牌榜单专用接口；subTabId/subTabName 是子分类参数，不是分页参数，也不支持 keyword/page/count/cursor。平台专用目录不是其他清洗任务的商品合集，也不代表其中每个平台都已支持统一搜索。手机采集和数据清洗记录走独立的已收录数据合同。</p>
+    <p>统一搜索支持淘宝、天猫、京东、闲鱼、小红书电商、抖音电商。拼多多、Amazon、AliExpress 和 Shopee 的商品关键词搜索使用各自的原生入口。SHEIN 美国站原生入口需单独开通。快手的购物榜单与品牌榜单接受子分类参数 subTabId/subTabName，当前尚无快手小店商品关键词入口。请在下方平台专用目录查看当前 Key 的接口。</p>
     <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>
     <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；路径和授权规则不变，新增的可选 <code>deliveryMode</code> 只表达 Hub 是否可以访问外部平台，不是供应方选择器。</div>
-    <p><code>ecommerce</code> 是稳定的数据域，不是某一家供应方的名字；<code>marketplace</code> 是本次要检索的业务站点，也不是供应方选择器。各 marketplace 当前只有一个兼容适配器。默认路由由管理端保存，只有完成同一商品合同的字段、筛选和分页适配的接口才能作为候选；尚无可切换的第二个候选，也没有自动故障转移。默认修改只用于新采集，已有游标沿用原适配器，原幂等请求继续重放。配置不可用时，新采集返回 503 ecommerce_route_unavailable；已有缓存和精确重放不依赖新的默认配置。调用方不能通过请求字段指定供应方，也不需要在新增供应方后修改集成。</p>
-    <div class="notice">当前及未来，一次逻辑请求都最多派发给一个外部候选。未来 Hub 只有在尚未创建 provider-call 证据或发出网络请求、且能确定候选不可用时才可改选；一旦外部派发开始，超时、结果未知、可能已消耗供应方额度/内部采购成本或响应不可规范化，都不得自动改投第二家，避免重复成本与语义漂移。</div>
+    <p><code>ecommerce</code> 是商品数据的授权域，<code>marketplace</code> 选择业务站点。只有完成同一商品合同的字段、筛选和分页适配的接口才能作为候选。淘宝、天猫和京东支持主备路由，管理端决定每个站点使用固定路由还是主备路由。配置变更用于新采集，调用方可继续使用已有游标、有效缓存和幂等回放。</p>
+    <div class="notice">主备模式下，主用在派发前无法执行，或明确拒绝且确认未计费时，同一请求最多切换一次。对已计费、超时、结果未知或无法解析的响应，Hub 保留本次结果。</div>
 
     <h3>1. 授权与运行能力预检</h3>
     <p>使用管理台“API Keys”签发的同一把 Hub Public API Key，而不是任何上游密钥。无需为 ecommerce 再签一把 Key；为其所属调用身份启用 <code>ecommerce</code> 后即可直接调用，轮换 Key 也无需重配。外部电商采集只接受 <code>mih_live_</code>；旧 <code>mih_test_</code> 只是兼容元数据，不是隔离沙箱，capabilities 会把 ecommerce 报为 <code>ready=false</code>。先检查 capabilities 中的 <code>ecommerce</code> 项；Live Key 的 <code>ready=true</code> 表示商品搜索操作已就绪，不保证每个 marketplace 都已启用；具体平台仍可能返回 503。false 时仅允许回退的交付策略可能返回有效存储结果。</p>

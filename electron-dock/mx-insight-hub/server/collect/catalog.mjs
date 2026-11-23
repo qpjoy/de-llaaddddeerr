@@ -7,6 +7,7 @@ import { DNS_RESOLVERS, DNS_TYPES, dnsLookup } from './native/dns.mjs'
 import { rdapDomain } from './native/rdap.mjs'
 import { ctIssuances } from './native/ct.mjs'
 import { subdomains } from './native/subdomains.mjs'
+import { shopifySearch } from './native/shopify.mjs'
 import { projectTiebaSearchResult } from '../ingest/tieba.mjs'
 
 // Request validation for each public collection capability, and how its
@@ -686,13 +687,23 @@ const DEFINITIONS = Object.freeze({
       scrapeProductDetails: false, includeReviews: false, includeQuestions: false, includeVariations: false, includeSellerProfile: false, includeFeaturedItems: false }),
     resultLimit: input => input.maxItems,
   },
-  // Package 124. Marketplace links only, never posts, pages or the Ad Library.
+  // Package 124. The pinned Actor takes Marketplace start URLs. Normalize
+  // keyword searches to the same input saved for link-based jobs.
   'collect.ecommerce.fbmarketplace.search': {
     normalize(input) {
       object(input, 'input')
-      onlyFields(input, ['urls', 'maxItems'], 'input')
-      return { urls: uniqueList(input.urls, 'urls', 1, 5, value => pathUrl(value, host => FACEBOOK_HOSTS.has(host), ['/marketplace/'], 'urls')),
-        maxItems: integer(input.maxItems, 'maxItems', 1, 200, 20) }
+      onlyFields(input, ['keyword', 'city', 'urls', 'maxItems'], 'input')
+      const mode = oneOf(input, ['keyword', 'urls'])
+      const maxItems = integer(input.maxItems, 'maxItems', 1, 200, 20)
+      if (mode === 'urls') {
+        if (input.city !== undefined) throw invalid('city applies only to keyword searches', { field: 'city' })
+        return { urls: uniqueList(input.urls, 'urls', 1, 5, value => pathUrl(value, host => FACEBOOK_HOSTS.has(host), ['/marketplace/'], 'urls')), maxItems }
+      }
+      const city = text(input.city, 'city', 100).toLowerCase()
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(city)) throw invalid('city must be a Marketplace city slug or numeric location ID', { field: 'city' })
+      const url = new URL(`https://www.facebook.com/marketplace/${city}/search/`)
+      url.searchParams.set('query', text(input.keyword, 'keyword', 100))
+      return { urls: [url.href], maxItems }
     },
     apify: { actorId: 'U5DUNxhH3qKt5PnCf', actor: 'apify/facebook-marketplace-scraper', build: '0.0.326' },
     actorInput: input => ({ startUrls: input.urls.map(url => ({ url })), resultsLimit: input.maxItems, includeListingDetails: false }),
@@ -703,9 +714,21 @@ const DEFINITIONS = Object.freeze({
   'collect.classifieds.craigslist.search': {
     normalize(input) {
       object(input, 'input')
-      onlyFields(input, ['urls', 'maxAgeDays', 'maxItems'], 'input')
-      return { urls: uniqueList(input.urls, 'urls', 1, 5, value => pathUrl(value, host => CRAIGSLIST_HOST.test(host), ['/search/'], 'urls')),
-        maxAgeDays: integer(input.maxAgeDays, 'maxAgeDays', 1, 30, 7), maxItems: integer(input.maxItems, 'maxItems', 1, 200, 50) }
+      const mode = oneOf(input, ['urls', 'keyword'])
+      onlyFields(input, [...(mode === 'urls' ? ['urls'] : ['keyword', 'region']), 'maxAgeDays', 'maxItems'], 'input')
+      let urls
+      if (mode === 'urls') {
+        urls = uniqueList(input.urls, 'urls', 1, 5, value => pathUrl(value, host => CRAIGSLIST_HOST.test(host), ['/search/'], 'urls'))
+      } else {
+        const region = text(input.region, 'region', 40).toLowerCase()
+        if (!/^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/.test(region) || region === 'www') {
+          throw invalid('region must be a Craigslist regional subdomain such as seattle or sfbay', { field: 'region' })
+        }
+        const url = new URL(`https://${region}.craigslist.org/search/sss`)
+        url.searchParams.set('query', text(input.keyword, 'keyword', 100))
+        urls = [url.href]
+      }
+      return { urls, maxAgeDays: integer(input.maxAgeDays, 'maxAgeDays', 1, 30, 7), maxItems: integer(input.maxItems, 'maxItems', 1, 200, 50) }
     },
     apify: { actorId: 'owuUx043cdcXvJ6fa', actor: 'ivanvs/craigslist-scraper-pay-per-result', build: '0.0.38' },
     actorInput: input => ({ urls: input.urls.map(url => ({ url })), maxAge: input.maxAgeDays, maxConcurrency: 2 }),
@@ -721,6 +744,18 @@ const DEFINITIONS = Object.freeze({
     apify: { actorId: 'dsYHmuqeHvtR7NYxx', actor: 'trovevault/shopify-products-scraper', build: '0.1.75' },
     actorInput: input => ({ domains: input.domains.map(host => `https://${host}`), maxProducts: input.maxItems, includeInventoryDetails: false }),
     resultLimit: input => Math.min(1_000, input.maxItems * input.domains.length),
+  },
+  'collect.ecommerce.shopify.search': {
+    normalize(input) {
+      object(input, 'input')
+      onlyFields(input, ['domain', 'keyword', 'maxItems', 'after'], 'input')
+      const host = text(input.domain, 'domain', 253)
+      if (/[^\p{L}\p{N}.-]/u.test(host)) throw invalid('domain must be a bare Shopify storefront hostname', { field: 'domain' })
+      return { domain: dnsName(host, 'domain'), keyword: text(input.keyword, 'keyword', 200),
+        maxItems: integer(input.maxItems, 'maxItems', 1, 50, 20),
+        ...(input.after == null ? {} : { after: text(input.after, 'after', 2_048) }) }
+    },
+    native: { run: shopifySearch },
   },
   // Package 184. maxRequestsPerCrawl defaults to ten million upstream; bound it.
   'collect.web.builtwith.technologies': {

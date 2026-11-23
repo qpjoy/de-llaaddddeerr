@@ -2,6 +2,9 @@ import official from './provider-official-contracts.json' with { type: 'json' }
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { THREADS_SCRAPER_RAPIDAPI_ENDPOINTS } from '../contracts/threads-rapidapi-endpoints.mjs'
 import { TWITTER_RAPIDAPI_ENDPOINTS } from '../contracts/twitter-rapidapi-endpoints.mjs'
+import { FACEBOOK_MARKETPLACE_RAPIDAPI_ENDPOINT } from '../contracts/facebook-marketplace-rapidapi-endpoint.mjs'
+import { SHEIN_RAPIDAPI_SEARCH_ENDPOINT } from '../contracts/shein-rapidapi-endpoint.mjs'
+import { PINDUODUO_RAPIDAPI_SEARCH_ENDPOINT } from '../contracts/pinduoduo-rapidapi-endpoint.mjs'
 import { PROVIDER_CATALOG_ADDITIONS } from './provider-catalog-additions.mjs'
 import tikPrices from './tikhub-official-prices.json' with { type: 'json' }
 import wechat from './wechat-contracts.json' with { type: 'json' }
@@ -11,9 +14,9 @@ const DIRECTORY = {
   douyin:['0001'], kuaishou:['0002'], wechat_channels:['0003'], 'weixin-channels':['0003'],
   xiaohongshu:['0004'], 'xiaohongshu-pgy':['0004'], weibo:['0005'], bilibili:['0006'], zhihu:['0007'],
   douban:['0009'], toutiao:['0010'], xigua:['0011'], wechat_mp:['0025'], weixin:['0025'], wechat_search:['0026'],
-  taobao:['0058','0059'], jd:['0060'], 'douyin-ec':['0062'], 'xiaohongshu-ec':['0064'], '1688':['0069'], xianyu:['0073'],
-  tiktok:['0085'], twitter:['0086'], instagram:['0087'], facebook:['0088'], youtube:['0089'], reddit:['0090'],
-  linkedin:['0091'], threads:['0092'], amazon:['0108'], aliexpress:['0110'], shopee:['0114'], 'tiktok-shop':['0126'], telegram:['0160','0161'],
+  taobao:['0058','0059'], jd:['0060'], pinduoduo:['0061'], 'douyin-ec':['0062'], 'xiaohongshu-ec':['0064'], '1688':['0069'], xianyu:['0073'],
+  tiktok:['0085'], twitter:['0086'], instagram:['0087'], facebook:['0088'], facebook_marketplace:['0124'], youtube:['0089'], reddit:['0090'],
+  linkedin:['0091'], threads:['0092'], amazon:['0108'], aliexpress:['0110'], shein:['0112'], shopee:['0114'], 'tiktok-shop':['0126'], telegram:['0160','0161'],
 }
 export const providerCatalogKeys = platform => DIRECTORY[platform] ? DIRECTORY[platform].map(id => `source-catalog-${id}`)
   : PROVIDER_CATALOG_ADDITIONS.some(row=>row.sourceKey===`source-platform-${platform}`) ? [`source-platform-${platform}`] : []
@@ -23,7 +26,8 @@ export function officialProviderCatalog(operations = []) {
   const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [`${row.provider}:${row.method}:${row.path}`,row]))
   const policies = new Map(operations.map(row => [`${row.provider}:${row.operation}`,row.current]))
   const wechatByPath = new Map(wechat.endpoints.map(row => [row.path, row]))
-  const rows = [...official.endpoints, ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS, ...TWITTER_RAPIDAPI_ENDPOINTS].map(original => {
+  const rows = [...official.endpoints, ...THREADS_SCRAPER_RAPIDAPI_ENDPOINTS, ...TWITTER_RAPIDAPI_ENDPOINTS,
+    FACEBOOK_MARKETPLACE_RAPIDAPI_ENDPOINT, PINDUODUO_RAPIDAPI_SEARCH_ENDPOINT, SHEIN_RAPIDAPI_SEARCH_ENDPOINT].map(original => {
     const row = original.provider === 'tikhub' && wechatByPath.has(original.path) ? { ...original, ...wechatByPath.get(original.path) } : original
     const endpoint = row.marketplace === 'threads-scraper' ? row : native.get(`${row.provider}:${row.method}:${row.path}`)
     const policy = endpoint && policies.get(`${row.provider}:${endpoint.operation}`)
@@ -42,7 +46,7 @@ export function officialProviderCatalog(operations = []) {
   return { version:official.version, observedAt:official.observedAt, rows,
     summary:['tikhub','justone','rapidapi'].map(provider => { const items=rows.filter(row=>row.provider===provider); return {
       provider, label: provider === 'rapidapi' ? 'RapidAPI' : provider === 'tikhub' ? 'TikHub' : 'JustOne',
-      observedAt: provider === 'rapidapi' ? '2026-11-17' : official.observedAt, documented:items.length, platforms:new Set(items.map(row=>row.platform)).size,
+      observedAt: provider === 'rapidapi' ? '2026-11-23' : official.observedAt, documented:items.length, platforms:new Set(items.map(row=>row.platform)).size,
       implemented:items.filter(row=>row.hubPath).length, active:items.filter(row=>row.effectiveState==='active').length,
       canary:items.filter(row=>row.effectiveState==='canary').length,
       unmappedPlatforms:[...new Set(items.filter(row=>!row.catalogKeys.length).map(row=>row.platform))],

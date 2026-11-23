@@ -531,6 +531,7 @@ export async function createRuntime(config = loadConfig()) {
   // Native endpoints reserve under the social grant; standardized Threads
   // workflows reserve in the threads domain. The ledger checks that scope.
   const threadsNativeGateway = nativeSearchGateway('social', 'rapidapi')
+  const ecommerceRapidNativeGateway = nativeSearchGateway('ecommerce', 'rapidapi')
   for (const gateway of Object.values(threadsGateways)) gateway.strategySearchRoutingStore = strategySearchRoutingStore
   const threadsListingGateways = { ...threadsGateways, [THREADS_SCRAPER_ROUTE]: threadsGateways.rapidapi }
   const threadsRouter = options => createCommentRouter({ gateways: { threads: threadsListingGateways }, policyStore: strategySearchRoutingStore,
@@ -879,6 +880,7 @@ export async function createRuntime(config = loadConfig()) {
     socialAccountGateway,
     socialAccountTikHubGateway,
     threadsNativeGateway,
+    ecommerceRapidNativeGateway,
     threadsPostDetail,
     // Comments reserve usage in the YouTube domain, not account search's social domain.
     youtubeCommentsGateway: socialAccountDataGateways.youtube,
@@ -901,7 +903,7 @@ export async function createRuntime(config = loadConfig()) {
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
-    ecommerceRapidApiGateway, ecommerceRapidApiAdapter,
+    ecommerceRapidApiGateway, ecommerceRapidApiAdapter, ecommerceRapidNativeGateway,
     xiaohongshuHotNotesGateway, xiaohongshuHotNotesStore,
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,

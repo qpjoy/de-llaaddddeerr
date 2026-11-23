@@ -31,6 +31,8 @@ electron-plugin/**/dist/
 electron-plugin/**/.quasar/
 electron-plugin/**/*.iconset/
 electron-plugin/packages/electron-plugin-hdo/resources/
+# Copied from the repository at prepack for the edge stacks (STACK_VENDOR).
+electron-plugin/packages/tunnel-cli/resources/edge/vendor/
 
 # Standalone Electron npm-package smoke test
 electron-test/node_modules/

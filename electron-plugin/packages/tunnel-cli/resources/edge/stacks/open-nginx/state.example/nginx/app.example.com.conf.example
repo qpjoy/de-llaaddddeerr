@@ -1,0 +1,25 @@
+# Rename to <name>.conf (only *.conf is applied). It becomes /etc/nginx/conf.d/qp-edge-<component>--<name>.conf.
+# @STATE_DIR@ is replaced with the component's state directory, so certificates
+# pushed under certs/ in the same --state-dir are found there.
+server {
+    listen 80;
+    server_name app.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name app.example.com;
+
+    ssl_certificate     @STATE_DIR@/certs/app.example.com.crt;
+    ssl_certificate_key @STATE_DIR@/certs/app.example.com.key;
+
+    location / {
+        # The Internal peer over OpenVPN, e.g. s2's host-nginx.
+        proxy_pass http://100.127.70.2:80;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

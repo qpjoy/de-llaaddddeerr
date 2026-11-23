@@ -393,6 +393,47 @@ test('2c: long-tail capabilities map to pinned Actors with enrichments and perso
   assert.deepEqual(trip.actor, { hotelUrl: 'https://us.trip.com/hotels/shanghai-hotel-detail-346403/x/', maxReviews: 50, sortBy: 'mostRecent', cutoffDate: '2026-06-01' })
 })
 
+test('Facebook Marketplace: keyword and city encode one scoped search and preserve URL job identity', () => {
+  const capability = 'collect.ecommerce.fbmarketplace.search'
+  const normalize = input => normalizeJobRequest({ capability, input })
+  const keyword = '茶 杯 &x=y/#'
+  const keywordJob = normalize({ keyword, city: ' SanFrancisco ', maxItems: 1 })
+  const target = new URL(keywordJob.item.input.urls[0])
+  assert.equal(target.origin, 'https://www.facebook.com')
+  assert.equal(target.pathname, '/marketplace/sanfrancisco/search/')
+  assert.deepEqual([...target.searchParams], [['query', keyword]])
+  const urlJob = normalize({ urls: [target.href], maxItems: 1 })
+  assert.deepEqual(keywordJob.item, urlJob.item)
+  assert.deepEqual(keywordJob.definition.actorInput(keywordJob.item.input), {
+    startUrls: [{ url: target.href }], resultsLimit: 1, includeListingDetails: false,
+  })
+  for (const input of [
+    { keyword }, { city: 'sanfrancisco' }, { keyword, city: 'nyc/../item' },
+    { keyword, city: 'nyc?sort=x' }, { keyword, city: 'nyc', urls: [target.href] },
+    { city: 'nyc', urls: [target.href] },
+  ]) assert.throws(() => normalize(input), { code: 'invalid_collect_request' })
+})
+
+test('Craigslist: region and keyword submit the same bounded run as the equivalent search URL', () => {
+  const normalize = input => normalizeJobRequest({ capability: 'collect.classifieds.craigslist.search', input })
+  const keyword = '键盘 & mouse/#?'
+  const options = { maxItems: 1, maxAgeDays: 3 }
+  const { definition, item } = normalize({ region: ' SEATTLE ', keyword, ...options })
+  const url = new URL(item.input.urls[0])
+  assert.equal(url.origin, 'https://seattle.craigslist.org')
+  assert.equal(url.pathname, '/search/sss')
+  assert.deepEqual([...url.searchParams], [['query', keyword]])
+  assert.deepEqual(item, normalize({ urls: [url.href], ...options }).item)
+  assert.deepEqual(definition.actorInput(item.input), { urls: [{ url: url.href }], maxAge: 3, maxConcurrency: 2 })
+  assert.equal(definition.resultLimit(item.input), 1)
+  for (const input of [
+    { keyword }, { region: 'seattle' }, { keyword: ' ', region: 'seattle' },
+    { keyword, region: 'www' }, { keyword, region: 'seattle.example.org' }, { keyword, region: 'x@y' },
+    { keyword, region: 'seattle/wrong' }, { keyword, region: 'seattle', category: 'jobs' },
+    { keyword, region: 'seattle', urls: [url.href] }, { region: 'seattle', urls: [url.href] },
+  ]) assert.throws(() => normalize(input), { code: 'invalid_collect_request' })
+})
+
 test('2c: links outside the reviewed hosts and paths, and closed options, are refused', () => {
   for (const [capability, input] of [
     ['collect.ecommerce.shein.listing', { url: 'https://m.shein.com/x' }], ['collect.ecommerce.shein.listing', { keyword: 'dress' }],

@@ -1,0 +1,125 @@
+{
+  "capturedAt": "2026-11-23T14:51:14.940Z",
+  "localHub": true,
+  "upstream": "Live Shopify Storefront 2026-10",
+  "endpoint": "/api/v1/data/collect/query",
+  "captures": [
+    {
+      "request": {
+        "capability": "collect.ecommerce.shopify.search",
+        "input": {
+          "domain": "www.deathwishcoffee.com",
+          "keyword": "coffee",
+          "maxItems": 1
+        }
+      },
+      "httpStatus": 200,
+      "responseExcerpt": {
+        "data": {
+          "job": {
+            "status": "succeeded"
+          },
+          "result": {
+            "dataStatus": "success",
+            "payload": {
+              "domain": "www.deathwishcoffee.com",
+              "keyword": "coffee",
+              "items": [
+                {
+                  "id": "gid://shopify/Product/263612097",
+                  "title": "Dark Roast Coffee",
+                  "handle": "death-wish-coffee",
+                  "onlineStoreUrl": "https://www.deathwishcoffee.com/products/death-wish-coffee",
+                  "priceRange": {
+                    "minVariantPrice": {
+                      "amount": "19.99",
+                      "currencyCode": "USD"
+                    }
+                  }
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": true,
+                "endCursor": "eyJwYWdlIjoyLCJsYXN0X2lkIjoyNjM2MTIwOTcsInJldmVyc2UiOnRydWUsIm9mZnNldCI6MH0="
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "capability": "collect.ecommerce.shopify.search",
+        "input": {
+          "domain": "www.deathwishcoffee.com",
+          "keyword": "coffee",
+          "maxItems": 1,
+          "after": "eyJwYWdlIjoyLCJsYXN0X2lkIjoyNjM2MTIwOTcsInJldmVyc2UiOnRydWUsIm9mZnNldCI6MH0="
+        }
+      },
+      "httpStatus": 200,
+      "responseExcerpt": {
+        "data": {
+          "job": {
+            "status": "succeeded"
+          },
+          "result": {
+            "dataStatus": "success",
+            "payload": {
+              "domain": "www.deathwishcoffee.com",
+              "keyword": "coffee",
+              "items": [
+                {
+                  "id": "gid://shopify/Product/4657897373751",
+                  "title": "Medium Roast Coffee",
+                  "handle": "medium-roast",
+                  "onlineStoreUrl": "https://www.deathwishcoffee.com/products/medium-roast",
+                  "priceRange": {
+                    "minVariantPrice": {
+                      "amount": "19.99",
+                      "currencyCode": "USD"
+                    }
+                  }
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": true,
+                "endCursor": "eyJwYWdlIjozLCJsYXN0X2lkIjo0NjU3ODk3MzczNzUxLCJyZXZlcnNlIjp0cnVlLCJvZmZzZXQiOjF9"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "capability": "collect.ecommerce.shopify.search",
+        "input": {
+          "domain": "www.deathwishcoffee.com",
+          "keyword": "mxshopifyprobeqzxkwr",
+          "maxItems": 1
+        }
+      },
+      "httpStatus": 200,
+      "responseExcerpt": {
+        "data": {
+          "job": {
+            "status": "succeeded"
+          },
+          "result": {
+            "dataStatus": "no_data",
+            "payload": {
+              "domain": "www.deathwishcoffee.com",
+              "keyword": "mxshopifyprobeqzxkwr",
+              "items": [],
+              "pageInfo": {
+                "hasNextPage": false,
+                "endCursor": null
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

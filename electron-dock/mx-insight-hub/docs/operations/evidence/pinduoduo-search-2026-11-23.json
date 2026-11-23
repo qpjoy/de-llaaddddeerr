@@ -1,0 +1,40 @@
+{
+  "observedAt": "2026-11-23T14:19:19.589Z",
+  "provider": "rapidapi",
+  "sourceUrl": "https://rapidapi.com/chuyenhangsieutocvn/api/pinduoduo1/playground/apiendpoint_f51cf272-e79a-4e60-aaad-d73b01dc2bca",
+  "supplierRequest": {
+    "method": "GET",
+    "host": "pinduoduo1.p.rapidapi.com",
+    "path": "/pinduoduo/search",
+    "query": { "keyword": "茶杯", "page": 1 },
+    "dispatches": 1,
+    "retries": 0
+  },
+  "response": {
+    "httpStatus": 200,
+    "success": true,
+    "code": 0,
+    "bodySha256": "040b2843e3bc817a1b820327c61fcf4d59fa086153b274d5a86417f1e90e5910",
+    "returnedItems": 9,
+    "pagination": { "current": 1, "page_size": 10 },
+    "firstProductExcerpt": {
+      "goods_id": 1023414381156,
+      "goods_name": "双层玻璃杯加厚大容量高档隔热茶杯杯子男女便携茶水泡茶家用水杯",
+      "default_price": 1498,
+      "market_price": 1800,
+      "product_url": "https://mobile.yangkeduo.com/goods.html?goods_id=1023414381156"
+    }
+  },
+  "offlineAdapterReplay": {
+    "productIdsComparedToExactJsonDigits": 9,
+    "matchingProductUrlIds": 9,
+    "productsWithTitleThumbnailAndBothPriceFields": 9,
+    "fullNativePayloadPreserved": true,
+    "mismatchedPageRejected": true
+  },
+  "limits": [
+    "商品价格以原始数值交付，币种和单位未经确认。",
+    "本次响应没有总数、总页数或结束标记。仅实测第 1 页。",
+    "验证包括一次直接上游请求和本地 Hub 适配器回放。未核对生产 Hub 下游调用或供应商账单扣费。"
+  ]
+}
