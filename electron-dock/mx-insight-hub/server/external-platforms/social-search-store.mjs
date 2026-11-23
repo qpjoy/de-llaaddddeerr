@@ -95,6 +95,7 @@ export class SocialSearchStateStore {
       throw new TypeError('Social account provider stores must share usage and database state')
     }
     this.platform = platform
+    this.workflowKind = workflowKind
   }
 
   async readUsage(id, input, client = this.pool, lock = false) {
@@ -206,7 +207,7 @@ export class SocialSearchStateStore {
   }
 
   async commitDelivery(input) {
-    const { delivery, responseBody, manifest, sources, capturedAt, sourceMode, usageUnitsActual, latencyMs = 0 } = input
+    const { delivery, responseBody, manifest, sources, capturedAt, sourceMode, usageUnitsActual, latencyMs = 0, responseStatus = 200 } = input
     if (!identityValid(input, this.paths) || !sha(input.scopeHash) || !uuid(delivery?.usageRequestId) || !sha(delivery.fingerprint)
       || ['tenantId', 'consumerId', 'apiKeyId'].some(key => delivery[key] !== input[key])
       || manifest?.version !== this.version || manifest.scopeHash !== input.scopeHash
@@ -225,33 +226,47 @@ export class SocialSearchStateStore {
       || !age(capturedAt) || !['live', 'fresh_cache', 'stored_fallback'].includes(sourceMode)
       || !isPostgresSafeJsonValue(responseBody) || !isPostgresSafeJsonValue(manifest)
       || !isPostgresSafeJsonValue(sources)) throw fail()
+    // An exhausted first account delivery may have no deliverable rows even
+    // though its supplier receipts succeeded. Preserve those receipts and
+    // settle only the public result as the caller-compatible 404.
+    const noData = responseStatus === 404
+    if (responseStatus !== 200 && !noData || noData && (this.workflowKind !== 'social-account'
+      || responseBody?.error?.code !== 'social_account_not_found'
+      || responseBody.error.details?.reason !== 'social_data_not_found'
+      || manifest.previousDeliveryId != null || manifest.deliveredIds.some(values => values.length)
+      || manifest.state.jobs.some(job => !job.done || job.buffer != null)
+      || sources.some(source => source.own !== true) || usageUnitsActual !== 0)) throw fail()
+    const unitsActual = noData ? 0 : Math.max(1, usageUnitsActual)
+    const errorCode = noData ? 'social_account_not_found' : null
     const work = async client => {
       const usage = await this.readUsage(delivery.usageRequestId, input, client, true)
       if (!scopeMatches(usage, input, this.platform) || usage.status !== 'reserved' || usage.fingerprint !== delivery.fingerprint) throw fail()
       for (const source of sources) {
         if (!uuid(source.callId) || !sha(source.rowsHash)) throw fail()
         const page = await this.pageFor({ ...input, callId: source.callId, ownUsageRequestId: delivery.usageRequestId, expected: source.expected }, client, true)
-        if (!page || page.bodySha256 !== source.bodySha256 || page.bodySize !== source.bodySize || page.capturedAt !== source.capturedAt) throw fail()
+        if (!page || page.bodySha256 !== source.bodySha256 || page.bodySize !== source.bodySize || page.capturedAt !== source.capturedAt
+          || noData && page.sourceUsageRequestId !== delivery.usageRequestId) throw fail()
       }
       const saved = { ...clone(manifest), capturedAt, sources: clone(sources) }
       const representative = [...sources].reverse().find(source => source.own) ?? sources[0]
       if (!this.pool) {
-        await this.usage.commitRequest(delivery.usageRequestId, { responseStatus: 200, responseBody,
-          unitsActual: Math.max(1, usageUnitsActual), upstreamLatencyMs: latencyMs,
+        await this.usage.commitRequest(delivery.usageRequestId, { responseStatus, responseBody,
+          unitsActual, upstreamLatencyMs: latencyMs,
           deliverySourceMode: sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt })
         usage.acquisitionRequest = { ...usage.acquisitionRequest, socialSearch: saved }
         this.stores[representative.expected.provider].requests.push({ id: randomUUID(), ...delivery, providerKey: representative.expected.provider, sourceMode,
-          succeeded: true, responseStatus: 200, providerCallId: representative.callId, createdAt: new Date().toISOString() })
+          succeeded: !noData, responseStatus, errorCode, providerCallId: representative.callId, createdAt: new Date().toISOString() })
       } else {
-        await client.query(`UPDATE usage_requests SET status='committed',response_status=200,response_body=$2,
+        await client.query(`UPDATE usage_requests SET status='committed',response_status=$8,response_body=$2,
           units_actual=$3,upstream_latency_ms=$4,delivery_source_mode=$5,response_captured_at=$6,completed_at=now(),
           acquisition_request=acquisition_request || jsonb_build_object('socialSearch',$7::jsonb) WHERE id=$1`,
-        [delivery.usageRequestId, responseBody, Math.max(1, usageUnitsActual), latencyMs,
-          sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt, JSON.stringify(saved)])
+        [delivery.usageRequestId, responseBody, unitsActual, latencyMs,
+          sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt, JSON.stringify(saved), responseStatus])
         await client.query(`INSERT INTO external_platform.gateway_requests
-          (id,provider_key,tenant_id,consumer_id,usage_request_id,request_fingerprint,source_mode,succeeded,response_status,provider_call_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,true,200,$8)`,
-        [randomUUID(), representative.expected.provider, delivery.tenantId, delivery.consumerId, delivery.usageRequestId, delivery.fingerprint, sourceMode, representative.callId])
+          (id,provider_key,tenant_id,consumer_id,usage_request_id,request_fingerprint,source_mode,succeeded,response_status,provider_call_id,error_code)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,$8,$11)`,
+        [randomUUID(), representative.expected.provider, delivery.tenantId, delivery.consumerId, delivery.usageRequestId, delivery.fingerprint, sourceMode,
+          representative.callId, !noData, responseStatus, errorCode])
       }
     }
     return this.pool ? transaction(this.pool, work) : work(null)

@@ -316,6 +316,8 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/crawl" \
 - Twitter 账号识别：1–19 位纯数字先按 ID 查，查无账号再按同名用户名查一次；只想按数字用户名查请加 `@`。
 - 条数少于 count 不代表结束，看 `nextCursor`。
 
+首次标准账号请求在上游返回 HTTP 200、但没有可交付数据时，返回 `404 social_account_not_found`，并以 `error.details.reason: "social_data_not_found"` 表明此次没有取得所需数据。这包括首次请求确认已完成且无后续页的合法空集合，以及没有形成可交付结果的 `invalid_social_contract` 投影失败；只取得账号资料不等于 `crawl` 已取得作品。404 不证明账号永久不存在。空页仍有可继续游标时保留 200；续页、分页耗尽和已有内容的部分成功沿用原行为。权限、超时、结果未知及非 200 上游拒绝仍按原错误处理。供应商原始结果与费用证据保留，原幂等请求仍回放已保存的响应。该约定只适用于标准账号接口，不覆盖原生透传或关键词内容搜索；发布状态与事故证据见 [TikTok 账号请求记录](../operations/tiktok-account-802f613f-2026-11-20.md)。
+
 ### 2. 账号资料 `POST /api/v1/data/social/user-info`
 
 字段同账号内容，没有 `activityTypes`。Threads 默认按用户名或公开主页查询资料；按数字账号 ID 查询时，管理员可配置 Threads API 或 TikHub。
@@ -344,7 +346,7 @@ curl -sS -X POST "$HUB_URL/api/v1/data/social/user-info" \
 | `location` | 所在地 |
 | `collected_at` | 采集时间 |
 
-要点：Twitter 账号不存在返回 `404 social_account_not_found`；被封、注销、受保护返回 `422 social_account_unavailable`，原因看 `error.details.reason`。都不是空结果，不要重试。
+要点：明确未找到账号返回 `404 social_account_not_found`。首次请求上游 HTTP 200 但没有可交付资料时也使用此公共码，并提供 `error.details.reason: "social_data_not_found"`；这不证明账号永久不存在。Twitter 被封、注销、受保护仍返回 `422 social_account_unavailable`，原因看 `error.details.reason`。不要自动重试；新请求可能再次采购。
 
 ### 3. 单帖详情 `POST /api/v1/data/social/post-detail`
 
@@ -626,7 +628,7 @@ curl -sS -X POST "$HUB_URL/api/v1/night-all/search/raw" \
 | 503 | `threads_acquisition_paused` | Threads 搜索、账号、帖子详情 | 管理端暂停了该业务的新采购 | 查对应接口的路由 |
 | 400 | `invalid_social_request` | 账号 | 账号参数不合法，看 `details.field`、`details.reason` | 改参数 |
 | 400 | `invalid_user_profile_url` | 账号、兼容 | 小红书主页链接不是官方域名 | 用官方主页链接 |
-| 404 | `social_account_not_found`、`user_not_found` | 账号、兼容 | 账号不存在 | 核对账号 |
+| 404 | `social_account_not_found` | 账号、兼容 | 明确未找到账号，或首次请求 HTTP 200 但无可交付数据（`details.reason=social_data_not_found`） | 核对账号与 reason；不推断永久不存在，不自动重试 |
 | 422 | `social_account_unavailable` | 账号 | 账号被封、注销、受保护等，看 `details.reason` | 按业务处理 |
 | 503 | `facebook_account_paused` | 账号 | Facebook 账号内容或资料被暂停 | 管理端恢复 |
 | 503 | `social_data_unavailable`、`social_search_deadline` | 账号 | 未就绪，或截止时间内一页都没取到 | 稍后重试 |

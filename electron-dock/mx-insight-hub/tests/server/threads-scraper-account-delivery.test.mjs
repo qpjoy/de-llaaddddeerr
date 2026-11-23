@@ -137,9 +137,12 @@ test('Threads Scraper delivers profiles and posts under business grants, replays
       { status: 404, code: 'social_account_not_found' })
     assert.equal(calls.length, start + 2, 'the first missing account stops the batch')
   }
-  const empty = await send('crawl', { username: 'empty' }, 'scraper-empty-posts')
-  assert.equal(empty.status, 200)
-  assert.deepEqual(empty.body.data.items, [])
+  await assert.rejects(send('crawl', { username: 'empty' }, 'scraper-empty-posts'), error => {
+    assert.equal(error.status, 404)
+    assert.equal(error.code, 'social_account_not_found')
+    assert.equal(error.details.reason, 'social_data_not_found')
+    return true
+  })
 
   const forwardNative = gateway.adapter.forwardNative.bind(gateway.adapter)
   gateway.adapter.forwardNative = async (...args) => {
@@ -147,9 +150,18 @@ test('Threads Scraper delivers profiles and posts under business grants, replays
     throw new RapidApiUpstreamError({ outcome: 'succeeded_unusable', billed: null, httpStatus: 200,
       businessCode: null, errorCode: 'invalid_social_contract', affectsCircuit: false }, result)
   }
-  await assert.rejects(send('crawl', { username: 'missing' }, 'scraper-historical-502'), { status: 502 })
+  await assert.rejects(send('crawl', { username: 'missing' }, 'scraper-historical-502'), { status: 404 })
   gateway.adapter.forwardNative = forwardNative
   const original = [...gateway.platformStore.calls.values()].at(-1)
+  // Seed the public receipt as saved before the no-data policy. Replaying it
+  // must preserve the old 502 instead of applying today's classification.
+  const legacyUsage = hub.store.requests.get(original.usageRequestId)
+  legacyUsage.responseStatus = 502
+  legacyUsage.responseBody = { error: { code: 'external_platform_response_unusable',
+    message: 'Account acquisition failed; inspect its saved outcome',
+    details: { outcome: 'succeeded_unusable', retryable: false } }, requestId: original.usageRequestId }
+  const legacyGateway = gateway.platformStore.requests.find(row => row.usageRequestId === original.usageRequestId)
+  legacyGateway.responseStatus = 502
   const historical = structuredClone({ usage: hub.store.requests.get(original.usageRequestId),
     charge: hub.store.customerCharges.get(original.usageRequestId), call: original,
     archive: gateway.platformStore.restrictedResponseArchives.get(original.id) })
@@ -169,6 +181,11 @@ test('Threads Scraper delivers profiles and posts under business grants, replays
   assert.deepEqual([declined.outcome, declined.httpStatus, declined.billed, declined.errorCode], ['rejected', 200, null, 'social_upstream_rejected'])
   assert.equal(gateway.platformStore.responseArchives.get(declined.id).contractState, 'rejected')
   assert.deepEqual(gateway.platformStore.restrictedResponseArchives.get(declined.id).parsedPayload, { status: 'error', data: { user: null } })
-  await assert.rejects(send('user-info', { username: 'malformed' }, 'scraper-malformed'), { status: 502, code: 'external_platform_response_unusable' })
+  await assert.rejects(send('user-info', { username: 'malformed' }, 'scraper-malformed'), error => {
+    assert.equal(error.status, 404)
+    assert.equal(error.code, 'social_account_not_found')
+    assert.equal(error.details.reason, 'social_data_not_found')
+    return true
+  })
   assert.equal([...gateway.platformStore.calls.values()].at(-1).outcome, 'succeeded_unusable')
 })

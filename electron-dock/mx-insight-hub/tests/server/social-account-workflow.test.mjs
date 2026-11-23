@@ -555,18 +555,177 @@ test('Weibo batch cursor can resume the next account without repurchasing the un
 })
 
 for (const otherAccount of [false, true]) {
-  test(`Weibo still fails on an unusable first posts page (other account has rows: ${otherAccount})`, async t => {
+  test(`Weibo only maps an unusable first posts page to data not found when no account has rows (other account has rows: ${otherAccount})`, async t => {
     const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call =>
       call.params.uid === '43' ? { list: [{ id: 'first', text: 'Verified other account' }], has_more: false } : { unexpected_rows: [] }) })
     const body = { platform: 'weibo', userIds: otherAccount ? ['43', '42'] : ['42'], count: 50 }
     const key = 'weibo-first-page-unusable'
-    await assert.rejects(h.invoke(body, key), { status: 502, code: 'external_platform_response_unusable' })
+    await assert.rejects(h.invoke(body, key), error => {
+      assert.equal(error.status, otherAccount ? 502 : 404)
+      assert.equal(error.code, otherAccount ? 'external_platform_response_unusable' : 'social_account_not_found')
+      assert.equal(error.details.reason, otherAccount ? undefined : 'social_data_not_found')
+      return true
+    })
     const ledger = [...h.platformStore.calls.values()]
     assert.equal(ledger.at(-1).outcome, 'succeeded_unusable')
+    assert.equal(ledger.at(-1).errorCode, 'invalid_social_contract')
     assert.equal(ledger.filter(call => call.outcome === 'succeeded' && call.itemCount > 0 && call.endpointKey === ledger.at(-1).endpointKey).length, otherAccount ? 1 : 0)
     assert.equal(h.calls.length, otherAccount ? 4 : 2)
   })
 }
+
+function tiktokPageFixture(posts) {
+  return call => {
+    if (call.url.pathname.endsWith('/handler_user_profile')) {
+      return Response.json({ code: 200, data: { user: { id: '42', sec_user_id: '42', unique_id: 'fixture' } } })
+    }
+    assert.ok(call.url.pathname.endsWith('/fetch_user_post_videos'))
+    return posts(call)
+  }
+}
+
+for (const operation of ['crawl', 'user-info']) {
+  test(`TikTok ${operation} maps an unprojectable initial profile to data not found without claiming supplier-confirmed absence`, async t => {
+    const h = await harness(t, { platform: 'tiktok', fetchImpl: () => Response.json({ code: 200, data: { unexpected_profile: {} } }) })
+    await assert.rejects(h.invoke({ platform: 'tiktok', userId: '42' }, `tiktok-invalid-profile-${operation}`, operation), error => {
+      assert.equal(error.status, 404)
+      assert.equal(error.code, 'social_account_not_found')
+      assert.equal(error.details.reason, 'social_data_not_found')
+      assert.equal(error.details.stage, 'account_lookup')
+      assert.equal(error.details.outcome, 'succeeded_unusable')
+      return true
+    })
+    assert.equal(h.calls.length, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(call.errorCode, 'invalid_social_contract')
+  })
+}
+
+for (const invalid of [true, false]) {
+  test(`TikTok initial ${invalid ? 'unprojectable' : 'completed empty'} posts return durable public 404 without changing provider evidence or repurchasing`, async t => {
+    const payload = { code: 200, data: invalid ? { unexpected_rows: [] } : { aweme_list: [], has_more: false } }
+    const wire = JSON.stringify(payload)
+    const h = await harness(t, { platform: 'tiktok', fetchImpl: tiktokPageFixture(() =>
+      new Response(wire, { headers: { 'content-type': 'application/json' } })) })
+    await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'test')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
+      { idempotencyKey: `tiktok-empty-credit-${invalid}`, actor: 'test' })
+    const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
+      listenerMode: 'public', logger: { error() {} }, hubSocialGateway: { socialData: (context, input) => h.gateway.socialAccountData(context, input) } }))
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+    t.after(() => new Promise(resolve => server.close(resolve)))
+    const send = () => fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/social/crawl`, { method: 'POST',
+      headers: { Authorization: `Bearer ${h.key.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': `http-tiktok-empty-${invalid}` },
+      body: JSON.stringify({ platform: 'tiktok', userId: '42', count: 20 }) })
+    const response = await send(), body = await response.json()
+    assert.equal(response.status, 404, JSON.stringify(body))
+    assert.equal(body.error.code, 'social_account_not_found')
+    assert.equal(body.error.details.reason, 'social_data_not_found')
+    assert.equal(body.error.details.stage, 'data_acquisition')
+    assert.equal(body.error.details.platform, 'tiktok')
+    assert.equal(body.error.details.outcome, invalid ? 'succeeded_unusable' : 'succeeded')
+    assert.equal(body.error.details.retryable, false)
+    assert.equal(h.calls.length, 2, 'profile success must not hide the absence of deliverable posts')
+    const ledger = [...h.platformStore.calls.values()]
+    assert.deepEqual(ledger.map(call => call.outcome), ['succeeded', invalid ? 'succeeded_unusable' : 'succeeded'])
+    assert.equal(ledger[1].errorCode ?? null, invalid ? 'invalid_social_contract' : null)
+    assert.ok(ledger.every(call => call.httpStatus === 200 && call.billed === true && call.costMinor === 2))
+    const usage = h.store.requests.get(ledger[1].usageRequestId)
+    assert.deepEqual([usage.status, usage.responseStatus, usage.unitsActual], ['committed', 404, 0])
+    assert.equal(body.requestId, usage.id)
+    assert.equal(body.error.details.requestId, usage.id)
+    assert.equal(response.headers.get('x-mx-insight-request-id'), usage.id)
+    const archive = h.platformStore.restrictedResponseArchives.get(ledger[1].id)
+    assert.equal(Buffer.from(archive.bodyBytes).toString(), wire)
+    assert.equal(archive.bodySha256, digest(Buffer.from(wire)))
+    assert.deepEqual(archive.parsedPayload, payload)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 2)
+    const charge = h.store.customerCharges.get(usage.id)
+    assert.deepEqual([charge.status, charge.chargedMinor], ['captured', 3])
+    const before = structuredClone({ usage, ledger, archive, charge })
+    const replay = await send()
+    assert.equal(replay.status, 404)
+    assert.equal(replay.headers.get('x-mx-insight-request-id'), usage.id)
+    assert.deepEqual(await replay.json(), body)
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.store.customerCharges.size, 1)
+    assert.deepEqual(structuredClone({ usage: h.store.requests.get(usage.id), ledger: [...h.platformStore.calls.values()],
+      archive: h.platformStore.restrictedResponseArchives.get(ledger[1].id), charge: h.store.customerCharges.get(usage.id) }), before)
+    assert.equal(h.historical.length, 0)
+  })
+}
+
+test('TikTok keeps an unusable later posts page as 502 after acquiring a row in the same request', async t => {
+  let page = 0
+  const h = await harness(t, { platform: 'tiktok', fetchImpl: tiktokPageFixture(() => Response.json({ code: 200,
+    data: ++page === 1 ? { aweme_list: [{ aweme_id: '1', desc: 'Verified post' }], has_more: true, max_cursor: 10 } : { unexpected_rows: [] } })) })
+  await assert.rejects(h.invoke(), error => {
+    assert.equal(error.status, 502, `${error.code}: ${error.message}`)
+    assert.equal(error.code, 'external_platform_response_unusable')
+    assert.equal(error.details.reason, undefined)
+    return true
+  })
+  const ledger = [...h.platformStore.calls.values()]
+  assert.deepEqual(ledger.map(call => call.outcome), ['succeeded', 'succeeded', 'succeeded_unusable'])
+  assert.equal(ledger[1].itemCount, 1)
+  assert.equal(ledger[2].errorCode, 'invalid_social_contract')
+  await assert.rejects(h.invoke(), { status: 502, code: 'external_platform_response_unusable' })
+  assert.equal(h.calls.length, 3)
+})
+
+for (const [name, failure, errorCode, publicCode] of [
+  ['non-JSON', () => new Response('not-json', { headers: { 'content-type': 'application/json' } }), 'invalid_upstream_json', 'external_platform_response_unusable'],
+  ['missing business status', () => Response.json({ data: { aweme_list: [] } }), 'invalid_upstream_contract', 'external_platform_response_unusable'],
+  ['business refusal', () => Response.json({ code: 400, data: null }), 'upstream_request_rejected', 'external_platform_rejected'],
+]) {
+  test(`TikTok ${name} keeps its original failure classification instead of data not found`, async t => {
+    const h = await harness(t, { platform: 'tiktok', fetchImpl: tiktokPageFixture(failure) })
+    await assert.rejects(h.invoke(), error => {
+      assert.equal(error.status, 502)
+      assert.equal(error.code, publicCode)
+      assert.equal(error.details.reason, undefined)
+      return true
+    })
+    const ledger = [...h.platformStore.calls.values()]
+    assert.equal(ledger.length, 2)
+    assert.equal(ledger[1].errorCode, errorCode)
+    assert.equal(h.store.requests.get(ledger[1].usageRequestId).responseStatus, 502)
+    await assert.rejects(h.invoke(), { status: 502 })
+    assert.equal(h.calls.length, 2)
+  })
+}
+
+test('an empty terminal continuation stays 200 after the initial account page delivered data', async t => {
+  const h = await harness(t, { fetchImpl: call => {
+    if (!call.url.pathname.includes('/tweets')) return Response.json(profile())
+    return Response.json(call.params.cursor ? timeline([]) : timeline(['1'], 'next'))
+  } })
+  const body = { platform: 'twitter', username: 'ui_batch_019', count: 1 }
+  const first = await h.invoke(body, 'before-empty-continuation')
+  assert.deepEqual(first.body.data.items.map(row => row.content_id), ['1'])
+  assert.ok(first.body.data.page.nextCursor)
+  const nextBody = { ...body, cursor: first.body.data.page.nextCursor }
+  const second = await h.invoke(nextBody, 'empty-continuation')
+  assert.equal(second.status, 200)
+  assert.deepEqual(second.body.data.items, [])
+  assert.deepEqual([second.body.data.page.hasMore, second.body.data.page.nextCursor], [false, null])
+  assert.deepEqual((await h.invoke(nextBody, 'empty-continuation')).body, second.body)
+  assert.equal(h.calls.length, 3)
+})
+
+test('empty advancing pages paused by the no-progress bound remain resumable 200', async t => {
+  let page = 0
+  const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
+    ? timeline([], `next-${++page}`) : profile()) })
+  const result = await h.invoke({ platform: 'twitter', username: 'ui_batch_019', count: 10 })
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body.data.items, [])
+  assert.equal(result.body.data.status, 'partial')
+  assert.ok(result.body.data.page.nextCursor)
+  assert.ok(result.body.data.warnings.some(warning => warning.code === 'social_page_fill_stopped' && warning.message.includes('no_new_items')))
+  assert.equal(h.calls.length, 4)
+})
 
 for (const platform of ['weibo', 'facebook']) {
   test(`${platform} real adapter keeps profile and posts receipts, bills once and never invokes Night-All`, async t => {
