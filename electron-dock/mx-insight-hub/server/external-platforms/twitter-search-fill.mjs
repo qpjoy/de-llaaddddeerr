@@ -42,6 +42,18 @@ function upstreamFailure(error) {
     { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}), upstreamStatus:evidence.httpStatus ?? null,outcome:evidence.outcome,retryable:false })
 }
 
+// The call ledger stores an int4. The restricted archive retains the supplier's original code.
+const pgIntegerLiteral = /^([+-]?)([0-9](?:_?[0-9])*|0x(?:_?[0-9a-f])+|0o(?:_?[0-7])+|0b(?:_?[01])+)$/i
+function ledgerBusinessCode(value) {
+  if (typeof value === 'string') {
+    const literal = pgIntegerLiteral.exec(value)
+    if (!literal) return null
+    const magnitude = Number(literal[2].replaceAll('_', ''))
+    value = literal[1] === '-' ? -magnitude : magnitude
+  }
+  return Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647 ? value : null
+}
+
 // A single customer intent owns all acquisition steps. Every paid receipt is
 // durable before another dispatch; only the final delivery settles the hold.
 export async function runTwitterSearchFill({ gateway,context,delivery,request,deadlineAt,signal,
@@ -242,7 +254,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
           if(!(error instanceof RapidApiUpstreamError)) throw error
           const mapped=upstreamFailure(error)
           currentEvidence={ callId:currentCall.id,delivery,outcome:error.evidence.outcome,
-            httpStatus:error.evidence.httpStatus,businessCode:error.evidence.businessCode,billed:error.evidence.billed ?? null,
+            httpStatus:error.evidence.httpStatus,businessCode:ledgerBusinessCode(error.evidence.businessCode),billed:error.evidence.billed ?? null,
             costMinor:cost.costMinor,costKind:cost.costKind,currency:cost.currency,latencyMs:Math.round(performance.now()-callStarted),
             errorCode:error.evidence.errorCode,affectsCircuit:error.evidence.affectsCircuit!==false,
             responseArchive:error.responseArchive,restrictedResponseArchive:error.restrictedResponseArchive,

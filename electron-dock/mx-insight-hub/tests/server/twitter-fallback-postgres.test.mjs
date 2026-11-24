@@ -15,12 +15,13 @@ import { normalizeHubDataSearch } from '../../server/contracts/hub-data-search.m
 import { createDataSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { requestFingerprint } from '../../server/core/crypto.mjs'
 import { createTwitterSearchRouter } from '../../server/data/twitter-search-routing.mjs'
+import { runTwitterSearchFill } from '../../server/external-platforms/twitter-search-fill.mjs'
 
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 const options = { skip: !modulePath && 'Set MX_INSIGHT_TEST_PGLITE_MODULE for real PostgreSQL fallback settlement' }
 const digest = value => createHash('sha256').update(value).digest('hex')
 
-test('PostgreSQL actual supplier stores share one reservation, preserve both receipts, use global ordinal1, settle once and replay TikHub', options, async t => {
+async function reservedTwitterSearch(t) {
   const { PGlite } = await import(pathToFileURL(modulePath).href)
   const db = new PGlite(); t.after(() => db.close())
   await db.exec('CREATE SCHEMA ingest; CREATE TABLE ingest.ingest_runs(id uuid PRIMARY KEY); CREATE SCHEMA control; CREATE SCHEMA billing;')
@@ -76,12 +77,47 @@ test('PostgreSQL actual supplier stores share one reservation, preserve both rec
   await db.query(`INSERT INTO billing.credit_ledger_entries(account_id,tenant_id,charge_id,usage_request_id,kind,amount_minor,
     available_delta_minor,held_delta_minor,currency,idempotency_key) VALUES($1,$2,$3,$4,'hold',9,-9,9,'CNY','fixture-hold')`,
   [accountId, delivery.tenantId, chargeId, delivery.usageRequestId])
-  const lease = { ...delivery, ownerRequestId: delivery.usageRequestId, expiresAt: new Date(Date.now() + 120000) }
-  assert.equal((await rapid.acquireTwitterFillDeliveryLease(lease)).kind, 'acquired')
   const cost = { costMinor: 1, costKind: 'estimated', currency: 'CNY', monthlyBudgetMinor: 1000, monthlySubsidyBudgetMinor: 1000 }
-  const costReservation = await rapid.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
   const codec = createDataSearchCursorCodec('offline-fallback', `${delivery.consumerId}:${delivery.apiKeyId}`)
   const request = normalizeHubDataSearch(body, codec, 'stable')
+  return { db, usageStore, rapid, tik, context, body, delivery, cost, request }
+}
+
+for (const status of [409, 503]) test(`standard Twitter settles a RapidAPI HTTP ${status} with a textual business code in PostgreSQL`, options, async t => {
+  const { db, usageStore, rapid, context, delivery, cost, request } = await reservedTwitterSearch(t)
+  let calls = 0
+  const payload = { code: 'SUPPLIER_CONFLICT' }
+  const adapter = new RapidApiAdapter({ apiKey: 'fixture-only', fetchImpl: async () => {
+    calls++
+    return Response.json(payload, { status })
+  } })
+  const rejected = status < 500
+  await assert.rejects(runTwitterSearchFill({
+    gateway: { platformStore: rapid, usageStore, adapter, config: { timeoutMs: 100, maxRequestsPerMinute: 90 },
+      operationControlStore: { authorizeDispatch: async () => null } },
+    context, delivery, request, deadlineAt: Date.now() + 120000, revalidateIdentity: async () => context,
+    resolveCredential: async () => ({ ready: true, credential: 'fixture-only' }),
+    providerCostControl: () => cost, enterCapacity: async () => true, leaveCapacity() {},
+  }), { status: 502, code: rejected ? 'social_upstream_rejected' : 'social_upstream_outcome_unknown' })
+  assert.equal(calls, 1)
+  const receipt = await db.query(`SELECT c.http_status, c.outcome, c.business_code, c.billed, r.body_bytes
+    FROM external_platform.provider_calls c
+    JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id = c.id`)
+  assert.deepEqual(receipt.rows.map(row => ({ ...row, body_bytes: Buffer.from(row.body_bytes).toString() })),
+    [{ http_status: status, outcome: rejected ? 'rejected' : 'unknown', business_code: null, billed: null, body_bytes: JSON.stringify(payload) }])
+  const saved = await usageStore.getUsageRequestByIdempotencyKey(delivery.consumerId, 'same-customer-key')
+  assert.equal(saved.status, rejected ? 'committed' : 'unknown')
+  if (rejected) {
+    assert.equal(saved.responseStatus, 502)
+    assert.equal(saved.responseBody.error.details.upstreamStatus, 409)
+  }
+})
+
+test('PostgreSQL actual supplier stores share one reservation, preserve both receipts, use global ordinal1, settle once and replay TikHub', options, async t => {
+  const { db, usageStore, rapid, tik, context, body, delivery, cost, request } = await reservedTwitterSearch(t)
+  const lease = { ...delivery, ownerRequestId: delivery.usageRequestId, expiresAt: new Date(Date.now() + 120000) }
+  assert.equal((await rapid.acquireTwitterFillDeliveryLease(lease)).kind, 'acquired')
+  const costReservation = await rapid.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
   const rapidCall = await rapid.beginProviderCall({ ...delivery, contractVersion: request.providerRequest.endpointContractVersion,
     endpointKey: request.providerRequest.endpointKey, endpointVersion: request.providerRequest.endpointVersion, marketplace: 'twitter',
     callOrdinal: 0, costControl: cost, costReservationId: costReservation.id })

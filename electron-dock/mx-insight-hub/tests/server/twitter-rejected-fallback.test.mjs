@@ -160,6 +160,45 @@ for (const outcome of [401, 403, 404, 429, 500, 'timeout', 'unusable', 'truncate
   })
 }
 
+test('standard Twitter records only int4 business codes and replays each RapidAPI 409 without another dispatch', async () => {
+  for (const [code, expected] of [
+    ['SUPPLIER_CONFLICT', null], ['2147483648', null], [-2147483649, null], [1.5, null], ['1.0', null],
+    ['-2147483648', -2147483648], [2147483647, 2147483647], ['0', 0], ['0409', 409],
+    ['0x1ff', 511], ['-0X_80000000', -2147483648], ['0o77', 63], ['0b1_01', 5], ['1_000', 1000], ['0b1__0', null],
+  ]) {
+    const f = await fixture()
+    f.setReply(async () => Response.json({ code }, { status: 409 }))
+    const rejected = error => error.status === 502 && error.code === 'social_upstream_rejected' && error.details?.upstreamStatus === 409
+    await assert.rejects(f.invoke(), rejected)
+    const [call] = f.providerCalls()
+    assert.equal(call.businessCode, expected, JSON.stringify(code))
+    assert.equal(call.outcome, 'rejected')
+    await assert.rejects(f.invoke(), rejected)
+    assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+  }
+})
+
+test('v2 replays a known RapidAPI 409 with a textual business code and never switches supplier', async () => {
+  const f = await fixture()
+  const body = { ...BODY, type: 'fresh', timeWindow: WINDOW }
+  f.setReply(async () => Response.json({ code: 'SUPPLIER_CONFLICT' }, { status: 409 }))
+  const invoke = () => f.invoke(body, 'v2-textual-conflict', 2)
+  const rejected = error => error.status === 502 && error.code === 'social_upstream_rejected'
+    && error.details?.upstreamStatus === 409 && error.details.outcome === 'rejected'
+  await assert.rejects(invoke(), rejected)
+  await assert.rejects(invoke(), rejected)
+  assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+})
+
+test('a textual RapidAPI 503 remains unknown on standard Twitter and its key cannot redispatch', async () => {
+  const f = await fixture()
+  f.setReply(async () => Response.json({ code: 'TEMPORARY_FAILURE' }, { status: 503 }))
+  await assert.rejects(f.invoke(), { code: 'social_upstream_outcome_unknown' })
+  assert.equal([...f.usage.requests.values()][0].status, 'unknown')
+  await assert.rejects(f.invoke(), { code: 'request_outcome_unknown' })
+  assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+})
+
 test('a RapidAPI continuation 400 never restarts the search on TikHub', async () => {
   const f = await fixture()
   f.setReply(async (provider, ordinal) => ordinal === 1 ? page(provider, [101], 'rapid-page-two') : rejection(400))
