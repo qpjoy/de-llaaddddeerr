@@ -235,6 +235,15 @@ preflight() { # preflight <unpacked_bundle> <component>; prints why and returns 
     printf 'edge: stack %s needs systemd; this host is not running it\n' "$name" >&2
     return 1
   fi
+  # Files the pushing tool adds to the bundle itself (the hy2 engine); a plain edge push lacks them.
+  for f in $(kv_value "$manifest" STACK_BUNDLE_REQUIRED); do
+    [ -e "$1/$f" ] || missing="$missing $f"
+  done
+  if [ -n "$missing" ]; then
+    printf 'edge: the bundle for stack %s lacks:%s\n' "$name" "$missing" >&2
+    [ -z "$(kv_value "$manifest" STACK_BUNDLE_HINT)" ] || printf 'edge: %s\n' "$(kv_value "$manifest" STACK_BUNDLE_HINT)" >&2
+    return 1
+  fi
   for f in $required; do
     [ -e "$MX_ROOT/state/$component/$f" ] || [ -e "$pushed/$f" ] || missing="$missing $f"
   done

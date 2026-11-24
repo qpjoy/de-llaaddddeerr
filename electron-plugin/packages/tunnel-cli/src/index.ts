@@ -18,6 +18,7 @@ import { dirname, join, resolve } from 'node:path';
 import { runEdgeCli } from './edge';
 import { runHdoCli } from './hdo';
 import { runH2iCli } from './h2i';
+import { runHy2Cli } from './hy2';
 import { runOpenCli } from './open';
 import { runWgCli } from './wg';
 
@@ -126,6 +127,8 @@ Usage:
   qp-tunnel-cli edge link init domestic-1 --subnet 100.127.201.0/24 --ip 100.127.201.89
   qp-tunnel-cli edge push domestic-1 --stack wg-nginx
   qp-tunnel-cli edge link up domestic-1
+  qp-tunnel-cli hy2 up oversea-1 --host 203.0.113.10   Hysteria2 server pushed there, local port 127.0.0.1:7891 here
+  qp-tunnel-cli hy2 status
   qp-tunnel-cli edge status
   qp-tunnel-cli edge relations
   qp-tunnel-cli <mihomo-client command> [options]
@@ -224,7 +227,7 @@ Run 'qp-tunnel-cli wg help' for the full command set.
 
 Edge hosts (Domestic relays, jump hosts, bastions) are reached and deployed from
 an Internal machine over plain SSH, without Kubernetes on the edge. Saved hosts
-hold key paths only; push unpacks a stack (wg-nginx, open-nginx, hy2-mihomo) or
+hold key paths only; push unpacks a stack (wg-nginx, open-nginx, hy2, hy2-mihomo) or
 your own bundle as /opt/mx/releases/<component>/<rev>, switches
 /opt/mx/current/<component> and runs its deploy.sh/health.sh. Debian/Ubuntu and
 CentOS/Rocky hosts are told apart before anything is switched. Any Internal
@@ -239,6 +242,16 @@ and on every saved host; relations lists which origin manages what:
   qp-tunnel-cli edge link check domestic-1
   qp-tunnel-cli edge rollback domestic-1 --component wg-nginx
 Run 'qp-tunnel-cli edge help' for the full command set.
+
+Hysteria2 to any SSH-reachable host in one command: the server (mihomo engine,
+systemd, no Docker; the engine ships from this machine, so the host needs no
+outbound access) is pushed with the edge layout, and this machine gets a local
+HTTP + SOCKS5 port that leaves from that host. The default mihomo-client
+instance (7788) and the subscriptions instance (7890) are never touched:
+  qp-tunnel-cli hy2 up oversea-1 --host 203.0.113.10 --key ~/.ssh/id_ed25519
+  curl -x http://127.0.0.1:7891 http://api.ipify.org/
+  qp-tunnel-cli hy2 status
+Run 'qp-tunnel-cli hy2 help' for the full command set.
 `);
 }
 
@@ -856,6 +869,11 @@ async function main(): Promise<void> {
 
   if (command === 'edge') {
     await runEdgeCli(args.slice(1));
+    return;
+  }
+
+  if (command === 'hy2' || command === 'hysteria2') {
+    await runHy2Cli(args.slice(1));
     return;
   }
 

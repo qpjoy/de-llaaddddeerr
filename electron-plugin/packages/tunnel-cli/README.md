@@ -209,6 +209,70 @@ updated profile and run `wg enroll --force`. See
 [wireguard.setup.md](wireguard.setup.md) for the full command sequence and
 multi-instance example.
 
+## Hysteria2 to Any Host in One Command (`hy2`)
+
+`qp-tunnel-cli hy2 up` pushes a Hysteria2 server to a host over SSH and gives
+this machine a local HTTP + SOCKS5 port whose traffic leaves from that host.
+Install the CLI on the machine that should get the port (an Internal server, for
+example), then:
+
+```bash
+npm i -g @qpjoy/tunnel-cli
+qp-tunnel-cli hy2 up oversea-1 --host 203.0.113.10 --key ~/.ssh/id_ed25519
+curl -x http://127.0.0.1:7891 http://api.ipify.org/      # prints 203.0.113.10
+```
+
+Without `--key`, in a terminal, you log in once with the host's password (typed
+into ssh's own prompt) and this machine's edge key is put there, as
+`edge key install` does. `up` then:
+
+1. looks at the host read-only over SSH: architecture, which UDP ports are taken;
+2. makes the settings here: a random password, an ECDSA key and a 10-year
+   self-signed certificate (local `openssl`), server port 443/udp (8443, 10443,
+   ... when 443 is taken), local port 7891 (or the next free one);
+3. pushes the `hy2` edge stack with `edge push` (release, state, origin, ledger,
+   rollback all as for other stacks). The bundle carries the mihomo engine for the
+   host's architecture, so the host downloads nothing and needs no Docker;
+4. on the host, `deploy.sh` unpacks the engine, checks `server.yaml` with it,
+   writes `qp-edge-hy2.service` and restarts it only when the engine, the
+   configuration or the certificate changed;
+5. installs the local client as the mihomo-client instance `hy2-<host>`
+   (`mihomo-client@hy2-<host>.service`, Linux with systemd, sudo);
+6. checks the path: through the local port the host's own sshd must answer, and
+   the exit address is shown.
+
+Running `up` again is safe: an unchanged server is not pushed again.
+
+Both ends run the mihomo engine already published as
+`@qpjoy/electron-plugin-tunnel-engine-<platform>`. The pushing machine fetches it
+once with `npm pack` (set `MIHOMO_NPM_REGISTRY` for a mirror) into
+`<edge home>/cache/engine/`, or takes `--engine <mihomo.gz>`. The certificate is
+pinned by its SHA-256 fingerprint in every client configuration, so no domain or
+CA is needed.
+
+The local side never touches the existing mihomo-client instances: it is always
+a named instance, and local ports 7788 (the default instance, the MX-H2I egress)
+and 7890 (the subscriptions instance) are refused. The port listens on
+127.0.0.1 unless `--bind` says otherwise.
+
+```bash
+qp-tunnel-cli hy2 status                          # what this machine set up; is each local port live
+qp-tunnel-cli hy2 test oversea-1                  # check the path again
+qp-tunnel-cli hy2 push oversea-1 --rotate-password    # new password (or --new-cert, --port 8443, --obfs)
+qp-tunnel-cli hy2 export oversea-1 --format uri   # hysteria2:// link for phones and desktop clients
+qp-tunnel-cli hy2 export oversea-1 > hy2.yaml     # Clash/mihomo configuration for another machine
+qp-tunnel-cli hy2 run oversea-1                   # macOS or no systemd: the client in the foreground
+qp-tunnel-cli hy2 disconnect oversea-1            # remove the local instance; the server keeps running
+qp-tunnel-cli edge status oversea-1 --health      # the host side
+qp-tunnel-cli edge rollback oversea-1 --component hy2 --yes
+```
+
+Open the server's UDP port in the host's cloud security group; nothing here
+opens ports (deploy.sh reports ufw/firewalld). A restarted server makes clients
+elsewhere wait for their QUIC idle timeout, about 30 seconds; `hy2 push`
+restarts this machine's instance at once. The design, the files and the failure
+modes are in [docs/02-hy2-push.md](docs/02-hy2-push.md).
+
 ## Edge Hosts: Reach and Deploy over SSH (`edge`)
 
 `qp-tunnel-cli edge` runs on an Internal machine and reaches edge hosts
@@ -255,6 +319,7 @@ A stack is a ready-made bundle for one technology, under
 |---|---|---|---|
 | `wg-nginx` | WireGuard relay made by `edge link init` | nginx 80/443 (optional: tunnel first) | throughput and low CPU matter; not on CentOS/RHEL 7 (no WireGuard module) |
 | `open-nginx` | OpenVPN server instance (`open`) | nginx 80/443 | TCP or TLS-wrapped transport, kernels without WireGuard |
+| `hy2` | none, it is the proxy | Hysteria2 UDP (mihomo engine, systemd) | a local proxy port on the pushing machine: `qp-tunnel-cli hy2 up` (above) makes its state and pushes it |
 | `hy2-mihomo` | none, it is the proxy | Hysteria2 UDP + subscription site | serving subscriptions; runs `docker/hysteria2-mihomo-stack` unchanged |
 
 Secrets, certificates and real domain names never travel inside a bundle. They

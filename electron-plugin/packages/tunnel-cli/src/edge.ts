@@ -70,12 +70,12 @@ export interface EdgeHost {
   launcherIdentityFile?: string;
 }
 
-interface HostsFile {
+export interface HostsFile {
   version: 1;
   hosts: Record<string, EdgeHost>;
 }
 
-interface ParsedArgs {
+export interface ParsedArgs {
   positionals: string[];
   options: Map<string, string | true>;
   lists: Map<string, string[]>;
@@ -268,7 +268,7 @@ Environment: QP_EDGE_HOME (edge home), QP_EDGE_ORIGIN (origin name), QP_EDGE_HOS
 
 // ---------- argument parsing ----------
 
-function parseArgs(args: string[]): ParsedArgs {
+export function parseArgs(args: string[], extraFlags: ReadonlySet<string> = new Set()): ParsedArgs {
   const positionals: string[] = [];
   const options = new Map<string, string | true>();
   const lists = new Map<string, string[]>();
@@ -290,7 +290,7 @@ function parseArgs(args: string[]): ParsedArgs {
         remember(raw.slice(0, eq), raw.slice(eq + 1));
         continue;
       }
-      if (flagOptions.has(raw)) {
+      if (flagOptions.has(raw) || extraFlags.has(raw)) {
         options.set(raw, true);
         continue;
       }
@@ -305,21 +305,21 @@ function parseArgs(args: string[]): ParsedArgs {
   return { positionals, options, lists, passthrough };
 }
 
-function option(parsed: ParsedArgs, name: string): string | undefined {
+export function option(parsed: ParsedArgs, name: string): string | undefined {
   const value = parsed.options.get(name);
   return typeof value === 'string' ? value : undefined;
 }
 
 /** Every value of a repeatable option; commas split too (--image a,b --image c). */
-function optionList(parsed: ParsedArgs, name: string): string[] {
+export function optionList(parsed: ParsedArgs, name: string): string[] {
   return (parsed.lists.get(name) ?? []).flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean);
 }
 
-function flag(parsed: ParsedArgs, ...names: string[]): boolean {
+export function flag(parsed: ParsedArgs, ...names: string[]): boolean {
   return names.some((name) => parsed.options.get(name) === true);
 }
 
-function fail(message: string, code = 2): never {
+export function fail(message: string, code = 2): never {
   process.stderr.write(`edge: ${message}\n`);
   process.exit(code);
 }
@@ -330,7 +330,7 @@ function hostsFilePath(): string {
   return process.env.QP_EDGE_HOSTS_FILE || join(homedir(), '.config', 'qp-tunnel', 'edge-hosts.json');
 }
 
-function readHosts(): HostsFile {
+export function readHosts(): HostsFile {
   const file = hostsFilePath();
   if (!existsSync(file)) return { version: 1, hosts: {} };
   try {
@@ -350,20 +350,20 @@ function writeHosts(data: HostsFile): void {
   renameSync(temp, file);
 }
 
-function validateName(label: string, value: string): void {
+export function validateName(label: string, value: string): void {
   if (!namePattern.test(value) || value === '.' || value === '..') {
     fail(`invalid ${label} '${value}' (allowed: letters, digits, . _ -)`);
   }
 }
 
-function parsePort(value: string | undefined, fallback: number): number {
+export function parsePort(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail(`invalid port '${value}'`);
   return port;
 }
 
-function expandHome(path: string): string {
+export function expandHome(path: string): string {
   return path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path;
 }
 
@@ -400,7 +400,7 @@ Or copy from Launcher: qp-tunnel-cli edge import --launcher-url http://10.88.88.
 `);
 }
 
-function addHost(parsed: ParsedArgs): void {
+export function addHost(parsed: ParsedArgs): void {
   const name = parsed.positionals[0];
   if (!name) fail('usage: edge add <name> --host <ip|dns> [--user root] [--port 22] [--key path] [--jump name] [--role domestic]');
   validateName('name', name);
@@ -512,7 +512,7 @@ Point an entry at a key this machine can read: qp-tunnel-cli edge add <name> --k
  * directories it pushes (secrets) and the ledger. Not under the home directory
  * on Linux, not in a Git checkout or the npm install, not under /tmp.
  */
-function edgeHome(): string {
+export function edgeHome(): string {
   if (process.env.QP_EDGE_HOME) return resolve(expandHome(process.env.QP_EDGE_HOME));
   if (process.platform === 'linux') return '/var/lib/qp-tunnel/edge';
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'qp-tunnel', 'edge');
@@ -529,7 +529,7 @@ function homeWritable(home: string): boolean {
 }
 
 /** Creates the edge home when the parent allows it; otherwise says how to, once, with sudo. */
-function ensureHome(): string {
+export function ensureHome(): string {
   const home = edgeHome();
   if (!existsSync(home)) {
     try {
@@ -548,11 +548,11 @@ function stateRoot(): string {
   return join(edgeHome(), 'state');
 }
 
-function defaultStateDir(host: string, component: string): string {
+export function defaultStateDir(host: string, component: string): string {
   return join(stateRoot(), host, component);
 }
 
-interface OriginInfo {
+export interface OriginInfo {
   name?: string;
   source: string;
   error?: string;
@@ -564,7 +564,7 @@ function checkOriginName(name: string): string | undefined {
   return undefined;
 }
 
-function readOrigin(): OriginInfo {
+export function readOrigin(): OriginInfo {
   const fromEnv = process.env.QP_EDGE_ORIGIN;
   if (fromEnv) {
     const error = checkOriginName(fromEnv);
@@ -584,7 +584,7 @@ function readOrigin(): OriginInfo {
   return error ? { source: 'hostname', error } : { name: short, source: 'hostname' };
 }
 
-function requireOrigin(): string {
+export function requireOrigin(): string {
   const origin = readOrigin();
   if (!origin.name) fail(`${origin.error}. Name this machine once: qp-tunnel-cli edge origin set <name>`, 1);
   return origin.name;
@@ -694,7 +694,7 @@ hosts    ${info.savedHosts} saved in ${info.hostsFile}
 
 // ---------- host selection ----------
 
-async function selectHosts(parsed: ParsedArgs, allowMany: boolean): Promise<Array<[string, EdgeHost]>> {
+export async function selectHosts(parsed: ParsedArgs, allowMany: boolean): Promise<Array<[string, EdgeHost]>> {
   const data = readHosts();
   const role = option(parsed, 'role');
   const spec = parsed.positionals[0];
@@ -745,7 +745,7 @@ let sigintHooked = false;
  * control (ESC[1G, ESC[0J), which some terminals show as a stray "["; the
  * terminal's own line editing and echo do the rest.
  */
-function ask(question: string): Promise<string> {
+export function ask(question: string): Promise<string> {
   if (!sigintHooked) {
     sigintHooked = true;
     process.on('SIGINT', () => {
@@ -767,7 +767,7 @@ function ask(question: string): Promise<string> {
   });
 }
 
-async function confirm(parsed: ParsedArgs, question: string): Promise<void> {
+export async function confirm(parsed: ParsedArgs, question: string): Promise<void> {
   if (flag(parsed, 'yes', 'y')) return;
   if (!process.stdin.isTTY) fail('not a terminal; pass --yes to proceed without the prompt');
   const answer = (await ask(`${question} [y/N] `)).trim().toLowerCase();
@@ -776,11 +776,11 @@ async function confirm(parsed: ParsedArgs, question: string): Promise<void> {
 
 // ---------- ssh ----------
 
-function sshBin(): string {
+export function sshBin(): string {
   return process.env.QP_EDGE_SSH_BIN || 'ssh';
 }
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
   return /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -827,7 +827,7 @@ export function buildSshArgs(name: string, hosts: Record<string, EdgeHost>, batc
   return args;
 }
 
-function asRoot(host: EdgeHost, command: string): string {
+export function asRoot(host: EdgeHost, command: string): string {
   return host.user === 'root' ? command : `sudo -n ${command}`;
 }
 
@@ -864,14 +864,14 @@ function runRemote(
   return reportSsh(name, result.status, result.error);
 }
 
-interface Captured {
+export interface Captured {
   status: number | null;
   stdout: string;
   stderr: string;
   error?: Error;
 }
 
-function runCapture(command: string, args: string[], input: Buffer, env: NodeJS.ProcessEnv = process.env): Promise<Captured> {
+export function runCapture(command: string, args: string[], input: Buffer, env: NodeJS.ProcessEnv = process.env): Promise<Captured> {
   return new Promise((resolveCapture) => {
     const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
@@ -889,7 +889,7 @@ function runCapture(command: string, args: string[], input: Buffer, env: NodeJS.
  * remote.sh never exits 255, so for our own scripts 255 means ssh itself
  * failed. For `edge ssh -- <command>` the user's command may return 255 too.
  */
-function reportSsh(name: string, status: number | null, error?: Error, userCommand = false): number {
+export function reportSsh(name: string, status: number | null, error?: Error, userCommand = false): number {
   if (error) {
     process.stderr.write(`edge: cannot run ${sshBin()}: ${error.message}\n`);
     return 1;
@@ -939,13 +939,20 @@ async function releases(parsed: ParsedArgs): Promise<void> {
   process.exit(status);
 }
 
-function defaultRevision(): string {
+export function defaultRevision(): string {
   const now = new Date();
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
 }
 
-async function push(parsed: ParsedArgs): Promise<void> {
+/** A file added to the bundle by a caller (hy2 adds its engine): published path -> local source. */
+export interface BundleExtra {
+  path: string;
+  source: string;
+  mode?: number;
+}
+
+export async function push(parsed: ParsedArgs, extras: BundleExtra[] = []): Promise<void> {
   const stackName = option(parsed, 'stack');
   const bundleOption = option(parsed, 'bundle');
   if (!stackName === !bundleOption) {
@@ -980,6 +987,16 @@ async function push(parsed: ParsedArgs): Promise<void> {
   const vendor = stack ? (stack.manifest.STACK_VENDOR ?? '').split(/\s+/).filter(Boolean) : [];
   const missingVendor = vendor.filter((file) => !vendorSource(file));
   if (missingVendor.length > 0) fail(`stack ${stack?.name} needs files this install does not have: ${missingVendor.join(', ')}`, 1);
+  for (const extra of extras) {
+    if (extra.path.split('/').some((part) => part === '..' || part === '' || part.startsWith('.edge-')) || !existsSync(extra.source)) {
+      fail(`cannot add ${extra.path} to the bundle (from ${extra.source})`, 1);
+    }
+  }
+  const bundleRequired = (stack?.manifest.STACK_BUNDLE_REQUIRED ?? '').split(/\s+/).filter(Boolean);
+  const bundleMissing = bundleRequired.filter((file) => !existsSync(join(sourceDir, file)) && !extras.some((extra) => extra.path === file));
+  if (bundleMissing.length > 0 && !flag(parsed, 'dry-run')) {
+    fail(`the bundle for stack ${stack?.name} lacks ${bundleMissing.join(', ')}. ${stack?.manifest.STACK_BUNDLE_HINT ?? ''}`.trim(), 1);
+  }
 
   const selected = await selectHosts(parsed, true);
   const hosts = readHosts().hosts;
@@ -1009,6 +1026,10 @@ async function push(parsed: ParsedArgs): Promise<void> {
   on host    ${root}/releases/${component}/${revision}  ->  ${root}/current/${component}
   hooks      ${hooks.length > 0 ? hooks.join(', then ') : 'none shipped (files are only unpacked and linked)'}
 `);
+  if (extras.length > 0) {
+    process.stdout.write(`  adds       ${extras.map((extra) => `${extra.path} (${Math.ceil(statSync(extra.source).size / 1024)} KiB)`).join(', ')}\n`);
+  }
+  if (bundleMissing.length > 0) process.stdout.write(`  lacks      ${bundleMissing.join(', ')}: ${stack?.manifest.STACK_BUNDLE_HINT ?? 'a real push stops here'}\n`);
   if (stack) {
     process.stdout.write(`  os         ${stack.manifest.STACK_OS || 'any'}${stack.manifest.STACK_SYSTEMD === '1' ? ', systemd' : ''}${flag(parsed, 'force-os') ? ' (--force-os: not enforced)' : ' (checked on the host before the switch)'}
   installs   ${stack.manifest.STACK_INSTALLS || 'nothing'}
@@ -1063,7 +1084,7 @@ async function push(parsed: ParsedArgs): Promise<void> {
   const workDir = mkdtempSync(join(tmpdir(), 'qp-edge-'));
   try {
     const staged = join(workDir, 'bundle');
-    stageBundle(staged, sourceDir, vendor, images);
+    stageBundle(staged, sourceDir, vendor, images, extras);
     const tarball = join(workDir, 'bundle.tar.gz');
     packDir(staged, tarball);
     const stateTarballs = new Map<string, string>();
@@ -1124,7 +1145,7 @@ function packDir(dir: string, tarball: string): void {
 }
 
 /** Copies the stack or bundle, its vendored files, the edge shell library and any --image tarballs. */
-function stageBundle(staged: string, sourceDir: string, vendor: string[], images: string[]): void {
+function stageBundle(staged: string, sourceDir: string, vendor: string[], images: string[], extras: BundleExtra[] = []): void {
   cpSync(sourceDir, staged, {
     recursive: true,
     filter: (path) => !path.split(/[\\/]/).includes('state.example'),
@@ -1134,6 +1155,12 @@ function stageBundle(staged: string, sourceDir: string, vendor: string[], images
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(vendorSource(file) as string, target);
     chmodSync(target, statSync(vendorSource(file) as string).mode & 0o777);
+  }
+  for (const extra of extras) {
+    const target = join(staged, extra.path);
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(extra.source, target);
+    chmodSync(target, extra.mode ?? 0o644);
   }
   mkdirSync(join(staged, 'lib'), { recursive: true });
   for (const lib of ['edge-os.sh', 'edge-nginx.sh']) {
@@ -1149,7 +1176,7 @@ function stageBundle(staged: string, sourceDir: string, vendor: string[], images
 }
 
 /** Directories 0700, files 0600: state directories hold keys and certificates. */
-function privateTree(dir: string): void {
+export function privateTree(dir: string): void {
   chmodSync(dir, 0o700);
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -1158,7 +1185,7 @@ function privateTree(dir: string): void {
   }
 }
 
-function listFiles(dir: string, prefix = ''): string[] {
+export function listFiles(dir: string, prefix = ''): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(join(dir, prefix), { withFileTypes: true })) {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -1168,7 +1195,7 @@ function listFiles(dir: string, prefix = ''): string[] {
   return out.sort();
 }
 
-function warnIfTracked(dir: string): void {
+export function warnIfTracked(dir: string): void {
   const inside = spawnSync('git', ['-C', dir, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' });
   if (inside.status !== 0 || inside.stdout.trim() !== 'true') return;
   const ignored = spawnSync('git', ['-C', dir, 'check-ignore', '-q', '.'], { encoding: 'utf8' });
@@ -1212,7 +1239,7 @@ interface StatusRow {
   detail: string;
 }
 
-interface HostStatus {
+export interface HostStatus {
   label: string;
   target: string;
   reachable: boolean;
@@ -1260,7 +1287,7 @@ async function status(parsed: ParsedArgs): Promise<void> {
 }
 
 /** Runs `remote.sh status` here and on the selected hosts (default: here plus every saved host), four at a time. */
-async function collectStatus(parsed: ParsedArgs, root: string, health: boolean): Promise<HostStatus[]> {
+export async function collectStatus(parsed: ParsedArgs, root: string, health: boolean): Promise<HostStatus[]> {
   const data = readHosts();
   const role = option(parsed, 'role');
   const spec = parsed.positionals[0];
@@ -1528,7 +1555,7 @@ async function runPool<T>(jobs: Array<() => Promise<T>>, limit: number): Promise
   return results;
 }
 
-function printTable(header: string[], rows: string[][]): void {
+export function printTable(header: string[], rows: string[][]): void {
   const widths = header.map((title, column) => Math.max(title.length, ...rows.map((row) => (row[column] ?? '').length)));
   for (const row of [header, ...rows]) {
     process.stdout.write(`${row.map((cell, column) => (cell ?? '').padEnd(widths[column])).join('  ').trimEnd()}\n`);
@@ -2104,12 +2131,12 @@ function interfacePresent(name: string): boolean | undefined {
   return result.status === 0;
 }
 
-function commandExists(name: string): boolean {
+export function commandExists(name: string): boolean {
   return spawnSync('sh', ['-c', `command -v ${shellQuote(name)}`], { stdio: 'ignore' }).status === 0;
 }
 
 /** Runs a bash script as root: directly when already root, else through sudo (it may ask for a password). */
-function runAsRoot(script: string, args: string[], capture = false): Captured {
+export function runAsRoot(script: string, args: string[], capture = false): Captured {
   const sudo = process.env.QP_EDGE_SUDO ?? 'sudo';
   const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
   const command = isRoot || sudo === '' ? 'bash' : sudo;
@@ -2124,14 +2151,14 @@ function runAsRoot(script: string, args: string[], capture = false): Captured {
 
 // ---------- tools this machine needs, installed on request ----------
 
-interface LocalTool {
+export interface LocalTool {
   command: string;
   apt: string;
   rpm: string;
 }
 
 /** What push needs here: the ssh it will run (QP_EDGE_SSH_BIN when set) and tar. */
-function pushTools(): LocalTool[] {
+export function pushTools(): LocalTool[] {
   return [
     { command: sshBin(), apt: 'openssh-client', rpm: 'openssh-clients' },
     { command: 'tar', apt: 'tar', rpm: 'tar' },
@@ -2191,7 +2218,7 @@ esac
  * packages with apt-get/dnf/yum through sudo after asking (or with --yes).
  * The proxy comes from PROXY / HTTPS_PROXY / HTTP_PROXY, because sudo drops them.
  */
-async function ensureLocalTools(tools: LocalTool[], parsed: ParsedArgs): Promise<void> {
+export async function ensureLocalTools(tools: LocalTool[], parsed: ParsedArgs): Promise<void> {
   const missing = tools.filter((tool) => !commandExists(tool.command));
   if (missing.length === 0) return;
   const names = missing.map((tool) => tool.command).join(', ');
@@ -2724,14 +2751,14 @@ async function ensureOriginKey(parsed: ParsedArgs): Promise<string> {
   return key;
 }
 
-interface SshProbe {
+export interface SshProbe {
   ok: boolean;
   auth: boolean;
   message: string;
 }
 
 /** One non-interactive login. auth = the host answered but refused the key. */
-function probeSsh(name: string): SshProbe {
+export function probeSsh(name: string): SshProbe {
   const result = spawnSync(sshBin(), [...buildSshArgs(name, readHosts().hosts, true), 'true'], { encoding: 'utf8' });
   if (result.error) return { ok: false, auth: false, message: result.error.message };
   if (result.status === 0) return { ok: true, auth: false, message: '' };
@@ -2744,7 +2771,7 @@ function probeSsh(name: string): SshProbe {
 }
 
 /** Logs in once with the password (ssh asks for it), adds this origin's key, saves it for the host and checks a key login. */
-async function installKeyWithPassword(name: string, parsed: ParsedArgs): Promise<boolean> {
+export async function installKeyWithPassword(name: string, parsed: ParsedArgs): Promise<boolean> {
   const data = readHosts();
   const host = data.hosts[name];
   if (!host) fail(`no saved host named ${name}`, 1);
@@ -2835,11 +2862,11 @@ used by  ${users.length > 0 ? users.join(', ') : 'no saved host yet'}
 // ---------- edge setup: the whole way, one question at a time ----------
 
 const useColor = (): boolean => Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
-const bold = (text: string): string => (useColor() ? `\x1b[1m${text}\x1b[0m` : text);
-const dim = (text: string): string => (useColor() ? `\x1b[2m${text}\x1b[0m` : text);
+export const bold = (text: string): string => (useColor() ? `\x1b[1m${text}\x1b[0m` : text);
+export const dim = (text: string): string => (useColor() ? `\x1b[2m${text}\x1b[0m` : text);
 
 /** Asks until the answer passes the check; Enter takes the default. */
-async function promptValue(label: string, def: string | undefined, check?: (value: string) => string | undefined, optional = false): Promise<string> {
+export async function promptValue(label: string, def: string | undefined, check?: (value: string) => string | undefined, optional = false): Promise<string> {
   for (;;) {
     const answer = (await ask(`  ${label}${def ? ` ${dim(`[${def}]`)}` : optional ? ` ${dim('[none]')}` : ''}: `)).trim();
     const value = answer || def || '';
@@ -2857,7 +2884,7 @@ async function promptValue(label: string, def: string | undefined, check?: (valu
   }
 }
 
-async function askYesNo(question: string, defaultYes: boolean): Promise<boolean> {
+export async function askYesNo(question: string, defaultYes: boolean): Promise<boolean> {
   for (;;) {
     const answer = (await ask(`  ${question} ${dim(defaultYes ? '[Y/n]' : '[y/N]')} `)).trim().toLowerCase();
     if (!answer) return defaultYes;
@@ -2866,14 +2893,14 @@ async function askYesNo(question: string, defaultYes: boolean): Promise<boolean>
   }
 }
 
-async function promptChoice(label: string, choices: Array<[string, string]>, defaultIndex: number): Promise<number> {
+export async function promptChoice(label: string, choices: Array<[string, string]>, defaultIndex: number): Promise<number> {
   const width = Math.max(...choices.map(([title]) => title.length));
   choices.forEach(([title, detail], index) => process.stdout.write(`    ${index + 1}) ${title.padEnd(width)}  ${dim(detail)}\n`));
   const answer = await promptValue(label, String(defaultIndex + 1), (value) => (/^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= choices.length ? undefined : `pick 1-${choices.length}`));
   return Number(answer) - 1;
 }
 
-function emptyArgs(positionals: string[] = [], options: Array<[string, string | true]> = []): ParsedArgs {
+export function emptyArgs(positionals: string[] = [], options: Array<[string, string | true]> = []): ParsedArgs {
   return { positionals, options: new Map(options), lists: new Map(), passthrough: [] };
 }
 
@@ -3016,6 +3043,15 @@ Defaults are in ${dim('[brackets]')}; Enter takes them. Ctrl-C stops; finished s
     Math.max(0, stacks.findIndex((stack) => stack.name === 'wg-nginx')));
   const stack = stacks[stackIndex];
 
+  if (stack.name === 'hy2') {
+    // hy2 makes its own state (password, certificate, port), pushes, and ends with a local port here.
+    // Loaded here, not at the top: hy2.ts builds on this module.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { hy2SetupSteps } = require('./hy2') as typeof import('./hy2');
+    await hy2SetupSteps(name, parsed, step);
+    return;
+  }
+
   let link: LinkInfo | undefined;
   let replacedLink: LinkInfo | undefined;
   if (stack.name === 'wg-nginx') {
@@ -3086,7 +3122,7 @@ Next:
 
 // ---------- stacks ----------
 
-interface StackInfo {
+export interface StackInfo {
   name: string;
   dir: string;
   manifest: Record<string, string>;
@@ -3114,7 +3150,7 @@ function listStacks(): StackInfo[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function findStack(name: string): StackInfo {
+export function findStack(name: string): StackInfo {
   const stack = listStacks().find((candidate) => candidate.name === name);
   if (!stack) fail(`no stack named ${name}. Stacks: ${listStacks().map((candidate) => candidate.name).join(', ') || '(none)'}`);
   return stack;
@@ -3157,7 +3193,14 @@ function stacksCommand(parsed: ParsedArgs): void {
   images      ${m.STACK_IMAGES || '-'}
   vendor      ${vendor.length === 0 ? '-' : vendor.map((file) => `${file}${vendorSource(file) ? '' : ' (MISSING)'}`).join('\n              ')}
   template    ${existsSync(example) ? listFiles(example).join(', ') : '-'}${m.STACK_STATE_TEMPLATES ? `, ${m.STACK_STATE_TEMPLATES.split(/\s+/).map((pair) => pair.split('=')[0]).join(', ')}` : ''}
-
+`);
+  if (m.STACK_START) {
+    process.stdout.write(`
+Start:  ${m.STACK_START}   (makes the state, pushes and connects; see ${m.STACK_START.split(' ').slice(0, 2).join(' ')} help)
+`);
+    return;
+  }
+  process.stdout.write(`
 Start:  qp-tunnel-cli edge state init <host> --stack ${stack.name}   (in this origin's edge home, ${stateRoot()}/<host>/${stack.name})
         or anywhere: qp-tunnel-cli edge stacks ${stack.name} --init <dir>, then push with --state-dir <dir>
 Push:   qp-tunnel-cli edge push <host> --stack ${stack.name} --dry-run

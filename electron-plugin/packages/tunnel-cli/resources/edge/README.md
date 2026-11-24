@@ -24,6 +24,7 @@ edge/
 |---|---|---|---|
 | `wg-nginx` | WireGuard relay from `edge link init` (shape of the Launcher's `mx-domestic`) | nginx 80/443, optional | throughput and low CPU per packet matter; kernel has WireGuard (not CentOS 7) |
 | `open-nginx` | OpenVPN server instance (`qp-tunnel-cli open`) | nginx 80/443 | TCP fallback, TLS-wrapped transport, or kernels without WireGuard |
+| `hy2` | none (it is the proxy) | Hysteria2 UDP, mihomo engine under systemd, no Docker | a local proxy port on the pushing machine; `qp-tunnel-cli hy2 up` makes the state and adds the engine to the bundle |
 | `hy2-mihomo` | none (it is the proxy) | Hysteria2 UDP + subscription site | serving proxy subscriptions; runs `docker/hysteria2-mihomo-stack` unchanged |
 
 `qp-tunnel-cli edge stacks` lists them, `edge stacks <name>` shows one,
@@ -47,6 +48,21 @@ or when `/etc/wireguard/<interface>.conf` exists without the
 `/etc/wireguard/qp-edge-backup/<component>/` before it is replaced. nginx is
 optional: with no `nginx/*.conf` in the state, nginx is not installed or touched.
 The Internal side is `edge link up <host>` on the machine that ran init.
+
+## hy2
+
+`qp-tunnel-cli hy2 push <host>` (or `hy2 up`) makes the state on the pushing
+machine (`server.yaml`, `hy2.env` with `HY2_PORT`, `tls/server.crt`,
+`tls/server.key`) and adds `engine/mihomo.gz`, `engine/target` and
+`engine/source` for the host's architecture to the bundle. deploy.sh refuses an
+engine for another architecture, unpacks it to `<release>/bin/mihomo`, runs
+`mihomo -t` on `server.yaml` before touching anything, refuses a UDP port held
+by another process and a `qp-edge-<component>.service` it did not write, raises
+`net.core.rmem_max`/`wmem_max` to 16 MiB for QUIC (`/etc/sysctl.d/90-qp-hy2.conf`,
+only upwards), and restarts the unit only when the engine, `server.yaml`, the
+certificate or the unit changed (`state/<component>/.hy2-applied`). The unit runs
+`current/<component>/bin/mihomo`, so `edge rollback` restarts the old engine with
+the restored state. health.sh: the unit is active and its process holds the port.
 
 ## Origins
 
@@ -75,6 +91,9 @@ as tar.gz, for `edge state pull`.
 | `STACK_IMAGES` | images the stack pulls; ship them with `--image` when the host cannot reach the registry |
 | `STACK_STATE_TEMPLATES` | `name=vendor/path` pairs `--init` copies into the state template |
 | `STACK_INSTALLS` | packages deploy.sh may install, shown in the push plan |
+| `STACK_BUNDLE_REQUIRED` | files the pushing tool adds to the bundle itself (hy2: `engine/mihomo.gz engine/target`); `edge push` refuses before connecting, and preflight before switching, when they are missing |
+| `STACK_BUNDLE_HINT` | what to run instead, printed with that refusal |
+| `STACK_START` | the one command that sets the stack up, shown by `edge stacks <name>` instead of the state-template steps |
 
 ## OS families
 
