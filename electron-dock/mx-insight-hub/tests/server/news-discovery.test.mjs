@@ -110,7 +110,10 @@ test('news HTTP requests preserve grants, billing replay, explicit dispatch and 
   const adapter = { capabilities: async () => ({ data: { platforms: [] } }), dependencies: async () => ({ status: 'up' }) }
   const service = new HubService({ store, adapter, apiKeyPepper: 'test-news-http-pepper-at-least-32-bytes', newsDiscovery: {
     async sourceOptions(platforms) { optionReads.push(platforms); return { items: [{ key: entry.id, value: entry.canonicalName }] } },
-    async search(query) { queries.push(query); return { items: [], pageInfo: { returnedCount: 0, hasMore: false, nextCursor: null } } },
+    async search(query) {
+      queries.push(query)
+      return { total: 12, items: [publicNewsArticle(record)], pageInfo: { returnedCount: 1, hasMore: true, nextCursor: 'next' } }
+    },
     async article(articleId, platforms) { assert.deepEqual(platforms, [NEWS]); throw Object.assign(new Error('not visible'), { status: 404, code: 'news_article_not_found' }) },
   } })
   const tenant = await service.createTenant({ name: 'News test' })
@@ -141,9 +144,13 @@ test('news HTTP requests preserve grants, billing replay, explicit dispatch and 
     assert.equal(optionReads.length, 1)
     assert.equal(store.requests.size, 0, 'opening the source dropdown must not reserve metered usage')
     assert.equal(queries.length, 0)
-    assert.equal((await call('/api/v1/data/news/search', {})).response.status, 200)
-    const replay = await call('/api/v1/data/news/search', {})
+    const search = await call('/api/v1/data/news/search', { pageSize: 1 })
+    assert.equal(search.response.status, 200)
+    assert.equal(search.payload.data.total, 12)
+    const replay = await call('/api/v1/data/news/search', { pageSize: 1 })
     assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
+    assert.equal(replay.payload.data.total, 12)
+    assert.deepEqual([...store.requests.values()].map(request => request.unitsActual), [1])
     assert.equal(queries.length, 1)
     assert.deepEqual(queries[0].platforms, [NEWS])
     assert.equal((await call('/api/v1/data/news/search', { query: 'changed' })).response.status, 409)
@@ -196,21 +203,34 @@ test('PostgreSQL news search, legacy projection, review conflicts and Agent idem
     assert.deepEqual((await news.sourceOptions([NEWS])).items, [], 'unbound records are not catalog source options')
     const first = await news.search(normalizeNewsQuery({ pageSize: 2 }, scoped), scoped.secret)
     assert.deepEqual(first.items.map(row => row.id), [id(5), id(4)])
+    assert.equal(first.total, 3)
+    assert.equal(first.pageInfo.returnedCount, 2)
     assert.equal(first.items[0].summary, '保留的历史摘要')
     assert.equal(first.items[0].contentExtent, 'summary')
     const second = await news.search(normalizeNewsQuery({ pageSize: 2, cursor: first.pageInfo.nextCursor }, scoped), scoped.secret)
     assert.deepEqual(second.items.map(row => row.id), [id(1)])
+    assert.equal(second.total, 3)
+    assert.equal(second.pageInfo.returnedCount, 1)
     assert.equal(second.pageInfo.hasMore, false)
     await assert.rejects(news.article(id(2), [NEWS]), { status: 404 })
-    assert.equal((await news.search(normalizeNewsQuery({ timeField: 'publishedAt' }, scoped), scoped.secret)).items.length, 0)
+    const noMatches = await news.search(normalizeNewsQuery({ timeField: 'publishedAt' }, scoped), scoped.secret)
+    assert.deepEqual(noMatches.items, [])
+    assert.equal(noMatches.total, 0)
     assert.equal((await news.facets(normalizeNewsQuery({}, scoped))).sampledRecords, 3)
     await insert(8, { collected_at: '2026-09-23T00:00:00.000123Z' })
     await insert(9, { collected_at: '2026-09-23T00:00:00.000122Z' })
     const microFilters = { pageSize: 1, from: '2026-09-23T00:00:00.000100Z', to: '2026-09-23T00:00:00.000200Z' }
     const microFirst = await news.search(normalizeNewsQuery(microFilters, scoped), scoped.secret)
     assert.deepEqual(microFirst.items.map(row => row.id), [id(8)])
-    const microNext = await news.search(normalizeNewsQuery({ ...microFilters, cursor: microFirst.pageInfo.nextCursor }, scoped), scoped.secret)
+    const microContinuation = normalizeNewsQuery({ ...microFilters, cursor: microFirst.pageInfo.nextCursor }, scoped)
+    const microNext = await news.search(microContinuation, scoped.secret)
     assert.deepEqual(microNext.items.map(row => row.id), [id(9)], 'cursor must preserve PG microseconds, not skip the rest of a millisecond')
+    assert.equal(microNext.total, 2)
+    await db.query('UPDATE core.canonical_records SET deleted_at = now() WHERE id = $1', [id(9)])
+    const exhausted = await news.search(microContinuation, scoped.secret)
+    assert.equal(exhausted.total, 1)
+    assert.deepEqual(exhausted.items, [])
+    assert.deepEqual(exhausted.pageInfo, { returnedCount: 0, hasMore: false, nextCursor: null })
     const catalogStore = { listSourceCatalogEntries: async () => [entry] }
     const ruleAgent = new CatalogClassifier({ pool, store: catalogStore, agent: { refresh() { throw new Error('rules must not need an Agent') } } })
     const proposal = await ruleAgent.propose({ recordId: id(1), recordRevision: 1, requestKey: 'rule-known-source', useAgent: true }, 'test-admin')
@@ -280,6 +300,7 @@ test('PostgreSQL news search, legacy projection, review conflicts and Agent idem
     assert.deepEqual(await optionKeys([NEWS, FINANCE]), [90, 91, 92, 99, 100].map(id).sort())
     const multiple = await news.search(normalizeNewsQuery({ catalogEntryIds: [id(91), id(99)] }, scoped), scoped.secret)
     assert.deepEqual(multiple.items.map(row => row.id), [id(10), id(18)], 'selected source UUIDs are OR-ed')
+    assert.equal(multiple.total, 2)
     await db.query('UPDATE catalog.source_catalog_entries SET canonical_name = $2 WHERE id = $1', [id(91), '新来源名称'])
     assert.equal((await news.sourceOptions([NEWS])).items.find(item => item.key === id(91)).value, '新来源名称')
     catalogStore.listSourceCatalogEntries = async () => [{ ...entry, revision: 2 }]
@@ -291,6 +312,9 @@ test('PostgreSQL news search, legacy projection, review conflicts and Agent idem
     await db.query(`INSERT INTO core.canonical_records (id, dataset_id, platform, object_type, external_id, schema_version, content_type, title, collected_at)
       SELECT ('20000000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'test.v1', $1, 'article', n::text, 'v1', 'news.article', '近期未归类新闻', '2026-09-23'
       FROM generate_series(1, 5001) n`, [NEWS])
+    const keywordPage = await news.search(normalizeNewsQuery({ query: '近期未归类新闻', pageSize: 9 }, scoped), scoped.secret)
+    assert.equal(keywordPage.total, 5001)
+    assert.equal(keywordPage.items.length, 9)
     const allOptions = await news.sourceOptions([NEWS])
     assert.equal(allOptions.scope, 'authorized_news_catalog_sources')
     assert.equal(allOptions.countBasis, 'catalog_entries')

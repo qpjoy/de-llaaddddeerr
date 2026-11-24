@@ -209,6 +209,105 @@ updated profile and run `wg enroll --force`. See
 [wireguard.setup.md](wireguard.setup.md) for the full command sequence and
 multi-instance example.
 
+## Hysteria2 to Any Host in One Command (`hy2`)
+
+`qp-tunnel-cli hy2 up` pushes a Hysteria2 server to a host over SSH and gives
+this machine a local HTTP + SOCKS5 port whose traffic leaves from that host.
+Install the CLI on the machine that should get the port (an Internal server, for
+example), then:
+
+```bash
+npm i -g @qpjoy/tunnel-cli
+qp-tunnel-cli hy2 up oversea-1 --host 203.0.113.10 --key ~/.ssh/id_ed25519
+curl -x http://127.0.0.1:7891 http://api.ipify.org/      # prints 203.0.113.10 (a host in mainland China: http://ip.3322.net/)
+```
+
+Without `--key`, in a terminal, you log in once with the host's password (typed
+into ssh's own prompt) and this machine's edge key is put there, as
+`edge key install` does. `up` then:
+
+1. looks at the host read-only over SSH: architecture, which UDP ports are taken;
+2. makes the settings here: a random password, an ECDSA key and a 10-year
+   self-signed certificate (local `openssl`), server port 443/udp (8443, 10443,
+   ... when 443 is taken), local port 7891 (or the next free one);
+3. pushes the `hy2` edge stack with `edge push` (release, state, origin, ledger,
+   rollback all as for other stacks). The bundle carries the mihomo engine for the
+   host's architecture, so the host downloads nothing and needs no Docker;
+4. on the host, `deploy.sh` unpacks the engine, checks `server.yaml` with it,
+   writes `qp-edge-hy2.service` and restarts it only when the engine, the
+   configuration or the certificate changed;
+5. installs the local client as the mihomo-client instance `hy2-<host>`
+   (`mihomo-client@hy2-<host>.service`, Linux with systemd, sudo);
+6. checks the path: through the local port the host's own sshd must answer, and
+   the exit address is shown.
+
+Running `up` again is safe: an unchanged server is not pushed again.
+
+Both ends run the mihomo engine already published as
+`@qpjoy/electron-plugin-tunnel-engine-<platform>`. The pushing machine fetches it
+once with `npm pack` (set `MIHOMO_NPM_REGISTRY` for a mirror) into
+`<edge home>/cache/engine/`, or takes `--engine <mihomo.gz>`. The certificate is
+pinned by its SHA-256 fingerprint in every client configuration, so no domain or
+CA is needed.
+
+The local side never touches the existing mihomo-client instances: it is always
+a named instance, and local ports 7788 (the default instance, the MX-H2I egress)
+and 7890 (the subscriptions instance) are refused.
+
+The port listens on 127.0.0.1. For containers and programs that take a proxy
+address in a web form, open it further with `--bind` (on `up`, `init`, `push`
+or `connect`; 127.0.0.1 always stays). The port has no password: whoever
+reaches one of those addresses can use it.
+
+```bash
+qp-tunnel-cli hy2 connect oversea-1 --bind docker    # + every Docker bridge gateway: 172.17.0.1, 172.18.0.1, ...
+qp-tunnel-cli hy2 connect oversea-1 --bind 0.0.0.0   # every interface; only private and loopback sources are served
+qp-tunnel-cli hy2 connect oversea-1 --bind 127.0.0.1,192.168.224.1   # chosen addresses of this machine
+```
+
+`docker` is looked up again by every `hy2 connect`, so run it after creating a
+new Docker network; with it the instance starts after `docker.service`. docker0
+counts even with no container attached (Linux reports it NO-CARRIER).
+With `0.0.0.0`, this machine's own public addresses are allowed too: Docker
+masquerades what the host itself sends to a bridge address (`curl -x
+http://172.18.0.1:<port>` on the host) to its main address. `hy2 test` checks
+the port on those other addresses as well and names one that refuses. To check
+what a container sees, ask from one:
+`docker exec -e http_proxy=http://<its gateway>:<port> <container> wget -qO- http://api.ipify.org/`
+(busybox and GNU wget both read `http_proxy`). A
+container can also use `http://host.docker.internal:<port>` with
+`extra_hosts: ["host.docker.internal:host-gateway"]` (that is docker0's
+172.17.0.1). With ufw or firewalld active here, containers need
+`sudo ufw allow from 172.16.0.0/12 to any port <port> proto tcp`.
+
+When the check fails, `hy2 test` examines both ends, as `edge link check` does
+for the WireGuard relay: the local instance, its log and its route to the server;
+on the host (read-only, over SSH) the unit, who holds the UDP port, the firewall,
+and a 9-second `tcpdump` on the port while this side sends. It then names the
+failing part: nothing arrives (security group, or a filtered port), packets
+arrive but get no answer (the host firewall, with the command to open it), the
+server answers but nothing works here (replies lost on the way back, or settings
+out of sync), or the server is not running. `--diagnose` runs it anyway,
+`--no-diagnose` never. The host needs `tcpdump` for the packet part.
+
+```bash
+qp-tunnel-cli hy2 status                          # what this machine set up; is each local port live; "not applied" = rerun hy2 connect
+qp-tunnel-cli hy2 test oversea-1                  # check the path again; on failure, both ends are examined
+qp-tunnel-cli hy2 push oversea-1 --rotate-password    # new password (or --new-cert, --port 8443, --obfs)
+qp-tunnel-cli hy2 export oversea-1 --format uri   # hysteria2:// link for phones and desktop clients
+qp-tunnel-cli hy2 export oversea-1 > hy2.yaml     # Clash/mihomo configuration for another machine
+qp-tunnel-cli hy2 run oversea-1                   # macOS or no systemd: the client in the foreground
+qp-tunnel-cli hy2 disconnect oversea-1            # remove the local instance; the server keeps running
+qp-tunnel-cli edge status oversea-1 --health      # the host side
+qp-tunnel-cli edge rollback oversea-1 --component hy2 --yes
+```
+
+Open the server's UDP port in the host's cloud security group; nothing here
+opens ports (deploy.sh reports ufw/firewalld). A restarted server makes clients
+elsewhere wait for their QUIC idle timeout, about 30 seconds; `hy2 push`
+restarts this machine's instance at once. The design, the files and the failure
+modes are in [docs/02-hy2-push.md](docs/02-hy2-push.md).
+
 ## Edge Hosts: Reach and Deploy over SSH (`edge`)
 
 `qp-tunnel-cli edge` runs on an Internal machine and reaches edge hosts
@@ -255,6 +354,7 @@ A stack is a ready-made bundle for one technology, under
 |---|---|---|---|
 | `wg-nginx` | WireGuard relay made by `edge link init` | nginx 80/443 (optional: tunnel first) | throughput and low CPU matter; not on CentOS/RHEL 7 (no WireGuard module) |
 | `open-nginx` | OpenVPN server instance (`open`) | nginx 80/443 | TCP or TLS-wrapped transport, kernels without WireGuard |
+| `hy2` | none, it is the proxy | Hysteria2 UDP (mihomo engine, systemd) | a local proxy port on the pushing machine: `qp-tunnel-cli hy2 up` (above) makes its state and pushes it |
 | `hy2-mihomo` | none, it is the proxy | Hysteria2 UDP + subscription site | serving subscriptions; runs `docker/hysteria2-mihomo-stack` unchanged |
 
 Secrets, certificates and real domain names never travel inside a bundle. They
@@ -330,7 +430,7 @@ Internal machine / origin ending in `M`):
 
 | Plan | Edge host | Internal machine | For |
 |---|---|---|---|
-| `launcher` (default) | `10.88.0.N` (domestic02: `10.88.0.2`) | `10.88.88.(87+M)` (s1 `.88`, s2 `.89`) | the Launcher's own numbering, so a machine keeps the address it has in the Launcher network; `10.88.0.1` stays the current Domestic's relay and `10.88.100.0/24` the Launcher's service VIPs |
+| `launcher` (default) | `10.88.0.N` (domestic02: `10.88.0.2`) | `10.88.88.(87+M)` (s2 `.89`; s1 `.87`) | the Launcher's own numbering. `10.88.0.1` and `10.88.88.88` are the Launcher's role addresses (the current Domestic relay and the current Internal service peer); they move with the role, so no edge link takes them and internal01 gets `.87`. `10.88.100.0/24` is the Launcher's service VIPs |
 | `isolated` | `100.127.200.N` | `100.127.200.(87+M)` | other clusters: overlaps nothing the Launcher uses (qp-tunnel-cli's own `100.127` range, next to OpenVPN `100.127.0.0/24` and WireGuard `100.127.50.0/24`) |
 
 `edge link init <host> --plan launcher|isolated` (the wizard asks). Only `/32`s

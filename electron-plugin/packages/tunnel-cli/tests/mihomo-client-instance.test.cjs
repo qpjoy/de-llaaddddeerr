@@ -750,3 +750,44 @@ fetch_subscription 'http://example.test:3434/public.yaml' '' ''
   assert.equal(existsSync(outputPath), false);
   assert.equal(existsSync(join(stateRoot, 'client/subscription.yaml')), true);
 });
+
+test('install from a local binary replaces a running core by rename, and leaves an identical one alone', () => {
+  const stateRoot = join(testRoot, 'binary-install');
+  mkdirSync(stateRoot, { recursive: true });
+  const result = runLibrary(
+    [],
+    String.raw`
+MIHOMO_HOME="$MIHOMO_TEST_STATE_ROOT"
+MIHOMO_ENV_FILE="$MIHOMO_HOME/client.env"
+MIHOMO_BIN="$MIHOMO_HOME/mihomo-hy2-box"
+inode() { ls -i "$1" | awk '{print $1}'; }
+printf '#!/bin/sh\necho new\n' > "$MIHOMO_HOME/new"
+chmod 755 "$MIHOMO_HOME/new"
+# The running core: a real executable, so Linux would refuse writing into it (Text file busy).
+cp "$(command -v sleep)" "$MIHOMO_BIN"
+"$MIHOMO_BIN" 30 &
+running=$!
+before="$(inode "$MIHOMO_BIN")"
+install_binary_from_path "$MIHOMO_HOME/new"
+after="$(inode "$MIHOMO_BIN")"
+kill "$running" 2>/dev/null || true
+[ "$before" != "$after" ] && echo "renamed"
+cmp -s "$MIHOMO_HOME/new" "$MIHOMO_BIN" && echo "content new"
+install_binary_from_path "$MIHOMO_HOME/new"
+[ "$(inode "$MIHOMO_BIN")" = "$after" ] && echo "identical kept"
+stat -c %a "$MIHOMO_BIN" 2>/dev/null || stat -f %Lp "$MIHOMO_BIN"
+ls -A "$MIHOMO_HOME" | grep -c '^\.mihomo-install' || true
+grep '^MIHOMO_VERSION=' "$MIHOMO_ENV_FILE"
+`,
+    { env: { MIHOMO_TEST_STATE_ROOT: stateRoot } },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^Installed Mihomo local binary to .*mihomo-hy2-box$/m);
+  assert.match(result.stdout, /^renamed$/m);
+  assert.match(result.stdout, /^content new$/m);
+  assert.match(result.stdout, /^Mihomo local binary at .*mihomo-hy2-box is already this one$/m);
+  assert.match(result.stdout, /^identical kept$/m);
+  assert.match(result.stdout, /^755$/m);
+  assert.match(result.stdout, /^0$/m);
+  assert.match(result.stdout, /^MIHOMO_VERSION='local'$/m);
+});

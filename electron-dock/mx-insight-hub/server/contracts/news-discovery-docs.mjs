@@ -38,7 +38,9 @@ export const newsOpenApiPaths = {
       items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, name: { type: 'string' }, majorCategory: text, scenarios: labels } } },
       categories: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, sourceType: { type: 'string' }, platform: { type: 'string' }, label: { type: 'string' }, datasetId: text, objectType: text, registered: { type: 'boolean' }, authorized: { type: 'boolean' } } } } }) }) },
   '/data/news/search': { post: operation('Search stored news, without acquisition or model calls', { operationId: 'newsSearch', parameters: [idempotency],
-    responses: response({ items: { type: 'array', items: article }, filters: newsQuerySchema, dataBasis: { const: 'stored_canonical' }, pagination: { const: 'live_keyset' },
+    responses: response({ items: { type: 'array', items: article },
+      total: { type: 'integer', minimum: 0, description: 'Exact count of stored news records visible to this Key that match the filters before applying the cursor or page size. May change between live pages.' },
+      filters: newsQuerySchema, dataBasis: { const: 'stored_canonical' }, pagination: { const: 'live_keyset' },
       pageInfo: { type: 'object', properties: { returnedCount: { type: 'integer' }, hasMore: { type: 'boolean' }, nextCursor: text } } }),
     requestBody: { required: true, content: { 'application/json': { schema: newsQuerySchema } } } }) },
   '/data/news/facets': { post: operation('Source/category facets of the latest 5000 matching records', { operationId: 'newsFacets', parameters: [idempotency],
@@ -75,7 +77,8 @@ curl -sS "$HUB_URL/api/v1/data/news/sources" -H "Authorization: Bearer $MX_INSIG
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
   -H "Idempotency-Key: news-page-001" -H "Content-Type: application/json" \\
   -d '{"query":"新能源","sourceCodes":["sina"],"pageSize":20}'</code></pre>
-<p>响应为 <code>{data:{contractVersion,items,pageInfo,filters,dataBasis,pagination},requestId}</code>。pageInfo 含 returnedCount、hasMore、nextCursor。保持过滤条件和页大小不变，将 nextCursor 原样传入下一页并使用新的幂等键。游标绑定 consumer、Key、授权与条件，6 小时过期；失效返回 invalid_cursor。实时 keyset 不承诺冻结快照；按 id 去重。不返回虚构总数。</p>
+<p>响应为 <code>{data:{contractVersion,items,total,pageInfo,filters,dataBasis,pagination},requestId}</code>。<code>data.total</code> 是当前 Key 可见、符合本次筛选条件的已入库新闻记录总数。计数在应用游标和页大小之前完成，无匹配时为 0。<code>data.pageInfo.returnedCount</code> 是本页返回条数。分页期间库存变化时，后续页面的总数也可能变化。</p>
+<p>保持过滤条件和页大小不变，若 <code>data.pageInfo.hasMore</code> 为 true，将 <code>data.pageInfo.nextCursor</code> 原样传入下一页并使用新的幂等键。游标绑定 consumer、Key、授权与条件，6 小时过期，失效返回 invalid_cursor。客户端按文章 id 去重。</p>
 <h3>文章详情与内容边界</h3><p>GET <code>/api/v1/data/news/articles/{id}</code> 返回 data.article，包含 id、revision、category、source、title、summary、body、url、author、topics、keywords、section、publishedAt、publishedDate、publishedAtPrecision、firstSeenAt、contentExtent。列表返回 excerpt 而不返回 body。summary 只取来源摘要；全文程度为 full_text/summary/reference/unknown。正文非空不证明全文；原文时间与收录时间分开。原始响应、凭据及内部采集血缘不返回。</p>
 <h3>统计与覆盖</h3><p>POST <code>/api/v1/data/news/facets</code> 使用相同条件，对最新最多 5000 条匹配记录统计，返回 sources、categories、sampledRecords、truncated、asOf、countBasis=records。该统计不是事件数或去重文章数。来源未绑定不会从全部结果中丢弃。当前识别 news/news.article/news.resolved，以及经过特定连接器限制的 bbc.article；引用、评论、热榜与未知类型不自动当新闻。</p>
 <h3>身份、计量与重试</h3><p>所有接口要求有效 Hub Key 和 saved-record 类别 grant。搜索、统计、详情复用现有 <code>data.canonical-search</code> 计量/套餐规则，要求 Idempotency-Key；搜索按返回条数（至少 1 unit），统计和详情为 1 unit。相同请求重试复用原键，完成重放不重复计量；改变参数或页码须新键。来源元数据不计量。401 检查 Key；403 检查类别授权；404 表示文章不可见；409 检查幂等冲突或未决请求；429 遵守额度；503 可缩小查询范围，不能自动重新采集。</p>

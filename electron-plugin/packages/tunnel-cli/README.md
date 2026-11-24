@@ -219,7 +219,7 @@ example), then:
 ```bash
 npm i -g @qpjoy/tunnel-cli
 qp-tunnel-cli hy2 up oversea-1 --host 203.0.113.10 --key ~/.ssh/id_ed25519
-curl -x http://127.0.0.1:7891 http://api.ipify.org/      # prints 203.0.113.10
+curl -x http://127.0.0.1:7891 http://api.ipify.org/      # prints 203.0.113.10 (a host in mainland China: http://ip.3322.net/)
 ```
 
 Without `--key`, in a terminal, you log in once with the host's password (typed
@@ -252,12 +252,47 @@ CA is needed.
 
 The local side never touches the existing mihomo-client instances: it is always
 a named instance, and local ports 7788 (the default instance, the MX-H2I egress)
-and 7890 (the subscriptions instance) are refused. The port listens on
-127.0.0.1 unless `--bind` says otherwise.
+and 7890 (the subscriptions instance) are refused.
+
+The port listens on 127.0.0.1. For containers and programs that take a proxy
+address in a web form, open it further with `--bind` (on `up`, `init`, `push`
+or `connect`; 127.0.0.1 always stays). The port has no password: whoever
+reaches one of those addresses can use it.
 
 ```bash
-qp-tunnel-cli hy2 status                          # what this machine set up; is each local port live
-qp-tunnel-cli hy2 test oversea-1                  # check the path again
+qp-tunnel-cli hy2 connect oversea-1 --bind docker    # + every Docker bridge gateway: 172.17.0.1, 172.18.0.1, ...
+qp-tunnel-cli hy2 connect oversea-1 --bind 0.0.0.0   # every interface; only private and loopback sources are served
+qp-tunnel-cli hy2 connect oversea-1 --bind 127.0.0.1,192.168.224.1   # chosen addresses of this machine
+```
+
+`docker` is looked up again by every `hy2 connect`, so run it after creating a
+new Docker network; with it the instance starts after `docker.service`. docker0
+counts even with no container attached (Linux reports it NO-CARRIER).
+With `0.0.0.0`, this machine's own public addresses are allowed too: Docker
+masquerades what the host itself sends to a bridge address (`curl -x
+http://172.18.0.1:<port>` on the host) to its main address. `hy2 test` checks
+the port on those other addresses as well and names one that refuses. To check
+what a container sees, ask from one:
+`docker exec -e http_proxy=http://<its gateway>:<port> <container> wget -qO- http://api.ipify.org/`
+(busybox and GNU wget both read `http_proxy`). A
+container can also use `http://host.docker.internal:<port>` with
+`extra_hosts: ["host.docker.internal:host-gateway"]` (that is docker0's
+172.17.0.1). With ufw or firewalld active here, containers need
+`sudo ufw allow from 172.16.0.0/12 to any port <port> proto tcp`.
+
+When the check fails, `hy2 test` examines both ends, as `edge link check` does
+for the WireGuard relay: the local instance, its log and its route to the server;
+on the host (read-only, over SSH) the unit, who holds the UDP port, the firewall,
+and a 9-second `tcpdump` on the port while this side sends. It then names the
+failing part: nothing arrives (security group, or a filtered port), packets
+arrive but get no answer (the host firewall, with the command to open it), the
+server answers but nothing works here (replies lost on the way back, or settings
+out of sync), or the server is not running. `--diagnose` runs it anyway,
+`--no-diagnose` never. The host needs `tcpdump` for the packet part.
+
+```bash
+qp-tunnel-cli hy2 status                          # what this machine set up; is each local port live; "not applied" = rerun hy2 connect
+qp-tunnel-cli hy2 test oversea-1                  # check the path again; on failure, both ends are examined
 qp-tunnel-cli hy2 push oversea-1 --rotate-password    # new password (or --new-cert, --port 8443, --obfs)
 qp-tunnel-cli hy2 export oversea-1 --format uri   # hysteria2:// link for phones and desktop clients
 qp-tunnel-cli hy2 export oversea-1 > hy2.yaml     # Clash/mihomo configuration for another machine

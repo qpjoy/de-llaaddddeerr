@@ -181,10 +181,15 @@ export class NewsDiscoveryStore {
   }
   async search(query, secret) {
     const where = newsWhere(query)
-    const { rows } = await this.bounded(`WITH page AS MATERIALIZED (
-      SELECT c.id, ${where.time} AS sort_time FROM core.canonical_records c ${CATALOG_JOINS}
+    // Both predicates share the filter parameters. Only the page uses the trailing cursor parameters.
+    const matches = newsWhere(query, { cursor: false })
+    const filterJoins = query.filters.catalogEntryIds.length || query.filters.binding !== 'all' ? CATALOG_JOINS : ''
+    const { rows } = await this.bounded(`WITH totals AS (
+      SELECT count(*) AS total FROM core.canonical_records c ${filterJoins} WHERE ${matches.sql}
+    ), page AS MATERIALIZED (
+      SELECT c.id, ${where.time} AS sort_time FROM core.canonical_records c ${filterJoins}
       WHERE ${where.sql} ORDER BY ${where.time} DESC, c.id DESC LIMIT $${where.values.length + 1}
-    ) SELECT c.*, page.sort_time,
+    ) SELECT c.*, totals.total, page.sort_time,
       to_char(page.sort_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_time,
       e.id AS catalog_id, e.canonical_name AS catalog_name,
       jsonb_build_object('attributes', jsonb_build_object(
@@ -193,12 +198,15 @@ export class NewsDiscoveryStore {
         'source_keywords', rv.normalized_payload #> '{attributes,source_keywords}',
         'body_status', rv.normalized_payload #> '{attributes,body_status}',
         'section', rv.normalized_payload #> '{attributes,section}')) AS news_raw
-      FROM page JOIN core.canonical_records c ON c.id = page.id ${CATALOG_JOINS}
+      FROM totals LEFT JOIN page ON true
+      LEFT JOIN core.canonical_records c ON c.id = page.id ${CATALOG_JOINS}
       LEFT JOIN core.record_revisions rv ON rv.record_id = c.id AND rv.revision = c.current_revision
       ORDER BY page.sort_time DESC, c.id DESC`, [...where.values, query.filters.pageSize + 1])
-    const hasMore = rows.length > query.filters.pageSize
-    const page = rows.slice(0, query.filters.pageSize)
-    return { contractVersion: NEWS_CONTRACT, items: page.map(row => publicNewsArticle(row)),
+    // An empty page still has a row from totals, with no article attached.
+    const records = rows.filter(row => row.id !== null)
+    const hasMore = records.length > query.filters.pageSize
+    const page = records.slice(0, query.filters.pageSize)
+    return { contractVersion: NEWS_CONTRACT, total: Number(rows[0].total), items: page.map(row => publicNewsArticle(row)),
       pageInfo: { returnedCount: page.length, hasMore, nextCursor: hasMore ? newsCursor(page.at(-1), query, secret) : null },
       filters: query.filters, dataBasis: 'stored_canonical', pagination: 'live_keyset' }
   }

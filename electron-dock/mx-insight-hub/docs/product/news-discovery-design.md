@@ -156,7 +156,7 @@ duplicateGroupId（有确定性分组时）
 
 分页按确定性 `(sortTime, id)` 或经验证的搜索排序进行，游标绑定版本、Key/consumer、有效授权、完整过滤条件、排序和页大小。每页重验权限；授权变化后拒绝失效游标。live keyset 不承诺冻结快照，未来全量同步/导出应使用独立快照或 change feed。
 
-返回 `returnedCount/hasMore/nextCursor`。来源/主题分面以相同授权和过滤范围计算，并明确 `countBasis=records`；未来折叠重复后显示数另行命名。精确总数和分面统计可独立限时、缓存并标注时间，不让首屏列表等待全库 COUNT 或 GROUP BY。
+搜索响应的 `data.total` 是本次请求在授权范围内匹配所有筛选条件的新闻记录总数，应用游标与页大小前计数。库存变化时，后续页面的总数也可能变化。`data.pageInfo` 返回本页的 `returnedCount/hasMore/nextCursor`。来源和类别分面单独统计最新最多 5,000 条匹配记录，`countBasis=records`。
 
 ## 8. 权限、用量与界面
 

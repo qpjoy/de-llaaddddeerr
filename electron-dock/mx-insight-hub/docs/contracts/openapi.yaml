@@ -1307,6 +1307,10 @@ paths:
                               type:
                               - string
                               - 'null'
+                      total:
+                        type: integer
+                        minimum: 0
+                        description: Exact count of stored news records visible to this Key that match the filters before applying the cursor or page size. May change between live pages.
                       filters:
                         type: object
                         additionalProperties: false

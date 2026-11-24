@@ -134,10 +134,12 @@ curl --fail-with-body -sS "$HUB_URL/api/v1/data/news/search" \
   -H "Idempotency-Key: $NEWS_PAGE_KEY" \
   --data-binary @hub-news-query.json \
   -o hub-news-page.json
-jq '{requestId, pageInfo: .data.pageInfo, articles: .data.items}' hub-news-page.json
+jq '{requestId, total: .data.total, pageInfo: .data.pageInfo, articles: .data.items}' hub-news-page.json
 ```
 
 `query` 为空表示浏览；例如改为 `"能源"` 表示在标题或正文中匹配该字面子串。不是 AND/OR 搜索表达式。
+
+`data.total` 是当前 Key 可见、匹配全部筛选条件的已入库新闻记录总数。游标和页大小不参与计数，无匹配时为 0。`data.pageInfo.returnedCount` 是本页实际返回的条数。
 
 超时或连接中断后重试上述请求时，保留同一个 `NEWS_PAGE_KEY` 和请求文件，只重跑 `curl`。不要重新执行生成幂等键的那一行。
 
@@ -161,7 +163,7 @@ fi
 
 继续翻页时，使用最新响应的 `nextCursor`，保持原过滤条件与 `pageSize` 不变，每个新页面生成新幂等键；`hasMore=false` 时停止。同一页面重试仍复用该页面的幂等键。
 
-游标有效期 6 小时，绑定 Key、consumer、授权及所有查询条件。按选定时间与文章 ID 倒序实时分页，不提供冻结快照或精确总数。客户端按文章 `id` 去重；需要处理修订时同时保存 `revision`。`firstSeenAt` 不是可靠的“最近更新”变更水位。
+游标有效期 6 小时，绑定 Key、consumer、授权及所有查询条件。按选定时间与文章 ID 倒序实时分页，库存变化时后续页面的总数也可能变化。客户端按文章 `id` 去重；需要处理修订时同时保存 `revision`。`firstSeenAt` 不是可靠的“最近更新”变更水位。
 
 ### 4.5 读取一篇文章
 
@@ -289,6 +291,7 @@ facets 使用相同过滤条件，按选定时间取最新最多 5,000 条匹配
         "section": null
       }
     ],
+    "total": 1,
     "pageInfo": {"returnedCount": 1, "hasMore": false, "nextCursor": null},
     "filters": {
       "query": "", "catalogEntryIds": [], "sourceCodes": [],

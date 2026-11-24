@@ -43,6 +43,16 @@ function workspaceEngine(target) {
 }
 const hereEngine = ['darwin', 'linux'].includes(process.platform) ? workspaceEngine(`${process.platform}-${process.arch}`) : undefined;
 const linuxX64Engine = workspaceEngine('linux-x64');
+const { networkInterfaces } = require('node:os');
+const ipv4 = (filter) => Object.entries(networkInterfaces()).filter(([name]) => filter(name))
+  .flatMap(([, list]) => (list || []).filter((entry) => entry.family === 'IPv4' || entry.family === 4).map((entry) => entry.address));
+const lanAddress = ipv4(() => true).find((address) => !address.startsWith('127.'));
+// As the CLI looks them up: on Linux `ip` also lists links Node skips (docker0 with no container).
+const hy2Module = require(resolve(packageRoot, 'dist/hy2.js'));
+const ipAddr = process.platform === 'linux' ? spawnSync('ip', ['-4', '-o', 'addr', 'show'], { encoding: 'utf8' }) : undefined;
+const dockerAddresses = ipAddr && ipAddr.status === 0 && hy2Module.parseIpAddr(ipAddr.stdout).length > 0
+  ? [...new Set(hy2Module.parseIpAddr(ipAddr.stdout).filter(({ name }) => name === 'docker0' || name.startsWith('br-')).map(({ address }) => address))]
+  : ipv4((name) => name === 'docker0' || name.startsWith('br-'));
 let hereMihomoPath;
 function hereMihomo() {
   if (!hereMihomoPath) {
@@ -65,6 +75,7 @@ const command = args.slice(index + 1).join(' ');
 let input = Buffer.alloc(0);
 try { input = readFileSync(0); } catch {}
 if (input.includes('qp-hy2-probe')) { process.stdout.write(process.env.FAKE_PROBE || ''); process.exit(0); }
+if (command.includes('qp-hy2-diagnose')) { process.stdout.write(process.env.FAKE_DIAG || ''); process.exit(Number(process.env.FAKE_SSH_STATUS || 0)); }
 if (process.env.FAKE_SSH_CAPTURE && command.includes('cat >')) {
   const kind = command.includes('.state.tar.gz') ? 'state' : 'bundle';
   writeFileSync(process.env.FAKE_SSH_CAPTURE + '/' + kind + '-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.tgz', input);
@@ -302,14 +313,16 @@ test('end to end on this machine: the generated server, hy2 run, and hy2 test th
   const c = newCase();
   // The far end, as the server sees it: an sshd banner and a page that answers with an address.
   const sshd = net.createServer((socket) => socket.end('SSH-2.0-FakeForHy2\r\n'));
-  const web = http.createServer((request, response) => response.end('203.0.113.99\n'));
+  // /text answers as myip.ipip.net does: the address inside a sentence.
+  const web = http.createServer((request, response) => response.end(request.url.startsWith('/text') ? '当前 IP：203.0.113.98  来自于：测试\n' : '203.0.113.99\n'));
   await new Promise((r) => sshd.listen(0, '127.0.0.1', r));
   await new Promise((r) => web.listen(0, '127.0.0.1', r));
   const udp = await freeUdpPort();
   const local = await freeTcpPort();
   try {
     ok(run(c, ['edge', 'add', 'box', '--host', '127.0.0.1']));
-    ok(run(c, ['hy2', 'init', 'box', '--port', String(udp), '--local-port', String(local)]));
+    // Also on a non-loopback address of this machine, as --bind docker does with the Docker bridges.
+    ok(run(c, ['hy2', 'init', 'box', '--port', String(udp), '--local-port', String(local), ...(lanAddress ? ['--bind', lanAddress] : [])]));
     const state = join(c.home, 'state/box/hy2');
     const server = background(hereMihomo(), ['-d', state, '-f', join(state, 'server.yaml')], {});
     const client = background(process.execPath, [cli, 'hy2', 'run', 'box'], { env: env(c, { QP_HY2_MIHOMO: hereMihomo() }) });
@@ -324,10 +337,32 @@ test('end to end on this machine: the generated server, hy2 run, and hy2 test th
     assert.equal(passed.status, 0, passed.stdout);
     assert.match(passed.stdout, /ok {4}box's own sshd answered through the tunnel \(SSH-2\.0-FakeForHy2\)/);
     assert.match(passed.stdout, /ok {4}exit address 203\.0\.113\.99/);
+    if (lanAddress) assert.ok(passed.stdout.includes(`ok    the local port also answers on ${lanAddress}:${local}`), passed.stdout);
+    if (lanAddress) {
+      const viaLan = await new Promise((resolveGet, rejectGet) => {
+        http.get({ host: lanAddress, port: local, path: `http://127.0.0.1:${web.address().port}/`, headers: { Host: `127.0.0.1:${web.address().port}` } }, (response) => {
+          let body = '';
+          response.on('data', (chunk) => { body += chunk; });
+          response.on('end', () => resolveGet(body.trim()));
+        }).on('error', rejectGet);
+      });
+      assert.equal(viaLan, '203.0.113.99', `the port also answers on ${lanAddress}`);
+    }
+
+    // A site the host cannot reach is passed over for the next one; an address inside text is picked out.
+    const dead = await freeTcpPort();
+    const fallback = await new Promise((r) => {
+      const child = spawn(process.execPath, [cli, 'hy2', 'test', 'box', '--ssh-port', String(sshd.address().port), '--ip-url', `http://127.0.0.1:${dead}/,http://127.0.0.1:${web.address().port}/text`], { env: env(c) });
+      let stdout = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.on('close', (status) => r({ status, stdout }));
+    });
+    assert.equal(fallback.status, 0, fallback.stdout);
+    assert.ok(fallback.stdout.includes(`ok    exit address 203.0.113.98 (http://127.0.0.1:${web.address().port}/text; http://127.0.0.1:${dead}/ gave HTTP 502)`), fallback.stdout);
 
     stop(server);
     const failed = await new Promise((r) => {
-      const child = spawn(process.execPath, [cli, ...args, '--timeout', '2'], { env: env(c) });
+      const child = spawn(process.execPath, [cli, ...args, '--timeout', '2', '--no-diagnose'], { env: env(c) });
       let stdout = '';
       child.stdout.on('data', (chunk) => { stdout += chunk; });
       child.on('close', (status) => r({ status, stdout }));
@@ -567,4 +602,300 @@ test('status and show list what this machine set up, without secrets', () => {
   const missing = run(c, ['hy2', 'show', 'other']);
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /no hy2 set up for other on this machine/);
+});
+
+test('test waits for a local port that starts listening a moment after the unit was started', { timeout: 60000 }, async () => {
+  const c = newCase();
+  const local = await freeTcpPort();
+  ok(run(c, ['edge', 'add', 'box', '--host', '203.0.113.10']));
+  ok(run(c, ['hy2', 'init', 'box', '--local-port', String(local)]));
+  const child = spawn(process.execPath, [cli, 'hy2', 'test', 'box', '--no-ip', '--timeout', '5'], { env: env(c) });
+  let stdout = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  const done = new Promise((r) => child.on('close', (status) => r(status)));
+  // A SOCKS5 port that comes up 1.5 s late and answers CONNECT with an sshd banner, as mihomo would.
+  await new Promise((r) => setTimeout(r, 1500));
+  const socks = net.createServer((socket) => {
+    let stage = 0;
+    socket.on('data', () => {
+      if (stage === 0) { socket.write(Buffer.from([5, 0])); stage = 1; return; }
+      if (stage === 1) { socket.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])); socket.end('SSH-2.0-Late\r\n'); stage = 2; }
+    });
+    socket.on('error', () => {});
+  });
+  await new Promise((r) => socks.listen(local, '127.0.0.1', r));
+  try {
+    const status = await done;
+    assert.equal(status, 0, stdout);
+    assert.match(stdout, /ok {4}box's own sshd answered through the tunnel \(SSH-2\.0-Late\)/);
+  } finally {
+    socks.close();
+  }
+});
+
+test('--bind: loopback always stays; docker, addresses of this machine, or every interface for private sources', { skip: !lanAddress && 'no non-loopback IPv4 address here' }, () => {
+  const c = newCase();
+  ok(run(c, ['edge', 'add', 'box', '--host', '203.0.113.10']));
+  ok(run(c, ['hy2', 'init', 'box', '--local-port', '17996']));
+  const client = () => readFileSync(join(c.home, 'hy2/box/client.yaml'), 'utf8');
+  assert.match(client(), /^allow-lan: false$/m);
+  assert.ok(!client().includes('listeners:'));
+
+  const out = ok(run(c, ['hy2', 'init', 'box', '--bind', lanAddress]));
+  assert.match(out, new RegExp(`local {6}127\\.0\\.0\\.1:17996 and ${lanAddress.replace(/\./g, '\\.')}:17996`));
+  assert.match(out, /it has no password, so whoever reaches it there can use it/);
+  assert.equal(readJson(join(c.home, 'hy2/box/hy2.json')).bind, `127.0.0.1,${lanAddress}`);
+  assert.match(client(), /^allow-lan: false$/m);
+  assert.ok(client().includes(`listeners:\n  - name: "local-${lanAddress}"\n    type: mixed\n    listen: ${lanAddress}\n    port: 17996\n`));
+
+  const absent = run(c, ['hy2', 'init', 'box', '--bind', '198.51.100.250']);
+  assert.equal(absent.status, 2);
+  assert.match(absent.stderr, /--bind 198\.51\.100\.250 is not an address of this machine/);
+  const junk = run(c, ['hy2', 'init', 'box', '--bind', 'eth0']);
+  assert.equal(junk.status, 2);
+  assert.match(junk.stderr, /--bind takes 127\.0\.0\.1, 0\.0\.0\.0, docker, or IPv4 addresses/);
+
+  const docker = run(c, ['hy2', 'init', 'box', '--bind', 'docker']);
+  if (dockerAddresses.length === 0) {
+    assert.equal(docker.status, 2);
+    assert.match(docker.stderr, /--bind docker: this machine has no Docker bridge \(docker0, br-\*\) right now/);
+  } else {
+    ok(docker);
+    for (const address of dockerAddresses) assert.ok(client().includes(`    listen: ${address}\n`), address);
+  }
+
+  ok(run(c, ['hy2', 'init', 'box', '--bind', `0.0.0.0,${lanAddress}`]));
+  assert.equal(readJson(join(c.home, 'hy2/box/hy2.json')).bind, '0.0.0.0');
+  assert.match(client(), /^allow-lan: true\nbind-address: "\*"\nlan-allowed-ips:\n {2}- 127\.0\.0\.0\/8\n(.*\n)*? {2}- 172\.16\.0\.0\/12\n/m);
+  assert.ok(!client().includes('listeners:'));
+
+  // Exported for another machine: 127.0.0.1 there unless asked; this machine's Docker bridges never.
+  assert.match(ok(run(c, ['hy2', 'export', 'box'])), /^allow-lan: false$/m);
+  assert.match(ok(run(c, ['hy2', 'export', 'box', '--bind', '0.0.0.0'])), /^bind-address: "\*"$/m);
+  const exportDocker = run(c, ['hy2', 'export', 'box', '--bind', 'docker']);
+  assert.equal(exportDocker.status, 2);
+  assert.match(exportDocker.stderr, /names this machine's Docker bridges/);
+});
+
+test('a configuration with extra listeners loads in the real engine', { skip: (!hereEngine || !lanAddress) && 'no engine or no non-loopback address here' }, () => {
+  const c = newCase();
+  ok(run(c, ['edge', 'add', 'box', '--host', '203.0.113.10']));
+  ok(run(c, ['hy2', 'init', 'box', '--bind', lanAddress]));
+  const own = join(c.home, 'hy2/box');
+  const checked = spawnSync(hereMihomo(), ['-t', '-d', own, '-f', join(own, 'client.yaml')], { encoding: 'utf8' });
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+});
+
+test('docker0 with no container still counts: `ip` lists links that Node leaves out', () => {
+  const sample = [
+    '1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever',
+    '2: eth0    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0\\       valid_lft forever preferred_lft forever',
+    '3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever preferred_lft forever',
+    '5: br-1a2b3c4d5e6f    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-1a2b3c4d5e6f\\       valid_lft forever preferred_lft forever',
+    '9: wg0@NONE    inet 10.253.0.1/24 scope global wg0\\       valid_lft forever preferred_lft forever',
+    '',
+  ].join('\n');
+  assert.deepEqual(hy2Module.parseIpAddr(sample), [
+    { name: 'lo', address: '127.0.0.1' },
+    { name: 'eth0', address: '10.0.0.5' },
+    { name: 'docker0', address: '172.17.0.1' },
+    { name: 'br-1a2b3c4d5e6f', address: '172.18.0.1' },
+    { name: 'wg0', address: '10.253.0.1' },
+  ]);
+});
+
+test('a failed local install leaves hy2 status honest: "not applied" until an install succeeds', () => {
+  const c = newCase();
+  const clientLog = join(c.dir, 'client.log');
+  const fakeClient = join(c.dir, 'fake-mihomo-client.sh');
+  writeFileSync(fakeClient, `#!/bin/sh
+echo "$*" >> "${clientLog}"
+if [ -n "$FAKE_CLIENT_FAIL" ]; then echo "cp: cannot create regular file '/usr/local/bin/mihomo-hy2-box': Text file busy" >&2; exit 1; fi
+echo "Mihomo client installed and started."
+`, { mode: 0o755 });
+  const fakeSystemctl = join(c.dir, 'fake-systemctl');
+  writeFileSync(fakeSystemctl, '#!/bin/sh\necho active\n', { mode: 0o755 });
+  const fakeMihomo = join(c.dir, 'mihomo');
+  writeFileSync(fakeMihomo, '#!/bin/sh\n', { mode: 0o755 });
+  const here = { QP_HY2_ASSUME_SYSTEMD: '1', QP_EDGE_SUDO: '', QP_HY2_SYSTEMCTL: fakeSystemctl, QP_HY2_CLIENT_SCRIPT: fakeClient, QP_HY2_MIHOMO: fakeMihomo };
+  const statusJson = () => JSON.parse(ok(run(c, ['hy2', 'status', '--json'], here)))[0];
+  ok(run(c, ['edge', 'add', 'box', '--host', '203.0.113.10']));
+  ok(run(c, ['hy2', 'init', 'box', '--local-port', '17995']));
+  assert.equal(statusJson().applied, 'unknown');
+
+  ok(run(c, ['hy2', 'connect', 'box', '--no-test'], here));
+  const first = readJson(join(c.home, 'hy2/box/hy2.json')).applied;
+  assert.match(first.digest, /^[0-9a-f]{64}$/);
+  assert.equal(statusJson().applied, 'applied');
+  assert.match(readFileSync(clientLog, 'utf8'), /^install --instance hy2-box --mixed-port 17995 --file \S+client\.yaml --binary-path \S+mihomo$/m);
+
+  const failed = run(c, ['hy2', 'connect', 'box', '--bind', '0.0.0.0', '--no-test'], { ...here, FAKE_CLIENT_FAIL: '1' });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stdout, /Local port 127\.0\.0\.1:17995 -> 0\.0\.0\.0:17995/);
+  assert.match(failed.stderr, /Text file busy/);
+  assert.match(failed.stderr, /install --instance hy2-box failed \(exit 1\)\. The local port keeps what it had before; hy2 status shows "not applied"/);
+  assert.match(failed.stderr, /try again {2}qp-tunnel-cli hy2 connect box/);
+  const kept = readJson(join(c.home, 'hy2/box/hy2.json'));
+  assert.equal(kept.bind, '0.0.0.0');
+  assert.deepEqual(kept.applied, first);
+  assert.equal(statusJson().applied, 'not applied');
+  const table = ok(run(c, ['hy2', 'status'], here));
+  assert.match(table, /0\.0\.0\.0:17995 +hy2-box +active, not listening, not applied/);
+  assert.match(table, /box: the local instance does not run these settings \(LOCAL 0\.0\.0\.0:17995 .*\)\. Apply: qp-tunnel-cli hy2 connect box/);
+  assert.match(ok(run(c, ['hy2', 'show', 'box'], here)), /this side {2}active, not running these settings \(qp-tunnel-cli hy2 connect box\)/);
+
+  // Retrying applies what hy2.json already says.
+  ok(run(c, ['hy2', 'connect', 'box', '--no-test'], here));
+  assert.equal(statusJson().applied, 'applied');
+  assert.doesNotMatch(ok(run(c, ['hy2', 'status'], here)), /not applied/);
+});
+
+test('--bind 0.0.0.0 also lets this machine in through its own public address (Docker masquerades it there); export leaves it out', () => {
+  const c = newCase();
+  const fakeIp = join(c.dir, 'fake-ip');
+  writeFileSync(fakeIp, `#!/bin/sh
+cat <<'OUT'
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+2: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0\\       valid_lft forever preferred_lft forever
+3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever preferred_lft forever
+5: br-1a2b3c4d5e6f    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-1a2b3c4d5e6f\\       valid_lft forever preferred_lft forever
+OUT
+`, { mode: 0o755 });
+  const here = { QP_HY2_IP: fakeIp };
+  ok(run(c, ['edge', 'add', 'box', '--host', '198.51.100.20'], here));
+  ok(run(c, ['hy2', 'init', 'box', '--local-port', '17994', '--bind', '0.0.0.0'], here));
+  const own = join(c.home, 'hy2/box');
+  const client = readFileSync(join(own, 'client.yaml'), 'utf8');
+  assert.match(client, /lan-allowed-ips:\n(  - .*\n)*  - fc00::\/7\n  - 203\.0\.113\.7\/32\nmode: rule\n/);
+  assert.ok(!client.includes('172.17.0.1/32'), 'private addresses are covered already');
+  if (hereEngine) {
+    const checked = spawnSync(hereMihomo(), ['-t', '-d', own, '-f', join(own, 'client.yaml')], { encoding: 'utf8' });
+    assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  }
+  assert.ok(!ok(run(c, ['hy2', 'export', 'box', '--bind', '0.0.0.0'], here)).includes('203.0.113.7'));
+
+  // docker0 counts although Node would leave it out with no container attached.
+  ok(run(c, ['hy2', 'init', 'box', '--bind', 'docker'], here));
+  const docker = readFileSync(join(own, 'client.yaml'), 'utf8');
+  for (const address of ['172.17.0.1', '172.18.0.1']) assert.ok(docker.includes(`    listen: ${address}\n`), address);
+  assert.ok(!docker.includes('203.0.113.7'));
+  ok(run(c, ['hy2', 'init', 'box', '--bind', '203.0.113.7'], here));
+});
+
+test('hy2 test checks the other addresses too: a port that closes at once there is named', { skip: !lanAddress && 'no non-loopback IPv4 address here', timeout: 60000 }, async () => {
+  const c = newCase();
+  const local = await freeTcpPort();
+  ok(run(c, ['edge', 'add', 'box', '--host', '203.0.113.10']));
+  ok(run(c, ['hy2', 'init', 'box', '--local-port', String(local), '--bind', lanAddress]));
+  // 127.0.0.1: a SOCKS5 port whose tunnel is dead. The LAN address: refused sources, as mihomo does.
+  const loopback = net.createServer((socket) => {
+    socket.on('error', () => {});
+    socket.once('data', () => {
+      socket.write(Buffer.from([5, 0]));
+      socket.once('data', () => socket.destroy());
+    });
+  });
+  const lan = net.createServer((socket) => { socket.on('error', () => {}); socket.destroy(); });
+  await new Promise((r) => loopback.listen(local, '127.0.0.1', r));
+  await new Promise((r) => lan.listen(local, lanAddress, r));
+  try {
+    const result = await new Promise((r) => {
+      const child = spawn(process.execPath, [cli, 'hy2', 'test', 'box', '--no-ip', '--timeout', '2', '--no-diagnose'], { env: env(c) });
+      let stdout = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.on('close', (status) => r({ status, stdout }));
+    });
+    assert.equal(result.status, 1);
+    assert.ok(result.stdout.includes(`FAIL  ${lanAddress}:${local}: closed the connection at once: mihomo refused the source address this machine used`), result.stdout);
+    assert.match(result.stdout, /from a container: docker exec -e http_proxy=http:\/\/<its gateway>:\d+ <container> wget -qO- http:\/\/api\.ipify\.org\//);
+  } finally {
+    loopback.close();
+    lan.close();
+  }
+});
+
+// A local port that accepts SOCKS5 and then drops every connection: mihomo when the server cannot be reached.
+async function withDeadProxy(c, args, diag, extra = {}) {
+  const local = await freeTcpPort();
+  ok(run(c, ['edge', 'add', 'box', '--host', '203.0.113.10']));
+  ok(run(c, ['hy2', 'init', 'box', '--local-port', String(local)]));
+  const stub = net.createServer((socket) => {
+    socket.once('data', () => {
+      socket.write(Buffer.from([5, 0]));
+      socket.once('data', () => socket.destroy());
+    });
+    socket.on('error', () => {});
+  });
+  await new Promise((r) => stub.listen(local, '127.0.0.1', r));
+  try {
+    return await new Promise((r) => {
+      const child = spawn(process.execPath, [cli, 'hy2', 'test', 'box', '--no-ip', '--timeout', '2', ...args], { env: env(c, { FAKE_DIAG: diag, ...extra }) });
+      let stdout = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.on('close', (status) => r({ status, stdout }));
+    });
+  } finally {
+    stub.close();
+  }
+}
+
+const serving = 'unit=active\npid=1234\nholder=UNCONN 0 0 0.0.0.0:443 0.0.0.0:* users:(("mihomo",pid=1234,fd=7))\n';
+const packetIn = 'pkt=12:00:00.100000 eth0  In  IP 198.51.100.7.53211 > 172.16.0.10.443: UDP, length 1252\n';
+const packetOut = 'pkt=12:00:00.200000 eth0  Out IP 172.16.0.10.443 > 198.51.100.7.53211: UDP, length 1200\n';
+
+test('diagnosis: nothing arrives at the host -> the security group (and udp 443 filtering)', { timeout: 60000 }, async () => {
+  const c = newCase();
+  const result = await withDeadProxy(c, [], `${serving}fw=none\ncapture=start\ncapture=done\n`);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stdout, /FAIL {2}no answer through the tunnel/);
+  assert.match(result.stdout, /Looking at both ends \(read-only; tcpdump on box watches udp 443 for 9 s while this side sends\)/);
+  assert.match(result.stdout, /box {10}qp-edge-hy2\.service active; udp 443: held by the server \(pid 1234\)/);
+  assert.match(result.stdout, /tcpdump on udp 443 for 9 s: 0 packet\(s\) in, 0 out/);
+  assert.match(result.stdout, /why\n {2}- nothing from this machine reached box on udp 443/);
+  assert.match(result.stdout, /box's cloud security group must allow udp 443 inbound; Aliyun: 安全组 → 入方向 → UDP 443\/443/);
+  assert.match(result.stdout, /a high port avoids that: allow udp 20443 there, then qp-tunnel-cli hy2 push box --port 20443 --yes/);
+  const call = readFileSync(c.log, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).find((args) => args.at(-1).includes('qp-hy2-diagnose'));
+  assert.ok(call, 'the host was asked');
+  assert.match(call.at(-1), /^sh -c /, 'as root (the saved user is root)');
+  assert.match(call.at(-1), /timeout 9 tcpdump -lnqi any -c 80 "udp port \$port"/);
+});
+
+test('diagnosis: packets arrive but get no answer -> the host firewall, with the command to open it', { timeout: 60000 }, async () => {
+  const c = newCase();
+  const result = await withDeadProxy(c, [], `${serving}fw=ufw-closed\ncapture=start\n${packetIn}${packetIn}capture=done\n`);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /2 packet\(s\) in from 198\.51\.100\.7, 0 out/);
+  assert.match(result.stdout, /packets arrive at box \(2, from 198\.51\.100\.7\) but the server does not answer them/);
+  assert.match(result.stdout, /box's ufw does not allow udp 443: qp-tunnel-cli edge ssh box -- 'ufw allow 443\/udp'/);
+});
+
+test('diagnosis: the server answers but nothing works here -> replies lost on the way back, or settings out of sync', { timeout: 60000 }, async () => {
+  const c = newCase();
+  const result = await withDeadProxy(c, [], `${serving}fw=none\ncapture=start\n${packetIn}${packetOut}capture=done\n`);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /the server answers \(1 packets back\), yet nothing works here/);
+  assert.match(result.stdout, /qp-tunnel-cli hy2 push box --yes refreshes both/);
+});
+
+test('diagnosis: a stopped server, a port held by someone else, no tcpdump, an unreachable host', { timeout: 120000 }, async () => {
+  const stopped = await withDeadProxy(newCase(), [], 'unit=failed\npid=0\nholder=\nfw=none\nlog=listen udp :443: bind: address already in use\ncapture=start\ncapture=done\n');
+  assert.match(stopped.stdout, /qp-edge-hy2\.service failed; nothing listens on udp 443/);
+  assert.match(stopped.stdout, /server log: listen udp :443: bind: address already in use/);
+  assert.match(stopped.stdout, /qp-edge-hy2\.service is failed on box: the server is not running \(its log is above\)\. Push again: qp-tunnel-cli hy2 push box --yes/);
+
+  const taken = await withDeadProxy(newCase(), [], 'unit=active\npid=1234\nholder=UNCONN 0 0 0.0.0.0:443 0.0.0.0:* users:(("caddy",pid=999,fd=9))\nfw=none\ncapture=start\ncapture=done\n');
+  assert.match(taken.stdout, /udp 443 on box is held by another process \(UNCONN .*"caddy",pid=999.*\), not by the server/);
+
+  const blind = await withDeadProxy(newCase(), [], `${serving}fw=firewalld-closed\ncapture=no-tcpdump\n`);
+  assert.match(blind.stdout, /tcpdump is not installed there/);
+  assert.match(blind.stdout, /tcpdump is not installed on box, so it is unknown whether packets arrive/);
+  assert.match(blind.stdout, /box's firewalld does not allow udp 443/);
+
+  const unreachable = await withDeadProxy(newCase(), [], '', { FAKE_SSH_STATUS: '255' });
+  assert.match(unreachable.stdout, /box {10}UNKNOWN: ssh exited 255/);
+  assert.match(unreachable.stdout, /box could not be asked over ssh \(ssh exited 255\), so only this side is known/);
+
+  const skipped = await withDeadProxy(newCase(), ['--no-diagnose'], serving);
+  assert.ok(!skipped.stdout.includes('Looking at both ends'));
+  assert.match(skipped.stdout, /The usual causes, most likely first:/);
 });

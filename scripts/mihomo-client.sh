@@ -726,8 +726,20 @@ install_binary_from_path() {
 	[[ -n "$source_path" ]] || die "Binary path is required."
 	[[ -f "$source_path" ]] || die "Mihomo binary not found: $source_path"
 	[[ -x "$source_path" ]] || die "Mihomo binary is not executable: $source_path"
-	cp "$source_path" "$MIHOMO_BIN"
-	chmod 755 "$MIHOMO_BIN"
+	if [[ -f "$MIHOMO_BIN" ]] && command -v cmp >/dev/null 2>&1 && cmp -s "$source_path" "$MIHOMO_BIN"; then
+		chmod 755 "$MIHOMO_BIN"
+		set_env_value MIHOMO_VERSION "local"
+		echo "Mihomo local binary at $MIHOMO_BIN is already this one"
+		return 0
+	fi
+	# A running instance executes $MIHOMO_BIN: copying over it fails with "Text file busy".
+	# Write a sibling and rename it into place; the restart that follows picks it up.
+	local tmpbin
+	tmpbin="$(mktemp "$(dirname "$MIHOMO_BIN")/.mihomo-install.XXXXXX")" || die "Cannot write next to $MIHOMO_BIN"
+	if ! cp "$source_path" "$tmpbin" || ! chmod 755 "$tmpbin" || ! mv -f "$tmpbin" "$MIHOMO_BIN"; then
+		rm -f "$tmpbin"
+		die "Failed to install Mihomo local binary to $MIHOMO_BIN"
+	fi
 	set_env_value MIHOMO_VERSION "local"
 	echo "Installed Mihomo local binary to $MIHOMO_BIN"
 }
