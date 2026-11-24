@@ -6,8 +6,7 @@ import {
 } from "./dataport-policy.mjs";
 import { DataportAccountsClient } from "./dataport-accounts.mjs";
 import { paging, uuid } from "./dataport-store.mjs";
-import { IP_PRODUCT_CAPABILITY } from "../contracts/ip-risk-product.mjs";
-import { commerceOrderView } from "../commerce/service.mjs";
+import { commerceOrderView, dataportKeyProductForConsumer } from "../commerce/service.mjs";
 import { paymentTimedOutSql } from "../commerce/order-state.mjs";
 
 const endpoints = {
@@ -311,57 +310,42 @@ export async function dataportRoute({
     return reply({...result,aiAnalysis});
   }
   if (resource === "keys") {
-    requireDataportAccess(
+    const membership = requireDataportAccess(
       principal,
       tenantId,
       request.method === "GET" ? "keys.read" : "keys.create",
     );
-    const consumers = await store.listConsumers(tenantId);
     if (request.method === "GET") {
-      const items = (
-        await Promise.all(
-          consumers
-            .filter((c) => c.tenantId === tenantId)
-            .map((c) => service.listApiKeys(c.id)),
-        )
-      ).flat();
-      return reply({ items: items.map(({ secret, ...item }) => item) });
+      const consumers = await store.listConsumers(tenantId);
+      const items = (await Promise.all(consumers.filter(c => c.tenantId === tenantId).map(async c => {
+        const product = dataportKeyProductForConsumer(c);
+        return (await service.listApiKeys(c.id)).map(({ secret, ...item }) => ({ ...item, product }));
+      }))).flat();
+      const products = (membership.dataport?.permissions || legacyPermissions(membership)).includes("keys.create")
+        ? (await commerce.keyProducts(tenantId)).map(({ id, name }) => ({ id, name })) : [];
+      return reply({ items, products });
     }
     const body = await readJson(request, 1024);
     if (
       Object.keys(body).some(
-        (k) => !["name", "expiresInDays", "replaceFrom"].includes(k),
-      )
+        (k) => !["name", "expiresInDays", "replaceFrom", "product"].includes(k),
+      ) || (body.product !== undefined && typeof body.product !== "string")
+      || (body.replaceFrom !== undefined && (!uuid(body.replaceFrom) || body.product !== undefined))
     )
       throw new AppError(400, "invalid_key_request", "Key 参数无效。");
-    const consumer = consumers.find(
-      (c) =>
-        c.tenantId === tenantId &&
-        c.businessId === `commerce:ip-risk:${tenantId}` &&
-        c.status === "active",
-    );
-    if (!consumer)
-      throw new AppError(409, "subscription_required", "请先开通企业订阅。");
-    const previous = body.replaceFrom
-      ? (await service.listApiKeys(consumer.id)).find(
-          (k) => k.id === body.replaceFrom,
-        )
-      : null;
-    if (
-      body.replaceFrom &&
-      (!previous ||
-        previous.status !== "active" ||
-        new Date(previous.expiresAt) <= new Date() ||
-        !Array.isArray(previous.platforms) ||
-        !Array.isArray(previous.capabilities))
-    )
-      throw new AppError(
-        409,
-        "replacement_key_unavailable",
-        "原 Key 已失效或不属于当前企业产品，请刷新后重试。",
-      );
+    const replacement = body.replaceFrom ? await store.findApiKeyById(body.replaceFrom) : null;
+    const replacementProduct = replacement?.tenant.id === tenantId && dataportKeyProductForConsumer(replacement.consumer);
+    if (body.replaceFrom && !replacementProduct)
+      throw new AppError(409, "replacement_key_unavailable", "原 Key 已失效或不属于当前企业产品，请刷新后重试。");
+    const { product, consumerId } = await commerce.prepareKeyConsumer(tenantId, replacementProduct || body.product);
+    const previous = replacement?.apiKey;
+    const platforms = previous?.platforms || (await store.listGrants(consumerId)).filter(scope => scope === product.platform);
+    const capabilities = previous?.capabilities
+      || (await store.listCapabilityGrants(consumerId)).filter(scope => product.capabilities.includes(scope));
+    if (!previous && (!platforms.length || !capabilities.length))
+      throw new AppError(409, "key_product_unavailable", "该服务当前没有可授权的接口，请联系管理员。");
     const key = await service.createApiKey({
-      consumerId: consumer.id,
+      consumerId,
       ...(previous
         ? {
             environment: previous.environment,
@@ -370,11 +354,11 @@ export async function dataportRoute({
         : {}),
       name: body.name,
       expiresInDays: body.expiresInDays,
-      platforms: previous?.platforms || ["ip_risk"],
-      capabilities: previous?.capabilities || [IP_PRODUCT_CAPABILITY],
+      platforms,
+      capabilities,
     });
     await dataport.event(tenantId, principal.memberId, "key.created", key.id);
-    return reply(key, 201);
+    return reply({ ...key, product: product.id }, 201);
   }
   if (resource.startsWith("keys/")) {
     requireDataportAccess(principal, tenantId, "keys.revoke");

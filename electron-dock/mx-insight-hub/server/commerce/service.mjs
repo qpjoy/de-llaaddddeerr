@@ -20,6 +20,13 @@ const INTERFACE_OFFER = Object.freeze({
   name: '小红书数据 API', unitPriceMinor: 10, revision: 1,
   minCalls: 100, maxCalls: 1000000,
 })
+const KEY_PRODUCTS = [
+  { id: 'ip_risk', name: 'IP 风险画像', consumerType: 'ip-risk', platform: 'ip_risk', capabilities: [IP_PRODUCT_CAPABILITY] },
+  { id: INTERFACE_OFFER.platform, name: INTERFACE_OFFER.name, consumerType: 'interface:xiaohongshu',
+    platform: 'xiaohongshu', capabilities: ['social.posts.search', 'social.comments.list'] },
+]
+export const dataportKeyProductForConsumer = ({ businessId, tenantId }) =>
+  KEY_PRODUCTS.find(product => businessId === `commerce:${product.consumerType}:${tenantId}`)?.id
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 const product = row => ({ ...row.document, revision: row.revision })
 const view = row => {
@@ -283,6 +290,51 @@ export class CommerceService {
       )`, [tenantIds])
     return new Set(rows.map(({tenant_id}) => tenant_id))
   }
+  async keyProducts(tenantId, db = this.pool) {
+    const { rows: [open] } = await db.query(`SELECT
+      EXISTS (SELECT 1 FROM hub_commerce.subscriptions
+        WHERE tenant_id=$1 AND channel='product' AND starts_at<=now() AND ends_at>now()) AS ip_risk,
+      EXISTS (SELECT 1 FROM hub_commerce.orders
+        WHERE tenant_id=$1 AND environment='live' AND intent->>'purpose'='interface_prepaid'
+          AND intent->>'paymentMethod'='alipay' AND payment->>'status'='paid'
+          AND delivered_at IS NOT NULL AND receipt IS NOT NULL
+          AND intent #>> '{product,sku}'=$2 AND intent #>> '{product,platform}'=$3) AS xiaohongshu
+      FROM tenants WHERE id=$1 AND status='active'`,
+    [tenantId, INTERFACE_OFFER.sku, INTERFACE_OFFER.platform])
+    return KEY_PRODUCTS.filter(product => open?.[product.id])
+  }
+  async prepareKeyConsumer(tenantId, productId) {
+    return this.atomic(async client => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tenant-access:${tenantId}`])
+      const products = await this.keyProducts(tenantId, client)
+      if (productId === undefined && products.length > 1)
+        throw new AppError(400, 'key_product_required', '请选择要授权的服务。')
+      const product = productId === undefined ? products[0] : products.find(item => item.id === productId)
+      if (!product) throw new AppError(409, 'subscription_required', '请先开通对应的企业服务。')
+      if (product.id === INTERFACE_OFFER.platform) {
+        const { rows: [pricing] } = await client.query(
+          "SELECT to_regprocedure('billing.tenant_customer_price_for_usage(uuid,uuid,text)') IS NOT NULL AS ready")
+        if (!pricing.ready) throw new AppError(503, 'customer_price_unavailable', '数据接口计费服务尚未就绪。')
+      }
+      const businessId = `commerce:${product.consumerType}:${tenantId}`
+      let { rows: [consumer] } = await client.query(
+        'SELECT id,status FROM consumers WHERE tenant_id=$1 AND business_id=$2 FOR SHARE', [tenantId, businessId])
+      // Older paid interface orders already have a wallet receipt. Provision
+      // only on first use and preserve subsequent operator grant changes.
+      if (!consumer && product.id === INTERFACE_OFFER.platform) {
+        const { rows: [created] } = await client.query(
+          'INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,$3,$4) RETURNING id,status',
+          [randomUUID(), tenantId, product.name, businessId])
+        consumer = created
+        await client.query('INSERT INTO platform_grants(consumer_id,platform) VALUES($1,$2)', [consumer.id, product.platform])
+        await client.query(`INSERT INTO capability_grants(consumer_id,capability)
+          SELECT $1, capability FROM unnest($2::text[]) AS authorized(capability)`, [consumer.id, product.capabilities])
+      }
+      if (consumer?.status !== 'active')
+        throw new AppError(409, 'key_product_unavailable', '该服务的调用身份不可用，请联系管理员。')
+      return { product, consumerId: consumer.id }
+    })
+  }
   async interfaceOffers() {
     if (!this.interfacePrepaymentEnabled) return {items:[], alipayAvailable:false}
     const route = await this.recharge?.route('live')
@@ -427,7 +479,10 @@ export class CommerceService {
         await client.query('INSERT INTO tenant_service_access(tenant_id,revision,configuration) VALUES($1,$2,$3) ON CONFLICT(tenant_id) DO UPDATE SET revision=excluded.revision,configuration=excluded.configuration,updated_at=now()',[row.tenant_id,after.revision,after])
         await client.query('INSERT INTO tenant_service_access_events(tenant_id,revision,actor,reason,configuration) VALUES($1,$2,$3,$4,$5)',[row.tenant_id,after.revision,actor,reason,after])
       }
-      const consumers=space?(await client.query("SELECT id FROM consumers WHERE tenant_id=$1 AND status='active' ORDER BY id",[row.tenant_id])).rows:[{id:row.consumer_id}]
+      // An IP purchase must not add IP grants to an interface-only Key.
+      const consumers=space?(await client.query(`SELECT id FROM consumers
+        WHERE tenant_id=$1 AND status='active' AND business_id<>$2 ORDER BY id`,
+      [row.tenant_id,`commerce:interface:xiaohongshu:${row.tenant_id}`])).rows:[{id:row.consumer_id}]
       for (const consumer of consumers) {
         for (const scope of [{type:'platform',key:'ip_risk'},{type:'capability',key:capability}]) await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[authorizationScopeLockKey(consumer.id,scope)])
         await client.query("INSERT INTO platform_grants(consumer_id,platform) VALUES($1,'ip_risk') ON CONFLICT DO NOTHING",[consumer.id])

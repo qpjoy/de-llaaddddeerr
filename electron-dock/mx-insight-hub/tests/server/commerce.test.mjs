@@ -932,3 +932,97 @@ test('DataPort bank application persists company and price with no Pay request o
   assert.equal((await invoke('interface-offers',{permissions:['subscriptions.buy']})).status,200);
   assert.equal((await invoke('interface-orders',{method:'POST',permissions:['subscriptions.buy']})).status,201);
 });
+
+test('DataPort issues keys only for opened services, with isolated scopes and prepaid settlement',database,async t=>{
+  const f=await fixture(t,{space:true,offers:true,interfacePrepaymentEnabled:true});
+  await f.upgradeInterfaceOrders();
+  for (const name of ['105_tenant_default_request_price.sql','196_dataport_interface_key_pricing.sql']) {
+    await f.pool.query(await readFile(new URL(`../../migrations/${name}`,import.meta.url),'utf8'));
+  }
+  const store=f.service.store;
+  const hub=new HubService({store,adapter:{},apiKeyPepper:'dataport-test-pepper'});
+  const permissions=['keys.read','keys.create','keys.revoke'];
+  const memberId=randomUUID();
+  const invoke=async (body, {tenant=f.tenant, memberTenant=f.tenant, rights=permissions}={})=>{
+    let reply;
+    await dataportRoute({
+      request:{method:body?'POST':'GET',headers:{}},response:{},
+      path:`/enterprises/${tenant}/keys`,searchParams:new URLSearchParams(),
+      principal:{memberId,memberships:[{tenantId:memberTenant,status:'active',dataport:{permissions:rights}}]},
+      dataport:{available(){},event:async()=>{}},store,service:hub,commerce:f.service,
+      readJson:async()=>body,sendJson:(_res,status,payload)=>{reply={status,...payload}},
+    });
+    return reply;
+  };
+  const draft={name:'DataPort QA',expiresInDays:30};
+  const {items:[offer]}=await f.service.interfaceOffers();
+  const purchase={sku:offer.sku,revision:offer.revision,callCount:100,agreed:true};
+  await f.service.createInterfaceOrder(f.tenant,{...purchase,method:'bank',company:'合成企业'},randomUUID(),memberId);
+  assert.deepEqual((await invoke()).data.products,[]);
+  await assert.rejects(invoke(draft),{code:'subscription_required'});
+  const order=await f.service.createInterfaceOrder(f.tenant,{...purchase,method:'alipay'},randomUUID(),memberId);
+  await assert.rejects(invoke({...draft,product:'xiaohongshu'}),{code:'subscription_required'});
+  const {source,event,payment}=await f.eventFor(order);
+  await f.service.commit(source,event,payment);
+  assert.deepEqual((await invoke()).data.products.map(({id})=>id),['xiaohongshu']);
+  assert.deepEqual((await invoke(undefined,{rights:['keys.read']})).data.products,[]);
+  await assert.rejects(invoke(draft,{rights:['keys.read']}),{code:'insufficient_permission'});
+  await assert.rejects(invoke(draft,{tenant:randomUUID()}),{code:'tenant_not_permitted'});
+  await assert.rejects(invoke({...draft,platforms:['twitter']}),{code:'invalid_key_request'});
+  await assert.rejects(invoke({...draft,product:'ip_risk'}),{code:'subscription_required'});
+  const xhs=(await invoke(draft)).data;
+  const another=(await invoke({...draft,product:'xiaohongshu'})).data;
+  assert.equal(xhs.consumerId,another.consumerId);
+  assert.equal(xhs.product,'xiaohongshu');
+  assert.deepEqual(xhs.platforms,['xiaohongshu']);
+  assert.deepEqual(xhs.capabilities,['social.comments.list','social.posts.search']);
+  assert.equal((await hub.authenticate(xhs.secret)).apiKey.id,xhs.id);
+
+  const requestId=randomUUID();
+  const reserve={requestId,tenantId:f.tenant,consumerId:xhs.consumerId,apiKeyId:xhs.id,
+    platform:'xiaohongshu',meterKey:'social.posts.search',
+    requiredAuthorizationScopes:[{type:'platform',key:'xiaohongshu'},{type:'capability',key:'social.posts.search'}],
+    idempotencyKey:requestId,fingerprint:'f'.repeat(64),unitsReserved:1,leaseExpiresAt:new Date(Date.now()+60000)};
+  assert.equal((await store.reserve(reserve)).kind,'reserved');
+  assert.equal((await store.getTenantBilling(f.tenant)).account.heldMinor,offer.unitPriceMinor);
+  await store.commitRequest(requestId,{responseStatus:200,responseBody:{data:[]},unitsActual:1,upstreamLatencyMs:1});
+  assert.equal((await store.reserve({...reserve,requestId:randomUUID()})).kind,'replay');
+  const wallet=(await store.getTenantBilling(f.tenant)).account;
+  assert.equal(wallet.availableMinor,order.product.amountMinor-offer.unitPriceMinor);
+  assert.equal(wallet.heldMinor,0);
+  const {rows:[charge]}=await f.pool.query(`SELECT enforcement_mode, charged_minor::int,pricing_snapshot FROM billing.customer_charges
+    WHERE usage_request_id=$1`,[requestId]);
+  assert.equal(charge.enforcement_mode,'enforced');
+  assert.equal(charge.charged_minor,offer.unitPriceMinor);
+  assert.equal(charge.pricing_snapshot.orderId,order.id);
+  for (const meterKey of ['social.posts.search','social.comments.list']) {
+    const {rows:[pricing]}=await f.pool.query('SELECT * FROM billing.customer_price_for_usage($1,$2,$3)',[f.tenant,xhs.consumerId,meterKey]);
+    assert.equal(Number(pricing.quoted_minor),offer.unitPriceMinor);
+  }
+  await assert.rejects(f.pool.query('SELECT * FROM billing.customer_price_for_usage($1,$2,$3)',
+    [f.tenant,xhs.consumerId,'ecommerce.products.search']),/customer_price_unavailable/);
+
+  await f.service.create(f.tenant,{sku:'ip-risk-trial-10',revision:1,environment:'live'},randomUUID(),memberId);
+  assert.deepEqual((await invoke()).data.products.map(({id})=>id),['ip_risk','xiaohongshu']);
+  await assert.rejects(invoke(draft),{code:'key_product_required'});
+  const ip=(await invoke({...draft,product:'ip_risk'})).data;
+  assert.notEqual(ip.consumerId,xhs.consumerId);
+  assert.deepEqual(ip.platforms,['ip_risk']);
+  assert.deepEqual(ip.capabilities,[IP_PRODUCT_CAPABILITY]);
+  const original=(await hub.authenticate(xhs.secret)).apiKey;
+  assert.deepEqual(original.platforms,xhs.platforms);
+  assert.deepEqual(original.capabilities,xhs.capabilities);
+  assert.ok(!(await invoke()).data.items.some(item=>item.secret));
+  const replaced=(await invoke({...draft,replaceFrom:xhs.id})).data;
+  assert.deepEqual(replaced.capabilities,xhs.capabilities);
+  assert.equal((await hub.authenticate(xhs.secret)).apiKey.id,xhs.id);
+
+  const trialTenant=randomUUID();
+  await f.pool.query("INSERT INTO tenants(id,name) VALUES($1,'IP-only fixture')",[trialTenant]);
+  await f.service.create(trialTenant,{sku:'ip-risk-trial-10',revision:1,environment:'live'},randomUUID(),memberId);
+  const trialOnly={tenant:trialTenant,memberTenant:trialTenant};
+  assert.deepEqual((await invoke(undefined,trialOnly)).data.products.map(({id})=>id),['ip_risk']);
+  const trialKey=(await invoke(draft,trialOnly)).data;
+  assert.deepEqual(trialKey.platforms,['ip_risk']);
+  assert.deepEqual(trialKey.capabilities,[IP_PRODUCT_CAPABILITY]);
+});
