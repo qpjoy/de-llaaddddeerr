@@ -325,6 +325,10 @@
 .responseFieldScroll {
   max-height: 28rem;
   overflow: auto;
+  scrollbar-width: none;
+}
+.responseFieldScroll::-webkit-scrollbar {
+  display: none;
 }
 .responseFieldScroll:focus-visible {
   outline: 2px solid var(--directory-accent);
