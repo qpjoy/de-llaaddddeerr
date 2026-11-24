@@ -18,7 +18,6 @@ import {
   Headphones,
   KeyRound,
   BookOpen,
-  Code2,
   Wallet,
 } from "lucide-react";
 import {
@@ -71,7 +70,7 @@ import "./alignment.css";
 import "./prototype-parity.css";
 const pages = [
   ["lookup", "数据直查", SquarePen],
-  ["interfaces", "数据接口", Code2],
+  ["interfaces", "数据接口", Layers3],
   ["overview", "用量概览", LayoutDashboard],
   ["keys", "API Keys", KeyRound],
   ["services", "我的订阅", Layers3],
@@ -118,7 +117,7 @@ function Navigation({
                   if (sidebar.isMobile) sidebar.setOpenMobile(false);
                 }}
               >
-                <Icon size={18} />
+                <Icon aria-hidden="true" />
                 <span>{title}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
@@ -196,7 +195,7 @@ export function ConsoleShell({
   return (
     <SidebarProvider
       className="harbor-shell"
-      style={{ "--sidebar-width": "14rem" } as React.CSSProperties}
+      style={{ "--sidebar-width": "224px" } as React.CSSProperties}
     >
       <Sidebar className="app-sidebar">
         <SidebarHeader>
@@ -297,7 +296,7 @@ function RemotePanel({
   if (page === "support")
     return <Support tenant={tenant} session={session} csrf={csrf} />;
   if (page === "keys")
-    return <ApiKeys tenant={tenant} session={session} csrf={csrf} />;
+    return <ApiKeys key={tenant} tenant={tenant} session={session} csrf={csrf} />;
   if (page === "overview")
     return <UsageOverview tenant={tenant} session={session} go={go} />;
   if (page === "docs-ip")

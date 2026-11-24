@@ -15,7 +15,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { interfacePlatforms } from "./interface-catalog";
+import { supportedInterfacePlatforms } from "./interface-catalog";
 import { PlatformLogo } from "./data-directory";
 import { checkoutLocation, canCheckoutOrder, commerceErrorMessage, money, orderStatusLabel, purchaseIntent } from "./commerce-state";
 import { enterpriseUrl, hasPermission } from "./permissions";
@@ -66,13 +66,13 @@ function InterfaceSelection({
 }: { offers: Offer[]; select: (offer: Offer) => void; openOrders?: () => void }) {
   const [query, setQuery] = useState("");
   const search = query.trim().toLowerCase();
-  const platforms = interfacePlatforms.filter(({ name, aliases }) =>
+  const platforms = supportedInterfacePlatforms.filter(({ name, aliases }) =>
     [name, ...(aliases ?? [])].some((value) => value.toLowerCase().includes(search)),
   );
   return (
     <section className={styles.selection} aria-label="接口付费目录">
       <div className={styles.selectionToolbar}>
-        <h2>全部接口 <span>{interfacePlatforms.length}</span></h2>
+        <h2>全部接口 <span>{supportedInterfacePlatforms.length}</span></h2>
         <div className={styles.selectionActions}>
           <Input type="search" aria-label="搜索平台接口" placeholder="搜索平台名称"
             value={query} onChange={(event) => setQuery(event.target.value)} />
