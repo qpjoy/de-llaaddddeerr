@@ -38,6 +38,114 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /data/share-links/resolve:
+    post:
+      tags: [External Data]
+      operationId: resolveShareLinks
+      summary: 解析抖音作品 ID 和小红书笔记 ID
+      x-mx-required-platform: social
+      x-mx-required-capabilities: [social.share_links.resolve]
+      x-mx-doc-path: /docs/share-link-resolver
+      description: 需要显式开通解析能力的 Live 快照 Key。一次请求可提交混合平台的分享文案。完整链接就地读取 ID，短链跟随平台跳转。每次解析计一次调用额度，费用按租户套餐或默认策略结算。查看作品详情需要另行授权并主动查询。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example: {text: '分享作品 https://www.douyin.com/note/7711088087472025201'}
+            schema:
+              type: object
+              required: [text]
+              additionalProperties: false
+              properties:
+                text: {type: string, minLength: 1, maxLength: 16384, description: 最多 10 个不同的分享链接。}
+                platform:
+                  type: string
+                  enum: [auto, douyin, xiaohongshu]
+                  default: auto
+                  description: 选择单个平台时，其他平台链接会给出逐条失败原因。
+      responses:
+        '200':
+          description: 按文案中的链接顺序返回，重复链接只处理一次。可同时包含成功和失败结果。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, requestId]
+                properties:
+                  requestId: {type: string}
+                  data:
+                    type: object
+                    required: [results, total, succeeded, failed]
+                    properties:
+                      total: {type: integer, minimum: 0, maximum: 10}
+                      succeeded: {type: integer, minimum: 0, maximum: 10}
+                      failed: {type: integer, minimum: 0, maximum: 10}
+                      results:
+                        type: array
+                        maxItems: 10
+                        items:
+                          oneOf:
+                          - type: object
+                            required: [ok, link, type, postId, how]
+                            properties:
+                              ok: {const: true}
+                              link:
+                                type: [string, 'null']
+                                description: 提取到的分享链接；纯口令为 null。
+                              type: {type: string}
+                              postId: {type: string, description: 用于详情查询的 ID，保留完整字符串。}
+                              how:
+                                enum: [direct, redirect, body-scan]
+                              uncertain: {type: boolean}
+                            oneOf:
+                            - required: [platform, aweme_id]
+                              properties:
+                                platform: {const: douyin}
+                                aweme_id: {type: string}
+                                author_uid: {type: string, description: 分享地址带有作者 UID 时返回。}
+                            - required: [platform, note_id]
+                              properties:
+                                platform: {const: xiaohongshu}
+                                note_id: {type: string}
+                                xsec_token: {type: string}
+                          - type: object
+                            required: [ok, platform, link, code, error]
+                            properties:
+                              ok: {const: false}
+                              platform:
+                                type: string
+                                enum: [douyin, xiaohongshu]
+                              link:
+                                type: [string, 'null']
+                                description: 提取到的分享链接；纯口令为 null。
+                              type: {type: string}
+                              code: {type: string}
+                              error: {type: string}
+        '400':
+          description: 文本、平台或链接数不符合输入要求。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401':
+          description: 请提供有效的 Hub API Key。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '403':
+          description: 当前 Key 的类型、平台或解析权限不满足要求。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '413':
+          description: 请求体过大。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '429':
+          description: 已达到请求限制或调用额度。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
   /data/social/post-comments:
     post: &hub_post_comments
       tags: [社媒与内容数据]

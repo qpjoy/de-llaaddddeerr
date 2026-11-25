@@ -1,4 +1,5 @@
 import { FILE_DATASET_SCOPES } from './file-datasets.mjs'
+import { SHARE_LINK_RESOLVER } from './share-link-resolver.mjs'
 
 // Explicit endpoint grants remain bounded; provider-sized batches never imply a wildcard.
 export const MAX_PLATFORM_SCOPES = 128
@@ -11,7 +12,7 @@ export const TWITTER_USER_EMAIL_SCOPES = Object.freeze({
   reveal: 'twitter.user_email.reveal',
 })
 // Every file dataset holds personal data (e-mails, phones, usernames).
-const explicitOnlyScopes = new Set([...Object.values(TWITTER_USER_EMAIL_SCOPES), ...FILE_DATASET_SCOPES])
+const explicitOnlyScopes = new Set([...Object.values(TWITTER_USER_EMAIL_SCOPES), ...FILE_DATASET_SCOPES, SHARE_LINK_RESOLVER.capability])
 export function isExplicitOnlyKeyScope(scope) {
   return explicitOnlyScopes.has(scope)
 }

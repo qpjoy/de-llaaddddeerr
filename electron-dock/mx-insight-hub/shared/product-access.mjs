@@ -1,5 +1,6 @@
 import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
 import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
+import { SHARE_LINK_RESOLVER } from './share-link-resolver.mjs'
 import { FILE_DATASETS } from './file-datasets.mjs'
 // Console visibility follows current consumer grants, independent of key issue/binding dates.
 import nativeServiceCapabilities from './native-service-access.json' with { type: 'json' }
@@ -15,6 +16,7 @@ const searchablePlatforms = new Set([
 const savedRecordCategory = platform => /^data_center_saved_records_[a-z][a-z0-9_]*$/.test(platform)
 const strategySearchPlatforms = new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), 'wechat_mp', 'wechat_search', 'telegram', 'threads'])
 export const PRODUCT_ACCESS = {
+  [SHARE_LINK_RESOLVER.path]: { platform: SHARE_LINK_RESOLVER.platform, any: [SHARE_LINK_RESOLVER.capability], docs: SHARE_LINK_RESOLVER.docs },
   '/data-products/web-search': {platform:'web_search',any:['web.search'],docs:'web-search'},
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [`/data-products/${product.key}`, { platform: 'social', any: wechatServices(product).map(row => row.operation), docs: product.key } ])),
   [WECHAT_SELF_HOSTED.path]: { platform: WECHAT_SELF_HOSTED.platform, any: [WECHAT_SELF_HOSTED.capability], docs: WECHAT_SELF_HOSTED.docs },

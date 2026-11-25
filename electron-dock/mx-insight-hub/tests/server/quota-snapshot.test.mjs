@@ -27,7 +27,7 @@ async function fixture({ consumerMax = 5, keyMax = null } = {}) {
     ...(keyMax ? { platformQuotas: { ecommerce: { maxRequests: keyMax } } } : {}),
   })
   const context = await hub.authenticate(key.secret)
-  const reserve = (n) => store.reserve({
+  const reserve = (n, options) => store.reserve({
     requestId: randomUUID(),
     idempotencyKey: `key-${n}`,
     fingerprint: `fp-${n}`,
@@ -41,12 +41,37 @@ async function fixture({ consumerMax = 5, keyMax = null } = {}) {
     windowStart: new Date(Date.now() - 3_600_000),
     maxRequests: consumerMax,
     replayWindowMs: null,
+    ...options,
   })
   const snapshot = async () => (await store.quotaSnapshot({
     tenantId: tenant.id, consumerId: consumer.id, apiKeyId: context.apiKey.id,
   }))[0]
   return { store, snapshot, reserve }
 }
+
+test('opted-in plan burst hint expires the oldest reservation at exactly one second', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const { store, reserve } = await fixture({ consumerMax: 20 })
+  const limits = store.plans.find(row => row.key === 'launch-1m').limits
+  limits.burstRps = 2
+  const waiting = { includePlanBurstRetryAfter: true }
+  const rejected = (hint) => error => error.code === 'plan_burst_exceeded' && error.details.retryAfterMs === hint
+
+  await reserve(1)
+  t.mock.timers.tick(400)
+  await reserve(2)
+  await assert.rejects(reserve(3, waiting), rejected(600))
+  limits.burstRps = 1
+  await assert.rejects(reserve(3, waiting), rejected(1000))
+  limits.burstRps = 2
+  t.mock.timers.tick(599)
+  await assert.rejects(reserve(3, waiting), rejected(1))
+  t.mock.timers.tick(1)
+  await assert.rejects(reserve(3), rejected(undefined))
+  assert.equal(store.requests.size, 2)
+  assert.equal((await reserve(3, waiting)).kind, 'reserved')
+  assert.equal(store.requests.size, 3)
+})
 
 test('remaining reaches zero exactly when admission starts rejecting', async () => {
   const { snapshot, reserve } = await fixture({ consumerMax: 3 })
@@ -58,6 +83,38 @@ test('remaining reaches zero exactly when admission starts rejecting', async () 
   // check would show room where the next call is about to be rejected.
   assert.equal((await snapshot()).binding.remaining, 0)
   await assert.rejects(() => reserve(4), (error) => error.code === 'consumer_quota_exceeded')
+})
+
+test('only a fresh opt-in reservation filling a multi-slot plan carries a local scheduling hint', async t => {
+  const start = Date.now()
+  t.mock.timers.enable({ apis: ['Date'], now: start })
+  t.mock.method(performance, 'now', () => 5_000 + Date.now() - start)
+  const { store, reserve } = await fixture({ consumerMax: 20 })
+  const limits = store.plans.find(row => row.key === 'launch-1m').limits
+  const optedIn = { includePlanBurstRetryAfter: true }
+  const hasHint = result => Object.hasOwn(result, 'nextPlanBurstSlotAt')
+
+  limits.burstRps = 1
+  assert.equal(hasHint(await reserve(1, optedIn)), false)
+  t.mock.timers.tick(1_000)
+  limits.burstRps = 2
+  assert.equal(hasHint(await reserve(2, optedIn)), false)
+  t.mock.timers.tick(400)
+  const third = await reserve(3, optedIn)
+  assert.equal(third.nextPlanBurstSlotAt, performance.now() + 600)
+  assert.equal(hasHint(store.requests.get(third.request.id)), false)
+  assert.equal(hasHint(await reserve(3, optedIn)), false) // In progress.
+  assert.equal(hasHint(await reserve(3, { ...optedIn, fingerprint: 'different' })), false)
+
+  await store.releaseRequest(third.request.id, 'test_release')
+  const retried = await reserve(3, optedIn)
+  assert.equal(retried.nextPlanBurstSlotAt, third.nextPlanBurstSlotAt)
+  await store.commitRequest(retried.request.id, { responseStatus: 200, unitsActual: 1 })
+  const replay = await reserve(3, optedIn)
+  assert.equal(replay.kind, 'replay')
+  assert.equal(hasHint(replay), false)
+  t.mock.timers.tick(601)
+  assert.equal(hasHint(await reserve(4)), false) // Legacy callers get the existing shape.
 })
 
 test('an in-flight reservation already holds its slot', async () => {

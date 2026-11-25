@@ -2562,7 +2562,7 @@ export class PostgresStore {
         else if (existing.status === 'unknown') kind = 'unknown'
         else {
           reservationId = input.requestId
-          await this.#assertQuota(client, quotaInput)
+          const burstHint = await this.#assertQuota(client, quotaInput)
           const inserted = await client.query(
             `INSERT INTO usage_requests
                (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
@@ -2594,14 +2594,14 @@ export class PostgresStore {
           )
           commitStarted = true
           await client.query('COMMIT')
-          return { kind: 'reserved', request: requestRecord(inserted.rows[0]) }
+          return { kind: 'reserved', request: requestRecord(inserted.rows[0]), ...burstHint }
         }
         commitStarted = true
         await client.query('COMMIT')
         return { kind, request: existing }
       }
 
-      await this.#assertQuota(client, quotaInput)
+      const burstHint = await this.#assertQuota(client, quotaInput)
       const inserted = await client.query(
         `INSERT INTO usage_requests
            (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
@@ -2640,7 +2640,7 @@ export class PostgresStore {
       )
       commitStarted = true
       await client.query('COMMIT')
-      return { kind: 'reserved', request: requestRecord(inserted.rows[0]) }
+      return { kind: 'reserved', request: requestRecord(inserted.rows[0]), ...burstHint }
     } catch (error) {
       if (commitStarted) {
         releaseError = error
@@ -2965,22 +2965,38 @@ export class PostgresStore {
     }
     const burstRps = planResult.rows[0]?.limits?.burstRps
     if (Number.isInteger(burstRps) && burstRps > 0) {
+      // The opted-in caller may have waited for this consumer's lock. Measure
+      // the one-second window and its oldest admission against the same clock.
+      const reportWait = input.includePlanBurstRetryAfter === true
+      const waitColumn = reportWait
+        ? ", ceil(extract(epoch from (min(reserved_at) + interval '1 second' - statement_timestamp())) * 1000)::integer AS retry_after_ms" : ''
+      const window = reportWait
+        ? "reserved_at > statement_timestamp() - interval '1 second' AND reserved_at <= statement_timestamp()"
+        : "reserved_at >= now() - interval '1 second'"
+      // Anchor the local scheduling hint before the query so INSERT and COMMIT
+      // latency are already accounted for when the process uses it.
+      const checkedAt = reportWait ? performance.now() : null
       const burstUsage = await client.query(
-        `SELECT count(*)::integer AS count
+        `SELECT count(*)::integer AS count${waitColumn}
            FROM usage_requests request
           WHERE consumer_id = $1
             AND status IN ('reserved', 'committed', 'unknown')
             ${quotaRecoverySql('plan_burst', '$1')}
-            AND reserved_at >= now() - interval '1 second'`,
+            AND ${window}`,
         [input.consumerId],
       )
-      if (Number(burstUsage.rows[0].count) >= burstRps) {
+      const burstCount = Number(burstUsage.rows[0].count)
+      if (burstCount >= burstRps) {
         throw new AppError(429, quotaExceededCode('plan_burst'), 'Plan burst quota exceeded', {
           maxRequests: burstRps,
           windowSeconds: 1,
           limitScope: 'plan_burst',
           plan: planResult.rows[0].plan_key,
+          ...(reportWait && { retryAfterMs: burstCount === burstRps ? Math.max(1, burstUsage.rows[0].retry_after_ms) : 1_000 }),
         })
+      }
+      if (reportWait && burstRps > 1 && burstCount === burstRps - 1) {
+        return { nextPlanBurstSlotAt: checkedAt + Number(burstUsage.rows[0].retry_after_ms) }
       }
     }
   }

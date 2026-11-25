@@ -1863,6 +1863,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/wechat/self-hosted/batches/{batchId}',
       '/data/wechat/self-hosted/batches/{batchId}/result',
       '/data/services/pricing',
+      '/data/share-links/resolve',
       '/acquisitions/{requestId}',
       '/data/canonical/items/{id}/context',
       '/data/canonical/items/{id}/timeline',
@@ -2114,7 +2115,7 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
   )
   assertNightAllPublicContract(document)
   assert.deepEqual(document.paths['/search/raw'], PUBLIC_OPENAPI_DOCUMENT.paths['/search/raw'])
-  for (const path of ['/data/search', '/data/aggregate/sources', '/data/aggregate/search', '/data/youtube/comments', '/data/youtube/channel-comments']) {
+  for (const path of ['/data/search', '/data/share-links/resolve', '/data/aggregate/sources', '/data/aggregate/search', '/data/youtube/comments', '/data/youtube/channel-comments']) {
     assert.deepEqual(document.paths[path], PUBLIC_OPENAPI_DOCUMENT.paths[path], path)
   }
   assert.equal(document.paths['/search/{operation}'].post['x-mx-wechat-raw-operation'], '/data/wechat/search/search')

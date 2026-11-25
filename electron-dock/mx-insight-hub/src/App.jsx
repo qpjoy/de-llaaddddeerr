@@ -12,6 +12,8 @@ import { productCategory, productNavigationOrder } from '../shared/product-navig
 import { ProvisioningPage } from './pages-provisioning.jsx'
 import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
 import { SocialContentOverview } from './product-workbench.jsx'
+import { ShareLinkResolverPage } from './share-link-resolver.jsx'
+import { SHARE_LINK_RESOLVER } from '../shared/share-link-resolver.mjs'
 import { DataportSupportPage } from './dataport-support.jsx'
 import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
@@ -44,6 +46,7 @@ import {
   Globe,
   House,
   Key,
+  LinkSimple,
   List,
   LockKey,
   MagicWand,
@@ -428,6 +431,7 @@ const ROUTES = [
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, navSection: 'wechat', description: product.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatOverview, capability: 'apikey.read' })),
   { path: WECHAT_SELF_HOSTED.path, label: WECHAT_SELF_HOSTED.label, navLabel: WECHAT_SELF_HOSTED.navLabel, navSection: 'wechat', description: WECHAT_SELF_HOSTED.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatSelfHostedPage, capability: 'apikey.read' },
   { path: '/data-products/social-content', label: '社媒与内容数据', description: '内容、账号、评论与趋势接口', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SocialContentOverview, capability: 'apikey.read' },
+  { path: SHARE_LINK_RESOLVER.path, label: SHARE_LINK_RESOLVER.label, description: '从抖音与小红书分享文本提取作品 ID', icon: LinkSimple, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: ShareLinkResolverPage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', navLabel: '笔记画卷', navSection: 'xiaohongshu', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-hot-notes', label: '小红书热门笔记', navLabel: '热门笔记', navSection: 'xiaohongshu', description: '热门内容、筛选与指标', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-inspiration', label: '小红书创作灵感', navLabel: '创作灵感', navSection: 'xiaohongshu', description: '热点灵感与创作线索', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
@@ -998,7 +1002,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), WECHAT_SELF_HOSTED.path, '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search', ...FILE_DATASET_PATHS].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), WECHAT_SELF_HOSTED.path, SHARE_LINK_RESOLVER.path, '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search', ...FILE_DATASET_PATHS].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
     strategySession,

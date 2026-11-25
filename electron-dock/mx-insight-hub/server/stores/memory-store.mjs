@@ -1496,6 +1496,7 @@ export class MemoryStore {
     authorizationPlatforms = null,
     replayWindowMs = null,
     replayReleasedFailures = false,
+    includePlanBurstRetryAfter = false,
     meterKey = null,
     acquisitionRequest = null,
     requiredAuthorizationScopes: suppliedAuthorizationScopes = null,
@@ -1538,9 +1539,9 @@ export class MemoryStore {
       if (existing.status === 'reserved') return { kind: 'in_progress', request: clone(existing) }
       if (existing.status === 'unknown') return { kind: 'unknown', request: clone(existing) }
       if (existing.status === 'released' || existing.status === 'committed') {
-        this.#assertQuota({
+        const burstHint = this.#assertQuota({
           tenantId, consumerId, apiKeyId, platform, capability,
-          windowStart, maxRequests, authorizationScopes, scopeEntitlements,
+          windowStart, maxRequests, authorizationScopes, scopeEntitlements, includePlanBurstRetryAfter,
           legacySingleScope: suppliedAuthorizationScopes == null,
         })
         const reservedAt = nowIso()
@@ -1574,13 +1575,13 @@ export class MemoryStore {
         this.requests.set(record.id, record)
         this.usageAuthorizationScopes.set(record.id, clone(authorizationScopes))
         this.requestsByScope.set(scopeKey, record.id)
-        return { kind: 'reserved', request: clone(record) }
+        return { kind: 'reserved', request: clone(record), ...burstHint }
       }
     }
 
-    this.#assertQuota({
+    const burstHint = this.#assertQuota({
       tenantId, consumerId, apiKeyId, platform, capability,
-      windowStart, maxRequests, authorizationScopes, scopeEntitlements,
+      windowStart, maxRequests, authorizationScopes, scopeEntitlements, includePlanBurstRetryAfter,
       legacySingleScope: suppliedAuthorizationScopes == null,
     })
     const record = {
@@ -1613,7 +1614,7 @@ export class MemoryStore {
     this.requests.set(record.id, record)
     this.usageAuthorizationScopes.set(record.id, clone(authorizationScopes))
     this.requestsByScope.set(scopeKey, record.id)
-    return { kind: 'reserved', request: clone(record) }
+    return { kind: 'reserved', request: clone(record), ...burstHint }
   }
 
   // The one definition of "how many requests count against this window".
@@ -1741,7 +1742,7 @@ export class MemoryStore {
 
   #assertQuota({
     tenantId, consumerId, apiKeyId, platform, capability,
-    windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
+    windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope, includePlanBurstRetryAfter,
   }) {
     const owner = { apiKey: this.apiKeys.get(apiKeyId), tenant: { id: tenantId }, consumer: { id: consumerId } }
     const internal = isInternalTraffic(this, owner)
@@ -1840,20 +1841,31 @@ export class MemoryStore {
     }
     const burstRps = plan?.limits?.burstRps
     if (Number.isInteger(burstRps) && burstRps > 0) {
-      const burstStart = new Date(Date.now() - 1_000)
-      const burstCount = records.filter(
-        (record) => record.consumerId === consumerId
-          && ['reserved', 'committed', 'unknown'].includes(record.status)
-          && new Date(record.reservedAt) >= burstStart,
-      ).length
-      if (burstCount >= burstRps) {
+      const reportWait = includePlanBurstRetryAfter === true
+      const checkedAt = reportWait ? performance.now() : null
+      const now = Date.now()
+      const burstStart = now - 1_000
+      const inWindow = records.filter(record => {
+        if (record.consumerId !== consumerId || !['reserved', 'committed', 'unknown'].includes(record.status)) return false
+        const reservedAt = new Date(record.reservedAt).getTime()
+        return reportWait ? reservedAt > burstStart && reservedAt <= now : reservedAt >= burstStart
+      })
+      const fillsWindow = reportWait && burstRps > 1 && inWindow.length === burstRps - 1
+      let retryAfterMs = 1_000
+      if (reportWait && (inWindow.length === burstRps || fillsWindow)) {
+        const earliest = inWindow.reduce((time, record) => Math.min(time, new Date(record.reservedAt).getTime()), now)
+        retryAfterMs = Math.max(1, earliest - burstStart)
+      }
+      if (inWindow.length >= burstRps) {
         throw new AppError(429, quotaExceededCode('plan_burst'), 'Plan burst quota exceeded', {
           maxRequests: burstRps,
           windowSeconds: 1,
           limitScope: 'plan_burst',
           plan: plan.key,
+          ...(reportWait && { retryAfterMs }),
         })
       }
+      if (fillsWindow) return { nextPlanBurstSlotAt: checkedAt + retryAfterMs }
     }
   }
 

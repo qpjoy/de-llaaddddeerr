@@ -33,6 +33,7 @@ import { COMMENT_REPLIES_PATH } from './contracts/comment-replies.mjs'
 import { takeFillPage } from './contracts/single-page-delivery.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
+import { SHARE_LINK_RESOLVER } from '../shared/share-link-resolver.mjs'
 import { fileDataset } from '../shared/file-datasets.mjs'
 import { retryAfterSeconds } from './self-hosted/wechat-contract.mjs'
 import { retryAfterSeconds as collectRetryAfterSeconds } from './collect/service.mjs'
@@ -5845,6 +5846,14 @@ export function createApp({
         const context = await requirePublic(request)
         const payload = await service.capabilities(context)
         sendJson(response, 200, { ...payload, requestId })
+        return
+      }
+      if (request.method === 'POST' && pathname === SHARE_LINK_RESOLVER.apiPath) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'Share link resolution')
+        const body = await readJson(request, 128 * 1024)
+        const result = await withAdmissionSignal(response, signal => service.resolveShareLinks(context, body, signal))
+        sendJson(response, 200, result, { 'cache-control': 'private, no-store', 'x-mx-insight-request-id': result.requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/ecommerce/products/media') {

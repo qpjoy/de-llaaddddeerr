@@ -5,6 +5,8 @@ import { ipRiskV2Paths, ipRiskV2Guide, ipRiskSubscriptionPaths } from './contrac
 import { twitterUserEmailOpenApiPaths, twitterUserEmailDocumentationHtml } from './contracts/twitter-user-email-docs.mjs'
 import { fileDatasetDocPaths, fileDatasetDocumentationHtml, fileDatasetOpenApiPaths } from './contracts/file-dataset-docs.mjs'
 import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
+import { shareLinkPaths, shareLinkGuide } from './contracts/share-link-resolver-docs.mjs'
+import { SHARE_LINK_RESOLVER } from '../shared/share-link-resolver.mjs'
 import { wechatSelfHostedPaths, wechatSelfHostedGuide } from './self-hosted/docs.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
@@ -1351,6 +1353,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...commentRepliesPaths,
     ...postCommentsAliasPaths,
     ...webSearchPaths,
+    ...shareLinkPaths,
     ...wechatSelfHostedPaths,
     '/data/services/pricing': { get: { tags:['Hub 服务定价'], summary:'当前 Key 的 Hub 官方定价与账户执行价',
       parameters:[{in:'query',name:'path',required:true,schema:{type:'string'},description:'完整 Hub 数据接口路径；仅支持已登记的价格合同'}],
@@ -5588,6 +5591,7 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
 }
 
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
+  { key: SHARE_LINK_RESOLVER.docs, path: `/docs/${SHARE_LINK_RESOLVER.docs}`, label: SHARE_LINK_RESOLVER.label, section: '数据服务' },
   {key:'web-search',path:'/docs/web-search',label:'Web Search',section:'数据产品'},
   ...WECHAT_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '微信数据服务' })),
   { key: WECHAT_SELF_HOSTED.docs, path: `/docs/${WECHAT_SELF_HOSTED.docs}`, label: WECHAT_SELF_HOSTED.label, section: '微信数据服务' },
@@ -6844,6 +6848,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
   return scopes.some(scope => scope.platforms.includes(platform) && capabilities.every(value => scope.capabilities.includes(value)))
 }
 const TENANT_PRODUCT_PATHS = {
+  [SHARE_LINK_RESOLVER.docs]: Object.keys(shareLinkPaths),
   'web-search':Object.keys(webSearchPaths),
   [WECHAT_SELF_HOSTED.docs]: Object.keys(wechatSelfHostedPaths),
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
@@ -6962,6 +6967,7 @@ function threadsDetailGuide(scopes = null) {
 }
 
 function tenantDocBody(route, scopes) {
+  if (route.key === SHARE_LINK_RESOLVER.docs) return shareLinkGuide
   if (route.key === 'strategy-search') return strategySearchGuide(scopes)
   if (route.key === 'web-search') return webSearchGuide
   if (route.key === WECHAT_SELF_HOSTED.docs) return wechatSelfHostedGuide
@@ -7043,6 +7049,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key === 'ip-risk-subscription') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskProductGuide}</main>`)
   if (route.key === 'ip-risk-v2') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskV2Guide}</main>`)
   if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
+  if (route.key === SHARE_LINK_RESOLVER.docs) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${shareLinkGuide}</main>`)
   if (route.key === WECHAT_SELF_HOSTED.docs) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${wechatSelfHostedGuide}</main>`)
   if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${postCommentsGuide()}${threadsDetailGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'strategy-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${strategySearchGuide()}</main>`)

@@ -1,5 +1,6 @@
 import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
 import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
+import { SHARE_LINK_RESOLVER } from './share-link-resolver.mjs'
 import { FILE_DATASETS } from './file-datasets.mjs'
 // Public business metadata. Supplier coordinates never belong in this module.
 import { XHS_DISCOVERY_PRODUCTS } from './xiaohongshu-discovery.mjs'
@@ -25,6 +26,9 @@ export const PRODUCT_BUNDLES = Object.freeze([
     href: '/data-products/xiaohongshu-note', catalogKeys: ['source-catalog-0004'] },
   { key: 'ip-risk', version: 1, name: 'IP 风险画像', platforms: ['ip_risk'],
     capabilities: ['ip.risk.query'], optionalCapabilities: [], featureKey: 'ip-risk', href: '/data-products/ip-risk', catalogKeys: [] },
+  { key: SHARE_LINK_RESOLVER.key, version: 1, name: SHARE_LINK_RESOLVER.label, platforms: [SHARE_LINK_RESOLVER.platform],
+    capabilities: [SHARE_LINK_RESOLVER.capability], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
+    href: SHARE_LINK_RESOLVER.path, catalogKeys: ['source-catalog-0001', 'source-catalog-0004'] },
   { key: 'ip-risk-subscription', version: 1, name: 'IP 风险画像 · 空间订阅', platforms: ['ip_risk'], capabilities: ['ip.risk.subscription.query'], optionalCapabilities: [], pricingMode: 'tenant_contract', featureKey: 'ip-risk', href: '/data-products/ip-risk', catalogKeys: [] },
   { key: 'ip-risk-baidu-v2', version: 2, name: 'IP 风险画像 · 百度 v2 订阅', platforms: ['ip_risk'],
     capabilities: ['ip.risk.query.v2'], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',

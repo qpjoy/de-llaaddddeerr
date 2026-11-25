@@ -18,6 +18,7 @@ import { DropdownField, ErrorState, Field, PageHeading } from './components.jsx'
 import { XiaohongshuFeed, BusinessImage } from './pages-xiaohongshu-feed.jsx'
 import { productMediaLoader } from './product-media-loader.js'
 import { xiaohongshuTopicHref } from './xiaohongshu-topics.js'
+import { xiaohongshuNoteUrl } from './share-link-actions.js'
 
 const DELIVERY_OPTIONS = [
   { value: 'cache_first', label: '智能交付 · 缓存优先', hint: '优先读取有效缓存；需要时更新数据，更新失败可返回已存版本。' },
@@ -245,10 +246,12 @@ function DeliveryEvidence({ evidence, error }) {
   )
 }
 
-export function XiaohongshuNotePage({ notify, token, session, onUnauthorized }) {
+export function XiaohongshuNotePage({ notify, token, session, onUnauthorized, query }) {
   const [apiKey] = useDemoApiKey()
   const accessIssues = useDemoAccess('social.posts.resolve')
-  const [url, setUrl] = useState('')
+  const prefilledUrl = xiaohongshuNoteUrl(query?.get('noteId'))
+  const [url, setUrl] = useState(prefilledUrl || '')
+  useEffect(() => { if (prefilledUrl) setUrl(prefilledUrl) }, [prefilledUrl])
   const [deliveryMode, setDeliveryMode] = useState('cache_first')
   const [result, setResult] = useState(null)
   const [history, setHistory] = useState([])
@@ -347,7 +350,7 @@ export function XiaohongshuNotePage({ notify, token, session, onUnauthorized }) 
         <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/xiaohongshu-note#xiaohongshu-note')}>查看开放 API / 文档</a>
       </PageHeading>
 
-      <details className="qp-panel mih-xhs-link-entry" id="xhs-link-entry"><summary>按链接打开笔记 · 已有分享链接时使用</summary><p>与列表中的笔记详情使用相同读取能力；此入口支持粘贴链接、选择交付策略和查看本次会话历史。</p>
+      <details key={prefilledUrl} open={Boolean(prefilledUrl)} className="qp-panel mih-xhs-link-entry" id="xhs-link-entry"><summary>按链接打开笔记 · 已有分享链接时使用</summary><p>与列表中的笔记详情使用相同读取能力；此入口支持粘贴链接、选择交付策略和查看本次会话历史。</p>
       <div className="mih-xhs-workbench" id="xhs-note-resolve">
         <form className="qp-panel mih-xhs-controls" onSubmit={submit}>
           <div className="mih-xhs-panel-title"><Sparkle size={19} /><div><strong>展开一篇笔记</strong><small><code>POST /api/v1/xiaohongshu/app/get_note_info</code> · JSON body · 平台与能力必须同时授权</small></div></div>

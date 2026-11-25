@@ -1,8 +1,10 @@
 import { WECHAT_PRODUCTS } from './wechat.mjs'
 import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
+import { SHARE_LINK_RESOLVER } from './share-link-resolver.mjs'
 import { FILE_DATASETS } from './file-datasets.mjs'
 // Product navigation and API docs share one mapping. It never grants access.
 export const PRODUCT_WORKBENCHES = [
+  { path: SHARE_LINK_RESOLVER.path, label: SHARE_LINK_RESOLVER.label, docs: SHARE_LINK_RESOLVER.docs, prefixes: ['/data/share-links/'] },
   {path:'/data-products/web-search',label:'Web Search',docs:'web-search',prefixes:['/data/web-search/'],native:true},
   { path: '/data-products/strategy-search', label: '策略搜索', docs: 'strategy-search',
     prefixes: ['/data/search', '/data/social/search', '/data/social/crawl', '/data/social/user-info', '/data/social/post-detail', '/data/social/post-comments', '/data/social/comment-replies', '/search/raw', '/search/crawl', '/search/user-info', '/night-all/search/'], native: true },

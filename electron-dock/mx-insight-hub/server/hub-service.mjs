@@ -1,7 +1,10 @@
-import { effectiveBusinessPageLimit, isLcySupplierPriority } from './core/internal-traffic-policy.mjs'
+import { effectiveBusinessPageLimit, isInternalTraffic, isLcySupplierPriority } from './core/internal-traffic-policy.mjs'
 import { StrategySearchRoutingStore, assertFacebookAccountEnabled } from './external-platforms/strategy-search-routing.mjs'
 import { requestMaintenance } from './core/request-maintenance.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
+import { SHARE_LINK_RESOLVER } from '../shared/share-link-resolver.mjs'
+import { normalizeShareLinkInput, resolveShareLinks } from './services/share-link-resolver.mjs'
+import { assertShareLinkConnected, ShareLinkAdmission } from './services/share-link-admission.mjs'
 import { validateSearchOrder } from './web-search/contract.mjs'
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES, isExplicitOnlyKeyScope } from '../shared/access-limits.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
@@ -302,6 +305,7 @@ const FILE_DATASET_REQUESTS = Object.freeze({
   'phone-directory': normalizePhoneSearchRequest,
 })
 const PUBLIC_CAPABILITIES = new Set([
+  SHARE_LINK_RESOLVER.capability,
   ...FILE_DATASET_CAPABILITIES.keys(),
   'web.search', ...WEB_SEARCH_PROVIDERS.map(row => row.capability),
   ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation),
@@ -633,6 +637,8 @@ function directXiaohongshuLegacyUserActivityRequest(operation, normalized) {
 const TENANT_STATUSES = new Set(['active', 'suspended'])
 
 export class HubService {
+  #shareLinkAdmission = new ShareLinkAdmission()
+
   constructor({
     store,
     adapter,
@@ -1557,6 +1563,7 @@ export class HubService {
         ? await this.store.listCapabilityPolicies(normalizedConsumerId)
         : [],
       availableCapabilities: [
+        { capability: SHARE_LINK_RESOLVER.capability, ready: true },
         ...fileDatasetOperations,
         ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => ({ capability: row.operation, ready: providerOperationReady(ecommerceSearch, row.operation) })),
         ...XHS_DISCOVERY_OPERATIONS.map(capability => ({ capability, ready: providerOperationReady(capability === 'social.posts.hot_search' ? ecommerceSearch : xiaohongshuAcquisition, capability) })),
@@ -2084,6 +2091,7 @@ export class HubService {
     const diagnosticsReady = typeof this.store.getAdminPublicOpinionFunnel === 'function'
       && typeof this.store.listAdminPublicOpinionBrowseRecords === 'function'
       && typeof this.store.getAdminPublicOpinionBrowseRecord === 'function'
+    const shareLinkAccess = canonicalGrants.includes(SHARE_LINK_RESOLVER.platform) && context.apiKey?.scopeMode === 'snapshot'
     const grantedNative = NATIVE_FORWARDING_ENDPOINTS.filter(row => canonicalGrants.includes(row.authorizationPlatform)
       && capabilityGrants.includes(row.operation)).map(row => row.operation)
     grantedNative.push(...Object.values(HUB_SOCIAL_ENDPOINTS).filter(row => canonicalGrants.includes(row.platform) && capabilityGrants.includes(row.operation)).map(row => row.operation))
@@ -2098,10 +2106,12 @@ export class HubService {
         ...(payload?.data || {}),
         capabilities: capabilityGrants
           .filter((capability) => PUBLIC_CAPABILITIES.has(capability)
+            && (capability !== SHARE_LINK_RESOLVER.capability || shareLinkAccess)
             && (!FILE_DATASET_CAPABILITIES.has(capability) || fileDatasetAccess.has(FILE_DATASET_CAPABILITIES.get(capability).key)))
           .map((capability) => ({
             capability,
-            ready: FILE_DATASET_CAPABILITIES.has(capability) ? fileDatasetAccess.get(FILE_DATASET_CAPABILITIES.get(capability).key) === true
+            ready: capability === SHARE_LINK_RESOLVER.capability ? !isTestApiKey(context.apiKey)
+              : FILE_DATASET_CAPABILITIES.has(capability) ? fileDatasetAccess.get(FILE_DATASET_CAPABILITIES.get(capability).key) === true
               : capability.startsWith('native.') || Object.values(HUB_SOCIAL_ENDPOINTS).some(row => row.operation === capability) ? nativeReady[capability] === true : capability === TOKENIZE_CAPABILITY
               ? typeof this.segmenter?.segmentWithMeta === 'function'
               : capability === PUBLIC_OPINION_ALL_INGESTED_CAPABILITY
@@ -2125,6 +2135,28 @@ export class HubService {
           })),
       },
     }
+  }
+
+  async resolveShareLinks(context, body, signal) {
+    const { platform, capability, apiPath } = SHARE_LINK_RESOLVER
+    assert(context.apiKey?.scopeMode === 'snapshot', 403, 'snapshot_key_required', 'Share link resolution requires explicitly selected Key scopes')
+    assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'Share link resolution requires a Live API key')
+    const [platforms, capabilities] = await Promise.all([this.#effectivePlatformGrants(context), this.#effectiveCapabilityGrants(context)])
+    assert(platforms.includes(platform), 403, 'platform_not_granted', 'Social data is not granted')
+    assert(capabilities.includes(capability), 403, 'capability_not_granted', 'Share link resolution is not granted')
+    const input = normalizeShareLinkInput(body)
+    const policy = await this.#effectiveCapabilityPolicy(context, capability)
+    return this.#meterRead(context, platform, policy, {
+      path: apiPath, method: 'POST', capability, fingerprintBody: input, failureCode: 'share_link_resolution_failed',
+      requiredAuthorizationScopes: [{ type: 'platform', key: platform }, { type: 'capability', key: capability }],
+      shareLinkAdmission: { signal },
+      // The ledger retains the fingerprint and quota usage only. Share text and
+      // temporary platform tokens are returned to the caller in memory.
+      operation: async requestId => {
+        assertShareLinkConnected(signal)
+        return { data: await resolveShareLinks(input, { signal }), requestId }
+      },
+    })
   }
 
   async tokenize(context, { body, idempotencyKey }) {
@@ -4315,43 +4347,66 @@ export class HubService {
     }
   }
 
-  async #meterStoredRead(context, platform, policy, {
+  #meterStoredRead(context, platform, policy, options) {
+    const acquisitionRequest = acquisitionRequestSnapshot({ method: 'GET', path: options.path, body: options.fingerprintBody })
+    return this.#meterRead(context, platform, policy, {
+      ...options, method: 'GET', acquisitionRequest, failureCode: 'stored_read_failed',
+    })
+  }
+
+  async #meterRead(context, platform, policy, {
     path,
+    method,
     fingerprintBody,
     operation,
     capability = null,
+    acquisitionRequest = null,
+    requiredAuthorizationScopes,
+    failureCode,
+    shareLinkAdmission,
   }) {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     await requestMaintenance(this.store)
-    const reservation = await this.store.reserve({
+    const input = {
       requestId,
       idempotencyKey: `${capability || platform}-read:${requestId}`,
-      fingerprint: requestFingerprint({ method: 'GET', path, body: fingerprintBody }),
+      fingerprint: requestFingerprint({ method, path, body: fingerprintBody }),
       tenantId: context.tenant.id,
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       ...(capability ? { capability } : { platform }),
-      // A stored read has no upstream body; the normalized filter set is
-      // exactly what a reproduction needs.
-      acquisitionRequest: acquisitionRequestSnapshot({ method: 'GET', path, body: fingerprintBody }),
+      requiredAuthorizationScopes,
+      acquisitionRequest,
       unitsReserved: 1,
       leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
       windowStart,
       maxRequests: policy.maxRequests,
-    })
+    }
+    const waitForPlanBurst = shareLinkAdmission && (!isInternalTraffic(this.store, context) || isLcySupplierPriority(context))
+    const reservation = waitForPlanBurst
+      ? await this.#shareLinkAdmission.reserve(context.consumer.id, shareLinkAdmission.signal,
+        () => this.store.reserve({ ...input, includePlanBurstRetryAfter: true,
+          windowStart: new Date(Date.now() - policy.windowSeconds * 1_000),
+          leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs) }),
+        async () => {
+          // reserve checks the current grants and plan under lock. Refresh the
+          // active key/tenant/consumer identity as well after a brief wait.
+          assert(await this.store.findApiKeyById(context.apiKey.id), 401, 'invalid_api_key', 'API key is unavailable')
+        })
+      : await this.store.reserve(input)
     assert(
       reservation.kind === 'reserved' && reservation.request?.id === requestId,
       500,
       'usage_reservation_failed',
-      'Stored read usage reservation did not enter the expected state',
+      'Read usage reservation did not enter the expected state',
     )
     let payload
     try {
-      payload = await operation()
+      payload = await operation(requestId)
     } catch (error) {
-      await this.store.releaseRequest(requestId, 'stored_read_failed').catch(() => {})
+      await this.store.releaseRequest(requestId, failureCode).catch(() => {})
       throw error
     }
     try {

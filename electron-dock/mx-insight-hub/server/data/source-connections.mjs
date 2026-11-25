@@ -18,6 +18,7 @@ import { PUBLIC_OPINION_DATASET_ID } from './public-opinion.mjs'
 import { XIAOHONGSHU_CAPABILITIES } from '../../shared/product-catalog.mjs'
 import { CRAWLER_SOURCES, crawlerSourceSpecForKey } from '../ingest/crawler/source-contract.mjs'
 import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
+import { SHARE_LINK_RESOLVER } from '../../shared/share-link-resolver.mjs'
 import { COLLECT, collectCapability } from '../../shared/collect-engines.mjs'
 
 // Read-only implementation inventory, not a dispatch registry or a grant.
@@ -47,6 +48,13 @@ function route(id, fields) {
 
 export function implementedRoutes(sources = []) {
   const rows = WEB_SEARCH_PROVIDERS.map(p=>route(`web-search-${p.key}`,{provider:p.key,providerLabel:p.label,product:'Web Search',operation:'web.search',platform:'web_search',path:WEB_SEARCH_PATH,catalogKeys:p.key==='baidu'?['source-catalog-0135']:[],keywordSearch:true,defaultRule:'按租户与 Key 的渠道范围和顺序选择；发送后不切换，不转发 Night-All。',evidence:'server/web-search/contract.mjs'}))
+  rows.push(route(SHARE_LINK_RESOLVER.key, {
+    product: SHARE_LINK_RESOLVER.label, platform: SHARE_LINK_RESOLVER.platform, provider: null,
+    operation: SHARE_LINK_RESOLVER.capability, path: SHARE_LINK_RESOLVER.apiPath, procurementOperation: false,
+    catalogKeys: [catalogKey('douyin'), catalogKey('xiaohongshu')],
+    defaultRule: '从分享文案提取作品 ID；短链接仅跟随受支持平台的跳转。查询作品详情需由调用方另行发起。',
+    evidence: 'server/services/share-link-resolver.mjs',
+  }))
   for (const [kind, path] of Object.entries(YOUTUBE_COMMENT_PATHS)) rows.push(route(`youtube-comments-${kind}`, {
     platform: 'youtube', catalogKeys: [catalogKey('youtube')], provider: 'tikhub', product: '社媒与内容数据',
     operation: YOUTUBE_COMMENTS_CAPABILITY, path, datasets: ['social.comments.v1'], procurementOperation: false,

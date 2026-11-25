@@ -12,6 +12,12 @@
 .mih-product-workbench .mih-api-console-main header { flex-wrap: wrap; overflow-wrap: anywhere; }
 .mih-product-workbench .mih-api-response { max-height: 520px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mih-product-workbench .mih-product-json { min-height: 220px; font-family: monospace; resize: vertical; }
+.mih-share-links form, .mih-share-links > section { display: grid; gap: 12px; }
+.mih-share-links textarea { resize: vertical; }
+.mih-share-links-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+.mih-share-links-controls .qp-field { min-width: min(100%, 12rem); }
+.mih-share-links td { overflow-wrap: anywhere; }
+.mih-share-links td small { display: block; }
 .mih-admin-evidence { margin-top: 16px; overflow-wrap: anywhere; }
 .mih-admin-evidence section { padding-block: 12px; border-top: 1px solid var(--qp-line); }
 .mih-admin-evidence h3 { font-size: 15px; }

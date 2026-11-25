@@ -17,12 +17,18 @@ import { ResponseFieldTable } from './response-field-table.jsx'
 import { ProductViewTabs, ProductManagement } from './product-management.jsx'
 import { EcommerceRoutingPage } from './ecommerce-routing.jsx'
 import { isProductAdmin } from '../shared/product-management.mjs'
+import { SHARE_LINK_RESOLVER } from '../shared/share-link-resolver.mjs'
+import { DOUYIN_DETAIL_ENDPOINT, douyinDetailId } from './share-link-actions.js'
 import './product-workbench.css'
 
 export function ProductWorkbench({ Page, pageProps, enabled }) {
   const product = enabled && productForPath(pageProps.routePath)
   const directoryLink = pageProps.routePath === '/source-catalog' && (pageProps.query?.has('section') || pageProps.query?.has('catalogView'))
-  const [selectedTab, setTab] = useState(directoryLink || pageProps.query?.get('view') === 'demo' ? 'demo' : 'debug'), [visited, setVisited] = useState(Boolean(directoryLink || pageProps.query?.get('view') === 'demo'))
+  const view = pageProps.query?.get('view')
+  const startInDemo = directoryLink || view === 'demo' || (product?.path === SHARE_LINK_RESOLVER.path && !view)
+  const [selectedTab, setTab] = useState(startInDemo ? 'demo' : 'debug'), [visited, setVisited] = useState(Boolean(startInDemo))
+  const initialEndpoint = pageProps.query?.get('endpoint')
+  const awemeId = product?.docs === 'social-content' && initialEndpoint === DOUYIN_DETAIL_ENDPOINT ? douyinDetailId(pageProps.query?.get('awemeId')) : null
   const tab = selectedTab === 'management' && !isProductAdmin(pageProps.session) ? 'debug' : selectedTab
   useEffect(() => { if (directoryLink) { setTab('demo'); setVisited(true) } }, [directoryLink, pageProps.query?.get('section'), pageProps.query?.get('catalogView')])
   useEffect(() => { if (pageProps.query?.get('view') === 'demo') { setTab('demo'); setVisited(true) } }, [pageProps.query?.get('view')])
@@ -34,7 +40,7 @@ export function ProductWorkbench({ Page, pageProps, enabled }) {
     {tab === 'management' && product.docs === WECHAT_SELF_HOSTED.docs && pageProps.token ? <WechatSelfHostedEngineAdmin token={pageProps.token} onUnauthorized={pageProps.onUnauthorized} notify={pageProps.notify} /> : null}
     {tab === 'management' && product.docs === 'ecommerce-treasure-box' && pageProps.token ? <EcommerceSupplierManagement token={pageProps.token} onUnauthorized={pageProps.onUnauthorized} /> : null}
     {tab === 'management' ? <ProductManagement token={pageProps.token} session={pageProps.session} onUnauthorized={pageProps.onUnauthorized} notify={pageProps.notify} path={product.path} label={product.label} /> : null}
-    <div hidden={tab !== 'debug'}><ProductApiConsole product={product} token={pageProps.token} initialEndpoint={pageProps.query?.get('endpoint')} /></div>
+    <div hidden={tab !== 'debug'}><ProductApiConsole key={awemeId || ''} product={product} token={pageProps.token} initialEndpoint={initialEndpoint} initialAwemeId={awemeId} /></div>
     <div hidden={tab !== 'demo'}>{visited ? <Page {...pageProps} /> : null}</div>
     <section className="qp-panel mih-panel" hidden={tab !== 'guide'}><h2>接入 {product.label}</h2><p>选择已授权的 Hub Key，在接口调试页查看参数、发送请求并复制示例。接口以当前 Key 的有效权限为准；目录展示不等于已开通或服务就绪。</p><p>支持幂等契约的接口，新查询与下一页各用新的 Idempotency-Key；失败重试保留原参数与标识。GET 等读取是否每次计量以各接口说明为准。游标原样传回，不从条数猜测总量，也不自动补页。切换标签页不会自动发起付费查询。</p>{product.docs === WECHAT_SELF_HOSTED.docs ? <p>自建引擎全局串行：提交返回 202 和 jobId，按 Retry-After 约 5 秒轮询状态，完成后读取 /result。可以一次提交多条，不必等上一条完成；每条使用各自的 Idempotency-Key，超时重发沿用原标识。计费默认关闭（只转发）；开启后实时或 24 小时缓存结果按任务计费，旧结果、失败、取消、排队超时不计费，结果未知待核实。</p> : null}{product.docs === 'aggregate-search' ? <p>推荐通过 POST fetch 设置 Accept: text/event-stream。按 source.completed 展示先到结果；search.completed 才是本批最终结果与分页游标。连接中断不代表调用被撤销，使用同一请求标识核对或重试。已收录模式读取最新入库及存量，不触发上游采集。</p> : null}<a href={publicDocsHref(`/docs/${product.docs}`)}>查看完整契约、分页和响应说明 ↗</a></section>
   </div>
@@ -56,12 +62,13 @@ function initialBody(document, endpoint, access) {
   return JSON.stringify(body, null, 2)
 }
 
-export function ProductApiConsole({ product, token, initialEndpoint, onResult, onAttempt, blocked = false, attemptStore }) {
+export function ProductApiConsole({ product, token, initialEndpoint, initialAwemeId, onResult, onAttempt, blocked = false, attemptStore }) {
   const [key] = useDemoApiKey()
   const identity = useDemoIdentity()
   const access = useDemoAccessSnapshot()
   const [document, setDocument] = useState(null), [loadError, setLoadError] = useState(null)
-  const [selected, setSelected] = useState(''), [drafts, setDrafts] = useState({}), [category, setCategory] = useState('')
+  const prefilledEndpoint = initialAwemeId ? `post:/data/native/${DOUYIN_DETAIL_ENDPOINT}` : null
+  const [selected, setSelected] = useState(prefilledEndpoint || ''), [drafts, setDrafts] = useState({}), [category, setCategory] = useState('')
   const [result, setResult] = useState(null), [error, setError] = useState(null), [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(null), [, render] = useState(0)
   const [copyStatus, setCopyStatus] = useState('')
@@ -78,10 +85,11 @@ export function ProductApiConsole({ product, token, initialEndpoint, onResult, o
   const visibleEndpoints = endpoints.filter(row=>!category || (row['x-mx-category'] || '通用') === category)
   const initialSelection = endpoints.find(row => row['x-mx-endpoint-key'] === initialEndpoint || row.id === `post:/data/native/${initialEndpoint}`)?.id
   useEffect(() => { if (initialSelection) setSelected(initialSelection) }, [initialSelection])
-  const endpoint = visibleEndpoints.find(row => row.id === selected) || visibleEndpoints[0]
+  const endpoint = visibleEndpoints.find(row => row.id === selected) || (prefilledEndpoint && selected === prefilledEndpoint ? null : visibleEndpoints[0])
   const revealItem = useMemo(() => { const index=endpoints.filter(row=>!category || (row['x-mx-category'] || '通用')===category).findIndex(row=>row['x-mx-endpoint-key'] === initialEndpoint || row.id===`post:/data/native/${initialEndpoint}`); return initialEndpoint && index>=0 ? {index} : null },[endpoints,category,initialEndpoint])
   const draft = drafts[endpoint?.id] || {}, values = draft.values || {}
-  const json = draft.json ?? initialBody(document, endpoint, access)
+  const json = draft.json ?? (prefilledEndpoint && endpoint?.id === prefilledEndpoint
+    ? JSON.stringify({ params: { aweme_id: initialAwemeId } }, null, 2) : initialBody(document, endpoint, access))
   const schema = structuredClone(resolveProductSchema(document, endpoint?.requestBody?.content?.['application/json']?.schema))
   if (endpoint?.['x-mx-platform-options'] && access && schema.properties?.platform) schema.properties.platform.enum = endpoint['x-mx-platform-options'].filter(platform => access.platforms?.includes(platform))
   if (product.docs === 'web-search' && access && schema.properties?.provider) schema.properties.provider.enum = searchProviderKeys(access.capabilities)
