@@ -9,12 +9,3 @@ test('customer allowlist exposes only scoped enterprise workflows, never platfor
  for(const path of [`/enterprises/${tenant}/challenge`,'/dataport/tickets','/admin/dataport/tickets',`/enterprises/${tenant}/tickets/${ticket}`,`/enterprises/${tenant}/members/${member}/reveal`])assert.equal(permittedCustomerRoute('POST',path),false,path);
  assert.equal(permittedCustomerRoute('GET',`/enterprises/${tenant}/members/${member}/reset-password`),false);
 });
-
-test('interface purchase forwards only the enterprise offer read and order write',()=>{
- const offers=`/enterprises/${tenant}/interface-offers`,orders=`/enterprises/${tenant}/interface-orders`;
- assert.equal(permittedCustomerRoute('GET',offers),true);
- assert.equal(permittedCustomerRoute('POST',orders),true);
- assert.equal(permittedCustomerRoute('POST',offers),false);
- assert.equal(permittedCustomerRoute('GET',orders),false);
- assert.equal(permittedCustomerRoute('POST','/commerce/interface-orders'),false);
-});

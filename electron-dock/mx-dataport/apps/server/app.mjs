@@ -17,11 +17,11 @@ export function permittedCustomerRoute(method, path) {
   if (enterprise && method === "GET" && /^assessments\/[0-9a-f-]{36}$/.test(enterprise[1])) return true;
   if (enterprise)
     return method === "GET"
-      ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access|interface-offers|tickets\/[0-9a-f-]{36})$/.test(
+      ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access|tickets\/[0-9a-f-]{36})$/.test(
           enterprise[1],
         )
       : method === "POST" &&
-          /^(profile|roles|members|tickets|query|keys|subscription-selection|orders|interface-orders|members\/[0-9a-f-]{36}(?:\/(?:initial-password|reset-password))?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
+          /^(profile|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/(?:initial-password|reset-password))?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
             enterprise[1],
           );
   if (/^\/joins\/[A-Za-z0-9_-]{43}$/.test(path))

@@ -1,42 +1,9 @@
 /* Latest /dataport visual source; application permissions and APIs stay in apps/web. */
-.app-sidebar {
-  --sidebar: #edf2fb;
-  --sidebar-primary: #6268e8;
-  --sidebar-accent: #eeefff;
-  --sidebar-accent-foreground: #555dcc;
-  --line-soft: #e1e5f3;
-  --text-secondary: #6a7590;
-  background: var(--sidebar);
-}
-.app-sidebar [data-slot="sidebar-inner"] {
-  background: var(--sidebar);
-}
-.app-sidebar .brand-symbol {
-  background: var(--sidebar-primary);
-}
-.app-sidebar .nav-button[data-active="true"] {
-  background: var(--sidebar-accent) !important;
-  color: var(--sidebar-primary) !important;
-}
-.app-sidebar .support-card:hover,
-.app-sidebar .sidebar-account-trigger[data-state="open"],
-.app-sidebar .sidebar-account-trigger:hover,
-.app-sidebar .sidebar-account-trigger [data-slot="avatar-fallback"] {
-  background: var(--sidebar-accent);
-}
-.sidebar-account-menu [data-slot="dropdown-menu-item"][aria-current="page"],
-.sidebar-account-menu [data-slot="dropdown-menu-item"][data-highlighted] {
-  background: #eeefff;
-  color: #6268e8;
-}
 .harbor-shell .app-main {
   height: 100dvh;
   /* Keep focus and programmatic scrolling inside the visible content area. */
   overflow: clip;
   min-height: 0;
-}
-.harbor-shell .app-main:not(.query-backdrop) {
-  background: #f6f7fc;
 }
 .harbor-console.content {
   display: flex;
@@ -414,15 +381,8 @@
 }
 .overview-tools [data-slot="select-trigger"] {
   width: 160px;
-}
-.overview-tools [data-slot="select-trigger"],
-.dp-key-form .field [data-slot="select-trigger"] {
   height: 40px;
-  border-radius: 6px;
   font-size: 13px;
-}
-.dp-key-form .field [data-slot="select-trigger"] {
-  min-height: 40px;
 }
 .harbor-console[data-page="overview"] > .usage-metrics .panel {
   margin-top: 0;

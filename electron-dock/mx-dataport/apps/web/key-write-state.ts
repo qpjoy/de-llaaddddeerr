@@ -9,7 +9,7 @@ export function keyCreationFailure(error: unknown) {
     message: unconfirmed
       ? `${message} 请先关闭弹窗并核对 Key 列表，确认上次创建结果，勿直接重复签发。`
       : failure?.code === "subscription_required"
-        ? "请先在「我的订阅」领取 IP 风险画像试用、购买 IP 风险画像套餐或开通对应的数据接口。"
+        ? "请先在“我的订阅”领取试用或开通 IP 风险画像套餐，开通后再签发 API Key。"
         : message,
   };
 }

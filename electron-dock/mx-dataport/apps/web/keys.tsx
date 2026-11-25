@@ -3,7 +3,6 @@ import { Plus, Copy, Info, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -24,8 +23,6 @@ import { enterpriseUrl, hasPermission } from "./permissions";
 import { dateTime } from "./commerce-state";
 import { Pagination, useLocalPage } from "./pagination";
 import { keyCreationFailure } from "./key-write-state";
-type KeyProduct = { id: string; name: string };
-
 export function ApiKeys({
   tenant,
   session,
@@ -45,39 +42,24 @@ export function ApiKeys({
     [revoke, setRevoke] = useState<any>(null),
     [copied, setCopied] = useState(false),
     [keyName, setKeyName] = useState(""),
-    [products, setProducts] = useState<KeyProduct[] | null>(null),
-    [product, setProduct] = useState(""),
     [replacement, setReplacement] = useState<any>(null);
-  const canCreate = hasPermission(session, tenant, "keys.create");
-  const canIssue = canCreate && !loading && (products === null || products.length > 0);
   const rows = useLocalPage(items, 10);
   useEffect(() => {
     const c = new AbortController();
     setLoading(true);
     setItems([]);
-    request<{ data: { items: any[]; products?: KeyProduct[] } }>(enterpriseUrl(tenant, "keys"), { signal: c.signal })
+    request(enterpriseUrl(tenant, "keys"), { signal: c.signal })
       .then((v) => {
-        if (c.signal.aborted) return;
-        setItems(v.data.items);
-        setProducts(v.data.products ?? null);
+        if (!c.signal.aborted) setItems(v.data.items);
       })
       .catch((e) => {
-        if (c.signal.aborted) return;
-        setProducts([]);
-        setError(e.message);
+        if (!c.signal.aborted) setError(e.message);
       })
       .finally(() => {
         if (!c.signal.aborted) setLoading(false);
       });
     return () => c.abort();
   }, [tenant, version]);
-  function openIssuer(previous: any = null) {
-    setError("");
-    setReplacement(previous);
-    setProduct(products?.length === 1 ? products[0].id : "");
-    setKeyName(previous ? previous.name.slice(0, 70) + "（替代）" : "");
-    setOpen(true);
-  }
   async function post(path: string, body: any) {
     setBusy(true);
     setError("");
@@ -107,16 +89,19 @@ export function ApiKeys({
           <h1>API Keys</h1>
           <p>管理企业接入凭证，Key 仍受独立授权、额度和订阅限制。</p>
         </div>
-        {canCreate && (
-          <Button disabled={!canIssue} onClick={() => openIssuer()}>
+        {hasPermission(session, tenant, "keys.create") && (
+          <Button
+            onClick={() => {
+              setReplacement(null);
+              setKeyName("");
+              setOpen(true);
+            }}
+          >
             <Plus size={16} />
             签发 API Key
           </Button>
         )}
       </div>
-      {canCreate && !loading && products?.length === 0 && !error && (
-        <p className="harbor-hint">请在「我的订阅」开通 IP 风险画像或数据接口后签发 API Key。</p>
-      )}
       <div className="notice">
         <Info size={16} />
         <span>
@@ -163,9 +148,7 @@ export function ApiKeys({
                         ...(k.capabilities || []),
                       ].join("、")}
                     >
-                      {k.product === "xiaohongshu"
-                        ? "小红书数据 API"
-                        : k.capabilities?.includes("ip.risk.query") ||
+                      {k.capabilities?.includes("ip.risk.query") ||
                       k.platforms?.includes("ip_risk")
                         ? "IP 风险画像"
                         : k.capabilities?.length
@@ -191,11 +174,15 @@ export function ApiKeys({
                   <TableCell>{dateTime(k.expiresAt)}</TableCell>
                   <TableCell>
                     <div className="key-row-actions">
-                      {canCreate && (products === null || products.some(item => item.id === k.product)) &&
+                      {hasPermission(session, tenant, "keys.create") &&
                         (k.effectiveStatus || k.status) === "active" && (
                           <Button
                             variant="link"
-                            onClick={() => openIssuer(k)}
+                            onClick={() => {
+                              setReplacement(k);
+                              setKeyName(k.name.slice(0, 70) + "（替代）");
+                              setOpen(true);
+                            }}
                           >
                             签发替代 Key
                           </Button>
@@ -223,8 +210,14 @@ export function ApiKeys({
               </div>
               <h3>签发你的第一把 API Key</h3>
               <p>密钥用于服务端请求鉴权，完整凭证只展示一次。</p>
-              {canIssue && (
-                <Button onClick={() => openIssuer()}>
+              {hasPermission(session, tenant, "keys.create") && (
+                <Button
+                  onClick={() => {
+                    setReplacement(null);
+                    setKeyName("");
+                    setOpen(true);
+                  }}
+                >
                   <Plus size={16} />
                   签发 API Key
                 </Button>
@@ -252,7 +245,7 @@ export function ApiKeys({
             <DialogDescription>
               {replacement
                 ? "替代 Key 沿用原 Key 的授权范围，完整凭证仅在创建成功后显示一次。"
-                : "新 Key 按所选服务授权，完整凭证仅在创建成功后显示一次。"}
+                : "新 Key 仅授权当前企业 IP 风险画像产品，完整凭证仅在创建成功后显示一次。"}
             </DialogDescription>
           </DialogHeader>
           {replacement && (
@@ -266,11 +259,10 @@ export function ApiKeys({
             onSubmit={async (e) => {
               e.preventDefault();
               const data = new FormData(e.currentTarget);
-              if (!replacement && products !== null && !product) return;
               try {
                 const k = await post("keys", {
                   name: data.get("name"),
-                  ...(replacement ? { replaceFrom: replacement.id } : product ? { product } : {}),
+                  ...(replacement ? { replaceFrom: replacement.id } : {}),
                   expiresInDays: Number(data.get("days")),
                 });
                 setSecret(k.secret);
@@ -280,21 +272,6 @@ export function ApiKeys({
               } catch {}
             }}
           >
-            {!replacement && products && (
-              <label className="field">
-                授权服务
-                <Select required value={product} onValueChange={setProduct}>
-                  <SelectTrigger aria-label="授权服务">
-                    <SelectValue placeholder="请选择服务" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {products.map(({ id, name }) => (
-                      <SelectItem key={id} value={id}>{name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </label>
-            )}
             <label className="field">
               密钥名称
               <input
@@ -324,7 +301,7 @@ export function ApiKeys({
               >
                 取消
               </Button>
-              <Button disabled={busy || !keyName.trim() || (!replacement && products !== null && !product)}>签发 API Key</Button>
+              <Button disabled={busy || !keyName.trim()}>签发 API Key</Button>
             </div>
           </form>
         </DialogContent>

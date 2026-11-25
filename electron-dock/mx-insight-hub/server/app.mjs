@@ -1542,12 +1542,7 @@ export function createApp({
           return
         }
         if(portalPath==='/session') {
-          const interfaceTenants = await commerce.paidInterfaceTenants(
-            customer.memberships.filter(m => m.dataport?.permissions.includes('docs.read')).map(m => m.tenantId),
-          )
-          const memberships = customer.memberships.map(m => m.dataport ? {
-            ...m, dataport: {...m.dataport, interfaceSubscriptionActive: interfaceTenants.has(m.tenantId)},
-          } : m)
+          const memberships=customer.memberships
           sendJson(response,200,{data:{kind:customer.kind,memberId:customer.memberId,displayName:customer.displayName,platformAdmin:false,scoped:true,tenantIds:customer.tenantIds,capabilities:[],memberships,identityProvider:customer.kind==='dataport-user'?'dataport-local':'mx-launcher',mustChangePassword:customer.mustChangePassword===true,tenantInvitationsEnabled:false,canOpenPersonalAccount:false,publicApiBaseUrl:customer.portalOrigin},requestId},{'cache-control':'private, no-store'})
           return
         }
