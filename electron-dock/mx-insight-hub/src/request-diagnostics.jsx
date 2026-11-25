@@ -58,9 +58,15 @@ function exportDiagnostics(data) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 export function RequestDiagnosticCall({ call, provider }) {
+  const twitterSearch = provider && call.provider === 'rapidapi' && call.operation === 'social.content.search'
+    && call.endpoint === 'twitter-aio.search'
+  const roleLabel = twitterSearch && { primary: '首次调用', retry: '重试', enrichment: '补页' }[call.callRole]
+  const twitterBusy = twitterSearch && call.outcome === 'rejected' && call.httpStatus === 409
+    && call.errorCode === 'upstream_service_busy'
+  const showMessageNote = provider && !call.message && !(twitterSearch && call.outcome === 'succeeded')
   return <article className="mih-diagnostic-call">
-    <h4>{provider ? call.provider : '连接器'} · {shown(call.operation)}</h4>
-    <p><strong>{stateName(call.outcome)}</strong>{call.message ? ` · ${call.message}` : ''}</p>
+    <h4>{provider ? call.provider : '连接器'} · {shown(call.operation)}{roleLabel ? ` · ${roleLabel}` : ''}</h4>
+    <p><strong>{twitterBusy ? '上游暂时繁忙' : stateName(call.outcome)}</strong>{call.message ? ` · ${call.message}` : ''}</p>
     <Facts entries={[
       ['HTTP 状态', call.httpStatus], ['业务码 / 失败类别', provider ? call.businessCode : call.failureKind],
       ['错误码', call.errorCode], ['上游 requestId', call.upstreamRequestId],
@@ -91,7 +97,7 @@ export function RequestDiagnosticCall({ call, provider }) {
         ? <p className="mih-diagnostic-note">部分技术错误码未通过展示规则或超过展示上限。</p> : null}
     </section> : null}
     {provider && call.transportFailureTooLarge ? <p className="mih-diagnostic-note">传输失败元数据超过展示上限，请按原调用 ID 核对归档。</p> : null}
-    {provider && !call.message ? <p className="mih-diagnostic-note">{call.messageEvidence === 'restricted_message_not_exposed' ? '受限响应已保存；该消息尚未通过安全展示规则，界面仅展示业务码，不返回原始正文。' : '没有可展示的上游消息，不能据此推断具体根因。'}</p> : null}
+    {showMessageNote ? <p className="mih-diagnostic-note">{call.messageEvidence === 'restricted_message_not_exposed' ? '受限响应已保存；该消息尚未通过安全展示规则，界面仅展示业务码，不返回原始正文。' : '没有可展示的上游消息，不能据此推断具体根因。'}</p> : null}
     {!provider && call.failureEvidence ? <section aria-label="Night-All 错误链">
       <h4>Night-All 错误链</h4>
       <p className="mih-diagnostic-note">以下为保存的结构化证据。说明由错误码映射，不是上游原文；任意消息、参数和密钥不展示。</p>

@@ -112,13 +112,23 @@ export function analyzeRequestDiagnostic(run) {
     nextSteps.push('在 TikHub 控制台 API Settings → RPS Settings 核对当前账户档位、有效期及是否回落到默认档；按账户汇总各应用的请求速率并调整并发/节流。Hub 的本地配额或 100 QPS 配置不能证明供应商账户也是 100 RPS；本诊断不会自动重发请求。')
   }
   const [onlyCall] = providers
-  const twitterSearch409 = run.platform === 'twitter' && run.status === 'committed' && run.responseStatus === 502
-    && run.hasResponseBody && ['social_upstream_rejected', 'upstream_service_busy'].includes(run.errorCode) && !run.callsTruncated
-    && !connectors.length && providers.every(call => call.provider === 'rapidapi' && call.operation === 'social.content.search'
-      && call.endpoint === 'twitter-aio.search' && call.outcome === 'rejected' && call.httpStatus === 409)
-  if (twitterSearch409 && providers.length === 2 && providers.every(call => call.errorCode === 'upstream_service_busy')
-    && providers.some(call => call.callOrdinal === 0 && call.callRole === 'primary')
-    && providers.some(call => call.callOrdinal === 1 && call.callRole === 'retry')) {
+  const twitterSearchCalls = run.platform === 'twitter' && !run.callsTruncated && !connectors.length
+    && providers.every(call => call.provider === 'rapidapi' && call.operation === 'social.content.search' && call.endpoint === 'twitter-aio.search')
+  const primary = providers.find(call => call.callOrdinal === 0 && call.callRole === 'primary')
+  const retry = providers.find(call => call.callOrdinal === 1 && call.callRole === 'retry')
+  const twitterSearch409 = twitterSearchCalls && run.status === 'committed' && run.responseStatus === 502 && run.hasResponseBody
+    && ['social_upstream_rejected', 'upstream_service_busy'].includes(run.errorCode)
+    && providers.every(call => call.outcome === 'rejected' && call.httpStatus === 409)
+  const busyPrimary = primary?.outcome === 'rejected' && primary.httpStatus === 409 && primary.errorCode === 'upstream_service_busy'
+  const pageSucceeded = call => call?.outcome === 'succeeded' && call.httpStatus === 200 && call.errorCode == null
+  if (twitterSearchCalls && successfulDelivery && run.sourceMode === 'live' && run.errorCode == null && !refusal
+    && busyPrimary && pageSucceeded(retry) && providers.every(call => call === primary || call === retry
+      || (call.callRole === 'enrichment' && call.callOrdinal > 1 && pageSucceeded(call)))) {
+    summary = 'Twitter 搜索首次调用因供应商繁忙返回 HTTP 409，自动重试返回 HTTP 200，Hub 已保存搜索结果。'
+    add('twitter_busy_retry_succeeded', 'confirmed', '同一请求的 RapidAPI 重试成功',
+      'Hub 使用原搜索条件向同一供应商重试。两次调用的回执可分别核对，客户结算可按同一 Hub 请求 ID 查询。',
+      ['sourceMode', 'responseStatus', ...refs(providers, call => call === primary || call === retry, 'providerCalls', ['callRole', 'errorCode', 'httpStatus'])])
+  } else if (twitterSearch409 && providers.length === 2 && primary && retry && providers.every(call => call.errorCode === 'upstream_service_busy')) {
     summary = 'RapidAPI 的 Twitter 搜索首次返回繁忙，Hub 重试一次后仍收到 HTTP 409，已保存 HTTP 502。'
     add('provider_rejection_recorded', 'confirmed', '同一请求的两次调用均报告繁忙',
       '首次调用和重试各有一条 upstream_service_busy 回执。采购费用可按两个上游 requestId 分别核对，客户结算使用本次 Hub 请求 ID。',

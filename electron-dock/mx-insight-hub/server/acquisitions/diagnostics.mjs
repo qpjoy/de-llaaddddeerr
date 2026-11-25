@@ -119,7 +119,7 @@ function advice(request, providers, connectors, gateway, refusal = null) {
   if (connectors.some(c => c.failure_evidence)) return '已保留 Night-All 结构化错误链。查看候选端点和内层错误码；缺失的字段不推测，多个端点失败不等同于已确认唯一根因。'
   if (connectors.some(c => c.error_code)) return '已保存连接器错误码和上游关联 ID；完整上游错误正文未接入本诊断，请按该 ID 和调用时间核对上游日志。'
   if (request.status === 'committed' && request.response_status >= 400) return `Hub 已保存失败响应；已提交不代表查询成功。请结合上游证据继续排查，客户扣费另查结算账本。${HISTORY_GUIDANCE}`
-  if (request.status === 'committed') return 'Hub 已提交响应。上游失败可能已由存量结果回退；请结合交付来源和响应 HTTP 状态判断。下游入库校验结果不在本诊断范围。'
+  if (request.status === 'committed') return 'Hub 已提交响应。请查看本请求的响应 HTTP 状态和交付来源，并在下方核对各次上游调用。'
   return '请结合 Hub 状态、上游业务码和调用时间继续排查；缺少调用记录不能单独证明上游未执行。'
 }
 

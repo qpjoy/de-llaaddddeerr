@@ -17,13 +17,40 @@ const view = build({
   } }],
 }).then(({ outputFiles }) => import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].contents).toString('base64')}`))
 
-async function render(transportFailure, transportFailureTooLarge = false) {
+async function renderCall(call) {
   const { RequestDiagnosticCall } = await view
-  return renderToStaticMarkup(createElement(RequestDiagnosticCall, { provider: true,
-    call: { id: 'call', provider: 'rapidapi', outcome: 'unknown', billed: null, hasArchive: true,
-      transportFailure: projectTransportFailure(transportFailure), transportFailureTooLarge },
-  }))
+  return renderToStaticMarkup(createElement(RequestDiagnosticCall, { provider: true, call }))
 }
+
+function render(transportFailure, transportFailureTooLarge = false) {
+  return renderCall({ id: 'call', provider: 'rapidapi', outcome: 'unknown', billed: null, hasArchive: true,
+    transportFailure: projectTransportFailure(transportFailure), transportFailureTooLarge })
+}
+
+test('Twitter AIO call cards identify the busy attempt and successful retry using their saved roles', async () => {
+  const first = { provider: 'rapidapi', operation: 'social.content.search', endpoint: 'twitter-aio.search',
+    callRole: 'primary', outcome: 'rejected', httpStatus: 409, errorCode: 'upstream_service_busy',
+    upstreamRequestId: 'upstream-first', message: 'TWI-BUSY', billed: null, costMinor: '1', currency: 'CNY', costKind: 'estimated' }
+  const firstCard = await renderCall(first)
+  assert.match(firstCard, /social\.content\.search · 首次调用<\/h4>/u)
+  assert.match(firstCard, /<strong>上游暂时繁忙<\/strong> · TWI-BUSY/u)
+  for (const evidence of ['409', 'upstream_service_busy', 'upstream-first', '1 CNY · estimated', '未知']) {
+    assert.ok(firstCard.includes(`<dd>${evidence}</dd>`))
+  }
+  const retryCard = await renderCall({ ...first, callRole: 'retry', outcome: 'succeeded', httpStatus: 200,
+    errorCode: null, message: null, upstreamRequestId: 'upstream-retry', messageEvidence: 'restricted_message_not_exposed' })
+  assert.match(retryCard, /social\.content\.search · 重试<\/h4>/u)
+  assert.match(retryCard, /<strong>上游成功<\/strong>/u)
+  assert.match(retryCard, /<dd>200<\/dd>/u)
+  assert.match(retryCard, /<dd>upstream-retry<\/dd>/u)
+  assert.doesNotMatch(retryCard, /暂时繁忙|具体根因|尚未通过安全展示规则/u)
+
+  for (const override of [{ errorCode: 'upstream_request_rejected' }, { httpStatus: 403 },
+    { operation: 'social.profile.get' }, { endpoint: 'twitter-aio.crawl' }, { provider: 'tikhub' }]) {
+    assert.match(await renderCall({ ...first, ...override }), /<strong>上游拒绝<\/strong>/u)
+  }
+  assert.doesNotMatch(await renderCall({ ...first, callRole: null }), /首次调用|重试|补页/u)
+})
 
 test('the request-stage card distinguishes transport evidence from final execution and billing', async () => {
   const html = await render({ phase: 'request', codes: ['UND_ERR_CONNECT_TIMEOUT', 'private-code'],

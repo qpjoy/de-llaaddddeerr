@@ -66,6 +66,38 @@ test('two typed Twitter busy receipts identify the primary call and its single s
   }
 })
 
+test('a saved live Twitter search identifies the successful retry after the first busy receipt', () => {
+  const primary = { provider: 'rapidapi', operation: 'social.content.search', endpoint: 'twitter-aio.search',
+    callOrdinal: 0, callRole: 'primary', httpStatus: 409, outcome: 'rejected', errorCode: 'upstream_service_busy' }
+  const retry = { ...primary, callOrdinal: 1, callRole: 'retry', httpStatus: 200, outcome: 'succeeded', errorCode: null }
+  const fill = { ...retry, callOrdinal: 2, callRole: 'enrichment' }
+  const run = { ...base(), status: 'committed', responseStatus: 200, hasResponseBody: true, sourceMode: 'live',
+    errorCode: null, providerCalls: [primary, retry] }
+  for (const providerCalls of [[primary, retry], [retry, primary], [primary, retry, fill]]) {
+    const analysis = analyzeRequestDiagnostic({ ...run, providerCalls })
+    assert.match(analysis.summary, /首次.*409.*重试.*200.*Hub.*已保存/u)
+    const recovery = finding(analysis, 'twitter_busy_retry_succeeded')
+    assert.equal(recovery.certainty, 'confirmed')
+    assert.ok(recovery.evidenceRefs.includes(`providerCalls[${providerCalls.indexOf(primary)}].errorCode`))
+    assert.ok(recovery.evidenceRefs.includes(`providerCalls[${providerCalls.indexOf(retry)}].callRole`))
+    assert.ok(finding(analysis, 'successful_response_saved'))
+    assert.equal(finding(analysis, 'provider_rejection_recorded'), undefined)
+  }
+
+  for (const override of [
+    { status: 'unknown' }, { responseStatus: 502 }, { hasResponseBody: false }, { sourceMode: 'stored_fallback' },
+    { callsTruncated: true }, { connectorCalls: [{ outcome: 'unknown' }] },
+    { providerCalls: [{ ...primary, errorCode: 'social_upstream_rejected' }, retry] },
+    { providerCalls: [primary, { ...retry, callRole: 'enrichment' }] },
+    { providerCalls: [primary, { ...retry, callOrdinal: 3 }] },
+    { providerCalls: [primary, { ...retry, endpoint: 'twitter-aio.crawl' }] },
+    { providerCalls: [primary, { ...retry, outcome: 'unknown' }] },
+    { providerCalls: [primary, retry, { ...fill, outcome: 'rejected', httpStatus: 409 }] },
+  ]) {
+    assert.equal(finding(analyzeRequestDiagnostic({ ...run, ...override }), 'twitter_busy_retry_succeeded'), undefined)
+  }
+})
+
 test('typed Twitter account rejection is distinguished from quota and parsing failures', () => {
   const analysis = analyzeRequestDiagnostic({ ...base(), status: 'committed', responseStatus: 422,
     providerCalls: [{ provider: 'rapidapi', operation: 'social.profile.get', outcome: 'rejected',
