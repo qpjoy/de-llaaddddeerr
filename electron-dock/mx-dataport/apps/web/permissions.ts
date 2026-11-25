@@ -19,14 +19,22 @@ export const pagePermission: Record<string, string> = {
   keys: "keys.read",
   services: "subscriptions.read",
   market: "subscriptions.buy",
+  "interface-subscriptions": "subscriptions.buy",
   orders: "billing.read",
   "docs-ip": "docs.read",
   team: "members.read",
   audit: "audit.read",
   support: "support.read.self",
 };
+export const isInterfacePage = (page: string) =>
+  page === "interfaces" || page.startsWith("interfaces/");
+
 export function canOpenPage(session: any, tenant: string, page: string) {
-  if (page === "intelligence")
+  if (isInterfacePage(page)) {
+    const rights = membershipFor(session, tenant)?.dataport;
+    return rights?.interfaceSubscriptionActive === true && rights.permissions?.includes("docs.read") === true;
+  }
+  if (page === "lookup" || page === "intelligence")
     return (
       hasPermission(session, tenant, "query.execute") ||
       hasPermission(session, tenant, "history.read")

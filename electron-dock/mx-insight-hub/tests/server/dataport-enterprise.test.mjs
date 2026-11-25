@@ -1094,9 +1094,11 @@ test('replacement Key keeps its exact existing scopes and environment, with no a
  const tenant=randomUUID(),memberId=randomUUID(),keyId=randomUUID(),consumerId=randomUUID(),calls=[];
  const principal={memberId,memberships:[{tenantId:tenant,role:'owner',dataport:{permissions:['keys.create'],ownerChallengeRequired:false}}]};
  const old={id:keyId,status:'active',environment:'test',expiresAt:'2099-01-01',platforms:['ip_risk'],capabilities:[],webSearchOrder:[]};
+ const consumer={id:consumerId,tenantId:tenant,businessId:`commerce:ip-risk:${tenant}`,status:'active'};
  const invoke=replaceFrom=>dataportRoute({request:{method:'POST',headers:{}},response:{},path:`/enterprises/${tenant}/keys`,searchParams:new URLSearchParams(),principal,
-  dataport:{available(){},event:async()=>{}},store:{listConsumers:async()=>[{id:consumerId,tenantId:tenant,businessId:`commerce:ip-risk:${tenant}`,status:'active'}]},
-  service:{listApiKeys:async()=>[old],createApiKey:async body=>{calls.push(body);return {id:randomUUID(),secret:'synthetic-only'}}},
+  dataport:{available(){},event:async()=>{}},store:{findApiKeyById:async id=>id===keyId?{tenant:{id:tenant},consumer,apiKey:old}:null},
+  commerce:{prepareKeyConsumer:async(_tenant,product)=>({product:{id:product},consumerId})},
+  service:{createApiKey:async body=>{calls.push(body);return {id:randomUUID(),secret:'synthetic-only'}}},
   readJson:async()=>({name:'replacement',expiresInDays:30,replaceFrom}),sendJson(){}});
  await invoke(keyId);assert.deepEqual(calls[0].platforms,old.platforms);assert.deepEqual(calls[0].capabilities,[]);assert.equal(calls[0].environment,'test');
  await assert.rejects(invoke(randomUUID()),{code:'replacement_key_unavailable'});assert.equal(calls.length,1);
@@ -1411,6 +1413,20 @@ test("verified MX Portal owner receives usable permissions without a code; retir
   const owner = (await session.json()).data;
   assert.equal(owner.memberships[0].dataport.ownerChallengeRequired,false);
   assert.ok(owner.memberships[0].dataport.permissions.includes("members.read"));
+  assert.equal(owner.memberships[0].dataport.interfaceSubscriptionActive,false);
+  const readInterfaceAccess = async () => (
+    await (await fetch(hub+"/internal/v1/portal/session", {headers})).json()
+  ).data.memberships[0].dataport.interfaceSubscriptionActive;
+  const insertDeliveredOrder = (tenant, purpose) => f.pool.query(
+    `INSERT INTO hub_commerce.orders(id,tenant_id,intent,payment,receipt,delivered_at)
+     VALUES($1,$2,$3,'{"status":"paid"}','"fixture receipt"',now())`,
+    [randomUUID(),tenant,{purpose,paymentMethod:"alipay"}],
+  );
+  await insertDeliveredOrder(f.other,"interface_prepaid");
+  await insertDeliveredOrder(f.tenant,"purchase");
+  assert.equal(await readInterfaceAccess(),false);
+  await insertDeliveredOrder(f.tenant,"interface_prepaid");
+  assert.equal(await readInterfaceAccess(),true);
   for (const resource of ["members","roles","history"]) {
     assert.equal((await fetch(hub+`/internal/v1/portal/enterprises/${f.tenant}/${resource}`, {headers})).status,200);
   }

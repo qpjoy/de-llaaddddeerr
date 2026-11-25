@@ -26,7 +26,7 @@ test("subscription rejection gives the next step without claiming a Key might ha
   });
   assert.equal(writes, 1);
   assert.equal(failure.unconfirmed, false);
-  assert.match(failure.message, /我的订阅.*IP 风险画像/);
+  assert.match(failure.message, /我的订阅.*IP 风险画像.*数据接口/);
   assert.doesNotMatch(failure.message, /上次创建结果|核对 Key/);
 });
 

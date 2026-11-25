@@ -6,8 +6,7 @@ import {
 } from "./dataport-policy.mjs";
 import { DataportAccountsClient } from "./dataport-accounts.mjs";
 import { paging, uuid } from "./dataport-store.mjs";
-import { IP_PRODUCT_CAPABILITY } from "../contracts/ip-risk-product.mjs";
-import { commerceOrderView } from "../commerce/service.mjs";
+import { commerceOrderView, dataportKeyProductForConsumer } from "../commerce/service.mjs";
 import { paymentTimedOutSql } from "../commerce/order-state.mjs";
 
 const endpoints = {
@@ -21,6 +20,7 @@ const endpoints = {
     "subscriptions",
     "billing",
     "query-access",
+    "interface-offers",
   ],
   POST: [
     "profile",
@@ -31,6 +31,7 @@ const endpoints = {
     "keys",
     "subscription-selection",
     "orders",
+    "interface-orders",
   ],
 };
 export function dataportRouteAllowed(method, path) {
@@ -157,6 +158,15 @@ export async function dataportRoute({
   }
   const [, tenantId, resource] = /^\/enterprises\/([^/]+)\/(.+)$/.exec(path);
   requireDataportAccess(principal, tenantId);
+  if (resource === "interface-offers" || resource === "interface-orders") {
+    const member = requireDataportAccess(principal, tenantId, "subscriptions.buy");
+    if (searchParams.size) throw new AppError(400, "invalid_query", "接口订阅不接受查询参数。");
+    if (resource === "interface-offers") return reply(await commerce.interfaceOffers());
+    return reply(await commerce.createInterfaceOrder(
+      tenantId, await readJson(request, 4096), request.headers["idempotency-key"], principal.memberId,
+      { purchaseActorOnly: !member.dataport?.permissions?.includes("billing.read") },
+    ), 201);
+  }
   if (resource === "query-access") {
     requireDataportAccess(principal, tenantId, "usage.read");
     const data = await commerce.list(tenantId, { pageSize: 100 });
@@ -300,57 +310,42 @@ export async function dataportRoute({
     return reply({...result,aiAnalysis});
   }
   if (resource === "keys") {
-    requireDataportAccess(
+    const membership = requireDataportAccess(
       principal,
       tenantId,
       request.method === "GET" ? "keys.read" : "keys.create",
     );
-    const consumers = await store.listConsumers(tenantId);
     if (request.method === "GET") {
-      const items = (
-        await Promise.all(
-          consumers
-            .filter((c) => c.tenantId === tenantId)
-            .map((c) => service.listApiKeys(c.id)),
-        )
-      ).flat();
-      return reply({ items: items.map(({ secret, ...item }) => item) });
+      const consumers = await store.listConsumers(tenantId);
+      const items = (await Promise.all(consumers.filter(c => c.tenantId === tenantId).map(async c => {
+        const product = dataportKeyProductForConsumer(c);
+        return (await service.listApiKeys(c.id)).map(({ secret, ...item }) => ({ ...item, product }));
+      }))).flat();
+      const products = (membership.dataport?.permissions || legacyPermissions(membership)).includes("keys.create")
+        ? (await commerce.keyProducts(tenantId)).map(({ id, name }) => ({ id, name })) : [];
+      return reply({ items, products });
     }
     const body = await readJson(request, 1024);
     if (
       Object.keys(body).some(
-        (k) => !["name", "expiresInDays", "replaceFrom"].includes(k),
-      )
+        (k) => !["name", "expiresInDays", "replaceFrom", "product"].includes(k),
+      ) || (body.product !== undefined && typeof body.product !== "string")
+      || (body.replaceFrom !== undefined && (!uuid(body.replaceFrom) || body.product !== undefined))
     )
       throw new AppError(400, "invalid_key_request", "Key 参数无效。");
-    const consumer = consumers.find(
-      (c) =>
-        c.tenantId === tenantId &&
-        c.businessId === `commerce:ip-risk:${tenantId}` &&
-        c.status === "active",
-    );
-    if (!consumer)
-      throw new AppError(409, "subscription_required", "请先开通企业订阅。");
-    const previous = body.replaceFrom
-      ? (await service.listApiKeys(consumer.id)).find(
-          (k) => k.id === body.replaceFrom,
-        )
-      : null;
-    if (
-      body.replaceFrom &&
-      (!previous ||
-        previous.status !== "active" ||
-        new Date(previous.expiresAt) <= new Date() ||
-        !Array.isArray(previous.platforms) ||
-        !Array.isArray(previous.capabilities))
-    )
-      throw new AppError(
-        409,
-        "replacement_key_unavailable",
-        "原 Key 已失效或不属于当前企业产品，请刷新后重试。",
-      );
+    const replacement = body.replaceFrom ? await store.findApiKeyById(body.replaceFrom) : null;
+    const replacementProduct = replacement?.tenant.id === tenantId && dataportKeyProductForConsumer(replacement.consumer);
+    if (body.replaceFrom && !replacementProduct)
+      throw new AppError(409, "replacement_key_unavailable", "原 Key 已失效或不属于当前企业产品，请刷新后重试。");
+    const { product, consumerId } = await commerce.prepareKeyConsumer(tenantId, replacementProduct || body.product);
+    const previous = replacement?.apiKey;
+    const platforms = previous?.platforms || (await store.listGrants(consumerId)).filter(scope => scope === product.platform);
+    const capabilities = previous?.capabilities
+      || (await store.listCapabilityGrants(consumerId)).filter(scope => product.capabilities.includes(scope));
+    if (!previous && (!platforms.length || !capabilities.length))
+      throw new AppError(409, "key_product_unavailable", "该服务当前没有可授权的接口，请联系管理员。");
     const key = await service.createApiKey({
-      consumerId: consumer.id,
+      consumerId,
       ...(previous
         ? {
             environment: previous.environment,
@@ -359,11 +354,11 @@ export async function dataportRoute({
         : {}),
       name: body.name,
       expiresInDays: body.expiresInDays,
-      platforms: previous?.platforms || ["ip_risk"],
-      capabilities: previous?.capabilities || [IP_PRODUCT_CAPABILITY],
+      platforms,
+      capabilities,
     });
     await dataport.event(tenantId, principal.memberId, "key.created", key.id);
-    return reply(key, 201);
+    return reply({ ...key, product: product.id }, 201);
   }
   if (resource.startsWith("keys/")) {
     requireDataportAccess(principal, tenantId, "keys.revoke");
@@ -384,13 +379,16 @@ export async function dataportRoute({
     if (searchParams.get("export") === "1")
       requireDataportAccess(principal, tenantId, "billing.export");
     const { page, pageSize } = paging(searchParams);
+    // Old DataPort bundles only understand IP terms, so they receive their
+    // original IP-only order view during mixed-version rollouts.
+    const includeInterface = searchParams.get("includeInterface") === "1";
     if (resource === "billing") {
       const q = (searchParams.get("q") || "").trim().slice(0, 128),
         status = searchParams.get("status") || "",
         from = searchParams.get("from") || null,
         to = searchParams.get("to") || null;
       if (
-        !["", "paid", "pending", "delivered", "payment_timeout"].includes(status) ||
+        !["", "paid", "pending", "delivered", "payment_timeout", "pending_config"].includes(status) ||
         [from, to].some(
           (v) =>
             v &&
@@ -400,9 +398,11 @@ export async function dataportRoute({
         throw new AppError(400, "invalid_billing_filter", "账单筛选条件无效。");
       // Calendar days follow the DataPort business timezone, not the PG session.
       // Keep created_at bare so the tenant/time index remains usable.
-      const args = [tenantId, q, status, from, to],
-        where = `tenant_id=$1 AND ($2='' OR position(lower($2) in lower(id::text||' '||(intent->'product'->>'name')))>0)
-        AND ($3='' OR ($3='paid' AND payment->>'status'='paid') OR ($3='pending' AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid' AND NOT coalesce(${paymentTimedOutSql},false)) OR ($3='payment_timeout' AND ${paymentTimedOutSql}) OR ($3='delivered' AND delivered_at IS NOT NULL))
+      const args = [tenantId, q, status, from, to, includeInterface],
+        where = `tenant_id=$1 AND ($6 OR intent->>'purpose' IS DISTINCT FROM 'interface_prepaid')
+        AND ($2='' OR position(lower($2) in lower(id::text||' '||(intent->'product'->>'name')))>0)
+        AND ($3='' OR ($3='paid' AND payment->>'status'='paid') OR ($3='pending_config' AND intent->>'paymentMethod'='bank')
+        OR ($3='pending' AND intent->>'paymentMethod' IS DISTINCT FROM 'bank' AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid' AND NOT coalesce(${paymentTimedOutSql},false)) OR ($3='payment_timeout' AND ${paymentTimedOutSql}) OR ($3='delivered' AND delivered_at IS NOT NULL))
         AND ($4::date IS NULL OR created_at >= ($4::date::timestamp AT TIME ZONE 'Asia/Shanghai'))
         AND ($5::date IS NULL OR created_at < (($5::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai'))`;
       const total = (
@@ -413,7 +413,7 @@ export async function dataportRoute({
       ).rows[0].total;
       const rows = (
         await dataport.pool.query(
-          `SELECT * FROM hub_commerce.orders WHERE ${where} ORDER BY created_at DESC,id LIMIT $6 OFFSET $7`,
+          `SELECT * FROM hub_commerce.orders WHERE ${where} ORDER BY created_at DESC,id LIMIT $7 OFFSET $8`,
           [...args, pageSize, (page - 1) * pageSize],
         )
       ).rows;
@@ -435,8 +435,9 @@ export async function dataportRoute({
       !permissions.includes("billing.read")
         ? (
             await dataport.pool.query(
-              "SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 AND intent->>'createdBy'=$2 AND delivered_at IS NULL ORDER BY created_at DESC,id LIMIT 20",
-              [tenantId, principal.memberId],
+              `SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 AND intent->>'createdBy'=$2 AND delivered_at IS NULL
+                AND ($3 OR intent->>'purpose' IS DISTINCT FROM 'interface_prepaid') ORDER BY created_at DESC,id LIMIT 20`,
+              [tenantId, principal.memberId, includeInterface],
             )
           ).rows.map(commerceOrderView)
         : [];
