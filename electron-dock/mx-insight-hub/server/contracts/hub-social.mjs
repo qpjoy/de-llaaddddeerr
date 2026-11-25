@@ -3,6 +3,7 @@ import { AppError } from '../core/errors.mjs'
 import { compileTwitterSearchQuery, TWITTER_QUERY_DIALECT } from './twitter-search-query.mjs'
 
 export const HUB_SOCIAL_VERSION = 'mx-insight-hub.social-data.v1'
+export const TWITTER_AIO_BUSY_MESSAGE = 'TWI-BUSY - Temporarily unavailable. You were not charged, please retry in a few seconds.'
 export const HUB_SOCIAL_ENDPOINTS = Object.freeze(Object.fromEntries([
   ['search', 'social.content.search', '内容搜索'],
   ['crawl', 'social.content.crawl', '账号内容'],

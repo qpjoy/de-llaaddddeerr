@@ -1,6 +1,27 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { publicDocsHtmlForPath, tenantOpenApiDocument, PUBLIC_OPENAPI_DOCUMENT } from '../../server/public-docs.mjs'
+import { normalizeJobRequest } from '../../server/collect/catalog.mjs'
+
+test('collect product documentation follows each capability grant and shows executable examples', () => {
+  const path = '/docs/ecommerce-treasure-box'
+  const capabilities = ['collect.ecommerce.fbmarketplace.search', 'collect.classifieds.craigslist.search', 'collect.ecommerce.shopify.search']
+  for (const capability of capabilities) {
+    const options = { tenant: true, scopes: [{ platforms: [], capabilities: [capability] }] }
+    assert.ok(publicDocsHtmlForPath('/docs', options).includes(`href="${path}"`))
+    const body = publicDocsHtmlForPath(path, options).match(/<main>([\s\S]*?)<\/main>/)[1]
+    const examples = [...body.matchAll(/<code>(\{"capability":.*?\})<\/code>/g)].map(match => JSON.parse(match[1]))
+    assert.deepEqual(examples.map(item => item.capability), [capability])
+    const { definition } = normalizeJobRequest(examples[0])
+    assert.ok(body.includes(`POST /api/v1/data/collect/${definition.sync ? 'query' : 'jobs'}`))
+    assert.equal(body.includes('data.result.payload.items'), Boolean(definition.sync))
+    for (const field of ['data.links.self', 'data.links.result', 'data.payload.items', 'Idempotency-Key']) assert.ok(body.includes(field), field)
+    assert.ok(!body.includes('/api/v1/data/ecommerce/products/search'))
+  }
+  const searchOnly = { tenant: true, scopes: [{ platforms: ['ecommerce'], capabilities: ['ecommerce.products.search'] }] }
+  assert.doesNotMatch(publicDocsHtmlForPath(path, searchOnly), /collect\.(?:ecommerce|classifieds)\./)
+  assert.equal(publicDocsHtmlForPath(path, { tenant: true, scopes: [{ platforms: ['ecommerce', 'classifieds'], capabilities: [] }] }), null)
+})
 
 test('news tenants receive all five integration contracts and source/category/article ID guidance', () => {
  const scopes = [{ platforms: ['data_center_saved_records_news'], capabilities: [] }]

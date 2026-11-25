@@ -772,6 +772,21 @@ export class MemoryExternalPlatformStore {
       succeeded: true, responseStatus: 200, providerCallId: representative.callId }))
   }
 
+  async commitTwitterBusyRejection({ delivery, callId, responseBody }) {
+    const call = this.calls.get(callId)
+    if (call?.usageRequestId !== delivery.usageRequestId || call.providerKey !== 'rapidapi'
+      || call.endpointKey !== 'twitter-aio.search' || call.callOrdinal !== 0 || call.httpStatus !== 409
+      || call.outcome !== 'rejected' || call.errorCode !== 'upstream_service_busy'
+      || [...this.calls.values()].some(row => row.usageRequestId === delivery.usageRequestId && row.id !== callId)) {
+      throw twitterHistoryError()
+    }
+    await this.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: 502, responseBody,
+      unitsActual: 0, upstreamLatencyMs: call.latencyMs, deliverySourceMode: 'live', capturedAt: call.completedAt })
+    this.usageStore.requests.get(delivery.usageRequestId).errorCode = call.errorCode
+    this.requests.push(requestEvent({ ...delivery, providerKey: this.providerKey, sourceMode: 'unavailable',
+      succeeded: false, responseStatus: 502, providerCallId: callId, errorCode: call.errorCode }))
+  }
+
   async commitTwitterPage(input) {
     assertTwitterPageDelivery(this.providerKey, input)
     const { delivery, sourceCallId, sourceMode, responseBody, capturedAt, usageUnitsActual } = input
@@ -2597,6 +2612,25 @@ export class PostgresExternalPlatformStore {
       [delivery.usageRequestId,responseBody,Math.max(1,usageUnitsActual),latencyMs,
         sourceMode==='stored_fallback'?'stale':'live',capturedAt,JSON.stringify(manifest)])
       await this.#insertGatewayRequest(client, { ...delivery,sourceMode,succeeded:true,responseStatus:200,providerCallId:representative })
+    })
+  }
+
+  // The busy receipt was settled before waiting. If no retry could start,
+  // commit that receipt as the customer's answer without recording it twice.
+  async commitTwitterBusyRejection({ delivery, callId, responseBody }) {
+    return transaction(this.pool, async client => {
+      const result = await client.query(`UPDATE usage_requests u SET status='committed', response_status=502,
+        response_body=$3, units_actual=0, upstream_latency_ms=c.latency_ms, delivery_source_mode='live',
+        response_captured_at=c.completed_at, error_code=c.error_code, completed_at=now()
+        FROM external_platform.provider_calls c
+        WHERE u.id=$1 AND u.status='reserved' AND u.platform='twitter'
+          AND c.id=$2 AND c.usage_request_id=u.id AND c.provider_key='rapidapi' AND c.endpoint_key='twitter-aio.search'
+          AND c.call_ordinal=0 AND c.outcome='rejected' AND c.http_status=409 AND c.error_code='upstream_service_busy'
+          AND NOT EXISTS (SELECT 1 FROM external_platform.provider_calls other WHERE other.usage_request_id=u.id AND other.id<>c.id)
+        RETURNING u.id`, [delivery.usageRequestId, callId, responseBody])
+      if (!result.rows[0]) throw twitterHistoryError()
+      await this.#insertGatewayRequest(client, { ...delivery, sourceMode: 'unavailable', succeeded: false,
+        responseStatus: 502, providerCallId: callId, errorCode: 'upstream_service_busy' })
     })
   }
 

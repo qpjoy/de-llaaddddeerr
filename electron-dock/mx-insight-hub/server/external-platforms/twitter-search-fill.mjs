@@ -1,5 +1,6 @@
 import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
-import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
+import { DispatchQueue } from './dispatch-queue.mjs'
+import { openCircuitError, twitterSearchBusyError, upstreamCapacityError } from './availability-errors.mjs'
 import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -10,6 +11,8 @@ import { rawSearchRecords } from '../contracts/raw-search.mjs'
 import { assertTwitterSearchAvailable } from '../data/twitter-search-availability.mjs'
 
 const MAX_UPSTREAM_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024, MAX_PAGE_BYTES = 4 * 1024 * 1024
+const BUSY_RETRY_SCOPE = createHash('sha256').update('rapidapi:twitter-aio.search:busy-retry').digest('hex')
+const BUSY_RETRY_POLICY = Object.freeze({ intervalMs: 3000, jitterMs: 0, maxPending: 8, maxWaitMs: 30000, busyBackoffMaxMs: 30000 })
 const hash = items => createHash('sha256').update(JSON.stringify(items)).digest('hex')
 const unavailable = () => new AppError(409, 'search_page_unavailable', 'The saved Twitter page cannot be continued; explicitly restart the search')
 const uncertain = message => {
@@ -35,6 +38,7 @@ function archiveObjects(result, request, callId) {
 
 function upstreamFailure(error) {
   const evidence = error.evidence
+  if (evidence.errorCode === 'upstream_service_busy') return twitterSearchBusyError()
   const code = evidence.outcome === 'unknown' ? 'social_upstream_outcome_unknown'
     : evidence.outcome === 'succeeded_unusable' ? 'social_upstream_response_unusable' : 'social_upstream_rejected'
   return new AppError(evidence.httpStatus === 429 ? 429 : evidence.errorCode === 'social_egress_unavailable' ? 503 : 502,
@@ -68,6 +72,14 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
   let calls=0, bytes=0, duplicateCount=0, discardedCount=0, sourcePartial=false
   let providerCursor=request.providerCursor ?? null, buffer=null, stopReason=null, capturedAt=null
   let ownsLease=false, entered=false, currentCall=null, currentEvidence=null, currentCost=null, settledFailure=false, retainLease=false
+  let pendingBusyRetry = null
+  let retryTicket = null, retryOutcome = 'cancelled'
+  const releaseRetryTicket = async () => {
+    if (!retryTicket) return
+    // A failed cleanup leaves the shared permit occupied until its lease expires.
+    await store.twitterBusyRetryQueue.finish(retryTicket, retryOutcome).catch(() => {})
+    retryTicket = null
+  }
   let phase='admission', unknownLogged=false
   const logUnknown=async error=>{
     if(unknownLogged) return
@@ -97,7 +109,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     ownerRequestId:delivery.usageRequestId,expiresAt:new Date(deadlineAt),
     ...(delivery.twitterManualRetry ? { twitterManualRetry: { ...delivery, ...delivery.twitterManualRetry } } : {}) }
   const timeoutMargin=(gateway.config.timeoutMs || 30000)+5000
-  const enoughTime=()=>Number.isFinite(deadlineAt) && clock()+timeoutMargin<deadlineAt
+  const enoughTime=(delay=0)=>Number.isFinite(deadlineAt) && clock()+delay+timeoutMargin<deadlineAt
   const markUnknown=async()=>{
     try { await gateway.usageStore.markRequestUnknown(delivery.usageRequestId,'external_platform_persistence_unknown'); return }
     catch {
@@ -118,7 +130,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       ? (await store.validateTwitterManualRetry(dispatchLease.twitterManualRetry)).ancestorRequestIds : []
     await assertTwitterSearchAvailable({usageStore:gateway.usageStore,context,query:request.query,
       excludeRequestIds:[delivery.usageRequestId,...excluded,...(delivery.acknowledgedRequestIds || [])]})
-    await assertSearchDispatchAllowed?.()
+    await assertSearchDispatchAllowed?.(pendingBusyRetry ? { retryProvider: 'rapidapi' } : undefined)
     const shared=await store.providerState('rapidapi')
     const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared
     const contract=await store.contractCircuitState?.('rapidapi','twitter')
@@ -191,9 +203,12 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       if(sources.length && !providerCursor) break
       if(bytes+MAX_PAGE_BYTES>MAX_BYTES) { stopReason='archive_byte_limit'; break }
       if(!enoughTime()) { stopReason='deadline'; break }
+      const retrying = Boolean(retryTicket)
+      const latestDispatchAt = pendingBusyRetry?.deadline ?? deadlineAt - timeoutMargin
       try {
         phase='admission'
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')
+        if (retrying && clock() >= latestDispatchAt) throw pendingBusyRetry.error
         let acquisition=await authorizeAcquisition()
         const lease=await store.acquireDispatchLease({...dispatchLease,ownedDeliveryLease:true})
         if(lease!==true && lease?.kind!=='acquired') {
@@ -205,14 +220,15 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
           leaveCapacity(entered); entered=false
         }
         if(!entered) {
-          if(!(entered=await enterCapacity({lease:{...dispatchLease,ownedDeliveryLease:true},expiresAt:new Date(deadlineAt),signal,
-            canWait:!sources.length,revalidate:async()=>{
+          if(!(entered=await enterCapacity({lease:{...dispatchLease,ownedDeliveryLease:true},expiresAt:new Date(latestDispatchAt + timeoutMargin),signal,
+            canWait:!sources.length && !pendingBusyRetry,revalidate:async()=>{
               acquisition=await authorizeAcquisition()
               return context
             }}))) {
             const active=gateway.active, consumerActive=gateway.activeByConsumer.get(context.consumer.id) || 0
             const reason=active>=currentAdmissionLimits(gateway).maxConcurrency ? 'hub_concurrency_exhausted'
               : consumerActive>=currentAdmissionLimits(gateway).maxConsumerConcurrency ? 'consumer_concurrency_exhausted' : 'concurrency_queue_pending'
+            if(pendingBusyRetry) throw pendingBusyRetry.error
             if(!sources.length) await store.rejectWithoutDispatch({delivery,sourceMode:'unavailable',status:503,errorCode:'external_platform_busy'})
             throw new AppError(503,'external_platform_busy','Hub Twitter 数据采集并发名额暂不可用，本次尚未发起采集，请稍后重试。',{
               platform:'twitter',layer:'hub',stage:'concurrency_admission',reason,upstreamDispatched:false,
@@ -225,7 +241,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         const {credential,control,cost}=acquisition
         currentCost=await store.reserveProviderCostWorkflow({ ...delivery,apiKeyId:context.apiKey.id,costControls:[cost] })
         const rate=await acquireSupplierRate(context,store,{ limit:(await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,windowMs:60000,
-          signal,providerState:()=>store.providerState('rapidapi'),deadline:deadlineAt-(gateway.config.timeoutMs || 30000)-5000,
+          signal,providerState:()=>store.providerState('rapidapi'),deadline:latestDispatchAt,
           maxWaitMs:currentAdmissionLimits(gateway).maxWaitMs })
         if(!rate.allowed) throw new AppError(429,'external_platform_rate_limited','External data rate limit is exhausted')
         if(!enoughTime()) throw new AppError(503,'twitter_fill_deadline','The bounded search deadline has been reached')
@@ -237,13 +253,21 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         delete step.upstreamQuery.cursor
         if(inputCursor) step.upstreamQuery.cursor=inputCursor
         currentEvidence=null
-        await assertSearchDispatchAllowed?.()
+        await assertSearchDispatchAllowed?.(pendingBusyRetry ? { retryProvider: 'rapidapi' } : undefined)
+        if (retrying) {
+          if (signal?.aborted || clock() >= latestDispatchAt) throw pendingBusyRetry.error
+          const permit = await store.twitterBusyRetryQueue.transition(retryTicket.scope, { ...retryTicket,
+            type: 'dispatch', jitterMs: 0, leaseMs: deadlineAt - clock() })
+          if (permit.kind !== 'acquired' || signal?.aborted || clock() >= latestDispatchAt) throw pendingBusyRetry.error
+        }
         phase='begin_call'
         currentCall=await store.beginProviderCall({ ...delivery,apiKeyId:context.apiKey.id,
           contractVersion:step.endpointContractVersion,endpointKey:step.endpointKey,endpointVersion:step.endpointVersion,
-          marketplace:'twitter',callOrdinal:calls,callRole:calls?'enrichment':'primary',dispatchFingerprint:delivery.fingerprint,
+          marketplace:'twitter',callOrdinal:calls,callRole:pendingBusyRetry?'retry':calls?'enrichment':'primary',dispatchFingerprint:delivery.fingerprint,
           ...(delivery.twitterManualRetry && calls===0 ? { retryOfRequestId:delivery.twitterManualRetry.retryOfRequestId } : {}),
           costControl:cost,costReservationId:currentCost.id,operationControl:control })
+        pendingBusyRetry = null
+        if (retrying) retryOutcome = 'unknown'
         calls++;upstreamPages++
         if(inputCursor) tokens.add(inputCursor)
         const callStarted=performance.now()
@@ -253,15 +277,39 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         catch(error) {
           if(!(error instanceof RapidApiUpstreamError)) throw error
           const mapped=upstreamFailure(error)
+          if (retrying) retryOutcome = error.evidence.errorCode === 'upstream_service_busy' ? 'busy' : error.evidence.outcome
           currentEvidence={ callId:currentCall.id,delivery,outcome:error.evidence.outcome,
             httpStatus:error.evidence.httpStatus,businessCode:ledgerBusinessCode(error.evidence.businessCode),billed:error.evidence.billed ?? null,
             costMinor:cost.costMinor,costKind:cost.costKind,currency:cost.currency,latencyMs:Math.round(performance.now()-callStarted),
             errorCode:error.evidence.errorCode,affectsCircuit:error.evidence.affectsCircuit!==false,
             responseArchive:error.responseArchive,restrictedResponseArchive:error.restrictedResponseArchive,
             upstreamEvidence:error.upstreamEvidence,archiveObjects:archiveObjects(error,step,currentCall.id) }
-          const canHandoff = rejectedFallback && error.evidence.outcome === 'rejected' && error.evidence.httpStatus === 400
-            && calls === 1 && !sources.length && !request.providerCursor && !request.buffer && !request.fill
+          const firstRejection = error.evidence.outcome === 'rejected' && calls === 1 && !sources.length && !request.providerCursor && !request.buffer && !request.fill
             && request.page === 1 && !delivery.twitterManualRetry
+          if (firstRejection && error.evidence.httpStatus === 409 && error.evidence.errorCode === 'upstream_service_busy'
+            && !signal?.aborted && enoughTime(BUSY_RETRY_POLICY.intervalMs)) {
+            // Keep the customer hold and parent lease. Only the failed supplier
+            // attempt is complete; the next iteration admits a separate call.
+            phase='finish_step'
+            await store.finishProviderStep(currentEvidence)
+            const limits = currentAdmissionLimits(gateway), now = clock()
+            const deadline = Math.min(deadlineAt - timeoutMargin, now + Math.min(BUSY_RETRY_POLICY.maxWaitMs, limits.maxWaitMs))
+            pendingBusyRetry = { callId: currentCall.id, error: mapped, deadline }
+            currentCall = null
+            bytes += currentEvidence.restrictedResponseArchive?.bodySize ?? 0
+            if (entered) { leaveCapacity(entered); entered = false }
+            const released = await store.releaseProviderCostWorkflow({ reservationId: currentCost.id,
+              usageRequestId: delivery.usageRequestId, bestEffortRelease: true })
+            if (!released) throw mapped
+            currentCost = null
+            const queue = store.twitterBusyRetryQueue ||= new DispatchQueue({ pool: store.pool })
+            retryTicket = await queue.enter({ scope: BUSY_RETRY_SCOPE, id: delivery.usageRequestId,
+              fingerprint: delivery.usageRequestId,
+              policy: { ...BUSY_RETRY_POLICY, maxPending: Math.min(BUSY_RETRY_POLICY.maxPending, limits.maxPending) },
+              notBefore: now + BUSY_RETRY_POLICY.intervalMs, deadline, leaseMs: deadlineAt - now, signal })
+            continue
+          }
+          const canHandoff = firstRejection && rejectedFallback && error.evidence.httpStatus === 400
             && await rejectedFallback.allowed().catch(() => false)
           if (canHandoff) {
             // Preserve the rejected procurement receipt, but keep the original
@@ -317,6 +365,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
           settledFailure=true
           throw mapped
         }
+        if (retrying) retryOutcome = 'succeeded'
         phase='project_response'
         const receipt=result.restrictedResponseArchive
         currentEvidence={callId:currentCall.id,delivery,outcome:'succeeded',httpStatus:200,businessCode:null,billed:null,
@@ -349,6 +398,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         if(knownAdmission(error) && sources.length) { stopReason=error.code; break }
         throw error
       } finally {
+        if (retrying) await releaseRetryTicket()
         if(currentCost) {
           const released=await store.releaseProviderCostWorkflow({reservationId:currentCost.id,
             usageRequestId:delivery.usageRequestId,bestEffortRelease:true}).catch(()=>false)
@@ -382,6 +432,20 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     return {status:200,body:responseBody,requestId:delivery.usageRequestId,replay:false,sourceMode,capturedAt,
       staleAgeSeconds:Math.max(0,Math.floor((clock()-Date.parse(capturedAt))/1000))}
   } catch(error) {
+    if (pendingBusyRetry && !error.preserveReservation) {
+      const { callId, error: busy } = pendingBusyRetry
+      const requestId = delivery.usageRequestId
+      try {
+        await store.commitTwitterBusyRejection({ delivery, callId, responseBody: { requestId,
+          error: { code: busy.code, message: busy.message, details: { ...busy.details, requestId } } } })
+      } catch (cause) {
+        phase='commit_delivery'
+        await logUnknown(cause)
+        await markUnknown()
+        throw uncertain('The saved Twitter refusal could not be confirmed')
+      }
+      throw busy
+    }
     if(calls && !settledFailure) {
       await logUnknown(error)
       await markUnknown()
@@ -389,6 +453,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     }
     throw error
   } finally {
+    await releaseRetryTicket()
     if(ownsLease && !retainLease) await store.releaseDispatchLease(dispatchLease).catch(()=>{})
     if(entered) leaveCapacity(entered)
   }

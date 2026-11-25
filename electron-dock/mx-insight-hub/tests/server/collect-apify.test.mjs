@@ -42,13 +42,13 @@ function fakeApify(routes = {}) {
   return { calls, fetchImpl }
 }
 
-async function fixture({ apify = fakeApify(), engine = {}, credential = TOKEN } = {}) {
+async function fixture({ apify = fakeApify(), engine = {}, credential = TOKEN, capability = TEMU } = {}) {
   const ledger = new MemoryStore()
   const hub = new HubService({ store: ledger, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await hub.createTenant({ name: 'Delta' })
   const consumer = await hub.createConsumer({ tenantId: tenant.id, name: 'LCY-delta' })
-  await hub.putCapabilityConfiguration(TEMU, { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
-  const key = await hub.createApiKey({ consumerId: consumer.id, name: 'delta', platforms: [], capabilities: [TEMU] })
+  await hub.putCapabilityConfiguration(capability, { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
+  const key = await hub.createApiKey({ consumerId: consumer.id, name: 'delta', platforms: [], capabilities: [capability] })
   const context = await hub.authenticate(key.secret)
   const jobs = new MemoryCollectStore()
   const contracts = createCollectContracts()
@@ -59,7 +59,7 @@ async function fixture({ apify = fakeApify(), engine = {}, credential = TOKEN } 
   const service = new CollectService({ jobs, ledger, contracts, executor, credentials, fetchImpl: apify.fetchImpl })
   if (engine !== null) {
     await service.adminCreateEngine({ id: ENGINE, kind: 'apify', displayName: 'Apify 主账号', capacity: 2, enabled: true,
-      routes: [{ capability: TEMU }], reason: '阶段 2 试点', ...engine }, 'tester')
+      routes: [{ capability }], reason: '阶段 2 试点', ...engine }, 'tester')
     if (credential) await service.adminSetCredential(ENGINE, { apiKey: credential, expectedRevision: 0, reason: '录入 token' }, 'tester')
   }
   return { ledger, hub, key, context, jobs, executor, service, apify, credentials }
@@ -413,6 +413,46 @@ test('Facebook Marketplace: keyword and city encode one scoped search and preser
     { city: 'nyc', urls: [target.href] },
   ]) assert.throws(() => normalize(input), { code: 'invalid_collect_request' })
 })
+
+// These records use fields from the publishers' public example datasets, replayed offline.
+for (const { capability, input, actorId, sample } of [
+  { capability: 'collect.ecommerce.fbmarketplace.search', input: { city: 'sanfrancisco', keyword: 'guitar', maxItems: 1 },
+    actorId: 'U5DUNxhH3qKt5PnCf', sample: { id: '1189200412268517', marketplace_listing_title: 'Ashthorpe Full-Size Dreadnought Acoustic-Electric Guitar', listing_price: { formatted_amount: '$65' } } },
+  { capability: 'collect.classifieds.craigslist.search', input: { region: 'newyork', keyword: 'bicycle', maxItems: 1 },
+    actorId: 'owuUx043cdcXvJ6fa', sample: { id: '7528462760', title: '21 Speed CANNONDALE QUICK 6 Road Bicycle 18 inch frame', price: '$300' } },
+]) {
+  test(`HTTP: ${capability} submits one Actor run and exposes the listing at the returned result link`, async t => {
+    const actor = { actId: actorId, buildNumber: capabilityDefinition(capability).apify.build }
+    const apify = fakeApify({
+      [`POST /v2/acts/${actorId}/runs`]: () => ({ status: 201, body: { data: run('READY', actor) } }),
+      'GET /v2/actor-runs/RunAbc123456': () => ({ status: 200, body: { data: run('SUCCEEDED', actor) } }),
+      'GET /v2/datasets/DsAbc123456/items': () => ({ status: 200, headers: { 'x-apify-pagination-total': '1' }, body: [sample] }),
+    })
+    const fx = await fixture({ apify, capability })
+    const server = createServer(createApp({ service: fx.hub, store: fx.ledger, adapter: {}, listenerMode: 'public', collect: fx.service }))
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    t.after(() => new Promise(resolve => server.close(resolve)))
+    const base = `http://127.0.0.1:${server.address().port}`
+    const headers = { authorization: `Bearer ${fx.key.secret}` }
+    const post = () => fetch(`${base}/api/v1/data/collect/jobs`, { method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json', 'idempotency-key': 'marketplace-sample-0001' },
+      body: JSON.stringify({ capability, input }) })
+    const submitted = await post()
+    assert.equal(submitted.status, 202)
+    const { data } = await submitted.json()
+    assert.equal((await (await post()).json()).data.jobId, data.jobId)
+    await fx.executor.drain()
+    await checkNow(fx)
+    assert.equal((await (await fetch(base + data.links.self, { headers })).json()).data.status, 'succeeded')
+    const result = await fetch(base + data.links.result, { headers })
+    assert.equal(result.status, 200)
+    assert.deepEqual((await result.json()).data.payload.items, [sample])
+    const starts = apify.calls.filter(call => call.method === 'POST')
+    assert.equal(starts.length, 1)
+    assert.equal(starts[0].query.maxItems, '1')
+    assert.equal(starts[0].query.build, actor.buildNumber)
+  })
+}
 
 test('Craigslist: region and keyword submit the same bounded run as the equivalent search URL', () => {
   const normalize = input => normalizeJobRequest({ capability: 'collect.classifieds.craigslist.search', input })

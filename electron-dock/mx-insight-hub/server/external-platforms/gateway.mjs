@@ -5,7 +5,7 @@ import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, isLcySupplierPriority, effectiveBusinessPageLimit } from '../core/internal-traffic-policy.mjs'
 import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
-import { circuitOpenError, ecommerceCapacityError, upstreamCapacityError } from './availability-errors.mjs'
+import { circuitOpenError, ecommerceCapacityError, twitterSearchBusyError, upstreamCapacityError } from './availability-errors.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
 import { gatewayWebSearchRequest } from '../web-search/contract.mjs'
@@ -265,6 +265,7 @@ function publicFailure(error, { ecommerce = false } = {}) {
     { ...base, ...(['facebook_selfhosted_session_invalid', 'facebook_selfhosted_misconfigured'].includes(evidence.errorCode) ? { action: 'contact_administrator' } : {}) })
   }
   if (error instanceof RapidApiUpstreamError) {
+    if (evidence.errorCode === 'upstream_service_busy') return twitterSearchBusyError()
     if (evidence.errorCode === 'social_egress_unavailable') return new AppError(503, 'social_egress_unavailable', 'Social data egress is unavailable; no business request was dispatched', { outcome: 'rejected', retryable: false })
     const unknown = evidence.outcome === 'unknown'
     const code = unknown ? 'social_upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'social_upstream_response_unusable' : 'social_upstream_rejected'

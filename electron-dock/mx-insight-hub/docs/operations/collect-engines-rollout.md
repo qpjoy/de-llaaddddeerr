@@ -162,7 +162,11 @@ node scripts/collect-acceptance.mjs smoke --include-paid --only collect.intel.sh
 ```
 
 - Apify 每个能力只跑最小量：Temu 10 条、Meta 广告库 10 条、Similarweb 1 个域名。成本记在任务上，只有管理台能看到。
-- 其余 14 个 Apify 能力用同样的方式按前缀逐个验收，输入参考 07 第 10 节。
+- Facebook Marketplace 和 Craigslist 可用下面的命令各验收一条商品，既有验收 Key 需要具有这两项采集能力。脚本读取任务结果中的 `data.payload.items`，收到带 ID 和标题的商品才算通过。Shopify 的同步验收也检查这两个字段。内置的用例见 `scripts/collect-acceptance.mjs` 中的 `SMOKE_CASES`，其他能力可按 07 第 10 节的输入手动提交。
+
+```bash
+node scripts/collect-acceptance.mjs smoke --include-paid --only collect.ecommerce.fbmarketplace.search,collect.classifieds.craigslist.search --key-file /root/collect-acceptance.key
+```
 
 **收尾**：验收用的 Key 可以留作以后复测，也可以在管理台撤销；租户 `collect-acceptance` 不影响业务。
 

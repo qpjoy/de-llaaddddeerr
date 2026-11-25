@@ -62,9 +62,13 @@ async function savedProvider(row, { usageStore, rapidGateway, tikHubGateway }) {
 
 export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGateway, apiKeyPepper, provider = 'auto', resolveProvider = null, policyStore = null }) {
   if (!['auto', 'rapidapi', 'tikhub'].includes(provider)) throw new AppError(500, 'invalid_configuration', 'Invalid Twitter search supplier')
-  const assertSearchDispatchAllowed = policyStore ? async () => {
-    if ((await policyStore.get('search', 'twitter')).mode === 'paused') {
+  const assertSearchDispatchAllowed = policyStore ? async ({ retryProvider } = {}) => {
+    const policy = await policyStore.get('search', 'twitter')
+    if (policy.mode === 'paused') {
       throw new AppError(503, 'strategy_search_paused', 'Twitter search is paused')
+    }
+    if (retryProvider && policy.mode === 'fixed' && policy.primaryProvider !== retryProvider) {
+      throw new AppError(503, 'strategy_search_route_unavailable', 'The configured route no longer permits this retry')
     }
   } : null
   return async (context, input) => {

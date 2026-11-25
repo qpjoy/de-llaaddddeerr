@@ -1,4 +1,5 @@
 import { THREADS_RAPIDAPI_ENDPOINTS, THREADS_SCRAPER_RAPIDAPI_ENDPOINTS } from '../contracts/threads-rapidapi-endpoints.mjs'
+import { TWITTER_AIO_BUSY_MESSAGE } from '../contracts/hub-social.mjs'
 import { AppError } from '../core/errors.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { analyzeRequestDiagnostic } from '../operations/request-diagnostic-analysis.mjs'
@@ -20,6 +21,8 @@ const threadsListing403 = p => p.provider_key === 'rapidapi' && THREADS_LISTINGS
 function reviewedMessage(p) {
   if (!p.has_restricted_archive) return null
   if (threadsListing403(p) && p.reviewed_message === NOT_SUBSCRIBED) return NOT_SUBSCRIBED
+  if (p.provider_key === 'rapidapi' && p.operation === 'social.content.search' && p.endpoint_key === 'twitter-aio.search'
+    && p.outcome === 'rejected' && p.http_status === 409 && p.reviewed_message === TWITTER_AIO_BUSY_MESSAGE) return TWITTER_AIO_BUSY_MESSAGE
   if (p.provider_key === 'qixin' && p.outcome === 'rejected' && QIXIN_MESSAGES.has(p.reviewed_message)) return p.reviewed_message
   return null
 }
@@ -180,7 +183,7 @@ export async function lookupRequestDiagnostics(pool, input) {
           marketplace: text(trigger.marketplace), failedAt: trigger.completed_at ?? trigger.started_at } : null,
       } : null
       const providers = (await client.query(`/* request-diagnostics:providers */
-        SELECT p.id, p.provider_key, p.operation, p.endpoint_key, p.outcome,
+        SELECT p.id, p.provider_key, p.operation, p.endpoint_key, p.outcome, p.call_ordinal, p.call_role,
           p.http_status, p.business_code, p.error_code, p.upstream_request_id,
           p.billed, p.cost_minor::text, p.cost_kind, p.currency, p.latency_ms,
           p.started_at, p.completed_at, a.id IS NOT NULL AS has_archive,
@@ -194,11 +197,14 @@ export async function lookupRequestDiagnostics(pool, input) {
             THEN r.parsed_payload->>'message'
             WHEN p.provider_key = 'rapidapi' AND p.operation = ANY($2::text[]) AND p.outcome = 'rejected'
               AND p.http_status = 403 AND r.parsed_payload->>'message' = $3::text THEN $3::text
+            WHEN p.provider_key = 'rapidapi' AND p.operation = 'social.content.search' AND p.endpoint_key = 'twitter-aio.search'
+              AND p.outcome = 'rejected' AND p.http_status = 409 AND r.parsed_payload->>'code' = 'busy'
+              AND r.parsed_payload->>'error' = $4::text THEN $4::text
             ELSE NULL END AS reviewed_message
         FROM external_platform.provider_calls p
         LEFT JOIN external_platform.response_archives a ON a.provider_call_id = p.id
         LEFT JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id = p.id
-        WHERE p.usage_request_id = $1 ORDER BY p.started_at, p.id LIMIT 51`, [id, [...THREADS_LISTINGS.keys()], NOT_SUBSCRIBED])).rows
+        WHERE p.usage_request_id = $1 ORDER BY p.started_at, p.id LIMIT 51`, [id, [...THREADS_LISTINGS.keys()], NOT_SUBSCRIBED, TWITTER_AIO_BUSY_MESSAGE])).rows
       const connectors = (await client.query(`/* request-diagnostics:connectors */
         SELECT id, operation, platform, outcome, http_status, failure_kind,
           error_code, upstream_request_id, upstream_trace_id, upstream_latency_ms,
@@ -211,6 +217,7 @@ export async function lookupRequestDiagnostics(pool, input) {
         FROM billing.customer_charges WHERE usage_request_id = $1 LIMIT 1`, [id])).rows
       const providerCalls = providers.slice(0, CALL_LIMIT).map(p => ({
         id: p.id, provider: text(p.provider_key), operation: text(p.operation), endpoint: text(p.endpoint_key),
+        callOrdinal: p.call_ordinal ?? null, callRole: ['primary', 'retry', 'enrichment'].includes(p.call_role) ? p.call_role : null,
         outcome: text(p.outcome), httpStatus: p.http_status, businessCode: p.business_code,
         errorCode: text(p.error_code), upstreamRequestId: text(p.upstream_request_id),
         message: reviewedMessage(p),

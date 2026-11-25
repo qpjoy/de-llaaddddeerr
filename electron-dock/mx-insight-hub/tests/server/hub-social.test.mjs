@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'node:http'
-import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest, normalizeTwitterResponse, projectTwitterSearchPage } from '../../server/contracts/hub-social.mjs'
+import { HUB_SOCIAL_ENDPOINTS, TWITTER_AIO_BUSY_MESSAGE, normalizeHubSocialRequest, normalizeTwitterResponse, projectTwitterSearchPage } from '../../server/contracts/hub-social.mjs'
 import { RapidApiAdapter, TWITTER_AIO_HOST } from '../../server/adapters/rapidapi.mjs'
 import { rapidApiConfig } from '../../server/external-platforms/rapidapi-config.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -266,6 +266,7 @@ async function harness({ enabled = true, grant = true, outcome = 'success' } = {
     calls++
     if (outcome === 'unknown') throw new Error('connection lost after dispatch')
     if (outcome === 'rejected') return Response.json({ code: 'BAD_QUERY', message: 'synthetic' }, { status: 400 })
+    if (outcome === 'busy') return Response.json({ code: 'busy', error: TWITTER_AIO_BUSY_MESSAGE }, { status: 409 })
     if (url.pathname.includes('/user/by/')) return Response.json(profile())
     return Response.json(timeline([String(calls)], calls < 2 ? 'page-2' : null))
   } })
@@ -307,6 +308,26 @@ test('failed/unknown requests retain evidence and cannot redispatch via same ide
     await assert.rejects(h.gateway.socialData(h.context, h.query))
     assert.equal(h.calls(), 1)
     assert.equal(h.legacyCalls.length, 0)
+  }
+})
+
+test('the direct social gateway recognizes TWI-BUSY only for Twitter search', async () => {
+  for (const operation of ['search', 'crawl']) {
+    const h = await harness({ outcome: 'busy' })
+    const input = { ...h.query, operation, path: HUB_SOCIAL_ENDPOINTS[operation].path,
+      body: operation === 'search' ? h.query.body : { platform: 'twitter', username: 'example' } }
+    const rejected = error => {
+      assert.equal(error.status, 502)
+      assert.equal(error.code, 'social_upstream_rejected')
+      assert.equal(error.details.upstreamStatus, 409)
+      assert.equal(error.details.reasonCode, operation === 'search' ? 'upstream_service_busy' : undefined)
+      assert.equal(error.details.retryable, false)
+      return true
+    }
+    await assert.rejects(h.gateway.socialData(h.context, input), rejected)
+    await assert.rejects(h.gateway.socialData(h.context, input), rejected)
+    assert.equal(h.calls(), 1)
+    assert.equal([...h.platformStore.calls.values()][0].billed, null)
   }
 })
 

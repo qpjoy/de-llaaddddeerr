@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
@@ -7,6 +8,7 @@ import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
+import { DispatchQueue } from '../../server/external-platforms/dispatch-queue.mjs'
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from '../../server/data/twitter-search-routing.mjs'
 import { compileTwitterSearchQuery } from '../../server/contracts/twitter-search-query.mjs'
 import { twitterDeliveryLeases } from '../../server/external-platforms/twitter-delivery-leases.mjs'
@@ -25,6 +27,8 @@ const timeline = (ids, next) => ({ entries: [
 const tikPost = id => ({ tweet_id: String(id), text: `Fixture ${id}`, created_at: 'Sun Oct 18 05:00:00 +0000 2026',
   user_info: { rest_id: '1999999999999999999', screen_name: 'fixture' }, favorites: 0, replies: 0, retweets: 0, views: '1' })
 const rejection = status => Response.json({ message: 'Synthetic supplier refusal' }, { status })
+const busyError = 'TWI-BUSY - Temporarily unavailable. You were not charged, please retry in a few seconds.'
+const busyResponse = () => Response.json({ code: 'busy', error: busyError }, { status: 409 })
 const page = (provider, ids = [101, 102], next = 'provider-page-two') => Response.json(provider === 'rapidapi'
   ? timeline(ids, next) : { code: 200, data: { timeline: ids.map(tikPost), next_cursor: next } })
 
@@ -74,8 +78,8 @@ async function fixture(initialPolicy = priority) {
   const providerCalls = () => Object.values(stores).flatMap(store => [...store.calls.values()])
   return { usage, service, context, calls, wires, gateways, stores, commits, providerCalls, diagnostics,
     setPolicy(next) { policy = structuredClone(next) }, setPolicyError(error) { policyError = error }, setReply(next) { reply = next },
-    invoke: (body = BODY, idempotencyKey = 'fallback-first-page', version = 1) => service.search(context,
-      { path: `/api/v${version}/data/search`, body, idempotencyKey }) }
+    invoke: (body = BODY, idempotencyKey = 'fallback-first-page', version = 1, signal) => service.search(context,
+      { path: `/api/v${version}/data/search`, body, idempotencyKey, signal }) }
 }
 
 for (const version of [1, 2]) test(`v${version}: first RapidAPI 400 falls back in the same request; conditions, settlement, replay and TikHub continuation stay intact`, async () => {
@@ -190,6 +194,272 @@ test('v2 replays a known RapidAPI 409 with a textual business code and never swi
   assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
 })
 
+async function enableRequestBilling(f) {
+  await f.service.setTenantBillingProfile(f.context.tenant.id,
+    { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+  await f.service.addTenantCredit(f.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
+    { idempotencyKey: 'twitter-busy-credit', actor: 'offline-admin' })
+}
+
+for (const version of [1, 2]) test(`v${version}: a busy first page retries RapidAPI with identical inputs and one customer charge`, async () => {
+  const f = await fixture(priority)
+  await enableRequestBilling(f)
+  const body = version === 2 ? { ...BODY, timeWindow: WINDOW } : BODY
+  const invoke = () => f.invoke(body, 'busy-then-success', version)
+  const firstRefusal = Promise.withResolvers()
+  let firstAttemptAt
+  f.setReply(async (provider, ordinal) => {
+    assert.equal(provider, 'rapidapi')
+    if (ordinal === 1) {
+      firstAttemptAt = performance.now()
+      setImmediate(firstRefusal.resolve)
+      return busyResponse()
+    }
+    assert.ok(performance.now() - firstAttemptAt >= 2000, 'Retry must allow the supplier time to recover')
+    const [firstCall] = f.providerCalls()
+    assert.equal(firstCall.outcome, 'rejected')
+    assert.equal(f.stores.rapidapi.restrictedResponseArchives.get(firstCall.id).parsedPayload.code, 'busy')
+    assert.equal(f.usage.requests.get(firstCall.usageRequestId).status, 'reserved')
+    return page(provider, [101, 102], null)
+  })
+  const pending = invoke()
+  await Promise.race([firstRefusal.promise, pending])
+  assert.equal(f.providerCalls()[0].outcome, 'rejected')
+  await assert.rejects(invoke(), error => ['request_in_progress', 'search_admission_blocked'].includes(error.code))
+  assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+  const result = await pending
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body.data.items.map(item => item.id), ['101'])
+  assert.equal(result.body.data.meta.providerCalls, 2)
+  assert.deepEqual(f.calls, { rapidapi: 2, tikhub: 0 })
+  assert.equal(f.wires[0].url.href, f.wires[1].url.href)
+  const calls = f.providerCalls()
+  assert.deepEqual(calls.map(call => [call.callOrdinal, call.httpStatus, call.usageRequestId]),
+    [[0, 409, result.requestId], [1, 200, result.requestId]])
+  assert.equal(calls[1].callRole, 'retry')
+  const charges = [...f.usage.customerCharges.values()]
+  assert.deepEqual(charges.map(charge => [charge.usageRequestId, charge.status, charge.chargedMinor]),
+    [[result.requestId, 'captured', 3]])
+  const replay = await invoke()
+  assert.equal(replay.requestId, result.requestId)
+  assert.deepEqual(replay.body, result.body)
+  assert.deepEqual(f.commits, [{ id: result.requestId, status: 200 }])
+  const bufferedPage = await f.invoke({ ...body, cursor: result.body.data.pageInfo.nextCursor }, 'busy-next-page', version)
+  assert.deepEqual(bufferedPage.body.data.items.map(item => item.id), ['102'])
+  assert.equal(bufferedPage.body.data.meta.providerCalls, 0)
+  assert.deepEqual(f.calls, { rapidapi: 2, tikhub: 0 })
+})
+
+test('concurrent Twitter busy retries share a paced queue and leave capacity for fresh searches', async () => {
+  const f = await fixture(fixed('rapidapi'))
+  f.gateways.rapidapi.adapter.timeoutMs = 10000
+  f.gateways.rapidapi.config.timeoutMs = 10000
+  const queries = ['alpha', 'beta', 'gamma']
+  const firstWave = Promise.withResolvers(), attempts = new Map(), retryStarts = []
+  let retriesInFlight = 0, peakRetries = 0
+  f.setReply(async (provider, _ordinal, wire) => {
+    assert.equal(provider, 'rapidapi')
+    const term = decodeURIComponent(wire.pathname.slice('/search/'.length))
+    if (term === 'fresh') return page(provider, [201], null)
+    assert.ok(queries.includes(term))
+    const count = (attempts.get(term) || 0) + 1
+    attempts.set(term, count)
+    if (count === 1) {
+      if (attempts.size === queries.length) setImmediate(firstWave.resolve)
+      return busyResponse()
+    }
+    retryStarts.push(performance.now())
+    peakRetries = Math.max(peakRetries, ++retriesInFlight)
+    try {
+      // A slow first retry spans another dispatch interval. The other two
+      // return immediately, exercising pacing separately from serialization.
+      if (retryStarts.length === 1) await sleep(3250)
+      return page(provider, [202], null)
+    } finally { retriesInFlight-- }
+  })
+  const invoke = term => f.invoke({ ...BODY, query: term }, `paced-retry-${term}`)
+  const pending = Promise.all(queries.map(invoke))
+  await Promise.race([firstWave.promise, pending])
+  assert.equal(f.gateways.rapidapi.active, 0, 'Queued retries must release their ordinary concurrency slots')
+  assert.equal((await invoke('fresh')).status, 200)
+  assert.equal(retryStarts.length, 0, 'A fresh first page should finish while the busy retries wait')
+  assert.ok((await pending).every(result => result.status === 200))
+  assert.equal(peakRetries, 1)
+  assert.equal(retryStarts.length, 3)
+  // Compare dispatches at the adapter boundary, allowing 25 ms between the
+  // queue clock and the actual mock call (including timer and DB resolution).
+  for (let index = 1; index < retryStarts.length; index++) {
+    const elapsed = retryStarts[index] - retryStarts[index - 1]
+    assert.ok(elapsed >= 2975, `Consecutive retries started only ${elapsed} ms apart`)
+  }
+  assert.deepEqual(queries.map(term => attempts.get(term)), [2, 2, 2])
+  assert.deepEqual(f.calls, { rapidapi: 7, tikhub: 0 })
+})
+
+for (const condition of ['full', 'expired', 'unavailable']) test(`Twitter settles the original busy reply once when its retry queue is ${condition}`, async () => {
+  const f = await fixture(fixed('rapidapi'))
+  await enableRequestBilling(f)
+  f.gateways.rapidapi.config.concurrencyQueue = { maxPending: 1, maxWaitMs: 10000 }
+  let now = Date.now(), waits = 0, joins = 0, ahead
+  const queue = new DispatchQueue({ clock: () => now, wait: async () => { waits++; now += 11000 } })
+  const enter = queue.enter.bind(queue)
+  queue.enter = async input => {
+    joins++
+    if (condition === 'unavailable') throw new Error('Synthetic dispatch queue storage outage')
+    if (condition === 'full') {
+      ahead = await queue.transition(input.scope, { ...input, type: 'join', id: 'other-request', fingerprint: 'other-request' })
+    }
+    return enter(input)
+  }
+  f.stores.rapidapi.twitterBusyRetryQueue = queue
+  f.setReply(busyResponse)
+  const rejected = error => error.status === 502 && error.code === 'social_upstream_rejected'
+    && error.details.reasonCode === 'upstream_service_busy' && error.details.upstreamDispatched === true
+  await assert.rejects(f.invoke(), rejected)
+  await assert.rejects(f.invoke(), rejected)
+  assert.equal(joins, 1, 'Replay should only return the saved busy reply')
+  if (condition === 'full') assert.equal(ahead?.kind, 'queued')
+  assert.equal(waits, condition === 'expired' ? 1 : 0)
+  assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+  const [call] = f.providerCalls()
+  assert.equal(f.stores.rapidapi.restrictedResponseArchives.get(call.id).parsedPayload.code, 'busy')
+  assert.deepEqual(f.commits, [{ id: call.usageRequestId, status: 502 }])
+  assert.deepEqual([...f.usage.customerCharges.values()].map(charge => [charge.usageRequestId, charge.status, charge.chargedMinor]),
+    [[call.usageRequestId, 'captured', 3]])
+})
+
+for (const version of [1, 2]) test(`v${version}: fixed RapidAPI saves two busy receipts and replays the final rejection`, async () => {
+  const f = await fixture(fixed('rapidapi'))
+  f.setReply(busyResponse)
+  const body = version === 2 ? { ...BODY, timeWindow: WINDOW } : BODY
+  const invoke = () => f.invoke(body, 'known-twitter-busy', version)
+  const rejected = error => {
+    assert.equal(error.status, 502)
+    assert.equal(error.code, 'social_upstream_rejected')
+    assert.equal(error.details.reasonCode, 'upstream_service_busy')
+    assert.equal(error.details.upstreamStatus, 409)
+    assert.equal(error.details.upstreamDispatched, true)
+    assert.equal(error.details.outcome, 'rejected')
+    assert.equal(error.details.retryable, false)
+    assert.doesNotMatch(JSON.stringify([error.message, error.details]), /not charged/i)
+    return true
+  }
+  await assert.rejects(invoke(), rejected)
+  await assert.rejects(invoke(), rejected)
+  assert.deepEqual(f.calls, { rapidapi: 2, tikhub: 0 })
+  const [saved] = f.usage.requests.values()
+  assert.deepEqual(f.commits, [{ id: saved.id, status: 502 }])
+  assert.deepEqual(f.providerCalls().map(call => call.callOrdinal), [0, 1])
+  for (const call of f.providerCalls()) {
+    assert.equal(call.usageRequestId, saved.id)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(call.httpStatus, 409)
+    assert.equal(call.errorCode, 'upstream_service_busy')
+    assert.equal(call.businessCode, null)
+    assert.equal(call.billed, null)
+    assert.deepEqual(f.stores.rapidapi.restrictedResponseArchives.get(call.id).parsedPayload,
+      { code: 'busy', error: busyError })
+  }
+})
+
+test('a RapidAPI 400 on the busy retry ends the request before TikHub fallback', async () => {
+  const f = await fixture(priority)
+  f.setReply(async (_provider, ordinal) => ordinal === 1 ? busyResponse() : rejection(400))
+  const rejected = error => error.code === 'social_upstream_rejected' && error.details.upstreamStatus === 400
+  await assert.rejects(f.invoke(), rejected)
+  await assert.rejects(f.invoke(), rejected)
+  assert.deepEqual(f.calls, { rapidapi: 2, tikhub: 0 })
+  assert.deepEqual(f.providerCalls().map(call => call.httpStatus), [409, 400])
+})
+
+test('an unknown result from the RapidAPI busy retry keeps the v2 key unresolved', async () => {
+  const f = await fixture(priority)
+  f.setReply(async (_provider, ordinal) => {
+    if (ordinal === 1) return busyResponse()
+    throw new DOMException('Connection ended during the retry', 'TimeoutError')
+  })
+  const invoke = () => f.invoke({ ...BODY, timeWindow: WINDOW }, 'busy-then-unknown', 2)
+  await assert.rejects(invoke(), { code: 'request_outcome_unknown' })
+  const [saved] = f.usage.requests.values()
+  assert.equal(saved.status, 'unknown')
+  assert.deepEqual(f.providerCalls().map(call => [call.callRole, call.outcome]),
+    [['primary', 'rejected'], ['retry', 'unknown']])
+  await assert.rejects(invoke(), { code: 'request_outcome_unknown' })
+  assert.deepEqual(f.calls, { rapidapi: 2, tikhub: 0 })
+})
+
+test('insufficient time for both backoff and a second attempt commits the first busy receipt', async () => {
+  const f = await fixture(priority)
+  // This allows the first 100 ms provider timeout and 5 s commit margin, but not a further 3 s wait.
+  f.gateways.rapidapi.reservationLeaseMs = 7000
+  f.setReply(busyResponse)
+  const rejected = error => error.code === 'social_upstream_rejected' && error.details.reasonCode === 'upstream_service_busy'
+  await assert.rejects(f.invoke(), rejected)
+  await assert.rejects(f.invoke(), rejected)
+  assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+  assert.equal([...f.usage.requests.values()][0].status, 'committed')
+})
+
+for (const interruption of ['strategy pause', 'switch to fixed TikHub', 'client cancellation']) test(`a ${interruption} during busy backoff saves the original refusal without another dispatch`, async () => {
+  const f = await fixture(priority)
+  const controller = new AbortController()
+  let interruptTimer
+  try {
+    f.setReply(async () => {
+      interruptTimer = setTimeout(() => {
+        if (interruption === 'strategy pause') f.setPolicy({ ...priority, mode: 'paused' })
+        else if (interruption === 'switch to fixed TikHub') f.setPolicy(fixed('tikhub'))
+        else controller.abort()
+      }, 50)
+      return busyResponse()
+    })
+    await assert.rejects(f.invoke(BODY, 'busy-interrupted', 1, controller.signal), error =>
+      error.code === 'social_upstream_rejected' && error.details.reasonCode === 'upstream_service_busy')
+  } finally { clearTimeout(interruptTimer) }
+  const [saved] = f.usage.requests.values()
+  assert.equal(saved.status, 'committed')
+  f.setPolicy(priority)
+  await assert.rejects(f.invoke(BODY, 'busy-interrupted'), error => error.code === 'social_upstream_rejected'
+    && error.details.requestId === saved.id && error.details.reasonCode === 'upstream_service_busy')
+  assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+  assert.equal(f.providerCalls()[0].errorCode, 'upstream_service_busy')
+})
+
+test('a historical unclassified busy receipt replays its exact original failure after retry support is enabled', async () => {
+  const f = await fixture(fixed('rapidapi')), adapter = f.gateways.rapidapi.adapter
+  const execute = adapter.execute.bind(adapter)
+  f.setReply(busyResponse)
+  // Recreate the old adapter's classification while retaining the actual archived busy response.
+  adapter.execute = async (...args) => {
+    try { return await execute(...args) } catch (error) {
+      error.evidence = { ...error.evidence, errorCode: 'social_upstream_rejected', businessCode: 'busy' }
+      throw error
+    }
+  }
+  await assert.rejects(f.invoke(), { code: 'social_upstream_rejected' })
+  const [saved] = structuredClone([...f.usage.requests.values()])
+  assert.equal(f.stores.rapidapi.restrictedResponseArchives.get(f.providerCalls()[0].id).parsedPayload.code, 'busy')
+  adapter.execute = execute
+  await assert.rejects(f.invoke(), error => error.status === 502 && error.code === 'social_upstream_rejected'
+    && error.details?.requestId === saved.id && error.details.reasonCode === undefined)
+  assert.deepEqual(f.usage.requests.get(saved.id), saved)
+  assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+})
+
+test('other errors with a busy code or similar text retain their original rejection', async () => {
+  for (const [status, payload] of [
+    [409, { code: 'busy' }], [409, { code: 'BUSY', error: busyError }],
+    [409, { code: 'busy', error: busyError + ' Extra text.' }], [403, { code: 'busy', error: busyError }],
+  ]) {
+    const f = await fixture(fixed('rapidapi'))
+    f.setReply(async () => Response.json(payload, { status }))
+    await assert.rejects(f.invoke(), error => error.code === 'social_upstream_rejected'
+      && error.details.upstreamStatus === status && error.details.reasonCode !== 'upstream_service_busy')
+    assert.equal(f.providerCalls()[0].errorCode, 'social_upstream_rejected')
+    assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
+  }
+})
+
 test('a textual RapidAPI 503 remains unknown on standard Twitter and its key cannot redispatch', async () => {
   const f = await fixture()
   f.setReply(async () => Response.json({ code: 'TEMPORARY_FAILURE' }, { status: 503 }))
@@ -199,20 +469,22 @@ test('a textual RapidAPI 503 remains unknown on standard Twitter and its key can
   assert.deepEqual(f.calls, { rapidapi: 1, tikhub: 0 })
 })
 
-test('a RapidAPI continuation 400 never restarts the search on TikHub', async () => {
+for (const status of [400, 409]) test(`a RapidAPI continuation ${status} cannot retry the first page or restart on TikHub`, async () => {
   const f = await fixture()
-  f.setReply(async (provider, ordinal) => ordinal === 1 ? page(provider, [101], 'rapid-page-two') : rejection(400))
+  const refused = status === 409 ? busyResponse : () => rejection(400)
+  f.setReply(async (provider, ordinal) => ordinal === 1 ? page(provider, [101], 'rapid-page-two') : refused())
   const first = await f.invoke()
   assert.equal(first.status, 200)
   await assert.rejects(f.invoke({ ...BODY, cursor: first.body.data.pageInfo.nextCursor }, 'fallback-rapid-continuation'),
-    error => error.details?.upstreamStatus === 400)
+    error => error.details?.upstreamStatus === status)
   assert.deepEqual(f.calls, { rapidapi: 2, tikhub: 0 })
 })
 
-test('a later RapidAPI fill rejection never mixes TikHub into an already acquired page', async () => {
+for (const status of [400, 409]) test(`a later RapidAPI fill ${status} cannot retry or mix TikHub into an acquired page`, async () => {
   const f = await fixture(), body = { ...BODY, pageSize: 2 }
-  f.setReply(async (provider, ordinal) => ordinal === 1 ? page(provider, [101], 'rapid-fill-two') : rejection(400))
-  await f.invoke(body).catch(error => assert.equal(error.details?.upstreamStatus, 400))
+  const refused = status === 409 ? busyResponse : () => rejection(400)
+  f.setReply(async (provider, ordinal) => ordinal === 1 ? page(provider, [101], 'rapid-fill-two') : refused())
+  await f.invoke(body).catch(error => assert.equal(error.details?.upstreamStatus, status))
   assert.deepEqual(f.calls, { rapidapi: 2, tikhub: 0 })
   assert.equal(f.providerCalls().length, 2)
 })

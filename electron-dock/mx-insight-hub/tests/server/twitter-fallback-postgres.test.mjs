@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import { PostgresExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { ContentSearchStateStore } from '../../server/external-platforms/content-search-store.mjs'
+import { DispatchQueue } from '../../server/external-platforms/dispatch-queue.mjs'
 import { pinTwitterSearchFallback, assertTwitterSearchFallback } from '../../server/external-platforms/twitter-search-fallback.mjs'
 import { normalizeTikHubContentSearchRequest, TIKHUB_CONTENT_SEARCH_VERSION } from '../../server/contracts/tikhub-content-search.mjs'
 import { projectContentPage } from '../../server/external-platforms/content-search-workflow.mjs'
@@ -20,15 +21,23 @@ import { runTwitterSearchFill } from '../../server/external-platforms/twitter-se
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 const options = { skip: !modulePath && 'Set MX_INSIGHT_TEST_PGLITE_MODULE for real PostgreSQL fallback settlement' }
 const digest = value => createHash('sha256').update(value).digest('hex')
+const twitterBusyRetryScope = digest('rapidapi:twitter-aio.search:busy-retry')
 
-async function reservedTwitterSearch(t) {
+async function assertRetryQueueReleased(db, backoffMs) {
+  const result = await db.query(`SELECT scope, state->'active'->>'id' AS active_id, state->'queue' AS waiting,
+      (state->'busyBackoff'->>'delayMs')::int AS backoff_ms
+    FROM external_platform.dispatch_queues`)
+  assert.deepEqual(result.rows, [{ scope: twitterBusyRetryScope, active_id: null, waiting: [], backoff_ms: backoffMs }])
+}
+
+async function reservedTwitterSearch(t, enforcementMode = 'enforced') {
   const { PGlite } = await import(pathToFileURL(modulePath).href)
   const db = new PGlite(); t.after(() => db.close())
   await db.exec('CREATE SCHEMA ingest; CREATE TABLE ingest.ingest_runs(id uuid PRIMARY KEY); CREATE SCHEMA control; CREATE SCHEMA billing;')
   for (const migration of ['001_initial.sql', '004_reservation_lease.sql', '051_external_platform_gateway.sql',
     '053_external_platform_uncertain_retry.sql', '055_external_platform_multi_call_rate_limit.sql',
     '057_external_platform_cost_reservations.sql', '058_external_platform_restricted_raw_responses.sql',
-    '071_contract_circuit_scopes.sql', '094_acquisition_request_snapshot.sql', '138_admission_recovery.sql',
+    '071_contract_circuit_scopes.sql', '094_acquisition_request_snapshot.sql', '107_external_dispatch_queue.sql', '138_admission_recovery.sql',
     '163_provider_cost_ledger.sql']) {
     await db.exec(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
   }
@@ -72,9 +81,9 @@ async function reservedTwitterSearch(t) {
   const chargeId = randomUUID(), accountId = randomUUID()
   await db.query(`INSERT INTO billing.customer_charges(id,usage_request_id,tenant_id,account_id,status,enforcement_mode,quoted_minor,currency,
     consumer_id,api_key_id,meter_key,billing_unit)
-    VALUES($1,$2,$3,$4,'reserved','enforced',9,'CNY',$5,$6,'twitter','request')`,
-  [chargeId, delivery.usageRequestId, delivery.tenantId, accountId, delivery.consumerId, delivery.apiKeyId])
-  await db.query(`INSERT INTO billing.credit_ledger_entries(account_id,tenant_id,charge_id,usage_request_id,kind,amount_minor,
+    VALUES($1,$2,$3,$4,'reserved',$7,9,'CNY',$5,$6,'twitter','request')`,
+  [chargeId, delivery.usageRequestId, delivery.tenantId, accountId, delivery.consumerId, delivery.apiKeyId, enforcementMode])
+  if (enforcementMode === 'enforced') await db.query(`INSERT INTO billing.credit_ledger_entries(account_id,tenant_id,charge_id,usage_request_id,kind,amount_minor,
     available_delta_minor,held_delta_minor,currency,idempotency_key) VALUES($1,$2,$3,$4,'hold',9,-9,9,'CNY','fixture-hold')`,
   [accountId, delivery.tenantId, chargeId, delivery.usageRequestId])
   const cost = { costMinor: 1, costKind: 'estimated', currency: 'CNY', monthlyBudgetMinor: 1000, monthlySubsidyBudgetMinor: 1000 }
@@ -83,21 +92,25 @@ async function reservedTwitterSearch(t) {
   return { db, usageStore, rapid, tik, context, body, delivery, cost, request }
 }
 
-for (const status of [409, 503]) test(`standard Twitter settles a RapidAPI HTTP ${status} with a textual business code in PostgreSQL`, options, async t => {
-  const { db, usageStore, rapid, context, delivery, cost, request } = await reservedTwitterSearch(t)
-  let calls = 0
-  const payload = { code: 'SUPPLIER_CONFLICT' }
-  const adapter = new RapidApiAdapter({ apiKey: 'fixture-only', fetchImpl: async () => {
-    calls++
-    return Response.json(payload, { status })
-  } })
-  const rejected = status < 500
-  await assert.rejects(runTwitterSearchFill({
+function runRapidSearch({ usageStore, rapid, context, delivery, cost, request }, fetchImpl) {
+  const adapter = new RapidApiAdapter({ apiKey: 'fixture-only', fetchImpl })
+  return runTwitterSearchFill({
     gateway: { platformStore: rapid, usageStore, adapter, config: { timeoutMs: 100, maxRequestsPerMinute: 90 },
       operationControlStore: { authorizeDispatch: async () => null } },
     context, delivery, request, deadlineAt: Date.now() + 120000, revalidateIdentity: async () => context,
     resolveCredential: async () => ({ ready: true, credential: 'fixture-only' }),
     providerCostControl: () => cost, enterCapacity: async () => true, leaveCapacity() {},
+  })
+}
+
+for (const status of [409, 503]) test(`standard Twitter settles a RapidAPI HTTP ${status} with a textual business code in PostgreSQL`, options, async t => {
+  const f = await reservedTwitterSearch(t), { db, usageStore, delivery } = f
+  let calls = 0
+  const payload = { code: 'SUPPLIER_CONFLICT' }
+  const rejected = status < 500
+  await assert.rejects(runRapidSearch(f, async () => {
+    calls++
+    return Response.json(payload, { status })
   }), { status: 502, code: rejected ? 'social_upstream_rejected' : 'social_upstream_outcome_unknown' })
   assert.equal(calls, 1)
   const receipt = await db.query(`SELECT c.http_status, c.outcome, c.business_code, c.billed, r.body_bytes
@@ -111,6 +124,107 @@ for (const status of [409, 503]) test(`standard Twitter settles a RapidAPI HTTP 
     assert.equal(saved.responseStatus, 502)
     assert.equal(saved.responseBody.error.details.upstreamStatus, 409)
   }
+})
+
+const busyPayload = { code: 'busy', error: 'TWI-BUSY - Temporarily unavailable. You were not charged, please retry in a few seconds.' }
+const busyRejection = error => error.status === 502 && error.code === 'social_upstream_rejected'
+  && error.details?.reasonCode === 'upstream_service_busy' && error.details?.retryable === false
+
+test('two PostgreSQL queue instances cannot dispatch Twitter busy retries concurrently', options, async t => {
+  const { rapid } = await reservedTwitterSearch(t)
+  const firstWorker = new DispatchQueue({ pool: rapid.pool })
+  const secondWorker = new DispatchQueue({ pool: rapid.pool })
+  // Zero spacing isolates the active-ticket guard from the spacing guard.
+  const policy = { intervalMs: 0, jitterMs: 0, maxPending: 1 }
+  const input = { scope: twitterBusyRetryScope, deadline: Date.now() + 60000, leaseMs: 30000, policy }
+  const firstId = randomUUID(), secondId = randomUUID()
+  const first = await firstWorker.enter({ ...input, id: firstId, fingerprint: digest(firstId) })
+  const second = { ...input, id: secondId, fingerprint: digest(secondId), jitterMs: 0 }
+  assert.equal((await secondWorker.transition(second.scope, { ...second, type: 'join' })).kind, 'queued')
+  assert.equal((await secondWorker.transition(second.scope, { ...second, type: 'claim' })).kind, 'wait')
+  await firstWorker.finish(first, 'succeeded')
+  assert.equal((await secondWorker.transition(second.scope, { ...second, type: 'claim' })).kind, 'acquired')
+  await secondWorker.finish(second, 'succeeded')
+})
+
+test('PostgreSQL archives two RapidAPI busy receipts and captures one customer charge', options, async t => {
+  const f = await reservedTwitterSearch(t), { db, delivery } = f
+  let attempts = 0, stateBeforeSecondReply, activeRetry
+  await assert.rejects(runRapidSearch(f, async () => {
+    attempts++
+    if (attempts === 2) {
+      const { rows } = await db.query(`SELECT state->'active'->>'id' AS active_id
+        FROM external_platform.dispatch_queues WHERE scope=$1`, [twitterBusyRetryScope])
+      activeRetry = rows
+      const first = await db.query(`SELECT c.outcome, r.body_sha256, u.status AS usage, ch.status AS charge
+        FROM external_platform.provider_calls c
+        JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id=c.id
+        JOIN usage_requests u ON u.id=c.usage_request_id
+        JOIN billing.customer_charges ch ON ch.usage_request_id=u.id
+        WHERE c.call_ordinal=0`)
+      stateBeforeSecondReply = first.rows
+    }
+    return Response.json(busyPayload, { status: 409, headers: { 'x-rapidapi-request-id': 'busy-' + attempts } })
+  }), busyRejection)
+
+  const hash = digest(JSON.stringify(busyPayload))
+  assert.equal(attempts, 2)
+  assert.deepEqual(activeRetry, [{ active_id: delivery.usageRequestId }])
+  await assertRetryQueueReleased(db, 6000)
+  assert.deepEqual(stateBeforeSecondReply, [{ outcome: 'rejected', body_sha256: hash, usage: 'reserved', charge: 'reserved' }])
+  const receipts = await db.query(`SELECT c.usage_request_id, c.call_ordinal, c.call_role, c.upstream_request_id, c.http_status,
+    c.outcome, c.error_code, c.business_code, c.billed, c.cost_minor::int, c.cost_kind,
+    a.payload_sha256, r.body_sha256, r.parsed_payload
+    FROM external_platform.provider_calls c
+    JOIN external_platform.response_archives a ON a.provider_call_id=c.id
+    JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id=c.id
+    WHERE c.provider_key='rapidapi' ORDER BY c.call_ordinal`)
+  assert.deepEqual(receipts.rows, [0, 1].map(i => ({ usage_request_id: delivery.usageRequestId, call_ordinal: i,
+    call_role: i === 0 ? 'primary' : 'retry', upstream_request_id: 'busy-' + (i + 1), http_status: 409,
+    outcome: 'rejected', error_code: 'upstream_service_busy', business_code: null, billed: null, cost_minor: 1,
+    cost_kind: 'estimated', payload_sha256: hash, body_sha256: hash, parsed_payload: busyPayload })))
+  const holds = await db.query(`SELECT base_cost_minor::int AS base, reserved_cost_minor::int AS reserved, status
+    FROM external_platform.provider_cost_reservations WHERE usage_request_id=$1 ORDER BY base_cost_minor`, [delivery.usageRequestId])
+  assert.deepEqual(holds.rows, [{ base: 0, reserved: 1, status: 'released' }, { base: 1, reserved: 1, status: 'released' }])
+  const saved = await f.usageStore.getUsageRequestByIdempotencyKey(delivery.consumerId, 'same-customer-key')
+  assert.equal(saved.id, delivery.usageRequestId)
+  assert.equal(saved.status, 'committed')
+  assert.equal(saved.responseBody.error.code, 'social_upstream_rejected')
+  assert.equal(saved.responseBody.error.details.reasonCode, 'upstream_service_busy')
+  assert.deepEqual((await db.query('SELECT status, charged_minor FROM billing.customer_charges')).rows,
+    [{ status: 'captured', charged_minor: 9 }])
+  assert.deepEqual((await db.query('SELECT kind, amount_minor FROM billing.credit_ledger_entries ORDER BY kind')).rows,
+    [{ kind: 'capture', amount_minor: 9 }, { kind: 'hold', amount_minor: 9 }])
+})
+
+test('PostgreSQL saves the original busy response if the retry exceeds the procurement budget', options, async t => {
+  // An enforced customer hold exempts the request from the supplier budget.
+  const f = await reservedTwitterSearch(t, 'shadow'), { db, delivery } = f
+  f.cost.monthlyBudgetMinor = f.cost.costMinor
+  const reserve = f.rapid.reserveProviderCostWorkflow.bind(f.rapid), declined = []
+  f.rapid.reserveProviderCostWorkflow = async input => {
+    try { return await reserve(input) }
+    catch (error) { declined.push(error.code); throw error }
+  }
+  let attempts = 0
+  await assert.rejects(runRapidSearch(f, async () => {
+    attempts++
+    return Response.json(busyPayload, { status: 409 })
+  }), busyRejection)
+  assert.equal(attempts, 1)
+  assert.deepEqual(declined, ['external_platform_cost_budget_exhausted'])
+  await assertRetryQueueReleased(db, null)
+  const reservation = await db.query(`SELECT id, status, error_code, delivery_source_mode, response_status,
+      response_body->'error'->'details'->>'reasonCode' AS reason
+    FROM usage_requests`)
+  assert.deepEqual(reservation.rows, [{ id: delivery.usageRequestId, status: 'committed', error_code: 'upstream_service_busy',
+    delivery_source_mode: 'live', response_status: 502, reason: 'upstream_service_busy' }])
+  assert.deepEqual((await db.query('SELECT outcome, error_code FROM external_platform.provider_calls')).rows,
+    [{ outcome: 'rejected', error_code: 'upstream_service_busy' }])
+  assert.deepEqual((await db.query('SELECT status FROM external_platform.provider_cost_reservations')).rows,
+    [{ status: 'released' }])
+  assert.deepEqual((await db.query('SELECT status, charged_minor FROM billing.customer_charges')).rows,
+    [{ status: 'captured', charged_minor: 0 }])
 })
 
 test('PostgreSQL actual supplier stores share one reservation, preserve both receipts, use global ordinal1, settle once and replay TikHub', options, async t => {

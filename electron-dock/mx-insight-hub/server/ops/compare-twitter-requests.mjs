@@ -61,7 +61,8 @@ function errorText(value) {
   return { state: 'projected_error_text', text, redacted: text !== value, length: value.length }
 }
 
-export function inspectTwitterRejectedArchive(row) {
+export function inspectTwitterRejectedArchive(row, httpStatus = 400) {
+  if (httpStatus !== 400 && httpStatus !== 409) return { state: 'not_rejected_http400' }
   if (!row) return { state: 'archive_missing' }
   if (row.body_size > BODY_LIMIT) return { state: 'archive_too_large', bodySize: integer(row.body_size), sha256: row.body_sha256 }
   const bytes = row.body_bytes instanceof Uint8Array ? Buffer.from(row.body_bytes) : null
@@ -91,8 +92,12 @@ export function inspectTwitterRejectedArchive(row) {
       : ['BAD_REQUEST', 'INVALID_REQUEST', 'INVALID_QUERY', 'VALIDATION_ERROR', 'QUERY_TOO_LONG', 'INVALID_ARGUMENT',
         'BAD_USER_INPUT', 'bad_request', 'invalid_request', 'invalid_query', 'validation_error'].includes(value)
         ? value : { state: 'unreviewed_code_withheld', length: value.length, sha256: sha(value) }
-  return { state: 'verified_http400_error_fields', ...evidence,
-    code: code(payload.code), errorCode: code(payload.error?.code),
+  return { state: `verified_http${httpStatus}_error_fields`, ...evidence,
+    // This tool also runs from stdin against older images without the busy classifier.
+    code: httpStatus === 409 && payload.code === 'busy'
+      && payload.error === 'TWI-BUSY - Temporarily unavailable. You were not charged, please retry in a few seconds.'
+      ? 'busy' : code(payload.code),
+    errorCode: code(payload.error?.code),
     messages, arraysTruncated: ['errors','detail'].some(key => Array.isArray(payload[key]) && payload[key].length > 5),
     scope: 'supplier error statement only, not an independently verified cause; no full body or business data returned' }
 }
@@ -157,14 +162,14 @@ async function readTwitterRequests(pool, selected, normalizers) {
         ORDER BY started_at,id LIMIT 16`, [requestId])
       const ownCalls = []
       for (const call of calls.slice(0, CALL_LIMIT)) {
-        let archive = { state: 'not_rejected_http400' }
+        let archive = { state: call.http_status === 409 ? 'not_matching_twitter_aio_rejection' : 'not_rejected_http400' }
         if (call.provider_key === 'rapidapi' && call.operation === 'social.content.search'
           && call.endpoint_key === 'twitter-aio.search' && call.endpoint_version === 'twitter-aio.hub.v1'
-          && call.contract_version === 'mx-insight-hub.social-data.v1' && call.outcome === 'rejected' && call.http_status === 400) {
+          && call.contract_version === 'mx-insight-hub.social-data.v1' && call.outcome === 'rejected' && [400, 409].includes(call.http_status)) {
           const { rows: [raw] } = await client.query(`SELECT /* twitter-compare:rejected-archive */ body_size,body_sha256,
             CASE WHEN body_size<=$2 AND octet_length(body_bytes)<=$2 THEN body_bytes END AS body_bytes
             FROM control.external_platform_restricted_raw_responses WHERE provider_call_id=$1::uuid`, [call.id, BODY_LIMIT])
-          archive = inspectTwitterRejectedArchive(raw)
+          archive = inspectTwitterRejectedArchive(raw, call.http_status)
         }
         ownCalls.push({ callId: call.id, provider: identifier(call.provider_key), operation: identifier(call.operation),
           endpoint: identifier(call.endpoint_key), endpointVersion: identifier(call.endpoint_version), contractVersion: identifier(call.contract_version),
@@ -198,13 +203,13 @@ export async function compareTwitterRequests(pool, { originalRequestId, failedRe
     { original: originalRequestId, failed: failedRequestId, success: successRequestId }, normalizers)
   return { diagnosticRevision: 'twitter-request-comparison.v1', requests,
     comparisons: { originalVsRetry: compare(requests.original, requests.failed), retryVsSuccess: compare(requests.failed, requests.success) },
-    interpretation: 'Exact operator-selected requests. HTTP 400 is a saved upstream refusal, unlike an unknown transport outcome. Query differences or current-code reconstruction alone do not prove its cause. No dispatch, credential read or settlement change.' }
+    interpretation: 'Exact operator-selected requests. Rejected Twitter AIO calls with HTTP 400 or 409 have a saved upstream refusal. Query differences or current-code reconstruction alone do not prove its cause. No dispatch, credential read or settlement change.' }
 }
 
 export async function diagnoseTwitterRequest(pool, requestId, normalizers = {}) {
   const { request } = await readTwitterRequests(pool, { request: requestId }, normalizers)
   return { diagnosticRevision: 'twitter-request-diagnostic.v1', readOnly: true, businessCalls: 0, request,
-    interpretation: 'One exact operator-selected request and its own calls only. HTTP 400 is a saved upstream refusal; projected error text is the supplier statement, not independent proof of its cause. Current-code reconstruction is not the historical outgoing URL. No dispatch, credential read or settlement change.' }
+    interpretation: 'One exact operator-selected request and its own calls only. For rejected Twitter AIO calls with HTTP 400 or 409, projected error fields describe the supplier response. Current-code reconstruction is not the historical outgoing URL. No dispatch, credential read or settlement change.' }
 }
 
 if (process.argv[1] === '-' || process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

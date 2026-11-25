@@ -53,6 +53,13 @@ export function queueTransition(state, action, now) {
     // Delayed retries yield to eligible fresh work, but retain their deadline.
     const head = state.queue.find(entry => entry.notBefore <= now)
     if (state.active || head?.id !== item.id || now < (state.nextAt || 0)) {
+      if (policy.busyBackoffMaxMs) {
+        // This ticket cannot run before either bound. Sleep through the known
+        // cooldown instead of asking PostgreSQL about the same slot each second.
+        const earliest = Math.max(state.nextAt || 0, item.notBefore)
+        if (earliest >= item.deadline) return { kind: 'busy' }
+        return { kind: 'wait', waitMs: earliest > now ? earliest - now : 500 }
+      }
       return { kind: 'wait', waitMs: Math.max(100, Math.min(1000, Math.max(state.nextAt || now, item.notBefore) - now || 500)) }
     }
     state.queue = state.queue.filter(entry => entry.id !== item.id)
@@ -95,6 +102,21 @@ export function queueTransition(state, action, now) {
     if (!item) return { kind: 'expired' }
     if (active) {
       state.latencyMs = Math.round((state.latencyMs || policy.intervalMs) * 0.75 + Math.max(0, now - active.startedAt) * 0.25)
+      if (policy.busyBackoffMaxMs && action.outcome !== 'cancelled') {
+        let delayMs = policy.intervalMs
+        if (action.outcome === 'busy') {
+          // Measuring idle time after the previous cooldown keeps a probe at
+          // the capped delay from resetting its own backoff.
+          const previous = state.busyBackoff
+          const continued = previous && active.startedAt <= previous.until + policy.busyBackoffMaxMs
+          delayMs = Math.min(policy.busyBackoffMaxMs, 2 * (continued ? previous.delayMs : policy.intervalMs))
+          state.busyBackoff = { delayMs, until: now + delayMs }
+        } else if (action.outcome === 'succeeded') {
+          delete state.busyBackoff
+        }
+        // Space actual upstream calls even if recording the dispatch took time.
+        state.nextAt = Math.max(state.nextAt, now + delayMs)
+      }
       state.active = null
     }
     state.queue = state.queue.filter(entry => entry.id !== action.id)
@@ -124,8 +146,15 @@ export class DispatchQueue {
       await client.query('INSERT INTO external_platform.dispatch_queues(scope, state) VALUES ($1, $2) ON CONFLICT DO NOTHING', [scope, {}])
       const { rows } = await client.query('SELECT state, clock_timestamp() AS now FROM external_platform.dispatch_queues WHERE scope = $1 FOR UPDATE', [scope])
       const state = rows[0].state
+      const checkChange = action.policy.busyBackoffMaxMs && (action.type === 'claim' || action.type === 'join')
+      const before = checkChange ? JSON.stringify(state) : null
       const result = queueTransition(state, action, new Date(rows[0].now).getTime())
-      await client.query('UPDATE external_platform.dispatch_queues SET state = $2, updated_at = now() WHERE scope = $1', [scope, state])
+      // Waiting or refused retries may prune expired tickets. Avoid a new row
+      // version for every poll and overflow request when nothing changed.
+      const noAdmission = result.kind === 'wait' || result.kind === 'busy'
+      if (!noAdmission || before === null || before !== JSON.stringify(state)) {
+        await client.query('UPDATE external_platform.dispatch_queues SET state = $2, updated_at = now() WHERE scope = $1', [scope, state])
+      }
       await client.query('COMMIT')
       return result
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error } finally { client.release() }

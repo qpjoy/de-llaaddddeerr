@@ -11,6 +11,61 @@ const base = () => ({
 })
 const finding = (analysis, code) => analysis.findings.find(item => item.code === code)
 
+test('a saved Twitter AIO search rejection distinguishes supplier 409 from Hub 502', () => {
+  const call = { provider: 'rapidapi', operation: 'social.content.search', endpoint: 'twitter-aio.search',
+    outcome: 'rejected', httpStatus: 409, businessCode: null, message: 'private archive text' }
+  const run = { ...base(), status: 'committed', responseStatus: 502, hasResponseBody: true,
+    errorCode: 'social_upstream_rejected', providerCalls: [call] }
+  const analysis = analyzeRequestDiagnostic(run)
+  assert.match(analysis.summary, /Twitter AIO.*409.*Hub.*502/u)
+  assert.match(finding(analysis, 'provider_rejection_recorded').detail, /具体拒绝原因需核对/u)
+  assert.doesNotMatch(JSON.stringify(analysis), /400|暂时繁忙/u)
+  assert.ok(finding(analysis, 'failed_response_saved'))
+  assert.doesNotMatch(JSON.stringify(analysis), /private archive text/u)
+
+  for (const override of [{ providerCalls: [] }, { providerCalls: [{ ...call, httpStatus: 400 }] },
+    { providerCalls: [{ ...call, endpoint: 'twitter-aio.crawl' }] }, { providerCalls: [call, call] },
+    { callsTruncated: true }, { status: 'unknown' }, { responseStatus: 200 }]) {
+    const other = analyzeRequestDiagnostic({ ...run, ...override })
+    assert.doesNotMatch(JSON.stringify(other), /Twitter AIO/u)
+  }
+
+  const typed = { ...call, errorCode: 'upstream_service_busy', message: null }
+  const recent = analyzeRequestDiagnostic({ ...run, errorCode: 'upstream_service_busy', providerCalls: [typed] })
+  assert.match(recent.summary, /搜索服务暂时繁忙.*409.*502/u)
+  assert.match(finding(recent, 'provider_rejection_recorded').detail, /upstream_service_busy/u)
+  assert.doesNotMatch(JSON.stringify(recent), /本次未收费/u)
+  const recovered = analyzeRequestDiagnostic({ ...run, errorCode: null, responseStatus: 200,
+    providerCalls: [typed, { outcome: 'succeeded' }] })
+  assert.ok(finding(recovered, 'successful_response_saved'))
+  assert.doesNotMatch(recovered.summary, /409|失败/u)
+})
+
+test('two typed Twitter busy receipts identify the primary call and its single same-supplier retry', () => {
+  const primary = { provider: 'rapidapi', operation: 'social.content.search', endpoint: 'twitter-aio.search',
+    outcome: 'rejected', httpStatus: 409, errorCode: 'upstream_service_busy', callOrdinal: 0, callRole: 'primary' }
+  const retry = { ...primary, callOrdinal: 1, callRole: 'retry' }
+  const run = { ...base(), status: 'committed', responseStatus: 502, hasResponseBody: true,
+    errorCode: 'upstream_service_busy', providerCalls: [primary, retry] }
+  const analysis = analyzeRequestDiagnostic(run)
+  assert.match(analysis.summary, /重试一次后仍收到 HTTP 409.*HTTP 502/u)
+  const rejection = finding(analysis, 'provider_rejection_recorded')
+  assert.equal(rejection.certainty, 'confirmed')
+  assert.ok(rejection.evidenceRefs.includes('providerCalls[1].callRole'))
+  assert.doesNotMatch(rejection.detail, /已扣款|未收费/u)
+
+  for (const override of [{ status: 'unknown' }, { responseStatus: 200 }, { callsTruncated: true },
+    { providerCalls: [primary, { ...retry, outcome: 'succeeded', httpStatus: 200 }] },
+    { providerCalls: [primary, { ...retry, outcome: 'unknown' }] },
+    { providerCalls: [primary, { ...retry, provider: 'tikhub' }] },
+    { providerCalls: [primary, { ...retry, errorCode: 'social_upstream_rejected' }] },
+    { providerCalls: [primary, { ...retry, callRole: 'enrichment' }] },
+    { providerCalls: [primary, { ...retry, callOrdinal: 2 }] },
+    { providerCalls: [primary, retry, retry] }]) {
+    assert.doesNotMatch(analyzeRequestDiagnostic({ ...run, ...override }).summary, /重试一次/u)
+  }
+})
+
 test('typed Twitter account rejection is distinguished from quota and parsing failures', () => {
   const analysis = analyzeRequestDiagnostic({ ...base(), status: 'committed', responseStatus: 422,
     providerCalls: [{ provider: 'rapidapi', operation: 'social.profile.get', outcome: 'rejected',

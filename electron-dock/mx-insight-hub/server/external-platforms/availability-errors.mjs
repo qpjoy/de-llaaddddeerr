@@ -58,6 +58,13 @@ export function upstreamCapacityError(evidence) {
   })
 }
 
+export function twitterSearchBusyError() {
+  return new AppError(502, 'social_upstream_rejected', 'The Twitter search provider is temporarily busy.', {
+    reasonCode: 'upstream_service_busy', layer: 'upstream', upstreamDispatched: true,
+    upstreamStatus: 409, outcome: 'rejected', retryable: false,
+  })
+}
+
 // Circuits open for about a minute after consecutive failures; this window
 // comfortably covers the failure that explains a current refusal.
 export const FAILURE_EVIDENCE_WINDOW_MS = 15 * 60_000

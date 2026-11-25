@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { COLLECT_CAPABILITIES, COLLECT_KINDS, COLLECT_RUNNER_SLOTS, collectCapability } from '../shared/collect-engines.mjs'
 import { normalizeJobRequest } from '../server/collect/catalog.mjs'
+import { marketplaceSearchExamples } from '../server/examples/marketplace-search.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const REASON = '采集引擎上线验收（collect-acceptance）'
@@ -79,13 +80,15 @@ export const SMOKE_CASES = Object.freeze([
   { capability: 'collect.audio.episodes', input: { platform: 'librivox', limit: 1, episodesPerShow: 3 } },
   { capability: 'collect.intel.dns.lookup', input: { name: 'iana.org', types: ['A', 'MX'] } },
   { capability: 'collect.intel.rdap.domain', input: { domain: 'iana.org' } },
-  { capability: 'collect.ecommerce.shopify.search', input: { domain: 'hydrogen-preview.myshopify.com', keyword: 'snowboard', maxItems: 2 } },
+  { ...marketplaceSearchExamples.shopify, listingTitle: 'title' },
   { capability: 'collect.intel.ct.issuances', input: { domain: 'iana.org', maxItems: 5 } },
   { capability: 'collect.intel.subdomains', input: { domain: 'iana.org', maxIssuances: 50 } },
   // Paid: Shodan query credits, Apify compute and per-result charges.
   { capability: 'collect.intel.shodan.count', input: { query: 'product:nginx country:SG' }, paid: true },
   { capability: 'collect.intel.shodan.host', input: { ip: '8.8.8.8', minify: true }, paid: true },
   { capability: 'collect.ecommerce.temu.search', input: { keyword: 'phone case', maxItems: 10 }, paid: true },
+  { ...marketplaceSearchExamples.facebook, listingTitle: 'marketplace_listing_title', paid: true, explicitOnly: true },
+  { ...marketplaceSearchExamples.craigslist, listingTitle: 'title', paid: true, explicitOnly: true },
   { capability: 'collect.ads.meta.library', input: { urls: ['https://www.facebook.com/nasa'], resultsLimit: 10 }, paid: true },
   { capability: 'collect.web.similarweb.overview', input: { domains: ['iana.org'] }, paid: true },
 ])
@@ -214,10 +217,30 @@ async function acceptanceKey(admin, file, capabilities) {
   return key.data.secret
 }
 
+export function selectSmokeCases(options) {
+  const prefixes = options.only?.split(',').map(value => value.trim()).filter(Boolean)
+  const matches = (item, prefix) => item.capability.startsWith(prefix) || label(item).startsWith(prefix)
+  const cases = SMOKE_CASES.filter(item => {
+    if (item.paid && !options['include-paid']) return false
+    if (!prefixes) return !item.explicitOnly
+    return prefixes.some(prefix => matches(item, prefix))
+  })
+  const unmatched = prefixes?.filter(prefix => !cases.some(item => matches(item, prefix))) || []
+  if (!cases.length || unmatched.length) {
+    throw new Error(`no smoke cases selected for ${unmatched.join(', ') || '--only'}; check prefixes and use --include-paid for paid capabilities`)
+  }
+  return cases
+}
+
+export function hasListing(result, titleField) {
+  const item = result?.payload?.items?.[0]
+  return result?.dataStatus === 'success'
+    && ['string', 'number'].includes(typeof item?.id) && String(item.id).trim().length > 0
+    && typeof item[titleField] === 'string' && item[titleField].trim().length > 0
+}
+
 async function smoke(admin, options) {
-  const only = options.only ? options.only.split(',').map(value => value.trim()) : null
-  const cases = SMOKE_CASES.filter(item => (!item.explicitOnly || only) && (options['include-paid'] || !item.paid) && (!only || only.some(prefix => item.capability.startsWith(prefix) || label(item).startsWith(prefix))))
-  const capabilities = [...new Set(cases.map(item => item.capability))]
+  const cases = selectSmokeCases(options)
   let key
   if (options['key-file'] && existsSync(options['key-file'])) key = readFileSync(options['key-file'], 'utf8').trim()
   // One key for every smoke capability, so later filtered runs can reuse it.
@@ -247,9 +270,16 @@ async function smoke(admin, options) {
       await new Promise(done => setTimeout(done, 1_000))
       job = (await api('GET', `/api/v1/data/collect/jobs/${job.jobId}`)).data
     }
-    const ok = job?.status === 'succeeded'
+    let ok = job?.status === 'succeeded'
+    let detail = job?.error?.message || ''
+    if (ok && item.listingTitle) {
+      // /query may deliver inline. A queued job's result GET reads stored data.
+      const result = submitted.data?.result ?? (await api('GET', `/api/v1/data/collect/jobs/${job.jobId}/result`)).data
+      ok = hasListing(result, item.listingTitle)
+      if (!ok) detail = 'FAILED: expected a delivered product with an ID and title'
+    }
     if (!ok) failures += 1
-    console.log(`${label(item).padEnd(44)} ${String(job?.status).padEnd(9)} ${String(job?.delivery?.dataStatus ?? job?.error?.code ?? '').padEnd(24)} items=${job?.delivery?.itemCount ?? '-'}  ${Math.round((Date.now() - run.at) / 1000)}s  ${ok ? '' : (job?.error?.message || '').slice(0, 100)}`)
+    console.log(`${label(item).padEnd(44)} ${String(job?.status).padEnd(9)} ${String(job?.delivery?.dataStatus ?? job?.error?.code ?? '').padEnd(24)} items=${job?.delivery?.itemCount ?? '-'}  ${Math.round((Date.now() - run.at) / 1000)}s  ${ok ? '' : detail.slice(0, 100)}`)
   }
   console.log(`\n${started.length - failures}/${started.length} succeeded${options['include-paid'] ? '' : ' (paid Apify/Shodan cases skipped; add --include-paid)'}`)
   if (failures) process.exitCode = 1

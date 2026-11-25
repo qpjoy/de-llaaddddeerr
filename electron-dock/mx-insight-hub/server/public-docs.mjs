@@ -9,6 +9,7 @@ import { wechatSelfHostedPaths, wechatSelfHostedGuide } from './self-hosted/docs
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
+import { COLLECT, collectCapability } from '../shared/collect-engines.mjs'
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
 import { hubSocialPaths, hubSocialGuide, hubSocialAccountPlatforms, hubSocialAccountExample, threadsAccountInputDescription } from './contracts/hub-social-docs.mjs'
@@ -27,6 +28,7 @@ import { productAllowed } from '../shared/product-access.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml, ipRiskHistoryPaths } from './contracts/ip-risk-docs.mjs'
 import { ecommerceFeedExample } from './examples/ecommerce-feed.mjs'
+import { marketplaceSearchExamples } from './examples/marketplace-search.mjs'
 import {
   DEFAULT_SEARCH_PROFILE,
   POSTGRES_SEARCH_PROFILE,
@@ -5690,6 +5692,24 @@ function marketplaceNativePage(key, label, marketplace, searchDescription) {
   </section>`
 }
 
+function visibleCollectProductSearches(scopes) {
+  return Object.values(marketplaceSearchExamples).filter(({ capability }) =>
+    scopes == null || scopes.some(scope => scope.capabilities.includes(capability)))
+}
+
+function collectProductSearchGuide(examples) {
+  if (!examples.length) return ''
+  const rows = examples.map(example => {
+    const { label, platform, sync } = collectCapability(example.capability)
+    return `<tr><td>${label}</td><td><code>POST ${COLLECT.apiPrefix}/${sync ? 'query' : 'jobs'}</code></td><td><code>${JSON.stringify(example)}</code></td><td><code>${platform}</code></td></tr>`
+  })
+  const syncHelp = examples.some(({ capability }) => collectCapability(capability).sync)
+    ? '<p>Shopify 返回 200 时先检查 <code>data.job.status</code>。成功后从 <code>data.result.payload.items</code> 读取商品。若 <code>pageInfo.hasNextPage</code> 为 true，保持店铺和关键词，把该 payload 的 <code>pageInfo.endCursor</code> 原样传入 <code>input.after</code> 查询下一页。</p>' : ''
+  return `<h3>商品采集</h3><p>请求使用 Hub API Key、<code>Content-Type: application/json</code> 和 <code>Idempotency-Key</code>。同一请求重试时保留原标识，新查询或翻页使用新标识。每项采集需要对应的 capability 授权。引擎启用客户计费时，Key 还需拥有表中的计费平台授权。</p>
+    <table><thead><tr><th>平台与范围</th><th>Hub 接口</th><th>JSON 请求示例</th><th>计费平台</th></tr></thead><tbody>${rows.join('')}</tbody></table>${syncHelp}
+    <p>收到 202 后，使用同一 Key 对 <code>data.links.self</code> 发起 GET 查询进度。<code>data.status</code> 为 <code>succeeded</code> 后，GET <code>data.links.result</code> 并读取 <code>data.payload.items</code>。两条链接均为相对于 Hub 的路径。</p>`
+}
+
 const PUBLIC_DOCS_TEMPLATE = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -5894,9 +5914,8 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     <tr><td>跨平台使用同一商品结构（推荐）</td><td><code>POST /api/v1/data/ecommerce/products/search</code></td><td>一次选择一个 marketplace；返回统一 items、url、pricing、shop 和 Hub cursor。实时采集或精确查询快照，见 sourceMode。</td></tr>
     <tr><td>平台特有详情、SKU、评论或指定搜索版本</td><td><code>POST /api/v1/data/native/{endpoint}</code>（下方平台专用目录）</td><td>Hub 托管的固定接口；data 保留该接口业务结构，不能按统一 items 解析。每项独立授权与启用。</td></tr>
     <tr><td>读取本调用身份已经查询到的商品</td><td><code>GET /api/v1/data/ecommerce/products/items</code></td><td>已存成功观察，不触发采集；all 仅用于这种历史查询。</td></tr>
-    <tr><td>Facebook Marketplace 城市商品、Craigslist 地区站在售商品</td><td><code>POST /api/v1/data/collect/jobs</code></td><td>分别传 <code>collect.ecommerce.fbmarketplace.search</code>（city、keyword）或 <code>collect.classifieds.craigslist.search</code>（region、keyword）。返回 202，成功后从结果链接读取 <code>data.payload.items</code>。</td></tr>
-    <tr><td>Shopify 指定店铺的商品关键词搜索</td><td><code>POST /api/v1/data/collect/query</code></td><td>传 <code>collect.ecommerce.shopify.search</code> 和 input（domain、keyword）。同步商品在 <code>data.result.payload.items</code>，下一页传 input.after。排队时返回 202 和查询链接。</td></tr>
     </tbody></table>
+    ${collectProductSearchGuide(visibleCollectProductSearches())}
     <p>统一搜索支持淘宝、天猫、京东、闲鱼、小红书电商、抖音电商。拼多多、Amazon、AliExpress 和 Shopee 的商品关键词搜索使用各自的原生入口。SHEIN 美国站原生入口需单独开通。快手的购物榜单与品牌榜单接受子分类参数 subTabId/subTabName，当前尚无快手小店商品关键词入口。请在下方平台专用目录查看当前 Key 的接口。</p>
     <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>
     <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；路径和授权规则不变，新增的可选 <code>deliveryMode</code> 只表达 Hub 是否可以访问外部平台，不是供应方选择器。</div>
@@ -6854,6 +6873,7 @@ const tenantDocsRoute = (route, scopes) => {
   if (TENANT_HIDDEN_DOCS.has(route.key)) return false
   if (scopes == null || ['start', 'rules', 'errors'].includes(route.key)) return true
   if (route.key === 'strategy-search') return productAllowed('/data-products/strategy-search', scopes)
+  if (route.key === 'ecommerce-treasure-box' && visibleCollectProductSearches(scopes).length) return true
   if (route.key === 'topic-reports' && !tenantDocumentPathAllowed('/data/topic-reports', scopes)) return false
   if (route.key === 'news-discovery' && !tenantDocumentPathAllowed('/data/news/search', scopes)) return false
   const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
@@ -6965,7 +6985,11 @@ function tenantDocBody(route, scopes) {
   let html = `<h2>${escape(route.label)}</h2><p>通过 Hub API 调用本页已开放能力。请求使用您的 Hub API Key；实际费用与可用额度请查看用量与账单。</p>`
   if (route.key === 'aggregate-search') html += '<p>数据产品 → 聚合搜索提供接口调试、产品展示与接入指南；管理员还可使用管理入口。refresh 搜索本轮实时内容；stored 查询最新入库与历史存量，新鲜度取决于清洗和索引进度。平台、条目类型支持多选，日期与标签目前仅限 stored。</p><p>同一 POST 设置 Accept: text/event-stream 可逐来源接收结果：search.started → source.started / source.completed → search.completed；最终事件才包含完整已提交结果与游标。每 10 秒心跳，断线不取消已派发调用；没有自动重连或 Last-Event-ID 续传。复用原 body 和 Idempotency-Key 重试，进行中返回 409，已提交则回放。开始流式前错误使用普通 HTTP/JSON，开始后用 search.error。并发 3，120 秒后停止新派发、等待在途调用按各自超时收尾，不是整轮硬超时；not_started 表示未调用，不自动重试。</p><p>续页保留原条件与 Key，把 data.pageInfo.nextCursor 原样传作 cursor，每页换新 Idempotency-Key；同页重试保留原标识。400 invalid_cursor 或 410 search_cursor_expired 需要显式从第一页重新查询；503 search_cursor_unavailable 可稍后重试原请求。返回数量是本批数量，没有 nextCursor 即停止，不以短页推断数据总量。</p>'
   if (route.key === 'xiaohongshu-note' && Object.keys(xhsResearchPaths).every(path => tenantDocumentPathAllowed(path, scopes))) html += xhsResearchGuide
-  if (route.key === 'ecommerce-treasure-box') html += nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
+  if (route.key === 'ecommerce-treasure-box') {
+    html += collectProductSearchGuide(visibleCollectProductSearches(scopes))
+    if (!paths.some(path => tenantDocumentPathAllowed(path, scopes))) return html
+    html += nativeServiceGuide(route.key, path => tenantDocumentPathAllowed(path, scopes))
+  }
   const discoveryProduct = XHS_DISCOVERY_PRODUCTS.find(product => product.key === route.key)
   if (discoveryProduct && tenantDocumentPathAllowed(discoveryProduct.path.slice('/api/v1'.length), scopes)) html += xhsDiscoveryGuide(discoveryProduct)
   for (const path of paths.filter(path => !path.startsWith('/data/native/') && tenantDocumentPathAllowed(path, scopes))) {

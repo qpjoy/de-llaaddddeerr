@@ -777,7 +777,17 @@ GET  /internal/v1/admin/collect/jobs/{id}
 
 前 18 个平台的核验有 4 次请求到达上游。Amazon、AliExpress、拼多多返回商品，SHEIN 在订阅检查时被拒。测试使用供应商凭据，未取得生产 Hub 的调用回执或账单。两条新增路由随 Hub 迁移 195 发布，使用 `ecommerce` 数据域及各自的 `native.r.*` 操作授权。首次上线日期以生产发布记录为准。
 
-### 9.1 第 19–21 行的请求和响应示例
+### 9.1 飞书第 19–21 行（Facebook Marketplace、Craigslist、Shopify 独立站）
+
+[复制四列表格（TSV）](ecommerce-marketplace-search-feishu.tsv)。文件含表头和三行数据，列顺序与飞书一致。若第 19–21 行已有平台名称，复制表格的 B2:D4，从飞书第 19 行的「API 接口」单元格粘贴即可。
+
+运行表中的 curl 前，按第 1.1 节设置 `HUB_URL`、`HUB_KEY`，再用下面的命令生成本轮查询标识。三条命令各有独立幂等键前缀。同一请求重试时沿用该标识，新搜索或翻页时重新生成。
+
+```bash
+export HUB_REQUEST_ID="$(uuidgen)"
+```
+
+可先用同一把 Key 调用 `GET /api/v1/data/collect/capabilities`，在 `data[]` 里按表中的 `capability` 检查 `granted` 和 `ready`。前者表示当前 Key 具有该采集能力，后者表示有已启用且未隔离的引擎路由。付费上游的凭据和实际取数需单独验证。
 
 下表的请求体可直接用于对应的 POST 路径。请求头使用 Hub Key、`Content-Type: application/json` 和 `Idempotency-Key`。同一页重试时复用原幂等键，翻页使用新键。响应为 JSON 字段节选。
 
@@ -790,6 +800,8 @@ GET  /internal/v1/admin/collect/jobs/{id}
 
 Facebook Marketplace 同步入口需要 `ecommerce` 和 `native.r.facebook_marketplace_search` 授权。纽约坐标的 `guitar`、`iphone` 两次请求都返回 HTTP 200 和空列表。迁移 197 将操作登记为暂停，待获得有商品的实测页后再启用。[实测记录](operations/evidence/facebook-marketplace-search-2026-11-23.json)
 
-两条城市或地区异步入口分别需要对应 `collect.*` 授权、已启用的引擎路由和 Apify 凭据。保存提交响应的 `data.links.self` 查询进度，成功后 GET `data.links.result`，读取 `data.payload.items[]`。本次用发布者样本验证了本地 HTTP 提交、幂等重放和取结果，未运行线上 Actor。Craigslist 的 RapidAPI 备选返回 HTTP 403，当前账号未订阅。[Facebook Marketplace 样本](https://apify.com/apify/facebook-marketplace-scraper) · [Craigslist 在售商品样本](https://apify.com/ivanvs/craigslist-scraper-pay-per-result#data-output-example---for-sale)
+两条城市或地区异步入口分别需要对应 `collect.*` 授权、已启用的引擎路由和 Apify 凭据。引擎开启客户计费时，Facebook Marketplace、Shopify 还需要 `ecommerce` 平台授权，Craigslist 需要 `classifieds`。按 `Retry-After` 轮询 `data.links.self`，任务成功后 GET `data.links.result`，读取 `data.payload.items[]`。2026-11-25 用发布者样本验证了本地 HTTP 提交、幂等重放和取结果，线上 Actor 的商品结果待实测。此前 Craigslist 的 RapidAPI 备选返回 HTTP 403，提示账号未订阅。[Facebook Marketplace 样本](https://apify.com/apify/facebook-marketplace-scraper) · [Craigslist 在售商品样本](https://apify.com/ivanvs/craigslist-scraper-pay-per-result#data-output-example---for-sale)
 
-Shopify 每次只搜索一个店铺，`domain` 填完整主机名，`maxItems` 为 1–50，默认 20。下一页保持店铺和关键词，将 `data.result.payload.pageInfo.endCursor` 原样传入 `input.after`。公开店铺验证中，第二页返回 Medium Roast Coffee，无匹配查询返回 `dataStatus: "no_data"`。若返回 HTTP 202，按异步结果路径取回商品。迁移 196 为既有标准原生引擎补充路由，调用方需获 `collect.ecommerce.shopify.search` 授权。[本地 Hub 实测三页响应](operations/evidence/shopify-storefront-search-2026-11-23.json) · [Shopify Storefront 搜索](https://shopify.dev/docs/api/storefront/latest/queries/search)
+Facebook Marketplace 表格行采用 Apify 维护的城市商品搜索，Meta 的官方 Marketplace 检索面向 Secure Research Environment。Craigslist 表格行采用 Apify 上由社区维护的 Actor，Craigslist 公开的 Bulk Posting Interface 用于管理刊登。[Meta 官方检索说明](https://developers.facebook.com/documentation/meta-content-library/content-library-api/guides/fb-marketplace) · [Craigslist 官方刊登接口](https://www.craigslist.org/about/bulk_posting_interface)
+
+Shopify 每次只搜索一个店铺，`domain` 填完整主机名，`maxItems` 为 1–50，默认 20。下一页保持店铺和关键词，将 `data.result.payload.pageInfo.endCursor` 原样传入 `input.after`。2026-11-25 用表中的店铺复测，首、次页分别返回 Dark Roast Coffee 和 Medium Roast Coffee，无匹配查询返回 `dataStatus: "no_data"`。HTTP 200 时检查 `data.job.status`，成功后读取 `data.result.payload.items[]`。HTTP 202 时按返回的任务链接取结果。迁移 196 为既有标准原生引擎补充路由，调用方需获 `collect.ecommerce.shopify.search` 授权。[11 月 23 日的本地 Hub 实测响应](operations/evidence/shopify-storefront-search-2026-11-23.json) · [Shopify Storefront 搜索](https://shopify.dev/docs/api/storefront/latest/queries/search)

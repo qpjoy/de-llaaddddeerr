@@ -30,6 +30,66 @@ test('retry yields to queued work, retains original deadline, and cannot steal a
   assert.equal(transition(state, 'dispatch', 10002, { id: 'b' }).kind, 'expired')
 })
 
+test('busy retries share capped cooldowns and space the next dispatch from completion', () => {
+  const state = {}, retryPolicy = { ...policy, intervalMs: 3000, busyBackoffMaxMs: 30000 }
+  const ticket = id => ({ id, fingerprint: id, policy: retryPolicy, deadline: 600000 })
+  let now = 0, index = 0
+  let current = ticket('first')
+  assert.equal(transition(state, 'join', now, current).kind, 'queued')
+  assert.equal(transition(state, 'claim', now, current).kind, 'acquired')
+  function completeAndClaimNext(outcome, delay) {
+    now += 800 // The supplier responds after this ticket was dispatched.
+    assert.equal(transition(state, 'finish', now, { ...current, outcome }).kind, 'finished')
+    current = ticket('next-' + ++index)
+    assert.equal(transition(state, 'join', now, current).kind, 'queued')
+    assert.deepEqual(transition(state, 'claim', now, current), { kind: 'wait', waitMs: delay })
+    assert.equal(transition(state, 'claim', now + delay - 1, current).kind, 'wait')
+    now += delay
+    assert.equal(transition(state, 'claim', now, current).kind, 'acquired')
+  }
+  for (const delay of [6000, 12000, 24000, 30000, 30000]) completeAndClaimNext('busy', delay)
+  completeAndClaimNext('succeeded', 3000)
+  completeAndClaimNext('busy', 6000)
+  completeAndClaimNext('unknown', 3000)
+  // A waiter abandoned before dispatch gives up its slot. The next request
+  // comes well after the last cooldown and starts a new sequence.
+  transition(state, 'finish', now + 2000, { ...current, outcome: 'cancelled' })
+  assert.equal(state.nextAt, now + 3000)
+  now += 60000
+  current = ticket('after-idle')
+  assert.equal(transition(state, 'join', now, current).kind, 'queued')
+  assert.equal(transition(state, 'claim', now, current).kind, 'acquired')
+  completeAndClaimNext('busy', 6000)
+})
+
+test('detail queues keep their configured dispatch spacing after a busy response', () => {
+  const state = {}
+  transition(state, 'join', 0)
+  transition(state, 'claim', 0)
+  transition(state, 'dispatch', 100)
+  transition(state, 'finish', 2000, { outcome: 'busy' })
+  const next = { id: 'b', fingerprint: 'note-b' }
+  assert.equal(transition(state, 'join', 2000, next).kind, 'queued')
+  assert.equal(transition(state, 'claim', 5099, next).kind, 'wait')
+  assert.equal(transition(state, 'claim', 5100, next).kind, 'acquired')
+})
+
+test('a longer shared cooldown promptly releases a waiter whose deadline can no longer be met', async () => {
+  let now = 0, cooldownStarted = false
+  const queue = new DispatchQueue({ clock: () => now, wait: async delay => {
+    assert.equal(cooldownStarted, false, 'the queued request must finish at its first poll after the cooldown')
+    now += delay
+    await queue.finish(first, 'busy')
+    cooldownStarted = true
+  } })
+  const input = { scope: 'retry', policy: { ...policy, intervalMs: 3000, busyBackoffMaxMs: 30000 },
+    deadline: 5000, leaseMs: 30000 }
+  const first = await queue.enter({ ...input, id: 'first', fingerprint: 'first' })
+  await assert.rejects(queue.enter({ ...input, id: 'second', fingerprint: 'second' }), { code: 'external_platform_busy' })
+  assert.equal(now, 3000)
+  assert.equal(queue.states.get('retry').queue.length, 0)
+})
+
 test('abandoned dispatch remains unknown across callers; expired pending tickets do not acquire', () => {
   const state = {}
   transition(state, 'join', 0); transition(state, 'claim', 0)
@@ -79,6 +139,36 @@ test('PostgreSQL queue uses one short row-locked transaction and releases the co
   assert.equal(connected, 0)
   assert.equal(queries.filter(sql => sql.includes('FOR UPDATE')).length, 2)
   assert.equal(queries.filter(sql => sql === 'COMMIT').length, 2)
+})
+
+test('PostgreSQL waits and overflow admissions only update the retry queue when they prune expired state', async () => {
+  const retryPolicy = { ...policy, busyBackoffMaxMs: 30000, maxPending: 1 }
+  const state = {}, owner = { id: 'owner', fingerprint: 'owner', policy: retryPolicy }
+  const waiter = { id: 'waiter', fingerprint: 'waiter', policy: retryPolicy }
+  transition(state, 'join', 0, owner)
+  transition(state, 'claim', 0, owner)
+  transition(state, 'join', 0, waiter)
+  const follower = { id: 'follower', fingerprint: 'owner', deadline: 200 }
+  transition(state, 'join', 0, { ...follower, policy: retryPolicy })
+  let now = 100, writes = 0
+  const queue = new DispatchQueue({ pool: { connect: async () => ({
+    async query(sql, values) {
+      if (sql.startsWith('SELECT')) return { rows: [{ state: structuredClone(state), now: new Date(now) }] }
+      if (sql.startsWith('UPDATE')) { writes++; Object.assign(state, values[1]) }
+      return { rows: [] }
+    }, release() {},
+  }) } })
+  const claim = { type: 'claim', ...waiter, jitterMs: 0, leaseMs: 30000 }
+  assert.equal((await queue.transition('retry', claim)).kind, 'wait')
+  assert.equal((await queue.transition('retry', { type: 'join', ...waiter, id: 'overflow',
+    fingerprint: 'overflow', deadline: 60000 })).kind, 'busy')
+  assert.equal(writes, 0)
+  now = 200
+  assert.equal((await queue.transition('retry', claim)).kind, 'wait')
+  assert.equal(writes, 1)
+  assert.deepEqual(state.followers, [])
+  assert.equal((await queue.transition('retry', claim)).kind, 'wait')
+  assert.equal(writes, 1)
 })
 
 test('exempt PGY requests skip unrelated scheduling but retain shared identity, expiry and unknown guards', () => {

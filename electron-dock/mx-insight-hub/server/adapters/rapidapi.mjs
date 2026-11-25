@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { HUB_SOCIAL_ENDPOINTS, TWITTER_REPLIES_ENDPOINT_KEY, normalizeTwitterResponse } from '../contracts/hub-social.mjs'
+import { HUB_SOCIAL_ENDPOINTS, TWITTER_AIO_BUSY_MESSAGE, TWITTER_REPLIES_ENDPOINT_KEY, normalizeTwitterResponse } from '../contracts/hub-social.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
@@ -249,6 +249,11 @@ export class RapidApiAdapter {
       if (facebook) quota = { ...quota, monthlyExhausted: response.status === 429
         && /(?:monthly|month)[\s\S]{0,80}(?:quota|limit)|(?:quota|limit)[\s\S]{0,80}(?:monthly|month)/i.test(String(raw?.message || raw?.error?.message || '').slice(0, 500)) }
       if (!response.ok) {
+        if (request.endpointKey === HUB_SOCIAL_ENDPOINTS.search.endpointKey && response.status === 409
+          && raw?.code === 'busy' && raw.error === TWITTER_AIO_BUSY_MESSAGE) {
+          throw new RapidApiUpstreamError({ outcome: 'rejected', billed: null, httpStatus: 409,
+            businessCode: null, errorCode: 'upstream_service_busy', affectsCircuit: false }, persistence('rejected'))
+        }
         const code = raw?.error?.code ?? raw?.code
         const businessCode = typeof code === 'string' ? scrub(code) : code
         throw new RapidApiUpstreamError({ outcome: response.status < 500 ? 'rejected' : 'unknown', billed: null,

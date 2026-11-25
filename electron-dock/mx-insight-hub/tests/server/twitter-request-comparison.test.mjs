@@ -92,9 +92,10 @@ test('archive corruption, oversize, malformed UTF8/JSON and non-object payload n
   assert.equal(oversizedText.messages.message.sha256, hash('x'.repeat(1025)))
 })
 
-function mockPool({ failure = null, crossKeySuccess = false, method = 'POST', callCount = 1 } = {}) {
+function mockPool({ failure = null, crossKeySuccess = false, method = 'POST', callCount = 1, failedCall = {},
+  raw = receipt({ code: 400, message: 'Invalid query syntax' }) } = {}) {
   const tenant = randomUUID(), consumer = randomUUID(), key = randomUUID(), callIds = new Map(Object.values(ids).map(id => [id,randomUUID()]))
-  const queries = [], raw = receipt({ code: 400, message: 'Invalid query syntax' })
+  const queries = []
   let releaseError, released = false
   const pool = { connect: async () => ({ query: async (sql, params) => {
     queries.push({ sql, params })
@@ -117,7 +118,8 @@ function mockPool({ failure = null, crossKeySuccess = false, method = 'POST', ca
         operation: 'social.content.search', endpoint_key: 'twitter-aio.search', endpoint_version: 'twitter-aio.hub.v1',
         contract_version: 'mx-insight-hub.social-data.v1', outcome: original ? 'unknown' : success ? 'succeeded' : 'rejected',
         http_status: original ? null : success ? 200 : 400, billed: null, item_count: success ? 20 : null,
-        call_ordinal: ordinal, call_role: ordinal ? 'enrichment' : 'primary' })) }
+        call_ordinal: ordinal, call_role: ordinal ? 'enrichment' : 'primary',
+        ...(!original && !success ? failedCall : {}) })) }
     }
     if (sql.includes('twitter-compare:rejected-archive')) {
       assert.equal(params[0], callIds.get(ids.failedRequestId)); assert.equal(params[1], 16384)
@@ -175,6 +177,48 @@ test('single request mode reads only that request and its verified 400 archive w
     { message: 'invalid_request_id' })
 })
 
+test('single request mode projects a verified Twitter AIO 409 using bounded supplier error fields', async () => {
+  const raw = receipt({ error: 'Search failed after multiple attempts', code: 'private-unreviewed-code',
+    detail: 'Authorization: private-value', data: { text: 'private-content' } })
+  const f = mockPool({ failedCall: { http_status: 409 }, raw })
+  const report = await diagnoseTwitterRequest(f.pool, ids.failedRequestId)
+  const [call] = report.request.ownCalls
+  assert.equal(report.businessCalls, 0)
+  assert.equal(report.request.httpStatus, 502)
+  assert.equal(call.httpStatus, 409)
+  assert.equal(call.rejectedArchive.state, 'verified_http409_error_fields')
+  assert.equal(call.rejectedArchive.sha256, raw.body_sha256)
+  assert.equal(call.rejectedArchive.messages.error.text, 'Search failed after multiple attempts')
+  assert.equal(call.rejectedArchive.messages.detail.state, 'credential_related_text_withheld')
+  assert.deepEqual(call.rejectedArchive.code, { state: 'unreviewed_code_withheld',
+    length: 'private-unreviewed-code'.length, sha256: hash('private-unreviewed-code') })
+  assert.doesNotMatch(JSON.stringify(report), /private-/u)
+  assert.equal(f.queries.filter(row => row.sql.includes('twitter-compare:rejected-archive')).length, 1)
+  assert.equal(inspectTwitterRejectedArchive({ ...raw, body_sha256: '0'.repeat(64) }, 409).state, 'archive_integrity_failed')
+})
+
+test('the standalone 409 inspector admits the reviewed busy code only with its archived message', () => {
+  const message = 'TWI-BUSY - Temporarily unavailable. You were not charged, please retry in a few seconds.'
+  const raw = receipt({ code: 'busy', error: message })
+  const projected = inspectTwitterRejectedArchive(raw, 409)
+  assert.equal(projected.code, 'busy')
+  assert.equal(projected.messages.error.text, message)
+  assert.equal(inspectTwitterRejectedArchive(raw, 400).code.state, 'unreviewed_code_withheld')
+  assert.equal(inspectTwitterRejectedArchive(receipt({ code: 'busy', error: 'different' }), 409).code.state, 'unreviewed_code_withheld')
+})
+
+test('409 archive access requires a rejected call on the exact Twitter AIO search contract', async () => {
+  for (const changed of [{ outcome: 'unknown' }, { provider_key: 'tikhub' }, { operation: 'social.content.comments' },
+    { endpoint_key: 'twitter-aio.user-info' }, { endpoint_version: 'future' }, { contract_version: 'other' },
+    { http_status: 429 }]) {
+    const f = mockPool({ failedCall: { http_status: 409, ...changed } })
+    const { request } = await diagnoseTwitterRequest(f.pool, ids.failedRequestId)
+    assert.equal(request.ownCalls[0].rejectedArchive.state,
+      changed.http_status === 429 ? 'not_rejected_http400' : 'not_matching_twitter_aio_rejection')
+    assert.equal(f.queries.filter(row => row.sql.includes('twitter-compare:rejected-archive')).length, 0)
+  }
+})
+
 test('comparison bounds owned calls and safely closes failed queries or rollback without exposing errors', async () => {
   const f = mockPool({ callCount: 16 }), result = await compareTwitterRequests(f.pool, ids)
   assert.equal(result.requests.failed.ownCalls.length, 15)
@@ -207,7 +251,7 @@ test('standalone CLI validates the selected UUIDs before pg import and emits onl
   }
 })
 
-test('actual PostgreSQL comparison uses a readonly snapshot and reads only the selected HTTP400 archive', {
+test('PostgreSQL comparisons and single-request diagnostics read only selected 400 and 409 archives', {
   skip: !modulePath && 'Set MX_INSIGHT_TEST_PGLITE_MODULE for actual PostgreSQL execution',
 }, async t => {
   const { PGlite } = await import(pathToFileURL(modulePath).href)
@@ -225,7 +269,9 @@ test('actual PostgreSQL comparison uses a readonly snapshot and reads only the s
   await db.query("INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,'Fixture','fixture')", [consumer,tenant])
   await db.query("INSERT INTO api_keys(id,tenant_id,consumer_id,name,key_digest,key_prefix,last_four) VALUES($1,$2,$3,'Fixture',$4,'fixture','0000')",
     [key,tenant,consumer,'a'.repeat(64)])
-  const failedCall = randomUUID(), receiptBytes = receipt({ message: 'Invalid query syntax', data: 'private-business-data' })
+  const failedCall = randomUUID(), conflictCall = randomUUID()
+  const receiptBytes = receipt({ message: 'Invalid query syntax', data: 'private-business-data' })
+  const conflictBytes = receipt({ error: 'Search attempts exhausted', code: 'BAD_REQUEST', data: 'private-unrelated-response' })
   for (const requestId of [...Object.values(ids), unrelated]) {
     const success = requestId === ids.successRequestId, original = requestId === ids.originalRequestId
     const saved = snapshot({ platform: 'twitter', query: success ? 'timo' : requestId === unrelated ? 'private-unrelated-query' : query,
@@ -234,14 +280,14 @@ test('actual PostgreSQL comparison uses a readonly snapshot and reads only the s
       response_status,acquisition_request,response_body) VALUES($1,$2,$3,$4,$5,$6,'twitter',$7,$8,$9,$10)`,
     [requestId,tenant,consumer,key,requestId,'a'.repeat(64),original ? 'unknown' : 'committed',original ? null : success ? 200 : 502,
       JSON.stringify(saved),JSON.stringify({ data: { pageInfo: { returnedCount: success ? 20 : 0, hasMore: false }, items: ['private-business-body'] } })])
-    const callId = requestId === ids.failedRequestId ? failedCall : randomUUID()
+    const callId = requestId === ids.failedRequestId ? failedCall : requestId === unrelated ? conflictCall : randomUUID()
     await db.query(`INSERT INTO external_platform.provider_calls(id,provider_key,tenant_id,consumer_id,api_key_id,usage_request_id,
       operation,contract_version,endpoint_key,endpoint_version,marketplace,request_fingerprint,outcome,http_status,completed_at)
       VALUES($1,'rapidapi',$2,$3,$4,$5,'social.content.search','mx-insight-hub.social-data.v1','twitter-aio.search','twitter-aio.hub.v1',
       'twitter',$6,$7,$8,now())`, [callId,tenant,consumer,key,requestId,'a'.repeat(64),original ? 'unknown' : success ? 'succeeded' : 'rejected',
-      original ? null : success ? 200 : 400])
+      original ? null : success ? 200 : requestId === unrelated ? 409 : 400])
     if (requestId === ids.failedRequestId || requestId === unrelated) {
-      const raw = requestId === unrelated ? receipt({ message: 'private-unrelated-response' }) : receiptBytes
+      const raw = requestId === unrelated ? conflictBytes : receiptBytes
       await db.query(`INSERT INTO control.external_platform_restricted_raw_responses
         (id,provider_call_id,body_size,body_sha256,body_bytes,json_parsed,captured_at) VALUES($1,$2,$3,$4,$5,true,now())`,
       [randomUUID(),callId,raw.body_size,raw.body_sha256,raw.body_bytes])
@@ -275,5 +321,14 @@ test('actual PostgreSQL comparison uses a readonly snapshot and reads only the s
   assert.deepEqual(archiveIds, [failedCall])
   assert.doesNotMatch(JSON.stringify(single), /private-business|private-unrelated/u)
   assert.equal(single.requests, undefined); assert.equal(single.comparisons, undefined)
+  archiveIds.length = 0
+  const conflict = await diagnoseTwitterRequest(pool, unrelated, normalizers)
+  assert.deepEqual(archiveIds, [conflictCall])
+  const archive = conflict.request.ownCalls[0].rejectedArchive
+  assert.equal(archive.state, 'verified_http409_error_fields')
+  assert.equal(archive.sha256, conflictBytes.body_sha256)
+  assert.equal(archive.messages.error.text, 'Search attempts exhausted')
+  assert.equal(archive.code, 'BAD_REQUEST')
+  assert.doesNotMatch(JSON.stringify(conflict), /private-unrelated-response|private-business/u)
   assert.equal((await db.query('SELECT count(*)::int AS n FROM usage_requests')).rows[0].n, 4)
 })

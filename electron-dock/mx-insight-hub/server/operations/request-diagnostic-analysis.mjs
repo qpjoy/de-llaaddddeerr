@@ -1,6 +1,7 @@
 // Interpret only the already projected, read-only request diagnostic DTO.
 // No request/response bodies, arbitrary log text, I/O, or model invocation.
 import { platformDiagnosticAnalysis } from './platform-diagnostic-analysis.mjs'
+import { TWITTER_AIO_BUSY_MESSAGE } from '../contracts/hub-social.mjs'
 
 export function analyzeRequestDiagnostic(run) {
   const providers = Array.isArray(run.providerCalls) ? run.providerCalls : []
@@ -110,7 +111,37 @@ export function analyzeRequestDiagnostic(run) {
       tikhubRateLimited)
     nextSteps.push('在 TikHub 控制台 API Settings → RPS Settings 核对当前账户档位、有效期及是否回落到默认档；按账户汇总各应用的请求速率并调整并发/节流。Hub 的本地配额或 100 QPS 配置不能证明供应商账户也是 100 RPS；本诊断不会自动重发请求。')
   }
-  if (rejected.length) {
+  const [onlyCall] = providers
+  const twitterSearch409 = run.platform === 'twitter' && run.status === 'committed' && run.responseStatus === 502
+    && run.hasResponseBody && ['social_upstream_rejected', 'upstream_service_busy'].includes(run.errorCode) && !run.callsTruncated
+    && !connectors.length && providers.every(call => call.provider === 'rapidapi' && call.operation === 'social.content.search'
+      && call.endpoint === 'twitter-aio.search' && call.outcome === 'rejected' && call.httpStatus === 409)
+  if (twitterSearch409 && providers.length === 2 && providers.every(call => call.errorCode === 'upstream_service_busy')
+    && providers.some(call => call.callOrdinal === 0 && call.callRole === 'primary')
+    && providers.some(call => call.callOrdinal === 1 && call.callRole === 'retry')) {
+    summary = 'RapidAPI 的 Twitter 搜索首次返回繁忙，Hub 重试一次后仍收到 HTTP 409，已保存 HTTP 502。'
+    add('provider_rejection_recorded', 'confirmed', '同一请求的两次调用均报告繁忙',
+      '首次调用和重试各有一条 upstream_service_busy 回执。采购费用可按两个上游 requestId 分别核对，客户结算使用本次 Hub 请求 ID。',
+      refs(providers, () => true, 'providerCalls', ['callOrdinal', 'callRole', 'errorCode', 'httpStatus']))
+  } else if (twitterSearch409 && providers.length === 1) {
+    const reviewedBusy = onlyCall.messageEvidence === 'reviewed_archive_message' && onlyCall.message === TWITTER_AIO_BUSY_MESSAGE
+    const busy = reviewedBusy || onlyCall.errorCode === 'upstream_service_busy'
+    const evidence = ['responseStatus', 'errorCode', 'providerCalls[0].provider', 'providerCalls[0].operation',
+      'providerCalls[0].endpoint', 'providerCalls[0].httpStatus', 'providerCalls[0].outcome']
+    if (busy) {
+      summary = 'Twitter AIO 报告搜索服务暂时繁忙（HTTP 409），Hub 已保存 HTTP 502。'
+      evidence.push(reviewedBusy ? 'providerCalls[0].message' : 'providerCalls[0].errorCode')
+      add('provider_rejection_recorded', 'confirmed', '供应商报告暂时繁忙', reviewedBusy
+        ? '归档中的 TWI-BUSY 消息说明供应商当时繁忙，并称本次未收费。实际采购费用以供应商账单为准，客户扣款见本次结算记录。'
+        : '供应商调用账本记录了 upstream_service_busy。供应商费用与客户扣款分别以各自账本为准。', evidence)
+      nextSteps.push('如需对账，可用上游 requestId 核对供应商账单，再用 Hub 请求 ID 核对客户结算。')
+    } else {
+      summary = 'Twitter AIO 搜索返回 HTTP 409，Hub 已将这次拒绝保存为 HTTP 502。'
+      add('provider_rejection_recorded', 'confirmed', 'RapidAPI 返回了 Twitter 搜索的 409',
+        '账本确认供应商返回了 409。具体拒绝原因需核对本次调用归档。', evidence)
+      nextSteps.push('按原请求 ID 核对保存的搜索参数和受限归档中的错误字段。需要供应商核查时，使用这次调用的上游 requestId。')
+    }
+  } else if (rejected.length) {
     add('provider_rejection_recorded', 'confirmed', '已保存供应商拒绝证据',
       '调用账本记录 rejected；HTTP 与业务码需要一起阅读。若 Hub 交付了存量回退，这些拒绝不等于最终交付失败。具体原因以已核实错误说明及原调用记录为准。', rejected)
   }

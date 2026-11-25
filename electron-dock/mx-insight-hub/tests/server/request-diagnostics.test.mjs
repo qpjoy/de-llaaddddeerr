@@ -198,7 +198,7 @@ test('Threads diagnostics reports the reviewed RapidAPI subscription rejection o
 })
 
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
-test('the provider SQL projection admits only the top-level Threads subscription message for a rejected RapidAPI 403', {
+test('the provider SQL projection limits Threads subscription and Twitter busy messages to their exact receipts', {
   skip: !pgliteModule && 'Set MX_INSIGHT_TEST_PGLITE_MODULE',
 }, async t => {
   const { PGlite } = await import(pathToFileURL(pgliteModule).href)
@@ -208,22 +208,35 @@ test('the provider SQL projection admits only the top-level Threads subscription
     CREATE TABLE external_platform.provider_calls (id integer PRIMARY KEY, usage_request_id uuid, provider_key text,
       operation text, endpoint_key text, outcome text, http_status int, business_code int, error_code text,
       upstream_request_id text, billed boolean, cost_minor int, cost_kind text, currency text, latency_ms int,
-      started_at timestamptz, completed_at timestamptz);
+      started_at timestamptz, completed_at timestamptz, call_ordinal int, call_role text);
     CREATE TABLE external_platform.response_archives (id integer, provider_call_id integer, content_type text, body_size int, raw_payload jsonb);
     CREATE TABLE control.external_platform_restricted_raw_responses (id integer, provider_call_id integer, parsed_payload jsonb);`)
+  const busyMessage = 'TWI-BUSY - Temporarily unavailable. You were not charged, please retry in a few seconds.'
+  const twitter = { operation: 'social.content.search', endpoint_key: 'twitter-aio.search', http_status: 409 }
+  const busyPayload = { code: 'busy', error: busyMessage, debug: 'private credentials' }
   const cases = [
-    [{}, { message: subscriptionMessage, debug: 'private credentials' }],
+    [{}, { message: subscriptionMessage, debug: 'private credentials' }, subscriptionMessage],
     [{}, { message: subscriptionMessage + ' private credentials' }],
     [{}, { error: { message: subscriptionMessage } }],
     [{ provider_key: 'tikhub' }, { message: subscriptionMessage }],
     [{ operation: 'native.r.other_unreviewed_api' }, { message: subscriptionMessage }],
     [{ http_status: 401 }, { message: subscriptionMessage }],
     [{ outcome: 'unknown' }, { message: subscriptionMessage }],
+    [twitter, busyPayload, busyMessage],
+    [twitter, { ...busyPayload, code: 'BUSY' }],
+    [twitter, { ...busyPayload, error: busyMessage + ' private credentials' }],
+    [twitter, { code: 'busy', error: { message: busyMessage } }],
+    [{ ...twitter, http_status: 400 }, busyPayload],
+    [{ ...twitter, endpoint_key: 'twitter-aio.crawl' }, busyPayload],
+    [{ ...twitter, operation: 'social.profile.get' }, busyPayload],
+    [{ ...twitter, provider_key: 'tikhub' }, busyPayload],
+    [{ ...twitter, outcome: 'unknown' }, busyPayload],
   ]
   for (const [i, [patch, payload]] of cases.entries()) {
     const call = { ...threadsCall, ...patch }
     await db.query(`INSERT INTO external_platform.provider_calls
-      (id,usage_request_id,provider_key,operation,endpoint_key,outcome,http_status) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      (id,usage_request_id,provider_key,operation,endpoint_key,outcome,http_status,call_ordinal,call_role)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,0,'primary')`,
     [i, id, call.provider_key, call.operation, call.endpoint_key, call.outcome, call.http_status])
     await db.query('INSERT INTO control.external_platform_restricted_raw_responses VALUES ($1,$1,$2)',
       [i, JSON.stringify(payload)])
@@ -232,9 +245,29 @@ test('the provider SQL projection admits only the top-level Threads subscription
   await lookupRequestDiagnostics(f.pool, id)
   const { sql, params } = f.queries.find(q => q.sql.includes('request-diagnostics:providers'))
   const { rows } = await db.query(sql, params)
-  assert.deepEqual(rows.map(row => row.reviewed_message), cases.map((_, i) => i === 0 ? subscriptionMessage : null))
+  assert.deepEqual(rows.map(row => row.reviewed_message), cases.map(([, , expected = null]) => expected))
   assert.doesNotMatch(JSON.stringify(rows), /private credentials/u)
   assert.ok(rows.every(row => row.transport_failure === null && row.transport_failure_too_large === false))
+
+  const busy = rows.find(row => row.reviewed_message === busyMessage)
+  const diagnoseTwitter = async patch => (await lookupRequestDiagnostics(fixture({
+    platform: 'twitter', status: 'committed', errorCode: 'social_upstream_rejected', providers: [{ ...busy, ...patch }],
+  }).pool, id)).runs[0]
+  const historical = await diagnoseTwitter({})
+  assert.equal(historical.providerCalls[0].message, busyMessage)
+  assert.equal(historical.providerCalls[0].messageEvidence, 'reviewed_archive_message')
+  assert.equal(historical.providerCalls[0].billed, null)
+  assert.equal(historical.providerCalls[0].callOrdinal, 0)
+  assert.equal(historical.providerCalls[0].callRole, 'primary')
+  assert.match(historical.analysis.summary, /搜索服务暂时繁忙.*409.*502/u)
+  assert.match(historical.analysis.findings.find(item => item.code === 'provider_rejection_recorded').detail,
+    /称本次未收费.*供应商账单.*客户扣款/u)
+  for (const patch of [{ provider_key: 'other' }, { http_status: 400 }, { has_restricted_archive: false },
+    { endpoint_key: 'twitter-aio.crawl' }, { reviewed_message: busyMessage + ' private credentials' }]) {
+    const run = await diagnoseTwitter(patch)
+    assert.equal(run.providerCalls[0].message, null)
+    assert.doesNotMatch(JSON.stringify(run), /暂时繁忙|TWI-BUSY|private credentials/u)
+  }
 
   const transport = { phase: 'body', codes: ['UND_ERR_SOCKET'], deadlineExceeded: false, elapsedMs: 4065, timeoutMs: 30000 }
   await db.query('INSERT INTO external_platform.response_archives (id, provider_call_id, raw_payload) VALUES (0, 0, $1)',
