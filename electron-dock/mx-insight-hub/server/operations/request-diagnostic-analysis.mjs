@@ -72,16 +72,29 @@ export function analyzeRequestDiagnostic(run) {
       'failureKind=timeout 确认 Hub 等待边界发生超时；不能仅凭耗时推断部署超时配置、下游停止、供应商失败或最终费用。', timeouts)
     nextSteps.push('按连接器关联 ID 与调用时间核对原下游记录及生效超时配置；仅凭相近时间的候选记录不能确认属于同一请求。')
   }
-  if (unknownCalls.length) {
-    add('call_outcome_unknown', 'confirmed', '部分调用最终结果未知',
-      '调用账本仍为 unknown；即使已收到 HTTP 响应头，也不能据此确认响应体完整或业务成功。Hub 最终交付请另看请求状态。', unknownCalls)
-  }
+  const [onlyCall] = providers
   if (run.status === 'unknown' || unknownCalls.length) {
-    add('unknown_cause_unresolved', 'unresolved', '尚未确认唯一根因',
-      timeouts.length
-        ? '已确认等待超时，但尚不能区分下游处理慢、传输或响应读取停滞；下游最终结果需要原调用的明确记录，不能根据相近时间的其他请求补齐。'
-        : '现有状态不能区分下游处理慢、传输中断、响应读取异常或证据持久化失败；需要原调用的明确记录，不能根据错误名称补齐。',
-      ['status', 'errorCode', ...unknownCalls])
+    const threadsScraper502 = run.platform === 'threads' && run.status === 'unknown' && run.errorCode === 'social_upstream_rejected'
+      && !refusal && !run.callsTruncated && !connectors.length && providers.length === 1
+      && onlyCall.provider === 'rapidapi' && onlyCall.operation === 'native.r.threads_scraper_search_posts'
+      && onlyCall.endpoint === onlyCall.operation && onlyCall.outcome === 'unknown' && onlyCall.httpStatus === 502
+      && onlyCall.errorCode === 'social_upstream_rejected' && onlyCall.hasRestrictedArchive === true && onlyCall.upstreamRequestId
+    if (threadsScraper502) {
+      summary = 'Hub 调用 RapidAPI 的 Threads Scraper 内容搜索时收到 HTTP 502，交付结果仍未知。'
+      add('threads_scraper_search_http_502', 'confirmed', '已保存供应商 HTTP 502 回执',
+        '本次搜索调用有上游请求 ID 和受限响应归档。可用该 ID 向供应商核对网关报错的具体原因及搜索是否已执行。',
+        refs(providers, () => true, 'providerCalls', ['provider', 'operation', 'endpoint', 'httpStatus', 'errorCode', 'outcome', 'hasRestrictedArchive', 'upstreamRequestId']))
+    } else {
+      if (unknownCalls.length) {
+        add('call_outcome_unknown', 'confirmed', '部分调用最终结果未知',
+          '调用账本仍为 unknown；即使已收到 HTTP 响应头，也不能据此确认响应体完整或业务成功。Hub 最终交付请另看请求状态。', unknownCalls)
+      }
+      add('unknown_cause_unresolved', 'unresolved', '尚未确认唯一根因',
+        timeouts.length
+          ? '已确认等待超时，但尚不能区分下游处理慢、传输或响应读取停滞；下游最终结果需要原调用的明确记录，不能根据相近时间的其他请求补齐。'
+          : '现有状态不能区分下游处理慢、传输中断、响应读取异常或证据持久化失败；需要原调用的明确记录，不能根据错误名称补齐。',
+        ['status', 'errorCode', ...unknownCalls])
+    }
     nextSteps.push('保留原请求及任务身份，先核对最终结果与结算；不自动重发、换幂等键、解除 unknown 或释放冻结。')
   }
 
@@ -111,7 +124,6 @@ export function analyzeRequestDiagnostic(run) {
       tikhubRateLimited)
     nextSteps.push('在 TikHub 控制台 API Settings → RPS Settings 核对当前账户档位、有效期及是否回落到默认档；按账户汇总各应用的请求速率并调整并发/节流。Hub 的本地配额或 100 QPS 配置不能证明供应商账户也是 100 RPS；本诊断不会自动重发请求。')
   }
-  const [onlyCall] = providers
   const twitterSearchCalls = run.platform === 'twitter' && !run.callsTruncated && !connectors.length
     && providers.every(call => call.provider === 'rapidapi' && call.operation === 'social.content.search' && call.endpoint === 'twitter-aio.search')
   const primary = providers.find(call => call.callOrdinal === 0 && call.callRole === 'primary')

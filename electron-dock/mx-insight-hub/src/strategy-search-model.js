@@ -151,7 +151,9 @@ export function strategyPolicySummary(interfaceId, row) {
     const primary = providerLabel(policy.primaryProvider), fallback = providerLabel(policy.fallbackProvider)
     const level = provider => COMMENT_VERIFICATION_LABELS[row.providerVerification?.[provider]] || '未登记'
     const current = policy.mode === 'priority'
-      ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: `首请求派发前，${primary} 的凭据、操作开关或价格未就绪时改用已就绪的 ${fallback}。已派发后的拒绝、超时、未知结果或不可解析响应不会自动换供应商重买；游标固定原供应商。` }
+      ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: interfaceId === 'search' && row.platform === 'threads'
+        ? '无游标的新查询在派发前按配置顺序选择渠道。优先渠道未就绪或受熔断保护时，可选用已就绪且允许派发的保底渠道。冷却结束后的新查询会重新检查优先渠道。已派发的请求遇到 HTTP 502 或结果未知时保留原回执，续页沿用原渠道。'
+        : `首请求派发前，${primary} 的凭据、操作开关或价格未就绪时改用已就绪的 ${fallback}。已派发后的拒绝、超时、未知结果或不可解析响应不会自动换供应商重买；游标固定原供应商。` }
       : policy.mode === 'paused'
         ? { title: `暂停新的${row.platform === 'threads' && !STRATEGY_COMMENT_INTERFACES.includes(interfaceId) ? `Threads ${STRATEGY_SEARCH_INTERFACES.find(item => item.id === interfaceId)?.label || ''}` : interfaceId === 'comment-replies' ? '评论回复' : '帖子评论'}采购`, mode: '暂停', description: '停止新的供应商采购，包括续页需要的后续采购；已完成响应的精确重放和已购缓冲数据仍可交付。' }
         : { title: `固定 ${primary}`, mode: '固定供应商', description: `新请求仅使用 ${primary}（${level(policy.primaryProvider)}）。该供应商未就绪时返回具体原因，不自动切换。` }

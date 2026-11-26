@@ -24,6 +24,13 @@ import { threadsCommentRetryDelay } from './threads-comment-retry.mjs'
 
 export const THREADS_SEARCH_NOT_DISPATCHED = Symbol('threadsSearchNotDispatched')
 
+export async function socialAcquisitionCircuits(gateway, context, marketplace) {
+  const { platformStore: store, providerKey: provider } = gateway
+  const [shared, contract] = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, marketplace)])
+  const state = provider === 'tikhub' || isHubRateLimitExempt(context) ? internalCircuitState(gateway.usageStore, context, shared) : shared
+  return { state, contract }
+}
+
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const unavailable = () => new AppError(409, 'search_page_unavailable', 'The saved account page cannot be continued; restart explicitly')
@@ -287,9 +294,8 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
           await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
           await assertCommentRouteEnabled(gateway.strategySearchRoutingStore, request)
-          const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, marketplace)])
-          if (provider === 'tikhub' || isHubRateLimitExempt(context)) states[0] = internalCircuitState(gateway.usageStore, context, states[0])
-          const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
+          const circuits = await socialAcquisitionCircuits(gateway, context, marketplace)
+          const blocked = await openCircuitError({ store, ...circuits, now: clock(), config: gateway.config,
             message: 'Account acquisition is temporarily unavailable', marketplace })
           if (blocked) throw blocked
           const credential = await resolveCredential()

@@ -7,17 +7,24 @@ import { AppError } from '../core/errors.mjs'
 //   price) and the fallback is; it never retries after a supplier was called.
 // - A paused policy still routes to the primary so exact replays and bought
 //   buffered rows stay readable; the workflow refuses new purchases.
-export function createCommentRouter({ interfaceId, gateways, policyStore, platformFor, recipeFor, cursorProvider, invoke, bodyFor = input => input.body, logger = null }) {
+export function createCommentRouter({ interfaceId, gateways, policyStore, platformFor, recipeFor, cursorProvider, invoke, bodyFor = input => input.body, routeAvailable, logger = null }) {
   async function ready(platform, provider, context, body) {
     const recipe = recipeFor(platform, provider, body), gateway = gateways[platform]?.[provider]
     if (!recipe?.available || !gateway) return false
     const operationKeys = recipe.operationKeys ?? [`native.${recipe.key}`]
     try {
       const readiness = await gateway.nativeReadiness({ consumerId: context.consumer.id, operationKeys })
-      return operationKeys.every(key => readiness[key] === true)
+      if (!operationKeys.every(key => readiness[key] === true)) return false
     } catch (error) {
       logger?.warn?.(`[comment-routing] readiness unavailable for ${platform}/${provider}: ${error.code || error.name}`)
       return false
+    }
+    if (!routeAvailable) return true
+    try { return await routeAvailable(gateway, context, recipe) }
+    catch (error) {
+      // A failed circuit read provides no evidence to override the configured primary.
+      logger?.warn?.(`[comment-routing] circuit state unavailable for ${platform}/${provider}: ${error.code || error.name}`)
+      return null
     }
   }
   async function select(context, platform, body) {
@@ -31,7 +38,7 @@ export function createCommentRouter({ interfaceId, gateways, policyStore, platfo
     }
     const route = await policyStore.get(interfaceId, platform)
     if (!route) throw new AppError(503, 'strategy_search_route_unavailable', 'Comment routing configuration is unavailable')
-    if (route.mode === 'priority' && route.fallbackProvider && !await ready(platform, route.primaryProvider, context, body)
+    if (route.mode === 'priority' && route.fallbackProvider && await ready(platform, route.primaryProvider, context, body) === false
       && await ready(platform, route.fallbackProvider, context, body)) return { provider: route.fallbackProvider, reason: 'fallback' }
     return { provider: route.primaryProvider, reason: route.mode }
   }

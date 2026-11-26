@@ -126,7 +126,7 @@ function commentPlatform(interfaceId, platform, policies) {
 // The compatibility sets deliberately exclude unsupported operation/platform
 // pairs; provider credential state and paid dispatch remain in their gateways.
 export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null, facebookCrawlPolicy = null, facebookProfilePolicy = null, commentPolicies = [] } = {}) {
-  const threadsSearch = threadsPlatform('search', 'RapidAPI 的 Threads API（threads-api4）和 Threads Scraper 分别订阅。请选择当前 RapidAPI 应用已开通的服务；选用 TikHub 时使用 TikHub 凭据。后续页沿用首次查询的服务。', commentPolicies)
+  const threadsSearch = threadsPlatform('search', 'RapidAPI 的 Threads API（threads-api4）和 Threads Scraper 分别订阅。选用 TikHub 时使用 TikHub 凭据。优先与保底模式下，无游标的新查询在派发前检查渠道就绪情况与适用的熔断状态。后续页沿用首次查询的服务。', commentPolicies)
   return {
     interfaces: [
       {

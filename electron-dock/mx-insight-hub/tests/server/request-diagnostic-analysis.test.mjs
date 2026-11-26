@@ -11,6 +11,38 @@ const base = () => ({
 })
 const finding = (analysis, code) => analysis.findings.find(item => item.code === code)
 
+test('an archived Threads Scraper 502 identifies the upstream HTTP response while delivery remains unknown', () => {
+  const operation = 'native.r.threads_scraper_search_posts'
+  const call = { provider: 'rapidapi', operation, endpoint: operation, outcome: 'unknown', httpStatus: 502,
+    errorCode: 'social_upstream_rejected', upstreamRequestId: 'private-supplier-id', hasRestrictedArchive: true,
+    billed: false, latencyMs: 2813, message: 'private-supplier-body' }
+  const run = { ...base(), platform: 'threads', errorCode: 'social_upstream_rejected', providerCalls: [call],
+    customerCharge: { status: 'unknown', chargedMinor: '0', settledAt: null } }
+  const analysis = analyzeRequestDiagnostic(run)
+  assert.match(analysis.summary, /Threads Scraper.*HTTP 502.*交付结果.*未知/u)
+  const receipt = finding(analysis, 'threads_scraper_search_http_502')
+  assert.equal(receipt.certainty, 'confirmed')
+  assert.ok(receipt.evidenceRefs.includes('providerCalls[0].hasRestrictedArchive'))
+  assert.ok(receipt.evidenceRefs.includes('providerCalls[0].upstreamRequestId'))
+  assert.ok(finding(analysis, 'request_outcome_unknown'))
+  assert.ok(finding(analysis, 'customer_settlement_pending'))
+  assert.equal(finding(analysis, 'unknown_cause_unresolved'), undefined)
+  assert.match(analysis.nextSteps.join(' '), /不自动重发/u)
+  assert.doesNotMatch(JSON.stringify(analysis), /private-supplier|已保存失败响应|本次未收费/u)
+
+  for (const override of [
+    { platform: 'twitter' }, { status: 'committed' }, { errorCode: 'external_platform_persistence_unknown' },
+    { callsTruncated: true }, { connectorCalls: [{ outcome: 'unknown' }] }, { providerCalls: [call, call] },
+    ...[{ provider: 'tikhub' }, { operation: 'social.content.search' }, { endpoint: 'native.r.threads_search_top' },
+      { outcome: 'rejected' }, { httpStatus: 503 }, { httpStatus: null }, { errorCode: 'social_upstream_response_unusable' },
+      { hasRestrictedArchive: false }, { upstreamRequestId: null }].map(change => ({ providerCalls: [{ ...call, ...change }] })),
+  ]) {
+    assert.equal(finding(analyzeRequestDiagnostic({ ...run, ...override }), 'threads_scraper_search_http_502'), undefined)
+  }
+  const transport = analyzeRequestDiagnostic({ ...run, providerCalls: [{ ...call, httpStatus: null }] })
+  assert.ok(finding(transport, 'unknown_cause_unresolved'))
+})
+
 test('a saved Twitter AIO search rejection distinguishes supplier 409 from Hub 502', () => {
   const call = { provider: 'rapidapi', operation: 'social.content.search', endpoint: 'twitter-aio.search',
     outcome: 'rejected', httpStatus: 409, businessCode: null, message: 'private archive text' }

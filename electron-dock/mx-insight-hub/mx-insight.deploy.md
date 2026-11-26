@@ -125,6 +125,21 @@ sudo ss -lntp '( sport = :6443 or sport = :2379 )'
 
 Docker 和 Kubernetes/containerd 是两个镜像存储。共享镜像缺失时优先导入本机 Docker 缓存，没有缓存才拉取；`MX_INSIGHT_BUILD_PROXY` 只控制 Hub 构建，不会替 Docker daemon 或 containerd 配置仓库代理。
 
+#### npm 安装依赖时出现 `Exit handler never called!`
+
+2026-11-26 的构建在 `/mx-common` 执行 `npm ci --omit=dev` 时退出。日志没有给出失败的包或网络端点。Hub 镜像现在默认先用 npmmirror，安装失败后用 npm 官方源按同一份 lockfile 重试一次。前端和生产依赖安装共用 BuildKit 下载缓存。
+
+如果部署机的构建代理可以访问 npm 官方源，可在正常部署命令中指定它，跳过第一次镜像源尝试。在 Hub 目录执行，代理端口沿用部署机现有配置。
+
+```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+  MX_INSIGHT_BUILD_NPM_REGISTRY=https://registry.npmjs.org \
+  MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 \
+  bash scripts/manage.sh ops internal-production deploy
+```
+
+显式指定源时，本次构建只使用该源。命令行设置优先于 `.env.internal`，传入空值可恢复默认换源策略。
+
 #### Dockerfile 前端退出（2026-11-18）
 
 若输出停在 `docker-image://docker.io/docker/dockerfile:1.7`，随后报

@@ -78,6 +78,7 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
 // audited revision CAS; a pending supplier is shown but cannot be selected.
 function CommentRoutePolicyForm({ token, row, notify, onSaved, interfaceId, label }) {
   const options = commentRouteOptions(row)
+  const threadsSearch = row.platform === 'threads' && interfaceId === 'search'
   const [mode, setMode] = useState(row.policy.mode)
   const [primaryProvider, setPrimaryProvider] = useState(row.policy.primaryProvider)
   const [fallbackProvider, setFallbackProvider] = useState(row.policy.fallbackProvider || options.providers.find(value => value !== row.policy.primaryProvider) || '')
@@ -103,11 +104,13 @@ function CommentRoutePolicyForm({ token, row, notify, onSaved, interfaceId, labe
         options={options.modes.map(value => ({ value, label: COMMENT_STRATEGY_MODE_LABELS[value] }))} />
       <DropdownField label={mode === 'priority' ? '优先供应商' : mode === 'paused' ? '保留的供应商设置' : '固定供应商'} value={primaryProvider} disabled={busy || conflict}
         onChange={setPrimaryProvider} options={options.providers.map(providerOption)} />
-      {mode === 'priority' ? <DropdownField label="保底供应商（派发前未就绪时使用）" value={fallbackProvider} disabled={busy || conflict}
+      {mode === 'priority' ? <DropdownField label={threadsSearch ? '保底供应商' : '保底供应商（派发前未就绪时使用）'} value={fallbackProvider} disabled={busy || conflict}
         onChange={setFallbackProvider} options={options.providers.filter(value => value !== primaryProvider).map(providerOption)} /> : null}
     </div>
     {pendingChoice ? <p role="status">所选供应商的返回结构尚待校准：该平台的新请求会在派发前返回 external_platform_contract_unverified（不调用供应商、不计费）。完成一次校准样本并发布后即可选择。</p> : null}
-    <p>{mode === 'priority' ? '只在首请求尚未派发、优先供应商凭据、操作开关或价格未就绪时改用保底供应商；已派发后的拒绝、超时、未知结果与不可解析响应不会换供应商重买。'
+    <p>{mode === 'priority' ? (threadsSearch
+      ? '新查询派发前按顺序检查渠道的凭据、操作开关、价格与适用于当前 Key 的熔断状态。已派发后收到 502 或结果未知时，仅使用原幂等键核对回执，不向保底渠道补采。'
+      : '只在首请求尚未派发、优先供应商凭据、操作开关或价格未就绪时改用保底供应商；已派发后的拒绝、超时、未知结果与不可解析响应不会换供应商重买。')
       : mode === 'paused' ? '暂停新的供应商采购（含续页需要的后续采购）；精确重放和已购缓冲仍可交付。' : '新请求只使用所选供应商；未就绪时返回具体原因，不自动切换。'}
       已有游标继续绑定原供应商。已校准可选：{selectable.map(value => supplier(value, row.platform)).join(' / ') || '暂无'}。</p>
     <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy || conflict} onChange={event => setReason(event.target.value)} placeholder="记录此次策略调整的原因" /></Field>

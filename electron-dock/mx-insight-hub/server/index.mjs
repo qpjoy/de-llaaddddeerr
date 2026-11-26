@@ -46,7 +46,7 @@ import { normalizeHubSocialCompatRequest, threadsAccountRecipe } from './contrac
 import { normalizeThreadsPostDetail, threadsPostDetailRecipe } from './contracts/threads-post-detail.mjs'
 import { threadsSearchRecipe } from './contracts/threads-search.mjs'
 import { THREADS_SCRAPER_ROUTE } from '../shared/threads-search-routing.mjs'
-import { threadsSearchCursorProvider } from './external-platforms/threads-search-workflow.mjs'
+import { threadsSearchCursorProvider, threadsSearchRouteAvailable } from './external-platforms/threads-search-workflow.mjs'
 import { socialAccountCursorProvider, threadsAccountReceiptProvider } from './external-platforms/social-account-delivery.mjs'
 import { normalizePostCommentsRequest, POST_COMMENTS_RECIPES, POST_COMMENT_PROVIDER_RECIPES, POST_COMMENTS_PATH,
   postCommentRecipe, postCommentsPlatform } from './contracts/post-comments.mjs'
@@ -536,7 +536,7 @@ export async function createRuntime(config = loadConfig()) {
   const threadsListingGateways = { ...threadsGateways, [THREADS_SCRAPER_ROUTE]: threadsGateways.rapidapi }
   const threadsRouter = options => createCommentRouter({ gateways: { threads: threadsListingGateways }, policyStore: strategySearchRoutingStore,
     platformFor: () => 'threads', ...options })
-  const threadsSearch = threadsRouter({ interfaceId: 'search', recipeFor: threadsSearchRecipe,
+  const threadsSearch = threadsRouter({ interfaceId: 'search', recipeFor: threadsSearchRecipe, routeAvailable: threadsSearchRouteAvailable,
     cursorProvider: (input, options) => threadsSearchCursorProvider(input, options),
     bodyFor: input => input.normalized, invoke: (gateway, context, input) => gateway.searchThreads(context, input) })
   const threadsPostDetail = threadsRouter({ interfaceId: 'post-detail', recipeFor: threadsPostDetailRecipe, cursorProvider: () => null,

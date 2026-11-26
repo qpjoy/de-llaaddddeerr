@@ -5,9 +5,9 @@
 # caches remain eligible rather than forcing a new base-image pull. Native
 # TypeScript still has a hard minimum, enforced immediately below.
 FROM node:22-bookworm-slim AS build
-# Default to the China npm mirror so the build needs no oversea proxy.
-# Override with --build-arg NPM_REGISTRY=https://registry.npmjs.org if desired.
-ARG NPM_REGISTRY=https://registry.npmmirror.com
+# An explicit registry pins all npm installs. The default tries the mirror first.
+ARG NPM_REGISTRY
+COPY scripts/image-npm-ci.sh /usr/local/bin/hub-npm-ci
 
 RUN node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 18)) throw new Error('mx-insight-hub requires Node >=22.18 for native TypeScript')"
 
@@ -23,7 +23,7 @@ COPY --from=ui_design src /workspace/mx-launcher/ui-design/src
 COPY --from=mx_common package.json package-lock.json /workspace/mx-common/
 COPY --from=mx_pay package.json /workspace/mx-base/mx-pay/package.json
 COPY package.json package-lock.json ./
-RUN npm ci --registry="$NPM_REGISTRY" --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000
+RUN --mount=type=cache,id=mx-insight-hub-npm,target=/root/.npm sh /usr/local/bin/hub-npm-ci
 COPY --from=mx_common src /workspace/mx-common/src
 COPY --from=mx_common migrations /workspace/mx-common/migrations
 COPY --from=mx_pay src /workspace/mx-base/mx-pay/src
@@ -32,7 +32,8 @@ COPY . ./
 RUN npm run build
 
 FROM node:22-bookworm-slim AS production-dependencies
-ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG NPM_REGISTRY
+COPY scripts/image-npm-ci.sh /usr/local/bin/hub-npm-ci
 
 # mx-common is a `file:` dependency, so npm links it rather than copying it, and
 # Node resolves its imports from the package's own realpath. Its dependencies
@@ -50,23 +51,14 @@ COPY --from=mx_common package.json package-lock.json ./
 # first meant a one-line change to shared source invalidated the install and
 # went back to the registry for every dependency, turning a seconds-long
 # rebuild into a minutes-long one that can fail on its own.
-# Retries and an explicit timeout are load-bearing, not cosmetic. A mirror that
-# lacks one platform-specific optional package -- @node-rs/jieba ships prebuilt
-# binaries per platform -- leaves npm waiting on a host this network cannot
-# reach, and npm's own exit handler then fails with "Exit handler never called"
-# instead of naming the package. A bounded fetch fails as a fetch.
-RUN npm ci --omit=dev --registry="$NPM_REGISTRY" \
-      --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000 \
- && npm cache clean --force
+RUN --mount=type=cache,id=mx-insight-hub-npm,target=/root/.npm sh /usr/local/bin/hub-npm-ci --omit=dev
 COPY --from=mx_common src ./src
 COPY --from=mx_common migrations ./migrations
 
 WORKDIR /app
 COPY --from=mx_pay package.json /mx-base/mx-pay/package.json
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --registry="$NPM_REGISTRY" \
-      --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000 --fetch-timeout=300000 \
- && npm cache clean --force
+RUN --mount=type=cache,id=mx-insight-hub-npm,target=/root/.npm sh /usr/local/bin/hub-npm-ci --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \

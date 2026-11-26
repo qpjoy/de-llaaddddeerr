@@ -1,6 +1,6 @@
 # Threads 接口手册
 
-更新于 2026-11-20
+更新于 2026-11-26
 
 策略搜索支持按关键词找帖子、按账号取发帖或资料、按标识取单帖，以及读取评论和回复。策略接口统一使用 `platform: "threads"`。持有该平台授权的 Key 可通过 `GET /api/v1/data/capabilities` 查询平台条目的 `search.ready`。同时拥有 `social.posts.resolve` 授权的 Key 还可读取 `postDetail.ready`。它表示当前 Hub 的搜索路由及操作就绪情况。供应商订阅和上游实时响应要按实际调用核对。
 
@@ -36,6 +36,10 @@
 | `fillPage` | boolean | 否 | 可传，Threads 始终按单页返回 |
 
 不支持 `params`，传了返回 400。Threads API 使用最新内容搜索；Threads Scraper 保留供应商返回的顺序，不保证按发布时间排序。`/api/v2/data/search` 另需 `timeWindow`，见策略搜索手册。
+
+在「优先与保底」模式下，无游标、使用新幂等键的独立搜索会在派发前按配置顺序检查渠道凭据、操作开关、价格及适用于当前 Key 的熔断状态。优先渠道未就绪或处于熔断冷却期时，Hub 可选择已就绪且允许派发的保底渠道。冷却结束后，后续新搜索会再次检查优先渠道。
+
+同一次搜索一旦派发，即使收到 HTTP 502 或结果为 `unknown`，Hub 也不会切换渠道补采。可携原幂等键只读查询 `GET /api/v1/requests/by-idempotency-key` 核对回执。续页使用新的幂等键和上一页的 `nextCursor`，游标继续绑定签发它的渠道。
 
 ```bash
 curl -sS -X POST "$HUB_URL/api/v1/data/search" \

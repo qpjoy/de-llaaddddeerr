@@ -330,4 +330,85 @@ test('public Threads routes deliver five original listing interfaces and replay 
     assert.deepEqual(store.requests.get(failure.requestId), originalUsage)
     assert.deepEqual(store.customerCharges.get(failure.requestId), originalCharge)
   })
+
+  await t.test('an open Scraper circuit sends only an independent homepage purchase to TikHub', async () => {
+    await service.addTenantCredit(tenant.id, { amountMinor: 10, currency: 'CNY', reason: 'Exercise independent Threads purchases' },
+      { idempotencyKey: 'threads-circuit-credit', actor: 'fixture' })
+    const primary = 'rapidapi-threads-scraper'
+    await runtime.strategySearchRoutingStore.update('search', 'threads', { mode: 'priority', primaryProvider: primary,
+      fallbackProvider: 'tikhub', expectedRevision: 5, reason: 'Exercise the Threads search fallback' })
+    const platformStore = accountGateway.platformStore
+    platformStore.circuitFailureThreshold = 1
+    const purchases = []
+    accountGateway.adapter = new RapidApiAdapter({ apiKey, fetchImpl: async (url, options) => {
+      purchases.push(url.pathname)
+      if (url.searchParams.get('query') === 'gateway failure') {
+        return Response.json({ message: 'Bad Gateway' }, { status: 502, headers: { 'x-rapidapi-proxy-response': 'true' } })
+      }
+      return fixtureFetch(url, options)
+    } })
+    const tikPath = '/api/v1/threads/web/search_posts'
+    fallbackGateway.adapter = new TikHubAdapter({ apiKey: 'synthetic-threads-fallback-credential', fetchImpl: async input => {
+      const url = new URL(input)
+      purchases.push(url.pathname)
+      assert.equal(url.pathname, tikPath)
+      assert.equal(url.searchParams.get('query'), 'gateway failure')
+      const post = samples.searchRecent.data.searchResults.edges[0].node.thread.thread_items[0].post
+      return Response.json({ code: 200, data: { results: [{ post, user: post.user }] } })
+    } })
+    const signed = await (await send('search', { query: 'cursor owner' }, 'threads-breaker-cursor')).json()
+    assert.ok(signed.data.pageInfo.nextCursor)
+    const input = { query: 'gateway failure' }, originalKey = 'threads-breaker-original'
+    const failedResponse = await send('search', input, originalKey)
+    assert.equal(failedResponse.status, 502)
+    const failed = await failedResponse.json()
+    assert.equal(failed.error.code, 'upstream_outcome_unknown')
+    const receipt = [...platformStore.calls.values()].find(c => c.usageRequestId === failed.requestId)
+    assert.deepEqual([receipt.marketplace, receipt.httpStatus, receipt.outcome, receipt.billed], ['threads-scraper', 502, 'unknown', false])
+    const originalCharge = structuredClone(store.customerCharges.get(failed.requestId))
+    const scraperPath = '/api/v1/posts/search'
+    assert.deepEqual(purchases, [scraperPath, scraperPath])
+
+    const unavailable = await send('search', input, 'threads-breaker-no-fallback')
+    assert.equal((await unavailable.json()).error.code, 'external_platform_circuit_open')
+    const tik = NATIVE_FORWARDING_ENDPOINTS.find(e => e.path === tikPath)
+    await runtime.externalPlatformControlStore.updatePolicy('tikhub', tik.operation, { expectedRevision: 1,
+      desiredState: 'active', reason: 'Enable the TikHub backup operation in the fixture',
+      priceBook: { currency: 'USD', pricingAsOf: '2026-11-11T00:00:00Z', monthlyBudgetMinor: 1000,
+        monthlySubsidyBudgetMinor: 1000, unitCostMinorByEndpoint: { [tik.endpointKey]: 1 } },
+    }, { runtime: { config: fallbackGateway.config, credentialConfigured: true } })
+    const retained = await send('search', input, originalKey)
+    assert.equal(retained.status, 409)
+    assert.equal((await retained.json()).error.details.requestId, failed.requestId)
+    const replay = await send('search', { query: 'cursor owner' }, 'threads-breaker-cursor')
+    assert.equal(replay.headers.get('idempotent-replay'), 'true')
+    assert.deepEqual(await replay.json(), signed)
+    const pinned = await send('search', { query: 'cursor owner', cursor: signed.data.pageInfo.nextCursor }, 'threads-breaker-page')
+    assert.equal((await pinned.json()).error.code, 'external_platform_circuit_open')
+    assert.equal(purchases.length, 2)
+
+    const fresh = await send('search', input, 'threads-breaker-independent'), delivered = await fresh.json()
+    assert.equal(fresh.status, 200, JSON.stringify(delivered))
+    assert.notEqual(delivered.requestId, failed.requestId)
+    assert.equal(delivered.data.items.length, 1)
+    const tikCalls = [...fallbackGateway.platformStore.calls.values()].filter(c => c.usageRequestId === delivered.requestId)
+    assert.deepEqual(tikCalls.map(c => [c.providerKey, c.operation, c.outcome]), [['tikhub', tik.operation, 'succeeded']])
+    assert.equal(store.requests.get(failed.requestId).status, 'unknown')
+    assert.deepEqual(store.customerCharges.get(failed.requestId), originalCharge)
+    assert.deepEqual(purchases.slice(2), [tikPath])
+
+    await runtime.strategySearchRoutingStore.update('search', 'threads', { mode: 'fixed', primaryProvider: primary,
+      fallbackProvider: null, expectedRevision: 6, reason: 'Respect fixed search mode' })
+    const fixed = await send('search', input, 'threads-breaker-fixed')
+    assert.equal((await fixed.json()).error.code, 'external_platform_circuit_open')
+    await runtime.strategySearchRoutingStore.update('search', 'threads', { mode: 'priority', primaryProvider: primary,
+      fallbackProvider: 'tikhub', expectedRevision: 7, reason: 'Check recovery after cooldown' })
+    platformStore.contractCircuits.get('threads-scraper').circuitOpenUntil = new Date(Date.now() - 1000).toISOString()
+    const fromCache = await send('search', input, 'threads-breaker-independent')
+    assert.equal(fromCache.headers.get('idempotent-replay'), 'true')
+    assert.deepEqual(await fromCache.json(), delivered)
+    const recovered = await send('search', { query: 'recovered' }, 'threads-breaker-expired')
+    assert.equal(recovered.status, 200)
+    assert.deepEqual(purchases.slice(3), [scraperPath])
+  })
 })

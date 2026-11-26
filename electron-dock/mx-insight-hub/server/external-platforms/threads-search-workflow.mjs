@@ -4,7 +4,8 @@ import { createDataSearchCursorCodec } from './cursor.mjs'
 import { nativeForwardingEndpoint } from '../contracts/native-forwarding.mjs'
 import { THREADS_SEARCH_PATH, THREADS_SEARCH_VERSION, threadsSearchRecipe } from '../contracts/threads-search.mjs'
 import { contentSearchDeliveryBody } from './content-search.mjs'
-import { runSocialAccountWorkflow } from './social-account-workflow.mjs'
+import { runSocialAccountWorkflow, socialAcquisitionCircuits } from './social-account-workflow.mjs'
+import { circuitIsOpen } from './availability-errors.mjs'
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
@@ -35,6 +36,13 @@ export function normalizeThreadsSearchDelivery(normalized, { resultType, provide
     fingerprintBody: { ...normalized, type: resultType },
     encodeNext: deliveryId => codec.encode({ version: THREADS_SEARCH_VERSION, scopeHash, provider, ...listing,
       page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }
+}
+
+export async function threadsSearchRouteAvailable(gateway, context, recipe) {
+  const endpoint = nativeForwardingEndpoint(recipe.key)
+  const { state, contract } = await socialAcquisitionCircuits(gateway, context, endpoint.marketplace ?? endpoint.platform)
+  const now = Date.now()
+  return !circuitIsOpen(state, now) && !circuitIsOpen(contract, now)
 }
 
 export function threadsSearchPlan({ gateway, context, input, dependencies }) {

@@ -112,12 +112,13 @@ export function circuitOpenError(state, config, message, { scope = null, evidenc
   })
 }
 
+export const circuitIsOpen = (row, now) => Boolean(row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > now)
+
 // Shared by every dispatch path that refuses because a circuit is open: the
 // platform contract circuit wins, and the recorded failure travels with it.
 export async function openCircuitError({ store, state, contract = null, now = Date.now(), config = null, message, marketplace = null }) {
-  const open = row => Boolean(row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > now)
-  const contractOpen = open(contract)
-  if (!contractOpen && !open(state)) return null
+  const contractOpen = circuitIsOpen(contract, now)
+  if (!contractOpen && !circuitIsOpen(state, now)) return null
   let evidence = null
   try {
     evidence = await store?.latestFailureEvidence?.(contractOpen ? { marketplace, unusableOnly: true } : {}) ?? null

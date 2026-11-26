@@ -22,6 +22,21 @@ test('Threads content search identifies each RapidAPI subscription in the saved 
   const summary = strategyPolicySummary('search', row)
   assert.equal(summary.editor, 'comment-route')
   assert.match(summary.title, /优先 RapidAPI · Threads Scraper → 保底 RapidAPI · Threads API（threads-api4）/)
+  assert.match(summary.description, /无游标的新查询.*派发前.*熔断.*保底/u)
+  assert.match(summary.description, /冷却结束.*优先渠道/u)
+  assert.match(summary.description, /已派发.*502.*未知.*原回执/u)
+  assert.match(summary.description, /续页.*原渠道/u)
+  assert.match(row.routeSummary, /优先与保底.*熔断/u)
+  for (const group of catalog.interfaces.filter(group => group.id !== 'search')) {
+    const other = group.platforms.find(row => row.platform === 'threads')
+    const accountOrPost = { ...other, policy: { ...policy, interface: group.id,
+      primaryProvider: other.providers[0], fallbackProvider: other.providers[1] } }
+    assert.doesNotMatch(strategyPolicySummary(group.id, accountOrPost).description, /熔断|冷却/u)
+    assert.doesNotMatch(other.routeSummary, /熔断|冷却/u)
+  }
+  for (const mode of ['fixed', 'paused']) {
+    assert.doesNotMatch(strategyPolicySummary('search', { ...row, policy: { ...policy, mode, fallbackProvider: null } }).description, /冷却结束/u)
+  }
 })
 
 test('Facebook account editors require an independent saved business policy', () => {

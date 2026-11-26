@@ -1872,6 +1872,7 @@ ensure_hub_database() {
 
 build_and_import_image() {
   local image="${MX_INSIGHT_IMAGE:-mx-insight-hub:shadow}"
+  local build_npm_registry="${MX_INSIGHT_BUILD_NPM_REGISTRY:-}"
   need docker
   need ctr
   DEPLOY_PREVIOUS_DOCKER_IMAGE_ID="$(
@@ -1902,6 +1903,7 @@ build_and_import_image() {
       --build-arg "https_proxy=$MX_INSIGHT_BUILD_PROXY" \
       --build-arg "NO_PROXY=$build_no_proxy" \
       --build-arg "no_proxy=$build_no_proxy" \
+      ${build_npm_registry:+--build-arg "NPM_REGISTRY=$build_npm_registry"} \
       --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
@@ -1928,6 +1930,7 @@ build_and_import_image() {
       --rm \
       --force-rm \
       ${build_network:+--network "$build_network"} \
+      ${build_npm_registry:+--build-arg "NPM_REGISTRY=$build_npm_registry"} \
       --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \
@@ -3300,6 +3303,8 @@ ops_action() {
   local action="${2:-}"
   local build_proxy_override_set="${MX_INSIGHT_BUILD_PROXY+x}"
   local build_proxy_override="${MX_INSIGHT_BUILD_PROXY-}"
+  local build_npm_registry_override_set="${MX_INSIGHT_BUILD_NPM_REGISTRY+x}"
+  local build_npm_registry_override="${MX_INSIGHT_BUILD_NPM_REGISTRY-}"
   local sync_launcher_override_set=0
   local sync_launcher_override=""
   local smoke_data_override_set=0
@@ -3387,6 +3392,9 @@ ops_action() {
   if [ "$build_proxy_override_set" = x ]; then
     MX_INSIGHT_BUILD_PROXY="$build_proxy_override"
     export MX_INSIGHT_BUILD_PROXY
+  fi
+  if [ "$build_npm_registry_override_set" = x ]; then
+    export MX_INSIGHT_BUILD_NPM_REGISTRY="$build_npm_registry_override"
   fi
   if [ "$sync_launcher_override_set" = 1 ]; then
     MX_INSIGHT_SYNC_LAUNCHER="$sync_launcher_override"

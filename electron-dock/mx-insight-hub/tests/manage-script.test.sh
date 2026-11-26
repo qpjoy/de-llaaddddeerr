@@ -78,6 +78,48 @@ assert_eq \
   "scoped build proxy covers buildx client token requests"
 rm -f -- "$build_proxy_marker"
 
+# Capture actual Docker argument boundaries for both Internal build paths.
+(
+  need() { :; }
+  ensure_build_proxy_builder() { DEPLOY_BUILD_PROXY_BUILDER=test-builder; }
+  containerd_import_docker_image() { :; }
+  docker() {
+    if [ "$1 $2" = 'image inspect' ]; then printf 'sha256:test-image\n'; return; fi
+    assert_eq "$expected_command" "$1" "$build_mode uses the expected Docker command"
+    local previous='' arg
+    for arg in "$@"; do
+      case "$arg" in NPM_REGISTRY|NPM_REGISTRY=*)
+        assert_eq --build-arg "$previous" "npm registry is passed as a build argument"
+        assert_eq "NPM_REGISTRY=$test_registry" "$arg" "npm registry argument value"
+        registry_args=$((registry_args + 1))
+      esac
+      previous="$arg"
+    done
+    build_seen=true
+  }
+  test_registry='https://registry.example/npm/'
+  for build_mode in bridge host proxy; do
+    unset MX_INSIGHT_BUILD_NETWORK MX_INSIGHT_BUILD_PROXY
+    expected_command=build
+    case "$build_mode" in
+      host) export MX_INSIGHT_BUILD_NETWORK=host ;;
+      proxy) export MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788; expected_command=buildx ;;
+    esac
+    for registry_mode in unset empty custom; do
+      unset MX_INSIGHT_BUILD_NPM_REGISTRY
+      expected_args=0
+      case "$registry_mode" in
+        empty) export MX_INSIGHT_BUILD_NPM_REGISTRY= ;;
+        custom) export MX_INSIGHT_BUILD_NPM_REGISTRY="$test_registry"; expected_args=1 ;;
+      esac
+      build_seen=false; registry_args=0
+      build_and_import_image
+      assert_eq true "$build_seen" "$build_mode build was captured"
+      assert_eq "$expected_args" "$registry_args" "$build_mode build with $registry_mode npm registry"
+    done
+  done
+)
+
 # Existing buildkitd containers keep their creation-time proxy. Model buildx's
 # inspect output and ensure a changed port cannot silently reuse that container.
 (
@@ -167,19 +209,27 @@ $second_builder" "$(cat "$builder_state/created")" 'mismatched explicit builder 
   printf 'ok - proxy validation and builder logs hide credentials\n'
 )
 
-# UI/CLI proxy overrides, including explicit direct mode, survive .env.internal.
+# CLI build overrides, including explicit empty values, survive .env.internal.
 for proxy_mode in custom direct saved; do
   proxy_override_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-proxy-override.XXXXXX")"
   (
-    unset MX_INSIGHT_BUILD_PROXY
-    case "$proxy_mode" in custom) export MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7999;; direct) export MX_INSIGHT_BUILD_PROXY=;; esac
+    unset MX_INSIGHT_BUILD_PROXY MX_INSIGHT_BUILD_NPM_REGISTRY
+    case "$proxy_mode" in
+      custom) export MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7999 MX_INSIGHT_BUILD_NPM_REGISTRY=https://custom.example/npm/ ;;
+      direct) export MX_INSIGHT_BUILD_PROXY= MX_INSIGHT_BUILD_NPM_REGISTRY= ;;
+    esac
     need() { :; }
-    load_env_file() { MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788; }
-    kubectl() { printf '%s' "${MX_INSIGHT_BUILD_PROXY-}" > "$proxy_override_marker"; }
+    load_env_file() { MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788; MX_INSIGHT_BUILD_NPM_REGISTRY=https://saved.example/npm/; }
+    kubectl() { printf '%s\n%s\n' "${MX_INSIGHT_BUILD_PROXY-}" "${MX_INSIGHT_BUILD_NPM_REGISTRY-}" > "$proxy_override_marker"; }
     ops_action internal-production status
   )
-  case "$proxy_mode" in custom) expected_proxy=http://127.0.0.1:7999;; direct) expected_proxy=;; saved) expected_proxy=http://127.0.0.1:7788;; esac
-  assert_eq "$expected_proxy" "$(cat "$proxy_override_marker")" "production proxy mode $proxy_mode survives env loading"
+  case "$proxy_mode" in
+    custom) expected_proxy=http://127.0.0.1:7999; expected_registry=https://custom.example/npm/ ;;
+    direct) expected_proxy=; expected_registry= ;;
+    saved) expected_proxy=http://127.0.0.1:7788; expected_registry=https://saved.example/npm/ ;;
+  esac
+  assert_eq "$expected_proxy" "$(sed -n '1p' "$proxy_override_marker")" "production proxy mode $proxy_mode survives env loading"
+  assert_eq "$expected_registry" "$(sed -n '2p' "$proxy_override_marker")" "production npm registry mode $proxy_mode survives env loading"
   rm -f -- "$proxy_override_marker"
 done
 
@@ -3091,13 +3141,16 @@ dockerfile_source="$(cat "${ROOT_DIR}/Dockerfile")"
 # A `file:` dependency is linked by manifest; its sources are read at build and
 # run time, never at install time. Copying them above the install sent a one-line
 # shared-source edit back to the registry for every dependency.
-for stage_marker in "/workspace/mx-common/src" "COPY --from=mx_common src ./src"; do
-  install_line="$(printf '%s' "$dockerfile_source" | grep -n 'RUN npm ci' | head -1 | cut -d: -f1)"
-  source_line="$(printf '%s' "$dockerfile_source" | grep -Fn "$stage_marker" | head -1 | cut -d: -f1)"
-  assert_eq \
-    "after" \
-    "$([ "$source_line" -gt "$install_line" ] && echo after || echo before)" \
-    "shared source (${stage_marker}) is copied after the first npm ci"
+for stage in build production-dependencies; do
+  source_order="$(awk -v stage="$stage" '
+    $1 == "FROM" { in_stage = ($NF == stage) }
+    in_stage && $1 == "WORKDIR" { workdir = $2 }
+    in_stage && $1 == "RUN" && /[[:space:]]sh[[:space:]]+\/usr\/local\/bin\/hub-npm-ci([[:space:]]|$)/ &&
+      workdir == (stage == "build" ? "/workspace/mx-insight-hub" : "/mx-common") && !install { install = NR }
+    in_stage && $1 == "COPY" && $2 == "--from=mx_common" && $3 == "src" && !src { src = NR }
+    END { print (install && src > install ? "after" : "missing or before") }
+  ' "${ROOT_DIR}/Dockerfile")"
+  assert_eq "after" "$source_order" "$stage copies shared source after its dependency install"
 done
 
 assert_eq \
