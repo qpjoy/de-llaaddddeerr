@@ -2,7 +2,7 @@ import { SHARE_LINK_LIMITS as limits, SHARE_LINK_RESOLVER as product } from '../
 
 const platform = { type: 'string', enum: ['douyin', 'xiaohongshu'] }
 const text = { type: 'string' }
-const link = { type: ['string', 'null'], description: '提取到的分享链接；纯口令为 null。' }
+const link = { type: ['string', 'null'], description: '提取到的分享链接。文案缺少网址时为 null。' }
 const count = { type: 'integer', minimum: 0, maximum: limits.maxLinks }
 const resolved = {
   type: 'object', required: ['ok', 'link', 'type', 'postId', 'how'],
@@ -57,6 +57,6 @@ export const shareLinkGuide = `<h1>${product.label}</h1>
 <pre>${JSON.stringify(requestExample, null, 2)}</pre>
 <p><code>text</code> 最长 ${limits.maxTextLength} 个 UTF-16 码元，每次最多 ${limits.maxLinks} 个不同链接。可选参数 <code>platform</code> 默认为 <code>auto</code>，也支持 <code>douyin</code>、<code>xiaohongshu</code>。</p>
 <h2>读取结果</h2><p>从 <code>data.results</code> 逐项检查 <code>ok</code>。成功项的 <code>postId</code> 为字符串，分别与 <code>aweme_id</code> 或 <code>note_id</code> 相同。小红书链接带有 <code>xsec_token</code> 时可一并返回。<code>how</code> 记录 ID 来自完整网址、短链跳转还是页面源码；带有 <code>uncertain</code> 标记的候选需要复核。</p>
-<p>失败项给出 <code>code</code> 和 <code>error</code>。没有匹配链接时结果为空；疑似抖音纯口令返回 <code>share_code_requires_lookup</code>。解析出 ID 只表示已识别链接，作品当前是否可读取，要在查询详情时确认。</p>
+<p>失败项给出 <code>code</code> 和 <code>error</code>。在产品页面粘贴带链接的标题时，会一并提取剪贴板中的作品网址。纯文本缺少网址时，疑似抖音口令返回 <code>share_code_requires_lookup</code>，含“小红书”的文案返回 <code>share_link_required</code>。请从原作品的分享菜单复制链接。没有识别到平台或链接时结果为空。解析出 ID 只表示已识别链接，作品当前是否可读取，要在查询详情时确认。</p>
 <h2>调用限流</h2><p>HTTP 429 的 <code>plan_burst_exceeded</code> 表示 Hub 在解析前检查到调用方的套餐一秒额度已满，多把 Key 共用该额度。Hub 会短暂等候即将释放的名额，持续超额时返回等待提示 <code>error.details.retryAfterMs</code>。<code>resource_admission_limited</code> 表示 Hub 的资源限制，可通过 <code>error.details.reason</code> 区分速率（<code>rate</code>）与并发（<code>concurrency</code>）等原因。</p>
 <h2>查询详情</h2><p>小红书可进入「小红书笔记画卷」查看正文与标签，也可按笔记 ID 查询详情与阅读量。抖音可进入「社媒与内容数据」，使用获取单个作品的接口。两者均需对应产品的权限，手动提交后按该产品规则计费。</p>`

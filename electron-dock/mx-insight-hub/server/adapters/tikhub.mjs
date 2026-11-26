@@ -754,6 +754,14 @@ export class TikHubAdapter {
       endpoint.version,
       endpoint.method,
     )
+    // A missing note is billable, but it must not quarantine every note's comments.
+    if (endpointKey === XHS_RESEARCH_ENDPOINTS.note_comments.endpointKey
+      && typeof exchange.raw.data === 'string' && /^服务异常\s*[:：]\s*笔记不存在$/u.test(exchange.raw.data.trim())) {
+      throw upstreamError('TikHub could not return an available Xiaohongshu note', {
+        outcome: 'succeeded_unusable', httpStatus: exchange.httpStatus, businessCode: 200,
+        billed: true, errorCode: 'upstream_note_unavailable', affectsCircuit: false,
+      }, exchange.persisted('succeeded_unusable', exchange.acceptedAt))
+    }
     const persistence = exchange.persisted('accepted', exchange.acceptedAt)
     return securedProviderResult({
       payload: providerCredentialSafePayload(exchange.raw, resolvedCredential),

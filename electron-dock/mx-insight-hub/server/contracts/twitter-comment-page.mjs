@@ -21,8 +21,30 @@ export function parseTikHubTwitterCommentPage(payload, postId, continuation = nu
   // object is the requested post; only thread entries are comment candidates.
   if (!object(payload) || payload.code !== 200 || !twitterId(postId)) unusable()
   const data = payload.data
-  if (!object(data) || !twitterId(data.id) || data.id !== postId || !twitterId(data.conversation_id)
+  if (!object(data) || data.id !== postId
     || !Array.isArray(data.thread) || data.thread.length > 1000) unusable()
+  if (!twitterId(data.conversation_id)) {
+    // Some first-page responses echo the requested tweet twice and supply an
+    // explicit empty thread without a conversation or continuation.
+    if (Object.hasOwn(data, 'conversation_id') || data.thread.length || payload.params?.tweet_id !== postId
+      || continuation?.cursor || payload.params?.cursor) unusable()
+    const conflictingFields = ['conversation_id_str', 'cursor', 'next_cursor', 'nextCursor', 'has_more', 'hasMore',
+      'result', 'items', 'tweets', 'entries', 'comments', 'instructions', 'threaded_conversation_with_injections_v2']
+    if (conflictingFields.some(key => Object.hasOwn(data, key)) || data.data != null) unusable()
+    // Only status fields describe delivery. The tweet's own text may discuss
+    // errors or unavailability and has no bearing on the page contract.
+    const failure = /\b(?:error|fail(?:ed|ure)?|unavailable|not[ _]?(?:found|available|authorized)|does not exist|deleted|private|protected|forbidden|unauthorized|suspended|rate.limit(?:ed)?|too many requests)\b|失败|错误|不存在|不可用|无权限|限流/iu
+    for (const scope of [payload, data]) {
+      if (scope.error || scope.detail || (Array.isArray(scope.errors) ? scope.errors.length : scope.errors)
+        || scope.success === false || scope.available === false || scope.unavailable === true
+        || scope.code != null && scope.code !== 200 || scope.status_code != null && scope.status_code !== 200
+        || (typeof scope.status === 'number' || typeof scope.status === 'string' && /^[0-9]{3}$/u.test(scope.status))
+          && Number(scope.status) !== 200
+        || ['TweetTombstone', 'TimelineTombstone', 'TweetUnavailable'].includes(scope.__typename)) unusable()
+      if ([scope.status, scope.reason, scope.message, scope.message_zh].some(value =>
+        typeof value === 'string' && failure.test(value))) unusable()
+    }
+  }
   const comments = []
   for (const raw of data.thread) {
     if (!object(raw) || !twitterId(raw.id)) unusable()
@@ -47,7 +69,7 @@ export function parseTikHubTwitterCommentPage(payload, postId, continuation = nu
   if (data.cursor != null && (typeof data.cursor !== 'string' || data.cursor.length > 8192 || data.cursor.includes('\0'))) unusable()
   const cursor = data.cursor || null
   const nextParams = cursor && cursor !== continuation?.cursor ? { cursor } : null
-  // Even the verified empty thread has a nonempty cursor. Preserve an opaque
+  // An empty thread can also have a nonempty cursor. Preserve an opaque
   // token for caller-driven continuation without claiming more rows or buying
   // another page automatically. Absence/repetition is not a proven terminal.
   const providerPage = { hasMore: null, nextParams, nextPage: null,

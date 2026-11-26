@@ -83,6 +83,35 @@ test('the observed empty reply-target shape remains empty despite its root objec
   assert.deepEqual(result.projected.providerPage, { hasMore: null, nextParams: { cursor: 'opaque+/==next' }, nextPage: null })
 })
 
+test('TikHub sparse empty thread requires matching request echo and root and leaves pagination unknown', () => {
+  const data = { id: targetReplyId, thread: [] }
+  const payload = { code: 200, params: { tweet_id: targetReplyId }, data,
+    message: 'Request successful. This request will incur a charge.' }
+  const empty = { comments: [], providerPage: { hasMore: null, nextParams: null, nextPage: null,
+    stopReason: 'continuation_unproven' } }
+  assert.deepEqual(parseTikHubTwitterCommentPage(payload, targetReplyId), empty)
+  assert.deepEqual(parseTikHubTwitterCommentPage({ ...payload, message: 'OK', request_id: 'receipt',
+    data: { ...data, lang: 'en', text: 'A discussion of failed requests' } }, targetReplyId), empty)
+  const invalid = [
+    { ...payload, code: 503 }, { ...payload, params: {} }, { ...payload, params: { tweet_id: rootId } },
+    { ...payload, error: 'explicit error' }, { ...payload, errors: [{ code: 144 }] },
+    { ...payload, message: 'Tweet not found' }, { ...payload, success: false }, { ...payload, status: '404' },
+    ...[{ id: rootId }, { id: Number(targetReplyId) }, { thread: undefined }, { thread: null },
+      { thread: [comment()] }, { conversation_id: null }, { conversation_id: Number(targetReplyId) },
+      { cursor: null }, { cursor: 'unverified' }, { next_cursor: 'unverified' }, { has_more: true },
+      { comments: [comment()] }, { result: { __typename: 'TweetUnavailable' } },
+      { status: 'failed' }, { status_code: 404 }, { reason: 'NotFound' }, { errors: ['forbidden'] },
+      { available: false }, { message: '此推文不存在' },
+      { __typename: 'TweetTombstone' },
+    ].map(fields => ({ ...payload, data: { ...data, ...fields } })),
+  ]
+  for (const response of invalid) {
+    assert.throws(() => parseTikHubTwitterCommentPage(response, targetReplyId), { code: 'invalid_upstream_contract' })
+  }
+  assert.throws(() => parseTikHubTwitterCommentPage(payload, targetReplyId, { cursor: 'second-page' }),
+    { code: 'invalid_upstream_contract' })
+})
+
 test('reply-target comments use the returned conversation identity without inventing their immediate parent', () => {
   const payload = envelope({ id: targetReplyId, thread: [{ id: targetReplyId }, { id: rootId }, comment()] })
   const result = project(payload, { postId: targetReplyId })

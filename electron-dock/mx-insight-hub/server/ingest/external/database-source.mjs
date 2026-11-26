@@ -9,6 +9,7 @@ import {
   refreshMappedPayloadSha256,
 } from './mapping.mjs'
 import { isTelegramSourceFunctionDefinition } from '../telegram/source-preparer.mjs'
+import { isTelegramMonitorSourceKey } from '../telegram/source-contract.mjs'
 import {
   PROVINCE_OPINION_SOURCE_KEY,
   provinceOpinionColumnIssues,
@@ -619,7 +620,7 @@ export class DatabaseSourcePuller {
     }
   }
 
-  async #assertManagedSourceContract(pool, connection) {
+  async #assertManagedSourceContract(pool, connection, sourceKey) {
     if (!connection.sourceContractId) return
     let marker
     let triggers
@@ -749,7 +750,9 @@ export class DatabaseSourcePuller {
               AND con.contype = 'c'`,
         ),
       ])
-    } catch {
+    } catch (error) {
+      // Cancellation leaves the contract unverified. Retry its checks before reading any rows.
+      if (error?.code === '57014' && isTelegramMonitorSourceKey(sourceKey)) throw error
       throw new AppError(409, 'source_contract_mismatch', 'Telegram source contract evidence is missing or unreadable')
     }
     const contract = marker.rows[0]
@@ -2036,6 +2039,10 @@ export class DatabaseSourcePuller {
       const saved = await this.queue.getCursor(cursorId)
       const position = saved?.position ?? {}
       const checkpointRunId = position.importRunId ?? null
+      // A cancelled initial read has no import owner. The pull already saved
+      // this exact failure at the unchanged watermark under the source lock.
+      if (!importRunId && !checkpointRunId && isTelegramMonitorSourceKey(sourceKey)
+        && error === '57014' && saved?.status === 'failed' && saved.last_error === error) return saved
       if (!checkpointRunId || (importRunId && checkpointRunId !== importRunId)) {
         throw new AppError(409, 'import_run_checkpoint_mismatch', 'The failed continuation no longer owns this checkpoint')
       }
@@ -2279,12 +2286,13 @@ export class DatabaseSourcePuller {
     // cursor evidence even if the source page has since drifted or vanished.
     const poolOptions = await this.#poolOptions(connection, 'mx-insight-hub-external-pull')
     const pool = this.poolFactory(poolOptions)
+    let phase = 'source_schema'
     let runFinished = false
     let batchCommitted = false
     let checkpointWriteInFlight = false
 
     try {
-      await this.#assertManagedSourceContract(pool, connection)
+      await this.#assertManagedSourceContract(pool, connection, sourceKey)
       const columns = await this.#columns(pool, connection)
       if (crawlerSpec) {
         const contractIssues = [
@@ -2396,6 +2404,7 @@ export class DatabaseSourcePuller {
                    ${cursorValue} NULLS FIRST, ${idColumn} NULLS FIRST
           LIMIT $3`
         : null
+      phase = 'source_page'
       const { rows } = await pool.query(
         guardedMobilePage || `SELECT *, ${cursorValue}::text AS ${cursorAlias} FROM ${table}
           WHERE ${cursorColumn} IS NOT NULL
@@ -2465,6 +2474,7 @@ export class DatabaseSourcePuller {
           'Mobile-commerce source returned a non-finite collected_at watermark',
         )
       }
+      phase = 'hub_checkpoint'
       await assertOwned()
       if (rows.length === 0) {
         if (run) {
@@ -2631,6 +2641,7 @@ export class DatabaseSourcePuller {
         lastId: String(last[idName]),
       }
       await assertOwned()
+      phase = 'hub_ingest'
       const result = await this.store.ingestExternalRecords({
         datasetId: source.datasetId,
         platform: source.platform,
@@ -2648,6 +2659,7 @@ export class DatabaseSourcePuller {
       })
       batchCommitted = true
 
+      phase = 'hub_checkpoint'
       const acknowledgedPosition = result.cursorEnd ?? nextPosition
       const acknowledgedRows = result.rowCount ?? rows.length
       const acknowledgement = await this.#acknowledgeBatch({
@@ -2681,7 +2693,18 @@ export class DatabaseSourcePuller {
         paused: acknowledgement.paused,
       }
     } catch (error) {
-      const preserveForRetry = batchCommitted
+      const telegramQueryCanceled = isTelegramMonitorSourceKey(sourceKey) && error?.code === '57014'
+      if (telegramQueryCanceled) {
+        // Keep driver text, SQL and row values out of worker logs.
+        let reason = 'unspecified'
+        if (error.message === 'canceling statement due to statement timeout') reason = 'statement_timeout'
+        if (error.message === 'canceling statement due to user request') reason = 'user_request'
+        this.logger?.warn?.(`[external] ${sourceKey} code=57014 phase=${phase} reason=${reason}`)
+      }
+      // A continuation carries its import ID. Closing that import here would
+      // turn the next queue attempt into a stale success without retrying the page.
+      const preserveForRetry = (telegramQueryCanceled && run != null)
+        || batchCommitted
         || checkpointWriteInFlight
         || error?.externalFinalizationAttempted === true
         || ['external_commit_outcome_unknown', 'external_finalize_outcome_unknown'].includes(error?.code)

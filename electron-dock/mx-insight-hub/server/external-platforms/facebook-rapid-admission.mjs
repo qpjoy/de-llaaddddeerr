@@ -61,7 +61,7 @@ export async function waitForFacebookRapidAdmission({ policyStore, requestId, de
     if (admission?.allowed && !returned) {
       // No dispatch began. Release only this token; keep its conservative
       // reservation count, and never refund an ambiguous provider attempt.
-      try { await policyStore.observeRapid(admission) } catch { /* Original lease expires without replenishing quota. */ }
+      try { await policyStore.releaseUndispatchedRapid(admission) } catch { /* Original lease expires without replenishing quota. */ }
     }
   }
 }

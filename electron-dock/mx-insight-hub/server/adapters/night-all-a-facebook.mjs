@@ -17,6 +17,7 @@ export const NIGHT_ALL_A_FACEBOOK_BUDGET_MS = 60_000
 const RUN_FAILURES = {
   auth_expired: 'facebook_selfhosted_session_invalid', verification_required: 'facebook_selfhosted_session_invalid',
   credential_missing: 'facebook_selfhosted_session_invalid', resource_misconfigured: 'facebook_selfhosted_misconfigured',
+  resource_unavailable: 'facebook_selfhosted_resource_unavailable',
   runner_unavailable: 'facebook_selfhosted_misconfigured', adapter_unavailable: 'facebook_selfhosted_misconfigured',
   unsupported_capability: 'facebook_selfhosted_misconfigured',
   account_rate_limited: 'facebook_selfhosted_rate_limited', soft_blocked: 'facebook_selfhosted_rate_limited',

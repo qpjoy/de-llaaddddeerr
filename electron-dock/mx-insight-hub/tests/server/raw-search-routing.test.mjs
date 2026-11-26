@@ -2473,6 +2473,36 @@ test('Instagram strategy fixed TikHub uses the original customer meter and one s
   }
 })
 
+test('Instagram budget refusals record the selected gateway and HTTP 429 without a supplier call', async () => {
+  for (const primaryProvider of ['justone', 'tikhub']) {
+    const fallbackProvider = primaryProvider === 'justone' ? 'tikhub' : 'justone'
+    const h = await instagramStrategyHarness({ policy: { mode: 'priority', primaryProvider, fallbackProvider } })
+    const selected = h.providers[primaryProvider]
+    const nativeKey = primaryProvider === 'justone' ? JUSTONE_INSTAGRAM_SEARCH_KEY : INSTAGRAM_SEARCH_KEY
+    const endpoint = nativeForwardingEndpoint(nativeKey)
+    await selected.controls.updatePolicy(primaryProvider, endpoint.operation, {
+      expectedRevision: 2, desiredState: 'active', reason: 'Offline exhausted budget fixture',
+      priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 0,
+        monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 12 } },
+    }, { runtime: { config: selected.config, credentialConfigured: true } })
+
+    const code = 'external_platform_cost_budget_exhausted'
+    await assert.rejects(h.invokeData(instagramBody, 'instagram-procurement-budget'), { status: 429, code })
+    const [usage] = h.store.requests.values()
+    assert.equal(usage.status, 'released')
+    assert.equal(usage.errorCode, code)
+    assert.equal(selected.platformStore.requests.length, 1)
+    const [event] = selected.platformStore.requests
+    assert.equal(event.usageRequestId, usage.id)
+    assert.equal(event.providerKey, primaryProvider)
+    assert.equal(event.responseStatus, 429)
+    assert.equal(event.errorCode, code)
+    assert.equal(event.providerCallId, null)
+    assert.equal(h.providers[fallbackProvider].platformStore.requests.length, 0)
+    assert.equal(h.providers.justone.calls.length + h.providers.tikhub.calls.length, 0)
+  }
+})
+
 test('Instagram strategy provider-pinned cursors retain buffers and upstream tokens across default changes', async () => {
   for (const route of ['invoke', 'invokeData']) {
     for (const provider of ['justone', 'tikhub']) {

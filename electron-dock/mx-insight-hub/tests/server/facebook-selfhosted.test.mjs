@@ -212,7 +212,7 @@ async function harness({ runs, mode = 'selfhosted', admit = async () => ({ allow
   service.externalRawSearch = dispatch; service.externalDataSearch = dispatch
   const raw = (body = { platform: 'facebook', query: 'Unitree', count: 20 }, idempotencyKey = 'selfhosted-raw-0001') =>
     service.nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path: '/api/v1/night-all/search/raw' })
-  const standard = (body, idempotencyKey) => service.search(context, { body, idempotencyKey, path: '/api/v1/data/search' })
+  const standard = (body, idempotencyKey, path = '/api/v1/data/search') => service.search(context, { body, idempotencyKey, path })
   return { usage, stores, context, fake, leases, supplierCalls, raw, standard }
 }
 
@@ -233,6 +233,7 @@ test('standard search fills from one Night-All-A task, records the lineage and k
   const h = await harness({ runs: [{ status: 'succeeded', result: runResult(['21', '22', '23'], 'next-cursor') }] })
   const page = await h.standard({ platform: 'facebook', query: 'Unitree', pageSize: 2 }, 'selfhosted-standard-0001')
   assert.deepEqual(page.body.data.items.map(item => item.id), ['21', '22'])
+  assert.equal([...h.stores[FACEBOOK_SELFHOSTED_PROVIDER].calls.values()][0].httpStatus, 200)
   assert.equal(page.body.data.pageInfo.hasMore, true)
   assert.equal(h.fake.calls[0].body.parameters.pages, 1)
   assert.deepEqual(h.leases, { admitted: 1, released: 1 }); assert.deepEqual(h.supplierCalls, [])
@@ -244,6 +245,7 @@ test('standard search fills from one Night-All-A task, records the lineage and k
   const error = await unknown.standard({ platform: 'facebook', query: 'Unitree', pageSize: 2 }, 'selfhosted-standard-0003').catch(error => error)
   assert.equal(error.code, 'facebook_selfhosted_outcome_unknown')
   assert.equal([...unknown.stores[FACEBOOK_SELFHOSTED_PROVIDER].calls.values()][0].outcome, 'unknown')
+  assert.equal([...unknown.stores[FACEBOOK_SELFHOSTED_PROVIDER].calls.values()][0].httpStatus, null)
   assert.deepEqual(unknown.leases, { admitted: 1, released: 0 })
   assert.equal(unknown.fake.calls.at(-1).path, '/api/tasks/7/cancel')
 })
@@ -255,7 +257,37 @@ test('a busy self-hosted queue rejects before any task and a session failure ask
   const failed = await harness({ runs: [{ status: 'failed', error_code: 'auth_expired' }] })
   const error = await failed.standard({ platform: 'facebook', query: 'Unitree', pageSize: 5 }, 'selfhosted-standard-0004').catch(error => error)
   assert.equal(error.code, 'facebook_selfhosted_unavailable'); assert.equal(error.details.action, 'contact_administrator')
+  assert.equal([...failed.stores[FACEBOOK_SELFHOSTED_PROVIDER].calls.values()][0].httpStatus, null)
   assert.deepEqual(failed.leases, { admitted: 1, released: 1 })
+})
+
+test('Facebook v1 and v2 identify a blocked Night-All-A resource allocation without buying another search', async () => {
+  for (const version of ['v1', 'v2']) {
+    const h = await harness({ runs: [{ status: 'blocked', error_type: 'resource_unavailable',
+      error_code: 'resource_unavailable', duration_ms: null, retryable: false }] })
+    const body = { platform: 'facebook', query: 'Unitree', pageSize: 1,
+      ...(version === 'v2' ? { timeWindow: { from: '2026-11-25T00:00:00+08:00', to: '2026-11-26T00:00:00+08:00',
+        timezone: 'Asia/Shanghai', boundary: '[from,to)' } } : {}) }
+    const key = `facebook-resource-unavailable-${version}`
+    await assert.rejects(h.standard(body, key, `/api/${version}/data/search`), error => {
+      assert.equal(error.status, 503)
+      assert.equal(error.code, 'facebook_selfhosted_unavailable')
+      assert.equal(error.details.reasonCode, 'facebook_selfhosted_resource_unavailable')
+      assert.equal(error.details.action, 'contact_administrator')
+      assert.equal(error.details.retryable, false)
+      assert.equal(error.details.outcome, 'rejected')
+      return true
+    })
+    const calls = [...h.stores[FACEBOOK_SELFHOSTED_PROVIDER].calls.values()]
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].errorCode, 'facebook_selfhosted_resource_unavailable')
+    assert.equal(calls[0].outcome, 'rejected')
+    assert.equal(calls[0].httpStatus, null)
+    assert.equal(calls[0].billed, false)
+    assert.equal(h.fake.calls.filter(row => row.path === '/api/tasks').length, 1)
+    assert.deepEqual(h.leases, { admitted: 1, released: 1 })
+    assert.deepEqual(h.supplierCalls, [])
+  }
 })
 
 test('admin model offers the self-hosted mode and states its limits', () => {

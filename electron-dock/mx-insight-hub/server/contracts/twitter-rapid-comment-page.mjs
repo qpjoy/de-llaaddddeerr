@@ -21,6 +21,27 @@ export function parseRapidApiTwitterCommentPage(payload, subjectId, continuation
     if (instruction.type === 'TimelineAddEntries') {
       if (!Array.isArray(instruction.entries) || instruction.entries.length > 1000) unusable()
       entries.push(...instruction.entries)
+    } else if (instruction.type === 'TimelineAddToModule') {
+      // X's AddToModuleInstructionBuilder appends moduleItems, alongside a
+      // separate TimelineAddEntries for cursors. ModuleItemMarshaller prefixes
+      // every member's entryId with the module's ID. Accept this append form
+      // only; anchored inserts and other modules have different semantics.
+      const { moduleEntryId, moduleItems } = instruction
+      if (typeof moduleEntryId !== 'string' || !/^conversationthread-\d{1,30}$/u.test(moduleEntryId)
+        || !Array.isArray(moduleItems) || moduleItems.length > 1000
+        || instruction.moduleItemEntryId != null || instruction.prepend != null && instruction.prepend !== false
+        || Object.hasOwn(instruction, '__typename') && instruction.__typename !== instruction.type
+        || Object.keys(instruction).some(key => !['type', '__typename', 'moduleEntryId', 'moduleItems', 'moduleItemEntryId', 'prepend'].includes(key))
+        || moduleItems.some(child => typeof child?.entryId !== 'string' || !child.entryId.startsWith(`${moduleEntryId}-`)
+          || child.entryId.length <= moduleEntryId.length + 1
+          || !['TimelineTweet', 'TimelineTimelineCursor', 'TimelineTombstone'].includes(child.item?.itemContent?.itemType))) unusable()
+      const previous = entries.findLastIndex(row => row?.entryId === moduleEntryId)
+      if (previous < 0) entries.push({ entryId: moduleEntryId, content: { items: moduleItems } })
+      else {
+        const row = entries[previous]
+        if (!Array.isArray(row.content?.items) || row.content.items.length + moduleItems.length > 1000) unusable()
+        entries[previous] = { ...row, content: { ...row.content, items: [...row.content.items, ...moduleItems] } }
+      }
     } else if (instruction.type === 'TimelineReplaceEntry') entries.push(instruction.entry)
     else if (instruction.type === 'TimelineTerminateTimeline') {
       // X's TerminateTimelineInstructionMarshaller emits these three directions.

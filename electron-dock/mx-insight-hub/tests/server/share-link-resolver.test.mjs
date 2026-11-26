@@ -41,6 +41,24 @@ test('allows same-platform HTTPS short links and stops before fetching the long 
   assert.equal(result.results[0].postId, noteId)
 })
 
+test('copied captions without a destination request the platform link without contacting either platform', async () => {
+  const douyin = '1.71 复制打开抖音，看看【Elowen～的图文作品】长沙是什么法外之地吗！！！ # 撬车 08/11 :1pm NjP:/ G@V.lp'
+  const xhs = '长沙也有撞人族了 女生需要特别注意 进入【小红书】探索笔记详情～'
+  let calls = 0
+  const parse = text => resolveShareLinks({ text }, { fetchImpl: () => { calls++; throw new Error('unexpected fetch') } })
+  for (const [text, platform, code] of [[douyin, 'douyin', 'share_code_requires_lookup'], [xhs, 'xiaohongshu', 'share_link_required']]) {
+    const { results, succeeded, failed } = await parse(text)
+    assert.deepEqual([succeeded, failed, results.length], [0, 1, 1])
+    assert.equal(results[0].platform, platform)
+    assert.equal(results[0].link, null)
+    assert.equal(results[0].code, code)
+    assert.match(results[0].error, /复制链接/u)
+  }
+  assert.deepEqual((await parse('1.71 今天的标题')).results, [])
+  assert.deepEqual((await parse('抖音 [作品](https://other.example/path)')).results, [])
+  assert.equal(calls, 0)
+})
+
 test('resolves the actual pasted Markdown destination once, ignoring URLs in visible labels', async () => {
   const example = '[https://xhslink.cn/o/3EUFAcQijZe](https://xhslink.cn/o/3EUFAcQijZe)'
   const douyin = 'https://v.douyin.com/7h9Ip7hjLRY/'

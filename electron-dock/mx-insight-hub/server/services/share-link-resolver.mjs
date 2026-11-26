@@ -1,46 +1,10 @@
-import { SHARE_LINK_LIMITS } from '../../shared/share-link-resolver.mjs'
+import { scanShareText, shareLinkPlatform, SHARE_LINK_LIMITS, trustedShareUrl } from '../../shared/share-link-resolver.mjs'
 import { AppError } from '../core/errors.mjs'
 import { readBounded } from '../collect/http.mjs'
 
 export { SHARE_LINK_LIMITS }
-const hosts = new Map([
-  ...['douyin.com', 'www.douyin.com', 'iesdouyin.com', 'www.iesdouyin.com', 'v.douyin.com'].map(host => [host, 'douyin']),
-  ...['xiaohongshu.com', 'www.xiaohongshu.com', 'xhslink.com', 'www.xhslink.com', 'xhslink.cn', 'www.xhslink.cn'].map(host => [host, 'xiaohongshu']),
-])
 const shortHosts = new Set(['v.douyin.com', 'xhslink.com', 'www.xhslink.com', 'xhslink.cn', 'www.xhslink.cn'])
-// Consume the whole authority (including internationalized domains), but
-// stop a platform path before surrounding Chinese share copy and punctuation.
-const linkPattern = /(?<![A-Za-z0-9_@%/.=-])(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/<>"'`,()[\]「」“”]+|(?<![\p{L}\p{N}\p{M}])(?:[\p{L}\p{N}\p{M}_-]+[.。．｡])+[\p{L}\p{N}\p{M}-]+)(?:\/[^\s\u0080-\u{10ffff}<>"'`,]*)?/gu
-const inlineLink = /\[(?:\\.|[^\[\]\\]|\[(?:\\.|[^\[\]\\])*\])*\]\(\s*(?:<([^<>\n]*)>|((?:\\.|[^()\s\\]|\([^()\s]*\))+))(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\s*\)/gu
 const redirects = new Set([301, 302, 303, 307, 308])
-
-function trustedUrl(value, platform, base) {
-  if (/[\\\s\u0000-\u001f]/u.test(value) || value.length > 4096) return null
-  const authority = /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/([^/?#]*)/u.exec(value)
-  if (authority && !/^[A-Za-z0-9.-]+(?::\d+)?$/u.test(authority[1])) return null
-  const url = URL.parse(value, base)
-  if (!url || !['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port) return null
-  const owner = hosts.get(url.hostname)
-  if (!owner || (platform && owner !== platform)) return null
-  // Official HTTP share text is accepted, but all outgoing requests use TLS.
-  url.protocol = 'https:'
-  url.hash = ''
-  return url
-}
-
-function* shareUrls(text) {
-  let start = 0
-  function* plain(value) {
-    for (const [match] of value.matchAll(linkPattern)) yield match.replace(/[.,;:!?)\]}]+$/gu, '')
-  }
-  for (const link of text.matchAll(inlineLink)) {
-    yield* plain(text.slice(start, link.index))
-    // Markdown's visible label may itself be a different URL.
-    yield link[1] ?? link[2]
-    start = link.index + link[0].length
-  }
-  yield* plain(text.slice(start))
-}
 
 function failure(code, error, extra) { return { ok: false, code, error, ...extra } }
 
@@ -79,7 +43,7 @@ function identify(url, platform) {
 function identifyTarget(url, platform) {
   if (platform === 'xiaohongshu' && !shortHosts.has(url.hostname) && /^\/login\/?$/u.test(url.pathname)) {
     const path = query(url).get('redirectPath')
-    const nested = path && trustedUrl(path.replaceAll('&amp;', '&'), platform, url.origin)
+    const nested = path && trustedShareUrl(path.replaceAll('&amp;', '&'), platform, url.origin)
     return nested && identify(nested, platform)
   }
   return identify(url, platform)
@@ -95,7 +59,7 @@ function pageIdentity(html, base, platform) {
       .map(([, key, double, single]) => [key.toLowerCase(), double ?? single]))
     const target = name.toLowerCase() === 'link' && attrs.rel?.toLowerCase().split(/\s+/u).includes('canonical') ? attrs.href
       : attrs.property?.toLowerCase() === 'og:url' ? attrs.content : null
-    const url = target && trustedUrl(target.replaceAll('&amp;', '&'), platform, base)
+    const url = target && trustedShareUrl(target.replaceAll('&amp;', '&'), platform, base)
     const post = url && identify(url, platform)
     if (post?.ok) {
       if (result && result.postId !== post.postId) return null
@@ -128,7 +92,7 @@ async function resolveLink(start, platform, fetchImpl, signal) {
       await response.body?.cancel()
       if (!redirects.has(response.status)) return failure('unresolved_link', '未能从平台响应中识别作品')
       const target = response.headers.get('location')
-      url = target && trustedUrl(target, platform, url)
+      url = target && trustedShareUrl(target, platform, url)
       if (!url) return failure('invalid_redirect', '跳转目标缺失或不属于该平台')
     } catch (error) {
       if (signal.aborted) return failure('resolution_timeout', '短链解析已超时或取消')
@@ -148,15 +112,8 @@ function prepare(input) {
     throw new AppError(400, 'invalid_share_text', `请提供 1 至 ${SHARE_LINK_LIMITS.maxTextLength} 个字符的分享文本`)
   }
   if (!['auto', 'douyin', 'xiaohongshu'].includes(platform)) throw new AppError(400, 'invalid_platform', '不支持的分享平台')
-  const links = new Map()
-  let sawUrl = false
-  for (const raw of shareUrls(text)) {
-    sawUrl = true
-    const url = trustedUrl(raw.includes('://') ? raw : `https://${raw}`)
-    if (!url) continue
-    links.set(url.href, url)
-    if (links.size > SHARE_LINK_LIMITS.maxLinks) throw new AppError(400, 'too_many_share_links', `每次最多解析 ${SHARE_LINK_LIMITS.maxLinks} 个不同链接`)
-  }
+  const { urls: links, sawUrl } = scanShareText(text)
+  if (links.size > SHARE_LINK_LIMITS.maxLinks) throw new AppError(400, 'too_many_share_links', `每次最多解析 ${SHARE_LINK_LIMITS.maxLinks} 个不同链接`)
   return { normalized: { text: text.trim(), platform }, links, sawUrl }
 }
 
@@ -169,7 +126,7 @@ export async function resolveShareLinks(input, { fetchImpl = globalThis.fetch, s
   const deadline = AbortSignal.timeout(15_000)
   const results = []
   for (const url of links.values()) {
-    const owner = hosts.get(url.hostname)
+    const owner = shareLinkPlatform(url)
     const linkSignal = AbortSignal.any([deadline, AbortSignal.timeout(5_000), ...(signal ? [signal] : [])])
     const result = platform !== 'auto' && platform !== owner
       ? failure('platform_mismatch', '链接与请求的平台不匹配')
@@ -177,7 +134,10 @@ export async function resolveShareLinks(input, { fetchImpl = globalThis.fetch, s
     results.push({ platform: owner, link: url.href, ...result })
   }
   if (!sawUrl && platform !== 'xiaohongshu' && /抖音|douyin/iu.test(text)) {
-    results.push({ platform: 'douyin', link: null, ...failure('share_code_requires_lookup', '抖音纯口令需要单独查询，无法直接提取作品 ID', { type: 'share_code' }) })
+    results.push({ platform: 'douyin', link: null, ...failure('share_code_requires_lookup', '文案里没有抖音作品网址。请在作品的分享菜单选择“复制链接”后粘贴；如果有完整口令，也可使用抖音口令查询。', { type: 'share_code' }) })
+  }
+  if (!sawUrl && platform !== 'douyin' && /小红书/u.test(text)) {
+    results.push({ platform: 'xiaohongshu', link: null, ...failure('share_link_required', '文案里没有小红书笔记网址。请打开原笔记，在分享菜单选择“复制链接”后粘贴。') })
   }
   const succeeded = results.filter(r => r.ok).length
   return { results, total: results.length, succeeded, failed: results.length - succeeded }

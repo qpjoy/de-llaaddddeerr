@@ -91,7 +91,7 @@ paths:
                               ok: {const: true}
                               link:
                                 type: [string, 'null']
-                                description: 提取到的分享链接；纯口令为 null。
+                                description: 提取到的分享链接。文案缺少网址时为 null。
                               type: {type: string}
                               postId: {type: string, description: 用于详情查询的 ID，保留完整字符串。}
                               how:
@@ -117,7 +117,7 @@ paths:
                                 enum: [douyin, xiaohongshu]
                               link:
                                 type: [string, 'null']
-                                description: 提取到的分享链接；纯口令为 null。
+                                description: 提取到的分享链接。文案缺少网址时为 null。
                               type: {type: string}
                               code: {type: string}
                               error: {type: string}
@@ -2530,6 +2530,7 @@ paths:
                 note_id:
                   type: string
                   pattern: ^[0-9a-fA-F]{24}$
+                  description: 填入目标笔记的 24 位 ID。用搜索结果测试时，取本次返回的 note 对象的 note_id 或 id 字段。
                 sort:
                   type: string
                   enum:
@@ -2541,9 +2542,6 @@ paths:
                   maxLength: 8192
                   description: 首屏省略。续页原样传入 data.nextCursor，保留 note_id/sort 并使用新的 Idempotency-Key。游标绑定当前
                     Key 与笔记/排序，最多 15 页。
-            example:
-              note_id: 6a20edfa0000000021020951
-              sort: hot
       responses:
         '200':
           description: 成功交付或已确认无数据；metadata 不包含外部服务身份。
@@ -2675,6 +2673,12 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '403':
           description: Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: post_not_found 表示该笔记不可用。请核对 note_id。
           content:
             application/json:
               schema:

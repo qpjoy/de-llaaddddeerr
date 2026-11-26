@@ -641,6 +641,37 @@ test('comments stop at page 15 and do not infer an end from missing pagination',
   assert.equal(projectXhsResearch(incomplete, request, stamp, { encodeCursor: codec.encode }).meta.paginationStatus, 'unknown')
 })
 
+test('an explicitly missing note cannot quarantine comments on another note', async () => {
+  const seen = []
+  const state = await fixture(async url => {
+    const noteId = new URL(url).searchParams.get('note_id')
+    seen.push(noteId)
+    return response(noteId === ID ? { code: 200, data: '服务异常：笔记不存在' } : comments())
+  })
+  state.platformStore.responseQuarantineCooldownMs = 300_000
+  const missing = { status: 404, code: 'post_not_found' }
+  await assert.rejects(state.call('note_comments', { note_id: ID }, 'missing-comments-1'), missing)
+  await assert.rejects(state.call('note_comments', { note_id: ID }, 'missing-comments-1'), missing)
+  await assert.rejects(state.call('note_comments', { note_id: ID }, 'missing-comments-2'), missing)
+  assert.deepEqual(seen, [ID])
+  const [call] = state.platformStore.calls.values()
+  assert.equal(call.errorCode, 'upstream_note_unavailable')
+  assert.equal(call.billed, true)
+  assert.equal(state.platformStore.restrictedResponseArchives.size, 1)
+  assert.equal(state.platformStore.ingestJobs.length, 0)
+  const next = await state.call('note_comments', { note_id: OTHER }, 'available-comments')
+  assert.equal(next.body.data.items[0].text, '评论正文')
+  assert.deepEqual(seen, [ID, OTHER])
+})
+
+test('a generic service error cannot establish that a Xiaohongshu note is missing', async () => {
+  const state = await fixture(async () => response({ code: 200, data: '服务异常' }))
+  await assert.rejects(state.call('note_comments', { note_id: ID }), { status: 502, code: 'external_platform_response_unusable' })
+  const rejected = await fixture(async () => Response.json({ code: 400, message: 'Request failed.' }, { status: 400 }))
+  await assert.rejects(rejected.call('note_comments', { note_id: ID }), { status: 502, code: 'external_platform_rejected' })
+  assert.equal([...rejected.platformStore.calls.values()][0].errorCode, 'upstream_request_rejected')
+})
+
 test('PGY HTTP billing evidence and ambiguous dispatch never trigger automatic retries', async () => {
   for (const [status, text, billed] of [[200, '{broken', true], [200, JSON.stringify({ code: 500 }), true], [400, 'unavailable', false]]) {
     const adapter = new TikHubAdapter({ apiKey: SECRET, fetchImpl: async () => new Response(text, { status, headers: { 'content-type': 'application/json' } }) })
@@ -660,6 +691,16 @@ test('unreviewed procurement price blocks only the new operation and does not ex
   assert.equal(capabilities.ready, true, 'old readiness remains independent')
   assert.equal(capabilities.operations['social.posts.analytics'].ready, false)
   await assert.rejects(state.call(), error => error.status === 503 && !/tikhub|pgy|endpointKey/i.test(JSON.stringify(error)))
+})
+
+test('published comments contracts require the caller to choose a note', () => {
+  const scoped = tenantOpenApiDocument([{ platforms: ['xiaohongshu'], capabilities: ['social.comments.list'] }])
+  for (const document of [PUBLIC_OPENAPI_DOCUMENT, scoped]) {
+    const content = document.paths['/data/xiaohongshu/notes/comments'].post.requestBody.content['application/json']
+    assert.deepEqual(content.schema.required, ['note_id'])
+    assert.equal(content.example?.note_id, undefined)
+    assert.match(content.schema.properties.note_id.description, /note 对象的 note_id 或 id 字段/)
+  }
 })
 
 test('HTTP routes and published tenant docs enforce the same independent scopes', async t => {

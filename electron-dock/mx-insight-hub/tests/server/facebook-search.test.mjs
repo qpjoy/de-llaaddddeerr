@@ -314,6 +314,48 @@ test('Facebook shared queue timeout and cancellation return Hub busy without pur
     })
   })
 
+test('Facebook raw, v1 and v2 retain shared quota after admission when call persistence prevents dispatch',
+  { skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }, async t => {
+    const { store } = await facebookQuotaFixture(t)
+    await store.observeRapid(await store.admitRapid(), { remaining: 10, limit: 1000 })
+    const h = await harness({ policyStore: store })
+    const beginCall = t.mock.method(h.stores.rapidapi, 'beginProviderCall', async () => { throw new Error('before dispatch') })
+    const body = { platform: 'facebook', query: 'before-dispatch' }
+    const requests = [
+      () => h.invoke({ ...body, count: 20 }, 'fb-quota-before-raw'),
+      () => invokeStandard(h, { ...body, pageSize: 20 }, 'fb-quota-before-v1'),
+      () => invokeV2(h, v2FacebookBody(), 'fb-quota-before-v2'),
+    ]
+    for (const request of requests) {
+      const before = await store.facebook()
+      await assert.rejects(request)
+      const after = await store.facebook()
+      assert.equal(after.remaining, before.remaining - 1)
+      assert.equal(after.lease_until, null)
+      assert.equal(after.rapid_available, true)
+      assert.equal(after.supplier_remaining, 10)
+      assert.equal(h.calls.length, 0)
+    }
+    beginCall.mock.restore()
+    const next = await invokeStandard(h, { ...body, pageSize: 20 }, 'fb-quota-after-local-error')
+    assert.equal(next.status, 200)
+    assert.deepEqual(h.calls.map(call => call.provider), ['rapidapi'])
+  })
+
+test('Facebook fill keeps a missing JustOne business code distinct from a received zero', async () => {
+  for (const [response, httpStatus, businessCode] of [
+    [new Response('Service Unavailable', { status: 503 }), 503, null],
+    [Response.json({ code: 0, data: { unexpected: true }, message: 'success', recordTime: null }), 200, 0],
+  ]) {
+    const h = await harness({ mode: 'justone', respond: () => response })
+    await assert.rejects(invokeStandard(h, { platform: 'facebook', query: 'fixture', pageSize: 1 }, 'fb-justone-error-code'))
+    const call = [...h.stores.justone.calls.values()][0]
+    assert.equal(call.httpStatus, httpStatus)
+    assert.equal(call.businessCode, businessCode)
+    assert.equal(h.calls.length, 1)
+  }
+})
+
 test('Facebook 301 preserves the failed receipt and existing customer settlement without a RapidAPI dispatch or automatic retry', async () => {
   for (const route of ['raw', 'standard']) for (const mode of ['justone', 'auto']) {
     const h = await harness({ mode, respond: ({ provider }) => {
@@ -347,6 +389,7 @@ test('Facebook 301 preserves the failed receipt and existing customer settlement
     assert.equal(h.stores.rapidapi.calls.size, 0)
     const call = [...h.stores.justone.calls.values()][0]
     assert.equal(call.businessCode, 301)
+    assert.equal(call.httpStatus, 200)
     assert.equal(call.billed, false)
     assert.equal(call.outcome, 'rejected')
     assert.equal(h.stores.justone.ingestJobs.length, 0)

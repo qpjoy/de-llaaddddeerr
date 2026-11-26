@@ -1241,15 +1241,17 @@ export class TikHubGateway {
           }
           const code = lease?.reason === 'unknown' ? 'request_outcome_unknown'
             : lease?.reason === 'succeeded_unusable' ? 'external_platform_response_unusable'
-              : 'request_in_progress'
+              : lease?.reason === 'upstream_note_unavailable' ? 'post_not_found' : 'request_in_progress'
+          const status = code === 'post_not_found' ? 404 : 409
           await this.platformStore.rejectWithoutDispatch({
             delivery,
             sourceMode: 'duplicate_suppressed',
-            status: 409,
+            status,
             errorCode: code,
           })
           ownsReservation = false
-          throw new AppError(409, code, 'An equal provider dispatch cannot be repeated safely')
+          throw new AppError(status, code, code === 'post_not_found'
+            ? 'The Xiaohongshu note is unavailable' : 'An equal provider dispatch cannot be repeated safely')
         }
         if (!(entered = await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
           expiresAt: reservation.request.leaseExpiresAt, signal, canWait: !(allowStoredFallback && snapshot),

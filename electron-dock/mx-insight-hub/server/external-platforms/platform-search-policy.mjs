@@ -256,6 +256,14 @@ export class PlatformSearchPolicyStore {
       WHERE NOT (entry.value->>'id'=$1 AND entry.value->>'requestId'=$2)
     ),'[]'::jsonb) WHERE singleton`, [ticket.id, ticket.requestId])
   }
+  async releaseUndispatchedRapid(admission) {
+    // No supplier response exists. Keep the reservation deduction, the last
+    // observed headers, and any consumed recovery check.
+    if (!UUID.test(admission?.token || '')) return
+    await this.pool.query(`UPDATE control.facebook_rapid_quota
+      SET lease_token=NULL,lease_until=NULL,updated_at=clock_timestamp()
+      WHERE singleton AND lease_token=$1`, [admission.token])
+  }
   async observeRapid(admission, observation = {}) {
     if (!admission?.token) return
     const client = await this.pool.connect()

@@ -6,7 +6,7 @@ const LIMIT = 20
 const PROVIDERS = new Set(['justone', 'tikhub'])
 const STATUSES = new Set(['reserved', 'committed', 'released', 'unknown'])
 const SOURCES = new Set(['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay', 'duplicate_suppressed', 'circuit_rejected', 'unavailable'])
-const ERRORS = new Set(['external_platform_circuit_open', 'external_platform_pre_dispatch_failed',
+const ERRORS = new Set(['external_platform_circuit_open', 'external_platform_pre_dispatch_failed', 'external_platform_cost_budget_exhausted',
   'external_platform_response_unusable', 'external_platform_rejected', 'external_platform_outcome_unknown',
   'social_upstream_response_unusable', 'social_upstream_rejected', 'social_upstream_outcome_unknown',
   'upstream_rate_limited', 'upstream_auth_or_balance_unavailable', 'upstream_balance_exhausted',

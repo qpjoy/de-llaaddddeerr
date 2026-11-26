@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { HubService } from '../../server/hub-service.mjs'
+import { AppError } from '../../server/core/errors.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { RapidApiAdapter, RapidApiUpstreamError } from '../../server/adapters/rapidapi.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -241,14 +242,17 @@ test('adapter: fixed host and headers, gateway refusals are unbilled, the key is
   })
 })
 
-async function searchHarness(payload) {
+async function searchHarness(payload, capabilities = []) {
   const store = new MemoryStore(), calls = []
   const service = new HubService({ store, apiKeyPepper: PEPPER, adapter: { async search() { throw new Error('Night-All must never be called') } } })
   const tenant = await service.createTenant({ name: 'Offline Threads' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Threads caller' })
   await store.setPlatformGrant(consumer.id, 'threads', true)
   await store.putPolicy({ tenantId: tenant.id, consumerId: consumer.id, platform: 'threads', maxRequests: 10000, windowSeconds: 3600, maxPageSize: 100, maxCrawlWork: 1000 })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Synthetic Threads key', platforms: ['threads'], capabilities: [] })
+  for (const capability of capabilities) {
+    await service.putCapabilityConfiguration(capability, { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
+  }
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Synthetic Threads key', platforms: ['threads'], capabilities })
   const context = await service.authenticate(key.secret)
   const config = { configured: true, contractVerified: true, nativeForwardingVerified: true, dispatchEnabled: true,
     timeoutMs: 100, freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 1000, billing: {} }
@@ -299,6 +303,69 @@ test('search runs through Hub delivery: one purchase, replay, signed cursor, the
   await h.gateway.strategySearchRoutingStore.update('search', 'threads', { mode: 'paused', primaryProvider: 'rapidapi', fallbackProvider: null, expectedRevision: 2, reason: 'pause' })
   await assert.rejects(h.search({ ...body, query: 'paused' }, 'threads-search-paused'), { code: 'threads_acquisition_paused' })
   assert.equal(h.calls.length, 2, 'a paused route buys nothing')
+  const released = await h.gateway.usageStore.getUsageRequestByIdempotencyKey(h.context.consumer.id, 'threads-search-paused')
+  assert.equal(released.status, 'released')
+  assert.equal(released.errorCode, 'threads_acquisition_paused')
+  assert.equal(released.responseBody, null)
+  assert.equal(released.responseStatus, null)
+  const events = h.platformStore.requests.filter(event => event.usageRequestId === released.id)
+  assert.deepEqual(events.map(event => [event.responseStatus, event.errorCode, event.providerCallId]),
+    [[503, 'threads_acquisition_paused', null]])
+  await h.gateway.strategySearchRoutingStore.update('search', 'threads', { mode: 'fixed', primaryProvider: 'rapidapi', fallbackProvider: null, expectedRevision: 3, reason: 'resume' })
+  const resumed = await h.search({ ...body, query: 'paused' }, 'threads-search-paused')
+  assert.equal(resumed.status, 200)
+  assert.notEqual(resumed.requestId, released.id)
+  assert.equal(h.calls.length, 3)
+})
+
+test('Threads search preserves the public busy error while recording its pre-dispatch refusal', async () => {
+  const h = await searchHarness(() => samples.searchRecent)
+  h.gateway.active = h.gateway.config.maxConcurrency
+  const key = 'threads-no-capacity'
+  await assert.rejects(h.search({ platform: 'threads', query: 'sample', pageSize: 1 }, key), error => {
+    assert.equal(error.code, 'external_platform_busy')
+    assert.equal(error.status, 503)
+    assert.deepEqual(Object.keys(error.details), ['requestId'])
+    return true
+  })
+  const request = await h.gateway.usageStore.getUsageRequestByIdempotencyKey(h.context.consumer.id, key)
+  assert.equal(request.errorCode, 'external_platform_busy')
+  assert.deepEqual(h.platformStore.requests.map(event => [event.usageRequestId, event.responseStatus, event.providerCallId]),
+    [[request.id, 503, null]])
+  assert.equal(h.calls.length, 0)
+})
+
+test('a lost provider-call acknowledgement keeps the Threads search outcome unknown', async t => {
+  const h = await searchHarness(() => samples.searchRecent)
+  const begin = h.platformStore.beginProviderCall.bind(h.platformStore)
+  t.mock.method(h.platformStore, 'beginProviderCall', async input => {
+    await begin(input)
+    throw new AppError(503, 'external_platform_call_persistence_unknown', 'Lost call acknowledgement')
+  })
+  const key = 'threads-lost-call-ack'
+  const search = () => h.search({ platform: 'threads', query: 'sample', pageSize: 1 }, key)
+  await assert.rejects(search(), { code: 'request_outcome_unknown' })
+  const request = await h.gateway.usageStore.getUsageRequestByIdempotencyKey(h.context.consumer.id, key)
+  assert.equal(request.status, 'unknown')
+  assert.equal(h.platformStore.requests.length, 0)
+  await assert.rejects(search(), { code: 'request_outcome_unknown' })
+  assert.equal(h.platformStore.calls.size, 1)
+  assert.equal(h.calls.length, 0)
+})
+
+test('a pre-dispatch hint on a Threads profile refusal does not create a search receipt', async () => {
+  const h = await searchHarness(() => samples.searchRecent, ['social.profile.get'])
+  await h.gateway.strategySearchRoutingStore.update('user-info', 'threads', { mode: 'paused', primaryProvider: 'rapidapi',
+    fallbackProvider: null, expectedRevision: 1, reason: 'Offline paused profile' })
+  const key = 'threads-paused-profile'
+  await assert.rejects(h.gateway.socialAccountData(h.context, { operation: 'user-info', path: '/api/v1/data/social/user-info',
+    body: { platform: 'threads', userId: '42' }, idempotencyKey: key, routing: { provider: 'rapidapi' } }),
+  error => error.code === 'threads_acquisition_paused' && error.details.upstreamDispatched === false)
+  const request = await h.gateway.usageStore.getUsageRequestByIdempotencyKey(h.context.consumer.id, key)
+  assert.equal(request.status, 'released')
+  assert.equal(request.errorCode, 'external_platform_pre_dispatch_failed')
+  assert.equal(h.platformStore.requests.length, 0)
+  assert.equal(h.calls.length, 0)
 })
 
 test('search step and ingest accept both suppliers and nothing else', () => {

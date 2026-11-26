@@ -12,6 +12,7 @@ import { MemoryExternalPlatformStore } from '../../server/external-platforms/sto
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { createDataSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../../server/contracts/native-forwarding.mjs'
+import { COMMENT_REPLIES_PATH } from '../../server/contracts/comment-replies.mjs'
 import { POST_COMMENTS_PATH, POST_COMMENTS_RECIPES, POST_COMMENTS_VERSION, normalizePostCommentsRequest } from '../../server/contracts/post-comments.mjs'
 import { classifyExternalPlatformIngest } from '../../server/workers/ingest.mjs'
 import { canonicalJson } from '../../server/ingest/normalizers.mjs'
@@ -299,6 +300,38 @@ test('Twitter empty thread with a cursor remains unknown and never automatically
   assert.match(result.body.data.page.nextCursor, /^mxds1\./u)
   assert.equal(h.calls.length, 1)
   assert.equal(result.body.data.meta.providerCalls, 1)
+})
+
+test('Twitter comments and nested replies deliver a matched sparse TikHub page without repurchasing it', async t => {
+  const replyId = '2117082385997250768'
+  const h = await harness({ platform: 'twitter', payload: ({ params }) => ({
+    code: 200, message: 'Request successful. This request will incur a charge.',
+    params: { tweet_id: params.tweet_id }, data: { id: params.tweet_id, thread: [] },
+  }) })
+  const server = createServer(createApp({ service: h.service, store: h.store, listenerMode: 'public',
+    commentRepliesGateway: { commentReplies: (context, input) => h.gateway.commentReplies(context, { ...input, platform: 'twitter' }) } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  for (const [path, key, body] of [
+    ['/api/v1/search/post-comments', 'sparse-post-comments', { platform: 'twitter', postId: TWITTER_POST }],
+    [COMMENT_REPLIES_PATH, 'sparse-comment-replies', { replyRef: { platform: 'twitter', commentId: replyId, contentId: TWITTER_POST } }],
+  ]) {
+    const send = () => fetch(`http://127.0.0.1:${server.address().port}${path}`, {
+      method: 'POST', headers: { authorization: `Bearer ${h.secret}`, 'content-type': 'application/json', 'idempotency-key': key },
+      body: JSON.stringify(body),
+    })
+    const first = await send()
+    const result = await first.json()
+    assert.equal(first.status, 200, JSON.stringify(result))
+    assert.deepEqual(result.data.items, [])
+    assert.equal(result.data.page.hasMore, null)
+    assert.equal(result.data.page.nextCursor, null)
+    assert.equal(result.data.page.paginationStatus, 'unknown')
+    const replay = await send()
+    assert.equal(replay.headers.get('idempotent-replay'), 'true')
+    assert.deepEqual(await replay.json(), result)
+  }
+  assert.deepEqual(h.calls.map(call => call.params.tweet_id), [TWITTER_POST, replyId])
 })
 
 test('historical signed JustOne Twitter cursors replay exact receipts but cannot start a TikHub purchase', async () => {

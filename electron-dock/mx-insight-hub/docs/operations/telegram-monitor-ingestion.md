@@ -362,6 +362,71 @@ still require their separate activation gates. Do not reset checkpoints merely
 to clear a failure: a changed installation identity requires a separate review
 and the explicit reset workflow described above.
 
+### 3.3 Diagnose a PostgreSQL cancellation (57014)
+
+The 21 November incident affected the messages input. The 25 November
+23:17 Asia/Shanghai snapshot showed its cursor failed at
+`(2026-11-21 04:56:31.323895+08, 3221897)`, with 3,111,052 processed rows
+and no open import at the checkpoint. Chats were idle. Both inputs were
+active on a 300-second schedule and the external-pull queue had no pending
+or running jobs. The failed messages cursor held the paired schedule.
+
+After the operator resumed and synced the pair on 25 November, another
+zero-row import failed at 23:21. At 23:21:46 the mx-common PostgreSQL log
+reported a statement timeout and referenced `core.canonical_records` on the
+same backend. Between 23:22:58 and 23:25:12 the ingest worker reported seven
+further 1,000-row message pages committed with zero rejections, each with
+`done=false`. This confirms that catch-up resumed on the deployed worker.
+The 171,000 rows remaining in the UI were from its earlier 23:12 source
+snapshot. **刷新记录** refreshes the import history. **精确核对源库进度** takes
+a new source snapshot.
+
+PostgreSQL reports `57014` for a canceled query. A fresh nonempty source
+page opens an import. The Hub increments its row counters in the transaction
+that commits the page. A failed import with zero rows can therefore have read
+source data. The 2,000 ingested rows on the last failed run were already
+committed. The error code and counters alone do not identify the canceled
+statement or its database.
+
+The previous worker closed an open import on cancellation. A retry of page
+zero could open a second import. A retry of a continuation carrying the old
+import ID could return as stale, leaving the cursor failed. The corrected
+worker keeps the open import and its last acknowledged tuple across queue
+attempts. If the attempts are exhausted, the failed cursor retains the
+open import for recovery. A first source read can fail before any import
+exists. In that case the cursor retains its previous position.
+
+1. From the production cluster, collect the current cursor, latest imports
+   and queue counts from the ingest pod. The report is read-only. It can exit
+   with status 1 when historical dead jobs exceed the sample limit. Check
+   each section's `state` and `truncated` fields.
+
+   ```sh
+   kubectl -n mx-insight-hub exec deploy/mx-insight-hub-ingest -c ingest -- \
+     node /app/server/ops/diagnose-telegram-ingestion.mjs
+   ```
+
+2. Allow pending or running attempts to finish. For a failed cursor with
+   no outstanding job, use **恢复卡住的任务** in **Telegram monitor**. It verifies
+   both sources and checkpoints under lock. After success, use **立即同步**
+   once or wait for the next schedule. Keep the saved checkpoints. If the
+   cursor still owns an import, continue with its original page size so the
+   worker can recognize any committed page awaiting acknowledgment.
+3. Verify that the messages cursor advances from its saved tuple and that
+   the processed count increases. A `running` cursor with advancing commits
+   shows backlog processing. After catch-up, look for an `idle` cursor with
+   no error and a later scheduled scan.
+4. On a recurrence with the corrected worker, collect the phase and reason
+   from its log. `source_schema` and `source_page` identify source-side reads,
+   `hub_ingest` identifies the Hub batch write, and `hub_checkpoint` covers
+   Hub import and cursor bookkeeping. `reason=unspecified` leaves the
+   cancellation cause open. Correlate with database logs at the same time.
+
+   ```sh
+   kubectl -n mx-insight-hub logs deploy/mx-insight-hub-ingest -c ingest \
+     --since=30m --timestamps | grep -F 'code=57014 phase='
+   ```
+
 ## 4. Verified source schema and canonical mapping
 
 ### 4.1 Chats

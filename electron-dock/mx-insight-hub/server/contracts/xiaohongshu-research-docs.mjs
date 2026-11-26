@@ -18,7 +18,7 @@ export const xhsResearchPaths = Object.fromEntries([
     } },
   }, '默认缓存优先，deliveryMode=refresh 明确获取最新数据；详情采集平滑排队，默认间隔至少 5 秒，预计等待达到 60 秒返回 429 external_platform_busy 和 Retry-After。可确认未计费的详情拒绝最多重试一次，未知结果不重试。仅查询原详情；指标缺失或全为零都不会自动查询博主列表或补数。需要其他指标时，由用户调用 /data/xiaohongshu/users/notes/analytics 并指定 user_id 和页码。meta.tagsAvailable=false 时不要当作无标签，可继续使用完整正文与标签接口。查无结果返回 meta.status=no_data、data.item=null，仍计一次成功调用；不要因此自动重试。旧幂等标识保留历史交付，可能含 metricsSupplement；新请求不会命中旧自动补数快照。'],
   ['comments', 'social.comments.list', '获取笔记评论', {
-    note_id: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
+    note_id: { type: 'string', pattern: '^[0-9a-fA-F]{24}$', description: '填入目标笔记的 24 位 ID。用搜索结果测试时，取本次返回的 note 对象的 note_id 或 id 字段。' },
     sort: { type: 'string', enum: ['latest', 'hot'], default: 'latest' },
     cursor: { type: 'string', maxLength: 8192, description: '首屏省略。续页原样传入 data.nextCursor，保留 note_id/sort 并使用新的 Idempotency-Key。游标绑定当前 Key 与笔记/排序，最多 15 页。' },
   }, { noteId: { type: 'string' }, items: { type: 'array', items: comment }, nextCursor: nullableText, hasMore: { type: ['boolean', 'null'] } }, '仅 nextCursor 非空时继续；meta.paginationStatus=unknown 或 limit_reached 时停止。hasMore=null 表示无法确认。评论总量与当前页数量不同；回复仅含已返回部分。'],
@@ -27,7 +27,10 @@ export const xhsResearchPaths = Object.fromEntries([
   description: `${commonDescription} ${description}`,
   'x-mx-required-platform': 'xiaohongshu', 'x-mx-required-capabilities': [capability],
   parameters: [{ name: 'Idempotency-Key', in: 'header', schema: { type: 'string', minLength: 8, maxLength: 128 }, description: '重试必须保留；省略时每次均视为新请求。' }],
-  requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false, required: ['note_id'], properties }, example: { note_id: '6a20edfa0000000021020951', ...(path === 'comments' ? { sort: 'hot' } : {}) } } } },
+  requestBody: { required: true, content: { 'application/json': {
+    schema: { type: 'object', additionalProperties: false, required: ['note_id'], properties },
+    ...(path === 'detail' ? { example: { note_id: '6a20edfa0000000021020951' } } : {}),
+  } } },
   responses: {
     200: { description: '成功交付或已确认无数据；metadata 不包含外部服务身份。', content: { 'application/json': { schema: {
       type: 'object', required: ['code', 'data', 'meta'], properties: {
@@ -46,6 +49,7 @@ export const xhsResearchPaths = Object.fromEntries([
         } },
       },
     } } } },
+    ...(path === 'comments' ? { 404: { description: 'post_not_found 表示该笔记不可用。请核对 note_id。', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } } } : {}),
     ...Object.fromEntries([400, 401, 403, 405, 409, 429, 502, 503].map(status => [status, { description: 'Hub 错误码与 requestId；结果不确定时保留原幂等标识，先查请求状态。', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }])),
   },
 } }]))
@@ -88,7 +92,7 @@ export const xhsResearchGuide = `<h3>关键词 → 热门笔记 → 阅读量与
 <p><code>POST /api/v1/data/xiaohongshu/users/notes/analytics</code>：JSON <code>{"user_id":"624560f5000000000100ffab","page_number":1,"page_size":8,"note_type":0,"order_type":1}</code>；与详情共用 <code>social.posts.analytics</code>。每次实时查询指定的一页博主笔记与指标，返回 <code>data.items / total / nextPage</code>。不自动翻页，页码无固定上限；下一页更换请求标识，空页停止。每页成功请求（含空页）独立计一次客户用量。原“获取用户笔记”接口及其游标、权限保持不变。</p>
 <p>按 note_id 查询详情不会自动补数，即使阅读/曝光缺失或全为零。需要阅读、曝光、收藏、总互动量时，用户自行调用 user_id 列表接口并分页寻找目标笔记。旧幂等标识仍重放历史交付（可能含 metricsSupplement）；新建请求才执行当前合同。两个入口使用同一授权能力；详情按 social.posts.analytics 计价，博主列表按 social.users.notes.analytics 每页独立计价。</p>
 <p>详情默认 <code>deliveryMode=cache_first</code>，有效缓存直接返回；<code>refresh</code> 强制实时。服务器按上游凭据排队，默认间隔至少 <strong>5 秒</strong>、等待上限 60 秒，队列满返回 429 和 Retry-After；确认未计费的拒绝最多重试一次，超时或未知结果不重试。缓存交付仍按调用者套餐计费，合并采集不会共享其他用户的权限或计费身份。无结果 <code>meta.status=no_data</code> 也计一次成功请求；不要自动重试。每次成功请求按已分配套餐计费。</p>
-<p><code>POST /api/v1/data/xiaohongshu/notes/comments</code>：JSON <code>{"note_id":"6a20edfa0000000021020951","sort":"hot"}</code>；需 <code>social.comments.list</code>。返回 <code>data.items</code> 和 <code>data.nextCursor</code>。下一页传 <code>cursor</code>，保留相同 note_id/sort 并换用新 Idempotency-Key；只在 nextCursor 非空时继续，最多 15 页。回复仅展示已取得部分。</p>
+<p><code>POST /api/v1/data/xiaohongshu/notes/comments</code> 需 <code>social.comments.list</code>。请求形如 <code>{"note_id":"NOTE_ID","sort":"hot"}</code>。将 NOTE_ID 换为本次搜索结果中所选笔记的 <code>note.note_id</code> 或 <code>note.id</code>。返回 <code>data.items</code> 和 <code>data.nextCursor</code>。下一页传 <code>cursor</code>，保留相同 note_id/sort 并换用新 Idempotency-Key；只在 nextCursor 非空时继续，最多 15 页。回复仅展示已取得部分。</p>
 <pre>curl -X POST "$HUB_URL/api/v1/data/xiaohongshu/notes/detail" \\
   -H "Authorization: Bearer $HUB_KEY" -H "Content-Type: application/json" \\
   -H "Idempotency-Key: note-detail-request-001" \\

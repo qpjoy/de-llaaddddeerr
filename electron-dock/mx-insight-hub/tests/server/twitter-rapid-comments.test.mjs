@@ -189,6 +189,49 @@ test('RapidAPI pagination uses only top-level Bottom, accepts replace entries an
   assert.equal(parseRapidApiTwitterCommentPage(page(withThreadCursor), '100').providerPage.nextParams, null)
 })
 
+test('TweetDetail conversation module additions deliver nested replies, deduplicate overlaps and keep the top-level cursor', async () => {
+  const h = await rapidHarness(url => {
+    const id = url.pathname === '/tweet/100' ? '201' : '301'
+    const parent = url.pathname === '/tweet/100' ? '100' : '201'
+    const childId = String(Number(id) + 1)
+    const siblingModule = { ...module(tweet('401', parent)), entryId: 'conversationthread-401' }
+    const payload = page(flat(tweet(parent, parent === '100' ? null : '100')), module(tweet(id, parent)), siblingModule, cursor('next'))
+    const moduleEntryId = 'conversationthread-1'
+    payload.data.threaded_conversation_with_injections_v2.instructions.push({ type: 'TimelineAddToModule', moduleEntryId,
+      moduleItems: [tweet(id, parent), tweet(childId, id)].map(row => ({
+        entryId: `${moduleEntryId}-tweet-${row.rest_id}`, item: { itemContent: content(row) } })) })
+    return payload
+  })
+  const first = await h.comments({ platform: 'twitter', postId: '100' }, 'module-comments')
+  assert.deepEqual(first.body.data.items.map(row => [row.commentId, row.parentExternalId]), [['201', '100'], ['202', '201'], ['401', '100']])
+  assert.match(first.body.data.page.nextCursor, /^mxds1\./u)
+  const replyBody = { platform: 'twitter', replyRef: first.body.data.items[0].replyRef }
+  const nested = await h.replies(replyBody, 'module-replies')
+  assert.deepEqual(nested.body.data.items.map(row => [row.commentId, row.rootCommentId, row.parentCommentId]),
+    [['301', '201', '201'], ['302', '201', '301'], ['401', '201', '201']])
+  assert.deepEqual((await h.replies(replyBody, 'module-replies')).body, nested.body)
+  assert.equal(h.calls.length, 2)
+})
+
+test('a standalone module continuation validates its member ownership and rejects unsupported positioning', () => {
+  const moduleEntryId = 'conversationthread-102'
+  const child = { entryId: `${moduleEntryId}-tweet-202`, item: { itemContent: content(tweet('202', '201')) } }
+  const instruction = { type: 'TimelineAddToModule', moduleEntryId, moduleItems: [child] }
+  const parse = change => {
+    const payload = page(cursor('next'))
+    payload.data.threaded_conversation_with_injections_v2.instructions.push({ ...instruction, ...change })
+    return parseRapidApiTwitterCommentPage(payload, '201', { cursor: 'previous' })
+  }
+  const result = parse({ __typename: 'TimelineAddToModule', prepend: false })
+  assert.deepEqual(result.comments.map(row => row.values.commentId), ['202'])
+  assert.deepEqual(result.providerPage.nextParams, { cursor: 'next' })
+  for (const change of [{ prepend: true }, { moduleItemEntryId: child.entryId }, { moduleEntryId: 'other-102' },
+    { entries: [] }, { moduleItems: [{ ...child, entryId: 'conversationthread-999-tweet-202' }] },
+    { moduleItems: [{ ...child, item: { itemContent: { itemType: 'unknown' } } }] }]) {
+    assert.throws(() => parse(change), { code: 'invalid_upstream_contract' })
+  }
+})
+
 test('TweetDetail termination preserves paid comments and only stops pagination in the terminated direction', () => {
   for (const direction of ['Top', 'Bottom', 'TopAndBottom']) {
     for (const beforeEntries of [false, true]) {

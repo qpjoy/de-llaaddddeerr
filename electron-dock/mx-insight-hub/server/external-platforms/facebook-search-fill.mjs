@@ -120,7 +120,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
       if (upstreamPages >= MAX_PAGES) { stopReason = 'upstream_page_limit'; break }
       if (sources.length && !providerCursor) break
       let currentCall = null, evidence = null, costReservation = null, childLease = null, entered = false
-      let admission = null, observationFailed = false, sourceProvider = null, selfhostedAdmission = null
+      let admission = null, observationFailed = false, rapidDispatchStarted = false, sourceProvider = null, selfhostedAdmission = null
       try {
         if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
         context = await revalidateIdentity()
@@ -211,6 +211,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         const callStarted = performance.now()
         let result, failure = null
         try {
+          rapidDispatchStarted = provider === 'rapidapi'
           result = provider === 'rapidapi'
             ? await target.adapter.execute(step, { credential: credential.credential })
             : provider === FACEBOOK_SELFHOSTED_PROVIDER ? await target.adapter.execute(step, { signal })
@@ -239,14 +240,17 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         const probe = provider === 'rapidapi' && admission?.probe === true
         evidence = { callId: currentCall.id, delivery: stepDelivery, outcome: failure ? failure.evidence.outcome : 'succeeded',
           billed: failure ? failure.evidence.billed ?? null : provider === 'rapidapi' ? null : provider !== FACEBOOK_SELFHOSTED_PROVIDER,
-          httpStatus: persisted.responseArchive?.httpStatus ?? failure?.evidence.httpStatus ?? 200,
-          businessCode: persisted.responseArchive?.businessCode ?? failure?.evidence.businessCode ?? (provider === 'justone' ? 0 : null),
+          httpStatus: persisted.responseArchive?.httpStatus ?? (failure ? failure.evidence.httpStatus ?? null : 200),
+          businessCode: persisted.responseArchive?.businessCode ?? failure?.evidence.businessCode ?? (!failure && provider === 'justone' ? 0 : null),
           costMinor: probe ? null : cost.costMinor, costKind: probe ? 'unknown' : cost.costKind, currency: probe ? null : cost.currency,
           latencyMs: Math.round(performance.now() - callStarted), itemCount: failure ? 0 : result.items.length,
           errorCode: failure?.evidence.errorCode ?? null, affectsCircuit: failure ? failure.evidence.affectsCircuit !== false : false,
           ...persisted, archiveObjects }
         if (provider === 'rapidapi') {
-          try { await policyStore.observeRapid(admission, failure?.evidence.quota ?? result?.quota) }
+          try {
+            await policyStore.observeRapid(admission, failure?.evidence.quota ?? result?.quota)
+            admission = null
+          }
           catch { observationFailed = true; gateway.logger?.warn?.('[external-platform] Facebook quota observation is unavailable; its admission remains reserved') }
         }
         if (failure) {
@@ -313,7 +317,10 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
           usageRequestId: delivery.usageRequestId }).catch(() => {})
         if (childLease) await target.platformStore.releaseDispatchLease(childLease).catch(() => {})
         if (entered) leaveCapacity(sourceProvider, entered)
-        if (admission && !observationFailed) await policyStore.observeRapid(admission).catch(() => {})
+        if (admission?.allowed && !observationFailed) {
+          if (rapidDispatchStarted) await policyStore.observeRapid(admission).catch(() => {})
+          else await policyStore.releaseUndispatchedRapid(admission).catch(() => {})
+        }
         if (selfhostedAdmission && !selfhostedAdmission.retain) await policyStore.releaseSelfhosted(selfhostedAdmission).catch(() => {})
       }
     }

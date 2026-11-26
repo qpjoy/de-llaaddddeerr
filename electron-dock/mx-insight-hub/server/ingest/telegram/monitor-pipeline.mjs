@@ -3,36 +3,15 @@ import { AppError } from '../../core/errors.mjs'
 import { enqueueJobsAtomically } from '../external/atomic-enqueue.mjs'
 import { validateDatabaseConnection } from '../external/database-source.mjs'
 import { EXTERNAL_PULL_QUEUE } from '../external/sync-job.mjs'
+import { TELEGRAM_MONITOR_INPUTS, TELEGRAM_MONITOR_MAPPING_VERSION } from './source-contract.mjs'
 
-export const TELEGRAM_MONITOR_MAPPING_VERSION = 2
+export {
+  TELEGRAM_MONITOR_INPUTS,
+  TELEGRAM_MONITOR_MAPPING_VERSION,
+  TELEGRAM_MONITOR_SOURCE_KEYS,
+  isTelegramMonitorSourceKey,
+} from './source-contract.mjs'
 export const TELEGRAM_MONITOR_WRITER_CONTRACT_VERSION = 'telegram-monitor.writer.v1'
-
-export const TELEGRAM_MONITOR_INPUTS = Object.freeze([
-  Object.freeze({
-    role: 'chats',
-    sourceKey: 'telegram-monitor-chats',
-    schema: 'public',
-    table: 'tg_monitor_chats',
-    cursorColumn: 'updated_at',
-    idColumn: 'chat_id',
-    builtInMappingVersion: TELEGRAM_MONITOR_MAPPING_VERSION,
-    builtInMappingId: 'f52f00f6-4326-4d0a-87ae-06b239450a1f',
-  }),
-  Object.freeze({
-    role: 'messages',
-    sourceKey: 'telegram-monitor-messages',
-    schema: 'public',
-    table: 'tg_monitor_messages',
-    cursorColumn: 'updated_at',
-    idColumn: 'id',
-    builtInMappingVersion: TELEGRAM_MONITOR_MAPPING_VERSION,
-    builtInMappingId: '32ac88ac-0c89-46c0-b22e-7885814ebd56',
-  }),
-])
-
-export const TELEGRAM_MONITOR_SOURCE_KEYS = new Set(
-  TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey),
-)
 
 export const TELEGRAM_MONITOR_WRITER_CONTRACT_SUMMARY = Object.freeze({
   watermark: 'Every inserted or changed row advances updated_at, including edits, metrics, media and soft deletes.',
@@ -48,10 +27,6 @@ export const TELEGRAM_MONITOR_WRITER_CONTRACT_SUMMARY = Object.freeze({
 export const TELEGRAM_MONITOR_WRITER_CONTRACT_DIGEST = createHash('sha256')
   .update(JSON.stringify(TELEGRAM_MONITOR_WRITER_CONTRACT_SUMMARY))
   .digest('hex')
-
-export function isTelegramMonitorSourceKey(sourceKey) {
-  return TELEGRAM_MONITOR_SOURCE_KEYS.has(sourceKey)
-}
 
 function writerContract() {
   return {

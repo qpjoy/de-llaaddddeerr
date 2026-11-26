@@ -3162,6 +3162,155 @@ test('source contract drift marks its cursor failed so periodic scheduling canno
   })
 })
 
+test('Telegram monitor retries cancelled first and continuation pages on the same durable import', async () => {
+  const source = {
+    id: 'tg-source', sourceKey: 'telegram-monitor-messages', sourceKind: 'database', status: 'active',
+    datasetId: 'telegram.monitor.messages.v1', platform: 'telegram', objectType: 'message',
+    connection: { dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_messages', cursorColumn: 'updated_at', idColumn: 'id' },
+  }
+  const mapping = { version: 2, fieldMap: { externalId: { from: 'id' }, eventTime: { from: 'updated_at' } } }
+  const updatedAt = '2026-11-21T00:00:00.000Z'
+  const cancellation = Object.assign(new Error('private driver detail'), { code: '57014' })
+  let cursor = null
+  let runStatus
+  let starts = 0
+  let fault = 'source'
+  const committed = []
+  const continuations = []
+  const warnings = []
+  const workerErrors = []
+  const queue = {
+    heartbeat: async () => {},
+    getCursor: async () => cursor,
+    saveCursor: async (_id, position, options) => {
+      cursor = { position, status: options.status, last_error: options.error }
+      return cursor
+    },
+    enqueue: async (_queue, payload) => continuations.push(payload),
+  }
+  const puller = new DatabaseSourcePuller({
+    queue,
+    logger: { warn: message => warnings.push(message) },
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      startImportRun: async () => {
+        starts++
+        runStatus = 'running'
+        return { id: 'tg-run' }
+      },
+      getImportRunState: async () => ({ sourceId: source.id, status: runStatus }),
+      ingestExternalRecords: async ({ importRunId, records }) => {
+        assert.equal(importRunId, 'tg-run')
+        if (fault === 'hub') throw cancellation
+        committed.push(...records.map(record => record.externalId))
+        return { ingested: records.length, changed: records.length }
+      },
+      finalizeExternalImportRun: async (input) => {
+        runStatus = input.status
+        cursor = { position: input.position, status: input.cursorStatus }
+        return { cursor }
+      },
+    },
+    env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+    poolFactory: () => ({
+      async query(sql, values) {
+        if (sql.includes('information_schema.columns')) return { rows: [
+          { column_name: 'id', data_type: 'bigint', udt_name: 'int8', is_nullable: 'NO', ordinal_position: 1 },
+          { column_name: 'updated_at', data_type: 'timestamp with time zone', udt_name: 'timestamptz', is_nullable: 'NO', ordinal_position: 2 },
+        ] }
+        if (fault === 'source') throw cancellation
+        const ids = ['1', '2', '3'].filter(id => Number(id) > Number(values[1]))
+        return { rows: ids.slice(0, values[2]).map(id => ({ id, updated_at: updatedAt })) }
+      },
+      async end() {},
+    }),
+  })
+  const first = { sourceKey: source.sourceKey, batchSize: 2, chunk: 0 }
+  const execute = (payload, attempts) => runExternalPullJob({
+    queue, puller, payload, job: { id: 1, attempts, max_attempts: 3 },
+    logger: { log() {}, error: message => workerErrors.push(message) },
+  })
+  const isCanceled = error => error.code === '57014' && !error.message.includes('private')
+
+  // A cancelled first source read must not invent an import or advance the watermark.
+  await assert.rejects(execute(first, 3), isCanceled)
+  assert.equal(starts, 0)
+  assert.equal(cursor.status, 'failed')
+  assert.equal(cursor.last_error, '57014')
+  assert.deepEqual(cursor.position, {})
+  assert.deepEqual(warnings, ['[external] telegram-monitor-messages code=57014 phase=source_page reason=unspecified'])
+
+  // A failed first write already owns an import, even though chunk zero carries no run ID.
+  fault = 'hub'
+  await assert.rejects(execute(first, 1), isCanceled)
+  assert.equal(cursor.status, 'running')
+  assert.equal(cursor.position.importRunId, 'tg-run')
+  assert.equal(cursor.position.lastId, undefined)
+  assert.deepEqual(committed, [])
+  fault = null
+  assert.equal((await execute(first, 2)).done, false)
+  const [continuation] = continuations
+  assert.equal(continuation.importRunId, 'tg-run')
+  assert.equal(cursor.position.lastId, '2')
+
+  // The next queue attempt must still own this page; exhaustion keeps its last committed tuple.
+  fault = 'hub'
+  for (const attempt of [1, 2, 3]) {
+    await assert.rejects(execute(continuation, attempt), isCanceled)
+    assert.equal(cursor.status, attempt < 3 ? 'running' : 'failed')
+    assert.equal(cursor.position.importRunId, 'tg-run')
+    assert.equal(cursor.position.lastId, '2')
+    assert.equal(runStatus, 'running')
+    assert.deepEqual(committed, ['1', '2'])
+  }
+  fault = null
+  const resumed = await execute(first, 1)
+  assert.equal(resumed.done, true)
+  assert.equal(runStatus, 'succeeded')
+  assert.equal(cursor.status, 'idle')
+  assert.equal(cursor.position.lastId, '3')
+  assert.equal(starts, 1)
+  assert.deepEqual(committed, ['1', '2', '3'])
+  assert.deepEqual(warnings.slice(1), Array(4).fill('[external] telegram-monitor-messages code=57014 phase=hub_ingest reason=unspecified'))
+  assert.deepEqual(workerErrors, [])
+})
+
+test('only a managed Telegram monitor contract check propagates query cancellation for retry', async () => {
+  for (const [sourceKey, code, expected] of [
+    ['telegram-monitor-messages', '57014', '57014'],
+    ['telegram-monitor-messages', '42P01', 'source_contract_mismatch'],
+    ['custom-source', '57014', 'source_contract_mismatch'],
+  ]) {
+    const source = {
+      id: 'tg-source', sourceKey, sourceKind: 'database', status: 'active',
+      connection: { dsnEnv: 'TG_DATABASE_URL', table: 'tg_monitor_messages', cursorColumn: 'updated_at', idColumn: 'id',
+        sourceContractId: 'a'.repeat(32) },
+    }
+    const warnings = []
+    const puller = new DatabaseSourcePuller({
+      store: {
+        getExternalSource: async () => source,
+        getActiveMapping: async () => ({ version: 2, fieldMap: { externalId: { from: 'id' } } }),
+      },
+      queue: { getCursor: async () => null, saveCursor: async () => {} },
+      logger: { warn: message => warnings.push(message) },
+      env: { TG_DATABASE_URL: 'postgres://private.invalid/db' },
+      poolFactory: () => ({
+        async query(sql) {
+          assert.doesNotMatch(sql, /SELECT \*,|information_schema\.columns/)
+          throw Object.assign(new Error('canceling statement due to statement timeout'), { code })
+        },
+        async end() {},
+      }),
+    })
+    await assert.rejects(puller.pullBatch(sourceKey), error => error.code === expected)
+    assert.deepEqual(warnings, expected === '57014'
+      ? ['[external] telegram-monitor-messages code=57014 phase=source_schema reason=statement_timeout']
+      : [])
+  }
+})
+
 test('a manual sync resumes the same running import after continuation enqueue exhaustion', async () => {
   const source = {
     id: 'source-resume', sourceKey: 'telegram-monitor-chats', sourceKind: 'database', status: 'active',

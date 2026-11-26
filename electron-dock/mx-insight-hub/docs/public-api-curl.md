@@ -1985,18 +1985,31 @@ curl -sS -i --get \
 
 ## 小红书：搜索结果再取阅读量与评论
 
-关键词列表可通过已授权搜索接口使用 `sort_type=popularity_descending` 或 `comment_descending`。从列表取出笔记 ID 后分别调用：
+下例从本次 `POST /api/v1/xiaohongshu/app_v2/search_notes` 已成功返回的 `search-response.json` 中选取首个有效笔记 ID，然后按需执行详情或评论命令。若本次搜索没有返回有效 ID，请跳过这两个调用。[搜索响应与笔记选择示例](xiaohongshu-api-quickstart.md)
 
 ```bash
+NOTE_ID=$(jq -er 'first(.data.data.items[]? | .note? | objects |
+  (.note_id // .id) | strings | select(test("^[0-9a-fA-F]{24}$")))' search-response.json)
+```
+
+获取详情
+
+```bash
+DETAIL_REQUEST_ID=$(uuidgen)
 curl -sS -X POST "$HUB_URL/api/v1/data/xiaohongshu/notes/detail" \
   -H "Authorization: Bearer $HUB_KEY" -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: note-analytics-001' \
-  --data '{"note_id":"6a20edfa0000000021020951"}'
+  -H "Idempotency-Key: $DETAIL_REQUEST_ID" \
+  --data "{\"note_id\":\"${NOTE_ID:?请先从本次搜索结果选取笔记 ID}\"}"
+```
 
+获取第一页评论
+
+```bash
+COMMENTS_REQUEST_ID=$(uuidgen)
 curl -sS -X POST "$HUB_URL/api/v1/data/xiaohongshu/notes/comments" \
   -H "Authorization: Bearer $HUB_KEY" -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: note-comments-page-001' \
-  --data '{"note_id":"6a20edfa0000000021020951","sort":"hot"}'
+  -H "Idempotency-Key: $COMMENTS_REQUEST_ID" \
+  --data "{\"note_id\":\"${NOTE_ID:?请先从本次搜索结果选取笔记 ID}\",\"sort\":\"hot\"}"
 ```
 
 详情需 `social.posts.analytics`，评论需 `social.comments.list`；两者同时需 `xiaohongshu` 平台授权，业务和所用 Key 都须开通。阅读量在 `data.item.metrics.views`，曝光量在 `impressions`；缺失为 null。建议新详情请求间隔至少 5 秒。有效 no_data 也计一次成功请求，不自动重试。

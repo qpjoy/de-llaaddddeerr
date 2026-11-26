@@ -90,6 +90,46 @@ test('HTTP admission waits only for shared busy, revalidates after acquisition a
   assert.equal(refused.allowed, false); assert.equal(checks, 1)
 })
 
+test('an undispatched Facebook reservation keeps observed allowance and cannot release a later lease', pg, async t => {
+  const { store, replica } = await fixture(t)
+  await store.observeRapid(await store.admitRapid(ticket()), { remaining: 5, limit: 1000 })
+  const before = await store.facebook()
+  const controller = new AbortController()
+  await assert.rejects(waitForFacebookRapidAdmission({ policyStore: store, requestId: randomUUID(),
+    deadlineAt: Date.now() + 60000, timeoutMs: 1000, signal: controller.signal,
+    revalidate: async () => controller.abort() }), { code: 'request_cancelled' })
+  const after = await store.facebook()
+  assert.equal(after.lease_until, null)
+  assert.equal(after.used, before.used + 1)
+  assert.equal(after.remaining, 4)
+  assert.equal(after.supplier_remaining, 5)
+  assert.deepEqual(after.supplier_observed_at, before.supplier_observed_at)
+  assert.equal(after.rapid_available, true)
+  const first = await replica.admitRapid(ticket())
+  assert.equal(first.allowed, true)
+  await replica.releaseUndispatchedRapid(first)
+  const next = await store.admitRapid(ticket())
+  assert.equal(next.allowed, true)
+  await replica.releaseUndispatchedRapid(first)
+  assert.equal((await store.admitRapid()).reason, 'source_busy')
+  await store.observeRapid(next)
+  assert.equal((await replica.admitRapid()).reason, 'quota_unknown', 'a dispatched response without headers still needs verification')
+})
+
+test('an undispatched Facebook recovery probe consumes its one-shot authorization', pg, async t => {
+  const { store, db } = await fixture(t)
+  await db.exec("UPDATE control.facebook_rapid_quota SET used=10,remaining=0,reason='quota_exhausted',reset_at=now()-interval '1 second'")
+  await assert.rejects(waitForFacebookRapidAdmission({ policyStore: store, requestId: randomUUID(),
+    deadlineAt: Date.now() + 60000, timeoutMs: 1000,
+    revalidate: async () => { throw new AppError(403, 'capability_not_granted', 'Access changed') } }), { code: 'capability_not_granted' })
+  const state = await store.facebook()
+  assert.equal(state.lease_until, null)
+  assert.equal(state.used, 11)
+  assert.equal(state.remaining, 0)
+  assert.equal(state.reset_at, null)
+  assert.equal((await store.admitRapid()).allowed, false)
+})
+
 test('queue timeout/full/cancel and failed revalidation never trigger another channel or replenish quota', async () => {
   for (const scenario of ['timeout', 'full', 'cancel', 'access', 'database']) {
     let now = 1000, released = 0, cancelled = 0
@@ -100,7 +140,7 @@ test('queue timeout/full/cancel and failed revalidation never trigger another ch
         if (scenario === 'database') throw new Error('private-database-credential')
         return scenario === 'access' ? { allowed: true, token: 'fixture' }
           : { allowed: false, reason: scenario === 'full' ? 'queue_full' : 'source_busy' }
-      }, cancelRapidWait: async () => { cancelled++ }, observeRapid: async () => { released++ } } }
+      }, cancelRapidWait: async () => { cancelled++ }, releaseUndispatchedRapid: async () => { released++ } } }
     await assert.rejects(waitForFacebookRapidAdmission(input, { clock: () => now, wait: async ms => {
       now += ms; if (scenario === 'cancel') abort.abort()
     } }), error => {

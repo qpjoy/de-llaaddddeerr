@@ -279,6 +279,12 @@ const replyStep = (platform, request, continuation = null) => ({ provider: 'tikh
 const commentStep = (platform, contentId, continuation = null) => ({ provider: 'tikhub', postComments: {
   request: normalizePostCommentsRequest({ platform, contentId }, { provider: 'tikhub' }), continuation } })
 
+test('Twitter replies reject a conversation ID that conflicts with the requested post even on an empty page', () => {
+  const payload = { code: 200, data: { id: '200', conversation_id: '100', thread: [] } }
+  const step = replyStep('twitter', { commentId: '200', contentId: '101' })
+  assert.throws(() => projectCommentReplyPage(payload, step, { capturedAt }), { code: 'invalid_upstream_contract' })
+})
+
 test('live-calibrated reply pages: Kuaishou, Bilibili, Instagram (both shapes), Xiaohongshu', () => {
   const ks = projectCommentReplyPage({ code: 200, params: { photo_id: 'ksPhoto1', root_comment_id: '1193254712948' }, data: { result: 1, pcursor: 'no_more',
     subComments: [{ comment_id: 1193284448083, content: '回复', timestamp: 1794056648470, time: '2026-11-07 21:04', author_id: 5649192663, author_name: '作者',

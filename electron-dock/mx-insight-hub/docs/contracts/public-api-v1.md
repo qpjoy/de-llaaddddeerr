@@ -2702,6 +2702,6 @@ warning, not a `503`.
 
 建议新详情请求相隔至少 5 秒；只做提示，不自动排队或重试。每个新请求实时获取一次，无新增缓存策略；同参数/同 Idempotency-Key 重放免于重复采集与扣款。查无结果为 HTTP 200、`meta.status=no_data`、`data.item=null`，仍计一次成功请求，价格以已分配套餐为准。
 
-JSON POST `/api/v1/data/xiaohongshu/notes/comments` 请求 `{ "note_id": "6a20edfa0000000021020951", "sort": "hot" }`，需 `xiaohongshu` + `social.comments.list`。sort 可为 latest/hot。返回 `data.items`、`nextCursor` 与 `hasMore`，续页只传返回的 cursor 并保持 ID/排序、换新 Idempotency-Key；游标绑定当前 Key，最多 15 页。无 nextCursor 时停止；`hasMore=null` 和 `meta.paginationStatus=unknown` 不代表已获取全部。回复仅包含已返回部分。
+JSON POST `/api/v1/data/xiaohongshu/notes/comments` 请求形如 `{ "note_id": "NOTE_ID", "sort": "hot" }`。将 NOTE_ID 换为本次搜索结果中所选笔记的 `note.note_id` 或 `note.id`。需 `xiaohongshu` + `social.comments.list`。sort 可为 latest/hot。返回 `data.items`、`nextCursor` 与 `hasMore`，续页只传返回的 cursor 并保持 ID/排序、换新 Idempotency-Key；游标绑定当前 Key，最多 15 页。无 nextCursor 时停止；`hasMore=null` 和 `meta.paginationStatus=unknown` 不代表已获取全部。回复仅包含已返回部分。
 
 两项新增能力独立开通，已有 Key 和套餐不会自动扩权/改价。新小红书 v2 快捷模板以 ¥0.10/成功请求纳入两项能力；只有显式发布并分配后才改变未来价格。

@@ -50,6 +50,7 @@ import { normalizeHubDataSearch, projectDataSearch, projectTwitterSearchFillDeli
 import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
 import { socialAccountPlan } from './social-account-delivery.mjs'
+import { THREADS_SEARCH_NOT_DISPATCHED } from './social-account-workflow.mjs'
 import { threadsSearchPlan } from './threads-search-workflow.mjs'
 import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
 import { postCommentsPlan } from './post-comments-workflow.mjs'
@@ -260,6 +261,9 @@ function publicFailure(error, { ecommerce = false } = {}) {
       'The self-hosted Facebook collector accepts a query and continuation of at most 500 characters', base)
     if (evidence.errorCode === 'facebook_selfhosted_rate_limited') return new AppError(429, 'facebook_selfhosted_rate_limited',
       'The self-hosted Facebook account is cooling down; retry later', { ...base, retryAfterMs: evidence.retryAfterMs ?? 300_000 })
+    if (evidence.errorCode === 'facebook_selfhosted_resource_unavailable') return new AppError(503, 'facebook_selfhosted_unavailable',
+      'No eligible Facebook collection identity was available. Ask the administrator to check its account, session and network bindings.',
+      { ...base, action: 'contact_administrator' })
     return new AppError(503, 'facebook_selfhosted_unavailable', ['facebook_selfhosted_session_invalid', 'facebook_selfhosted_misconfigured'].includes(evidence.errorCode)
       ? 'The self-hosted Facebook collector needs administrator attention' : 'The self-hosted Facebook collector could not complete this search',
     { ...base, ...(['facebook_selfhosted_session_invalid', 'facebook_selfhosted_misconfigured'].includes(evidence.errorCode) ? { action: 'contact_administrator' } : {}) })
@@ -1422,7 +1426,11 @@ export class ExternalPlatformGateway {
       } : null,
       // A self-hosted lease is freed once the run is terminal or confirmed
       // cancelled; an unknown run keeps its slot until the lease expires.
-      cleanup: rapid ? () => observe() : selfhosted ? async () => {
+      cleanup: rapid ? async () => {
+        // Dispatch records both returned quota headers and ambiguous failures.
+        // A remaining unobserved admission never reached the adapter.
+        if (admission?.allowed && !observationComplete && !observationFailed) await policyStore.releaseUndispatchedRapid(admission)
+      } : selfhosted ? async () => {
         if (selfhostedAdmission && !selfhostedAdmission.retain) await policyStore.releaseSelfhosted(selfhostedAdmission)
       } : null,
       costUnknown: () => admission?.probe === true,
@@ -1724,6 +1732,15 @@ export class ExternalPlatformGateway {
         // confirmed. Leave that original customer hold for durable recovery;
         // an unrelated prior-unknown admission still releases its new hold.
         if (error.preserveReservation === true) ownsReservation = false
+        if (ownsReservation && error[THREADS_SEARCH_NOT_DISPATCHED] === true) {
+          try {
+            // Keep the HTTP status in the gateway ledger. A response body on the
+            // released usage row would turn a temporary refusal into a replay.
+            await this.platformStore.rejectWithoutDispatch({ delivery, status: error.status, errorCode: error.code,
+              sourceMode: error.code === 'external_platform_circuit_open' ? 'circuit_rejected' : 'unavailable' })
+            ownsReservation = false
+          } catch { /* The outer cleanup still releases the hold if the receipt write failed. */ }
+        }
         // A transport correlation ID does not identify the durable usage row.
         // Keep an explicit ledger ID for read-only outcome checks after errors.
         if (error instanceof AppError) error.details = { ...error.details,
@@ -2116,14 +2133,27 @@ export class ExternalPlatformGateway {
           'Provider cost reservation is unavailable',
         )
       }
-      costReservation = costControl.costMinor === 0 ? null : await this.platformStore.reserveProviderCostWorkflow({
-        tenantId: context.tenant.id,
-        consumerId: context.consumer.id,
-        apiKeyId: context.apiKey.id,
-        usageRequestId: activeRequestId,
-        fingerprint: requestFingerprint,
-        costControls: [costControl],
-      })
+      try {
+        costReservation = costControl.costMinor === 0 ? null : await this.platformStore.reserveProviderCostWorkflow({
+          tenantId: context.tenant.id,
+          consumerId: context.consumer.id,
+          apiKeyId: context.apiKey.id,
+          usageRequestId: activeRequestId,
+          fingerprint: requestFingerprint,
+          costControls: [costControl],
+        })
+      } catch (error) {
+        if (plan.platformSearch && authorizationPlatform === 'instagram'
+          && error instanceof AppError && error.code === 'external_platform_cost_budget_exhausted') {
+          // Record the refusal at the gateway that checked the budget, including when the policy forwarded here.
+          try {
+            await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+              status: error.status, errorCode: error.code })
+            ownsReservation = false
+          } catch { /* The outer cleanup can still release the hold and return the original refusal. */ }
+        }
+        throw error
+      }
 
       const rateLimit = typeof this.platformStore.acquireProviderRateLimit !== 'function'
         ? { allowed: true, retryAfterMs: 0 }

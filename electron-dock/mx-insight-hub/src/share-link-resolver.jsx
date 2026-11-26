@@ -4,6 +4,7 @@ import { DropdownField, ErrorState, Field } from './components.jsx'
 import { useDemoAccessSnapshot, useDemoApiKey } from './demo-credentials.jsx'
 import { copyText } from './open-capabilities.js'
 import { shareLinkActions } from './share-link-actions.js'
+import { shareClipboardText } from './share-link-paste.js'
 import { SHARE_LINK_LIMITS, SHARE_LINK_RESOLVER } from '../shared/share-link-resolver.mjs'
 
 const platforms = { douyin: '抖音', xiaohongshu: '小红书' }
@@ -37,6 +38,27 @@ export function ShareLinkResolverPage({ notify }) {
   const lock = useRef(false)
   const granted = access === null || (access?.platforms?.includes(SHARE_LINK_RESOLVER.platform) && access?.capabilities?.includes(SHARE_LINK_RESOLVER.capability))
   function clearResult() { setData(null); setError(null) }
+  function pasteShare(event) {
+    if (!event.clipboardData) return
+    const field = event.currentTarget
+    let pasted
+    try { pasted = shareClipboardText(event.clipboardData, field.ownerDocument) }
+    catch (failure) {
+      event.preventDefault()
+      setData(null); setError(failure)
+      return
+    }
+    if (pasted === null) return
+    event.preventDefault()
+    clearResult()
+    const retained = field.value.length - (field.selectionEnd - field.selectionStart)
+    if (retained + pasted.length > field.maxLength) {
+      setError(new Error('含链接的文案超出输入长度，请分次粘贴或只复制作品链接。'))
+      return
+    }
+    field.setRangeText(pasted, field.selectionStart, field.selectionEnd, 'end')
+    setText(field.value)
+  }
   async function resolve(event) {
     event.preventDefault()
     if (lock.current || !apiKey || !granted || !text.trim()) return
@@ -54,7 +76,7 @@ export function ShareLinkResolverPage({ notify }) {
     <form onSubmit={resolve}>
       <Field label="分享文本或链接" hint={`支持抖音和小红书混合粘贴，每次最多 ${SHARE_LINK_LIMITS.maxTextLength.toLocaleString('zh-CN')} 个字符、${SHARE_LINK_LIMITS.maxLinks} 个不同链接。解析按次占用调用额度。`}>
         <textarea className="qp-input" rows={5} value={text} disabled={busy} required maxLength={SHARE_LINK_LIMITS.maxTextLength}
-          placeholder="粘贴从抖音或小红书复制的分享内容" onChange={event => { setText(event.target.value); clearResult() }} />
+          placeholder="粘贴从抖音或小红书复制的分享内容" onPaste={pasteShare} onChange={event => { setText(event.target.value); clearResult() }} />
       </Field>
       <div className="mih-share-links-controls">
         <DropdownField label="解析平台" value={platform} disabled={busy} onChange={value => { setPlatform(value); clearResult() }}
@@ -76,7 +98,7 @@ export function ShareLinkResolverPage({ notify }) {
               {row.uncertain ? <small>建议核对原作品</small> : null}</> : row.error}</td>
             <td><ResultActions row={row} access={access} notify={notify} /></td>
           </tr>)}</tbody></table></div>
-      </> : <p role="status">没有找到抖音或小红书链接，请粘贴含完整网址的分享文本。</p>}
+      </> : <p role="status">文案中没有识别到作品网址。请在抖音或小红书打开作品，选择「分享 → 复制链接」，再粘贴到上方。</p>}
     </section> : null}
   </section>
 }

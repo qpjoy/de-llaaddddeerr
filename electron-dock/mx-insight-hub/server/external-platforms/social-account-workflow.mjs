@@ -22,6 +22,8 @@ import { COMMENT_REPLIES_TRAVERSAL } from '../contracts/comment-replies.mjs'
 import { THREADS_SEARCH_TRAVERSAL } from '../contracts/threads-search.mjs'
 import { threadsCommentRetryDelay } from './threads-comment-retry.mjs'
 
+export const THREADS_SEARCH_NOT_DISPATCHED = Symbol('threadsSearchNotDispatched')
+
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const unavailable = () => new AppError(409, 'search_page_unavailable', 'The saved account page cannot be continued; restart explicitly')
@@ -519,6 +521,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     return { status: 200, body: responseBody, requestId: delivery.usageRequestId, replay: false, sourceMode, capturedAt }
   } catch (error) {
     if (calls && !settledFailure) { await markUnknown(); if (!error.preserveReservation) throw uncertain() }
+    if (workflowKind === 'threads-search' && !calls && !sources.length && !error.preserveReservation && error instanceof AppError) {
+      Object.defineProperty(error, THREADS_SEARCH_NOT_DISPATCHED, { value: true })
+    }
     throw error
   } finally {
     if (ownsParent && !retainLease) await stateStore.releaseDeliveryLease(parentLease).catch(() => {})

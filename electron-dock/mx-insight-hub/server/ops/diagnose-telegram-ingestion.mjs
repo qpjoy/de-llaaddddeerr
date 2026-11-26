@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 const SOURCES = ['telegram-monitor-chats', 'telegram-monitor-messages', 'telegram-sqlite-api-chats', 'telegram-sqlite-api-messages']
 const QUEUES = ['mx-insight-hub:external-pull', 'mx-insight-hub:ingest']
 const CODE_FILES = ['server/ingest/telegram/monitor-pipeline.mjs', 'server/ingest/telegram/sqlite-pipeline.mjs',
-  'server/ingest/telegram/source-preparer.mjs', 'server/ingest/telegram/sql/prepare-source-v1.sql',
+  'server/ingest/telegram/source-contract.mjs', 'server/ingest/telegram/source-preparer.mjs', 'server/ingest/telegram/sql/prepare-source-v1.sql',
   'server/ingest/external/database-source.mjs', 'server/ingest/external/sqlite-api-source.mjs',
   'server/ingest/external/sync-job.mjs', 'server/workers/ingest.mjs', '../mx-common/src/queue/postgres-queue.mjs']
 const ERRORS = new Set(['source_contract_mismatch', 'checkpoint_contract_mismatch', 'source_busy', 'source_lock_lost',
@@ -20,7 +20,7 @@ const ERRORS = new Set(['source_contract_mismatch', 'checkpoint_contract_mismatc
   'sqlite_api_unauthorized', 'sqlite_api_contract_rejected', 'sqlite_api_unhealthy', 'sqlite_api_contract_mismatch',
   'sqlite_api_page_mismatch', 'sqlite_api_lossless_json_unsupported', 'sqlite_api_numeric_token_too_large',
   'sqlite_api_unsupported_numeric_token', 'sqlite_api_pull_failed', 'source_pull_failed', 'checkpoint_reset',
-  'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'AbortError', 'TimeoutError'])
+  '57014', 'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'AbortError', 'TimeoutError'])
 const choice = (value, allowed) => value == null ? null : allowed.includes(value) ? value : 'other'
 const number = value => value != null && /^-?\d{1,20}$/u.test(String(value)) ? String(value) : null
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value) ? value : null

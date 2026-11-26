@@ -59,8 +59,9 @@ function twitter(payload, request, continuation, capturedAt) {
   let parsed
   try { parsed = parseTikHubTwitterCommentPage(payload, request.commentId, continuation) } catch { unusable() }
   // The conversation root is the post this comment belongs to.
-  const contentId = request.contentId ?? scalar(payload.data?.conversation_id)
-  if (request.contentId && scalar(payload.data?.conversation_id) !== request.contentId) unusable()
+  const conversationId = scalar(payload.data?.conversation_id)
+  if (request.contentId && conversationId && conversationId !== request.contentId) unusable()
+  const contentId = request.contentId ?? conversationId
   const rows = parsed.comments.map(({ raw, values }) => postCommentItem(itemRequest(request, contentId), values, raw, capturedAt))
   return finish(request, { rows, raws: parsed.comments.map(row => row.raw), providerPage: parsed.providerPage, capturedAt, provider: 'tikhub', contentId })
 }
